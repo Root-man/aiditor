@@ -1,29 +1,33 @@
 # Editor project — architecture sketch & open questions
 
-Oct 12, 2026 · @Boba
+Oct 12, 2026 · @Boba · revised Oct 13, 2026
 
 ## Goals and principles
 
-Build a personal, keyboard-first GUI editor for macOS in Rust, organised around **workspaces** (a primary repo plus other repos and folders) and **tabs** (everything for one task), with Emacs's buffer/window model as the interaction core. It is a private experiment; if it works, it becomes the editor used for daily work.
+Build a personal, keyboard-first GUI editor in Rust, organised around **projects** (a primary repo plus other repos and folders) and **workspaces** (everything for one task), with Emacs's buffer/window model as the interaction core. macOS is the target; development happens on both macOS and Linux, so it must build and run on both. It is a private experiment; if it works, it becomes the editor used for daily work.
 
 **Goals**
 
 - ACP client as a first-class subsystem with built-in session management; Claude Code and Codex from day one.
 - Emacs-flavoured keybindings and the Emacs buffer/window model as the default. Exact keys are chosen as each feature is built.
-- Workspaces that group several repos and give every agent session the same filesystem scope.
-- Tabs that hold all the files, terminals and agent sessions for one task.
-- Built-in terminal, where a terminal is just another buffer; several per tab.
+- Projects that group several repos and give every agent session the same filesystem scope.
+- Workspaces that hold all the files, terminals and agent sessions for one task.
+- Built-in terminal, where a terminal is just another buffer; several per workspace.
 
 **MVP feature set**, mapped from current daily use:
 
 | Today in Emacs | In this editor |
 | --- | --- |
-| projectile | Workspace commands: find file across all roots, switch workspace, grep the workspace |
+| projectile | Project commands: create and edit projects, find file across all roots, switch project, grep the project |
 | consult | Minibuffer completion for buffers, files, commands and grep hits, with live preview |
 | swiper | In-buffer search that lists matching lines in the minibuffer |
-| Buffer and window navigation | `C-x b`, `C-x o`, splits, one window configuration per tab |
-| Multiple cursors | Multiple selections in the core model, not an add-on |
-| In-buffer editing | Emacs motion, mark, kill ring, registers, keyboard macros |
+| Buffer and window navigation | `C-x b`, `C-x o`, splits, one window configuration per workspace |
+| In-buffer editing | Emacs motion, mark, kill ring, registers, keyboard macros, TAB indentation |
+| Formatters | Run the language's formatter (`mix format`, `rustfmt`, prettier) as a command; not on save |
+| xref / dumb-jump | Jump to definition by grep across the project, no LSP (spec to be decided) |
+| compile-mode / `next-error` | Jump to `file:line` from terminal output, grep hits and agent tool calls (spec to be decided) |
+| wgrep | Edit grep results in place and write them back (spec to be decided) |
+| Multiple cursors | After MVP |
 | dired (rarely used) | After MVP |
 
 Languages with first-class support: Elixir, Rust, JS/TS and Markdown.
@@ -32,45 +36,81 @@ Languages with first-class support: Elixir, Rust, JS/TS and Markdown.
 
 - Elisp compatibility or running Emacs packages.
 - A git UI or Magit replacement. Git runs in terminal buffers, and `git diff` in a terminal is how agent changes are reviewed.
-- LSP and git worktree workflows in the MVP.
-- Linux, Windows, a TUI frontend, plugins, collaboration, remote editing.
+- LSP, multiple cursors and git worktree workflows in the MVP.
+- Windows, a TUI frontend, plugins, collaboration, remote editing, more than one frame (OS window).
 
 **Design principles**
 
-1. **Everything is a buffer.** Files, terminals, agent sessions and the message log share one model, one buffer list and one window system.
+1. **Everything is a buffer.** Files, terminals, agent sessions and the message log share one model and one window system.
 2. **Everything is a command.** Keys and `M-x` call the same named commands, so every feature is reachable both ways.
 3. **Every layer is testable on its own**, and the whole app is testable end to end (see Testing).
-4. **One owner of state.** A single-threaded core loop owns editor state; I/O (agents, PTYs, file watching) runs in tasks that talk to it by messages.
-5. **Agents use their own tooling, scoped by the workspace.** The editor gives each agent a working directory and extra roots, then shows what it does: its file changes appear in buffers, its terminals are terminal buffers.
+4. **One owner of state.** A single-threaded core, running on the UI thread, owns editor state; I/O (agents, PTYs, file watching) and heavy CPU work (grep, fuzzy matching, parsing) run in tasks that talk to it by messages.
+5. **Agents use their own tooling, scoped by the project.** The editor gives each agent a working directory and extra roots, then shows what it does: its changes to files that are already open appear in their buffers, and terminals it asks the editor for are terminal buffers.
 
 ## Architecture at a glance
 
-Four layers: a thin frontend, one core loop that owns all state, async services that do I/O, and the outside processes they talk to.
+Four layers: a thin frontend, one core that owns all state, async services that do I/O, and the outside processes they talk to.
 
-&#91;embedded content: architecture · frontend, core loop, async services, outside processes\]
+```mermaid
+flowchart TB
+  FE["Frontend (GPUI, macOS + Linux)<br/>draws the display model, sends key and mouse events; swappable"]
+  subgraph core["Core: single owner of all editor state"]
+    CMD["Commands and keymaps<br/>registry, M-x, key trie, minibuffer, kill ring, undo"]
+    MODEL["Model<br/>projects, roots, workspaces, buffers, windows, sessions"]
+    DISP["Display builder<br/>visible lines + styled spans per window, mode line"]
+  end
+  subgraph svc["Async services: tasks messaging the core"]
+    AGS["Agent supervisor<br/>spawn, restart, logs"]
+    ACP["ACP client<br/>sessions, callbacks"]
+    SYN["Syntax parsing<br/>tree-sitter, off-thread"]
+    TERM["Terminals<br/>PTY + VT emulator"]
+    SRCH["Project search<br/>files + grep"]
+    LSP["LSP clients<br/>after MVP"]
+    PERS["Persistence<br/>session index, auto-save"]
+    FW["File watch<br/>auto-revert buffers"]
+  end
+  AGP["Agent processes<br/>ACP over stdio"]
+  SH["Shells<br/>one per terminal"]
+  LS["Language servers<br/>LSP over stdio"]
+  DISK["Repos on disk<br/>files, git, state"]
 
-Arrows between layers are message channels, never shared mutable state. Dashed boxes run outside the editor. Agents reach the workspace through their own tools, scoped by `cwd` and the extra roots; there is no editor-side MCP server.
+  FE -->|input events| core
+  core -->|display model| FE
+  core -->|commands, I/O requests| svc
+  svc -->|events, results| core
+  ACP <--> AGP
+  TERM <--> SH
+  LSP <--> LS
+  FW <--> DISK
+
+  classDef ext stroke-dasharray: 5 5
+  class AGP,SH,LS,DISK ext
+```
+
+Arrows between layers are message channels, never shared mutable state. Dashed boxes run outside the editor. Agents reach the project through their own tools, scoped by `cwd` and the extra roots; there is no editor-side MCP server. The core runs on the UI thread, inside the frontend's event loop; see [Core thread and output floods](#core-thread-and-output-floods).
 
 ## Core data model
 
-A workspace defines the filesystem scope; a tab is the unit of work inside it. Every tab belongs to exactly one workspace, and every terminal and agent session belongs to exactly one tab.
+A project defines the filesystem scope; a workspace is the unit of work inside it. Every workspace belongs to exactly one project, and every buffer, terminals and agent sessions included, belongs to exactly one workspace.
 
 | Entity | What it is | Owns / refers to | Survives restart |
 | --- | --- | --- | --- |
-| Workspace | A primary repo plus additional repos and folders | Roots, tabs, default agent | Yes, a TOML file in the editor's config dir, outside the repos |
-| Primary repo | The root whose agent config is used: AGENTS.md, CLAUDE.md, MCP server list, agent settings | Path, role line | In the workspace file |
-| Additional root | Another repo or folder the agent gets filesystem access to | Path, role line | In the workspace file |
-| Tab | Everything for one task, tied to one workspace | Window configuration, tab buffer list, terminals, agent session buffers | No |
-| Buffer | Text plus metadata, independent of any window | Rope, undo history, major and minor modes, markers, file binding or kind | No |
+| Project | A primary repo plus additional repos and folders | Roots, workspaces, default agent | Yes, a TOML file in the editor's config dir, outside the repos |
+| Primary repo | The root whose agent config is used: AGENTS.md, CLAUDE.md, MCP server list, agent settings | Path, role line | In the project file |
+| Additional root | Another repo or folder the agent gets filesystem access to | Path, role line | In the project file |
+| Workspace | Everything for one task, tied to one project | Window configuration, its buffers (files, terminals, agent sessions) | No |
+| Buffer | Content plus metadata, independent of any window, owned by one workspace | Content backend, undo history, major and minor modes, markers, file binding or kind | No (auto-save files aside, see Crash safety) |
 | Buffer kind | File, Terminal, AgentSession, Messages, Scratch | Kind-specific payload (PTY handle, session id) | No |
-| Window | A viewport onto one buffer | Buffer id, point, mark, extra cursors, scroll position | No |
+| Window | A viewport onto one buffer | Buffer id, point, mark, scroll position | No |
 | Window configuration | Split tree of windows (`C-x 2` / `C-x 3`) | Windows, split ratios, selected window | No |
-| Frame | A macOS window | Shows one tab at a time | No |
-| Agent session | One ACP conversation with one agent process | Agent, workspace, ACP session id, transcript, mode | Yes: index plus transcript, resumable |
+| Frame | The app's single OS window | Shows one workspace at a time | No |
+| Agent session | One ACP conversation with one agent process | Agent, project, ACP session id, mode | Index entry only: enough to reload it with `session/load` |
 
-A buffer never knows which windows show it, and a window holds only a buffer id. That separation keeps `C-x b`, `C-x 4 b` and per-tab window configurations cheap.
+A buffer never knows which windows show it, and a window holds only a buffer id. That separation keeps `C-x b`, `C-x 4 b` and per-workspace window configurations cheap.
 
-Each workspace has its own buffers; tabs in the same workspace share them. A file open in two workspaces has two buffers, kept in sync through the disk: when the file changes on disk (a save from the other workspace, an agent edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically.
+Buffers have more than one content backend: a rope for file, scratch and Messages buffers, the emulator grid for terminals, and a structured transcript for agent sessions. The display model for the agent session buffer is not decided yet (see Open questions).
+
+Each workspace owns its buffers, and a buffer belongs to exactly one workspace. Killing a workspace kills its buffers. The same file can have several buffers: a file open in two workspaces has two, kept in sync through the disk. When the file changes on disk (a save from the other workspace, an agent's edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically.
 
 If the file changes on disk while its buffer has unsaved edits, the editor does not revert. It marks the buffer as conflicted, shows that in the mode line, and asks you to resolve it the next time you focus the buffer or try to save it. The choices are:
 
@@ -80,55 +120,69 @@ If the file changes on disk while its buffer has unsaved edits, the editor does 
 
 Every save also checks the file's hash on disk against the last version the buffer loaded or saved, so a change the watcher missed is still caught before it can be overwritten.
 
-## Tabs
+How a revert keeps point, mark and markers, and several file-watcher edge cases, are still to be decided (see Open questions).
 
-A tab is everything related to one task: its file buffers, terminal buffers and agent sessions, laid out in its own window configuration. Opening a tab asks for a workspace, and the tab stays bound to it.
+## Projects
 
-- **Ownership.** Terminals and agent session buffers are created in a tab and stay there. File buffers can appear in several tabs of the same workspace.
-- **New tab.** Starts with one empty buffer.
-- **Closing a tab** kills every buffer that belongs to it, terminals and session buffers included. The agent sessions stay in the session index and can be resumed in another tab of the same workspace.
-- **Outside files.** A tab can open files from outside its workspace. What the agent may touch is set by the workspace roots and the session's approval mode, not by what is open.
-- **Lifetime.** Tabs live until closed or until the app quits; they are not restored on the next launch.
-- **Scoped switching.** `C-x b` and the consult-style switcher list the current tab's buffers first, with a key to widen to all buffers.
-- **Commands.** New tab (prompts for workspace), switch, next/previous, rename, close, list tabs. All available as keys and through `M-x`.
-- **Display.** A frame shows one tab at a time; a tab strip shows the tab names and their workspaces.
+A project is a TOML file in the editor's config dir that lists a primary repo and additional roots, each with a one-line role.
 
-Emacs has part of this. Since Emacs 27, `tab-bar-mode` gives each tab its own window configuration, but buffers stay global. Packages such as tabspaces and perspective.el add per-tab buffer lists, and tabspaces ties tabs to projects. This design builds that combination in and adds ownership of terminals and agent sessions.
+- **Commands.** Create a project, add or remove a root, edit a root's role line, set the default agent, open the project file for editing. All available as keys and through `M-x`.
+- Nested or overlapping roots, opening a folder without a project, and what "switch project" means are open questions.
+
+## Workspaces
+
+A workspace is everything related to one task: its file buffers, terminal buffers and agent sessions, laid out in its own window configuration. Creating a workspace asks for a project, and the workspace stays bound to it.
+
+- **Ownership.** Every buffer belongs to the workspace it was created in. Opening a file that is already open in another workspace creates a second buffer for it here.
+- **New workspace.** Starts with one empty scratch buffer.
+- **Killing a workspace** kills every buffer it owns, terminals and session buffers included. The agent sessions stay in the session index and can be resumed in another workspace of the same project.
+- **Outside files.** A workspace can open files from outside its project. What the agent may touch is set by the project roots and the session's approval mode, not by what is open.
+- **Lifetime.** Workspaces live until killed or until the app quits; they are not restored on the next launch.
+- **Switching buffers.** `C-x b` and the consult-style switcher list the current workspace's buffers.
+- **Commands.** New workspace (prompts for project), switch, next/previous, rename, kill, list workspaces. All available as keys and through `M-x`.
+- **Display.** The frame shows one workspace at a time; a strip along the top shows the workspace names and their projects.
+
+Emacs has part of this. Since Emacs 27, `tab-bar-mode` gives each tab its own window configuration, but buffers stay global. Packages such as tabspaces and perspective.el add per-tab buffer lists, and tabspaces ties tabs to projects. A workspace here is that combination built in, with ownership of every buffer, terminals and agent sessions included.
 
 ## Commands and keymaps
 
 Copy Emacs's model, not just its key chords: named interactive commands, layered keymaps resolved by a key-sequence trie, and a minibuffer for every prompt. Bindings are Emacs-flavoured; exact keys are settled as each feature is built.
 
-- **Command registry.** Each command has a name (`find-file`, `tab-new`, `agent-send-region`), an argument spec (prefix arg, region, prompted string), and a handler `fn(&mut Ctx, Args) -> Result`. `M-x` lists them all with fuzzy completion.
+- **Command registry.** Each command has a name (`find-file`, `workspace-new`, `agent-send-region`), an argument spec (prefix arg, region, prompted string), and a handler `fn(&mut Ctx, Args) -> Result`. `M-x` lists them all with fuzzy completion.
 - **Keymap layering**, highest priority first: transient map (after `C-x`, during isearch) → minor-mode maps of the current buffer → major-mode map → global map.
 - **Key sequences** resolve through a trie, so prefix keys (`C-x`, `C-c`, `C-x 4`) work naturally, with a which-key style hint after a short delay.
 - **Prefix argument** (`C-u`, `M-<digit>`) is passed to every command.
-- **Minibuffer** is a real one-line buffer with its own keymap, history rings and a vertical fuzzy completion list. It hosts the consult-style commands (buffers, files across workspace roots, workspace grep, `M-x`) with live preview, and the swiper-style in-buffer search.
-- **Multiple cursors** are part of the window's selection state, so every editing command runs once per cursor and the whole run is one undo group.
+- **Minibuffer** is a real one-line buffer with its own keymap, history rings and a vertical fuzzy completion list. It hosts the consult-style commands (buffers, files across project roots, project grep, `M-x`) with live preview, and the swiper-style in-buffer search.
 - **Kill ring, mark ring, registers and keyboard macros** belong in the core, because they depend on the command loop.
-- **Undo** is linear with a redo stack, per buffer, and grouped per command. An agent write and an auto-revert from disk are each one undo group, so either can be undone in one step.
-- **Prefixes.** One prefix for tab commands and one for agent commands (new session, send region or buffer, switch session, cycle mode, cancel turn).
+- **Undo** is linear with a redo stack, per buffer, and grouped per command. An auto-revert from disk is one undo group, so an agent's edit to an open file can be undone in one step.
+- **Indentation.** TAB indents the current line for the buffer's language. How the indentation rules are defined is to be decided (tree-sitter indent queries, as Helix uses, are one option).
+- **Formatters** run as a command, configured per language in TOML (`mix format`, `rustfmt`, prettier), with the project's process environment. They do not run on save in the MVP.
+- **Prefixes.** One prefix for workspace commands and one for agent commands (new session, send region or buffer, switch session, cycle mode, cancel turn).
+- **Multiple cursors** come after the MVP. When they land, they are part of the window's selection state, editing commands run once per cursor, and the whole run is one undo group.
 
 Keymaps and all other settings live in TOML files, reloadable at runtime. There is no scripting language.
 
 ## ACP integration and session management
 
-The editor is an ACP **client**. Each agent session spawns its own agent process (Claude Code through `claude-agent-acp`, Codex through `codex-acp`), talks JSON-RPC over stdio, and lives in the tab it was created in; after that tab closes, it can be resumed in another tab of the same workspace.
+The editor is an ACP **client**. Each agent session spawns its own agent process (Claude Code through `claude-agent-acp`, Codex through `codex-acp`), talks JSON-RPC over stdio, and lives in the workspace it was created in; after that workspace is killed, the session can be resumed in another workspace of the same project.
 
-**Workspace scope, the same way the CLIs and desktop apps do it.** The editor does not run an MCP server. Since June 2026 ACP has a stable way to pass extra roots: `session/new` takes `cwd` as the primary working directory and `additionalDirectories` as further absolute paths, which the agent treats as part of its filesystem scope. The client may only send them when the agent advertises `sessionCapabilities.additionalDirectories` ([ACP session setup](https://agentclientprotocol.com/protocol/v1/session-setup)).
+**Project scope, the same way the CLIs and desktop apps do it.** The editor does not run an MCP server. Since June 2026 ACP has a stable way to pass extra roots: `session/new` takes `cwd` as the primary working directory and `additionalDirectories` as further absolute paths, which the agent treats as part of its filesystem scope. The client may only send them when the agent advertises `sessionCapabilities.additionalDirectories` ([ACP session setup](https://agentclientprotocol.com/protocol/v1/session-setup)); both the Claude Code and Codex adapters do (checked).
 
-- `cwd` = the workspace's primary repo. The agent loads its own config from there: AGENTS.md or CLAUDE.md, MCP servers, settings. The editor passes no MCP servers of its own.
-- `additionalDirectories` = every other repo and folder in the workspace. Both the Claude Code and Codex adapters advertise support for it.
-- The first prompt of a session carries a short preamble: the list of roots with their role lines from the workspace file.
-- Every prompt attaches the current buffer as a file reference the agent reads itself: the file buffer last focused in the tab, plus the line range of the region when active.
+- `cwd` = the project's primary repo. The agent loads its own config from there: AGENTS.md or CLAUDE.md, MCP servers, settings. The editor passes no MCP servers of its own.
+- `additionalDirectories` = every other repo and folder in the project.
+- The first prompt of a session carries a short preamble: the list of roots with their role lines from the project file.
+- Nothing else is attached to prompts automatically. Context goes in only through explicit commands such as sending the region or the buffer.
+
+**Agents use the disk, not the editor's buffers.** The editor does not advertise the ACP `fs.readTextFile` or `fs.writeTextFile` client capabilities. Agents read and write files with their own tools, so the agent, its shell commands and `git diff` all see the same files. The file watcher catches every change and auto-reverts the open buffers visiting those files; a buffer with unsaved edits goes into the conflict flow instead.
 
 **Components**
 
-- **Agent registry.** Claude Code (claude-agent-acp) and Codex (the maintained @agentclientprotocol/codex-acp) in TOML: command, args, env, and a default mode per agent.
+- **Agent registry.** Claude Code (claude-agent-acp) and Codex (the maintained @agentclientprotocol/codex-acp) in TOML: command, args, env, and a default mode per agent. Processes start with the environment described under Process environment.
 - **One process per session.** A crash ends only that session; the agent's stderr goes to a log buffer.
-- **Session manager.** Keeps an index (session id, agent, tab, title, last activity, status) and the transcript. Sessions are the only state that survives a restart: a resume command lists the workspace's past sessions and continues the chosen one in the current tab with `session/resume` when advertised, otherwise `session/load`; both adapters support resuming across processes ([ConnectOnion's adapter matrix](https://docs.connectonion.com/useful-tools/acp-agent)).
-- **Session buffer.** A rich chat view like the Claude Code and Codex apps: rendered markdown, collapsible tool calls, the agent's plan, the current mode, and a multi-line prompt area at the bottom with Emacs editing. Underneath the rendering is a text projection, so swiper search, mark and kill, and copying all work with Emacs keys.
+- **Session manager.** Keeps an index of sessions: ACP session id, agent, project, `cwd` and additional directories, title, last activity, status. It stores no transcript. The index is the only state that survives a restart. A resume command lists the project's past sessions and continues the chosen one in the current workspace with `session/load`, which replays the history into the session buffer; `session/resume` does not replay history, so it isn't used. Both adapters support loading across processes ([ConnectOnion's adapter matrix](https://docs.connectonion.com/useful-tools/acp-agent)). If the agent can list its own sessions, the resume list also shows sessions started outside the editor, such as in the Claude Code CLI; adapter support is to be checked.
+- **Session buffer.** A rich chat view like the Claude Code and Codex apps: rendered markdown, collapsible tool calls, the agent's plan, the current mode, and a multi-line prompt area at the bottom with Emacs editing. Underneath the rendering is a text projection, so swiper search, mark and kill, and copying all work with Emacs keys. **Its display model is to be decided:** the "visible lines with styled spans" model used for other buffers cannot express rendered markdown, collapsible blocks, or a read-only transcript above an editable prompt.
 - **Status.** Expect two or three concurrent sessions. Mode-line status, a dashboard and notifications come after the MVP.
+- **After the MVP:** `@file` mentions, slash commands (`available_commands_update`), image paste, and rendering the diffs that tool calls include.
 
 **Modes and auto-approve.** Both agents expose their approval levels over ACP as session modes. The Claude adapter advertises `auto`, `default`, `acceptEdits`, `plan`, `dontAsk` and `bypassPermissions` ([block/buzz#2885](https://github.com/block/buzz/pull/2885)), with `bypassPermissions` offered only when bypass is enabled in the adapter. The maintained Codex adapter uses `read-only`, `agent` and `agent-full-access`, and can start in a chosen mode via `INITIAL_AGENT_MODE` ([openab#1353](https://github.com/openabdev/openab/pull/1353)). Claude Code starts in auto and Codex in agent, both set in config, and a key cycles modes per session; any permission request that still arrives is answered inline in the session buffer.
 
@@ -136,28 +190,116 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 | Agent asks for | Editor does |
 | --- | --- |
-| `fs/read_text_file` | Read from the open buffer if there is one, else from disk |
-| `fs/write_text_file` | Apply directly. If the buffer has unsaved edits, save them first; then write the buffer and save it to disk as one undo group |
-| `terminal/create` and friends | Spawn a regular terminal buffer in the session's tab |
+| `terminal/create` and friends | Spawn a regular terminal buffer in the session's workspace. Open question: whether either adapter calls it |
 | `session/request_permission` | Prompt inline in the session buffer |
 
-Agents also change files without asking the editor, through shell commands or their own patch tools. The file watcher catches those and auto-reverts the affected buffers.
+`fs/read_text_file` and `fs/write_text_file` are not offered (see above).
 
 ## Subsystems
 
-**Terminal.** Built on `alacritty_terminal` for VT emulation and `portable-pty` for the PTY. A tab usually holds several shells, and terminals an agent creates are regular terminal buffers in its tab. Each terminal has two modes, as in vterm: *char mode* sends almost every key to the shell (only an escape prefix stays with the editor), *copy mode* turns the scrollback into a read-only buffer where Emacs motion, search and kill work. Shell-integration escape codes (OSC 133 prompt marks, OSC 7 cwd) give jump-to-prompt and per-command output capture.
+**Terminal.** Built on `alacritty_terminal` for VT emulation and `portable-pty` for the PTY. A workspace usually holds several shells. Each terminal has two modes, as in vterm: *char mode* sends almost every key to the shell (only an escape prefix stays with the editor), *copy mode* turns the scrollback into a read-only buffer where Emacs motion, search and kill work. Shell-integration escape codes (OSC 133 prompt marks, OSC 7 cwd) give jump-to-prompt and per-command output capture.
+
+**`$EDITOR` in terminals.** Git runs in terminal buffers, so `git commit` and `git rebase -i` launch `$EDITOR`. Terminal buffers set `EDITOR` and `VISUAL` to a small client command, like `emacsclient`, that opens the file in a buffer in the terminal's workspace and blocks until you finish or abort the edit. The mechanism is to be decided (likely a Unix socket the editor listens on).
+
+**Process environment.** An app launched from the macOS Dock or a Linux desktop launcher does not get the shell's environment, so agents and formatters would not find `claude`, `codex`, `node`, `mix` or `cargo`, nor the asdf/mise shims behind `.tool-versions`.
+
+- **Launched from a shell** (`aiditor .`): use the inherited environment as is.
+- **Otherwise:** capture the environment once per project, on first use, by running the user's shell as an interactive login shell in the project's primary repo: `$SHELL -l -i -c '<print a marker>; env -0'`. Read only what follows the marker (shell profiles sometimes print text), give up after a few seconds, and fall back to the app's own environment with a note in the Messages buffer. Running it in the project's directory also picks up direnv and per-directory version managers. A command re-captures it after you change your shell setup.
+- **Overrides.** The agent registry and the project file can set extra `env` on top.
+- Terminal buffers start the user's shell as a login shell, which loads the profile itself; the captured environment matters most for agent processes and formatter commands.
 
 **Language support.** Tree-sitter for highlighting, folding and structural motion in Elixir, Rust, JS/TS and Markdown. LSP comes after the MVP, one server per root and language.
 
-**Search and navigation.** File finder and grep across all workspace roots (ripgrep's library crates), fuzzy matching in the minibuffer, swiper-style line search in the buffer, and jump history.
+**Search and navigation.** File finder and grep across all project roots (ripgrep's library crates), fuzzy matching in the minibuffer, swiper-style line search in the buffer, and jump history. Grep-based jump to definition, jumping to `file:line` from terminal output, grep hits and agent tool calls, and editing grep results in place are in the MVP; their specs are to be decided.
 
 **Git.** Nothing built in for the MVP: the git CLI runs in terminal buffers, and `git diff` there is how agent changes are reviewed.
 
-**Persistence.** Only agent sessions survive a restart: the session index (SQLite) and transcripts (JSONL per session) live under the macOS Application Support dir. Tabs, buffers and terminals start fresh on every launch. Workspace definitions and settings are TOML in the config dir.
+**Persistence.** Only the agent session index survives a restart, in SQLite under the platform data dir (Application Support on macOS, `$XDG_DATA_HOME` on Linux). Workspaces, buffers and terminals start fresh on every launch, apart from crash recovery below. Project definitions and settings are TOML in the config dir.
 
-**Frontend.** A native macOS GUI built on GPUI. The core produces a display model: per window, the visible lines with styled spans, cursors and overlays; the frontend draws it and feeds input events back. Keeping that boundary means the frontend stays thin and the core is testable without it.
+**Crash safety** (proposed). Nothing but the session index is persisted, and an experimental editor will crash, so unsaved edits need a safety net.
 
-**Runtime.** Tokio. The core loop is single-threaded, owns all editor state, and processes one message at a time: key events, agent updates, PTY output, file-watch events. Each I/O source is a task holding a channel to the core.
+- **Auto-save files.** About two seconds after the last edit, and at least every 30 seconds while a buffer is dirty, its text is written to a recovery dir under the platform data dir. Never next to the file, so repos, the file watcher, agents and `git status` never see it. Each recovery file records the original path, the hash of the disk version the buffer was based on, and the time. The core hands a copy of the rope to the persistence service (cheap: `ropey` ropes share their nodes), which writes it to a temp name and renames it. Saving, reverting or killing the buffer deletes the recovery file. File and scratch buffers are covered; terminals and session buffers are not.
+- **Recovery on launch.** If recovery files exist, the editor opens a list of them. For each one you can open it as a dirty buffer holding the recovered text, compare it with the disk, or discard it.
+- **Contain panics.** Each command runs under `catch_unwind`. A panicking command is logged to the Messages buffer with a backtrace, and the editor keeps running. The state that command touched may be inconsistent, and the log entry says so.
+
+**Frontend.** A native GUI built on GPUI, targeting macOS and also running on Linux for development; one frame only. The core produces a display model: per window, the visible lines with styled spans, cursors and overlays; the frontend draws it and feeds input events back. Keeping that boundary means the frontend stays thin and the core is testable without it.
+
+**Runtime.** Tokio for the async services, on background threads. The core runs on GPUI's main thread; see below.
+
+## Core thread and output floods
+
+### The core runs on the UI thread
+
+GPUI does not run on Tokio. It has its own executors: a foreground executor on the main thread, where all UI code and rendering run, and a background thread pool. The core runs on that main thread.
+
+- **The core is a plain Rust crate** with no GPUI dependency, written as a state machine: `handle(&mut Core, Msg) -> Effects`. Tests drive that function directly, without a frontend.
+- **The frontend holds the core** and calls it directly for each input event. Rendering reads core state directly; the display model is not copied across threads.
+- **Services run on a Tokio runtime** on background threads. Their results arrive on channels that a GPUI foreground task drains into the core.
+- **The core never does slow work.** Anything CPU-heavy (grep, fuzzy matching, parsing, large diffs) goes to a service, because a slow core freezes the UI.
+- **Text input and layout are answered synchronously.** GPUI asks the focused view for text ranges, the selection and character positions during IME input, and soft wrap, scrolling and mouse hit-testing use GPUI's text layout directly.
+
+This is the same shape as Zed, so GPUI's examples and Zed's code apply directly. The alternative, a core on its own thread that sends a display model to the frontend after each change, was rejected: every keystroke would cross threads twice, the core could not measure text, and the frontend would have to mirror the focused buffer's text and selection to answer IME queries.
+
+### Output floods
+
+A build or a `cat` of a large file can produce megabytes per second of terminal output, and agents stream many small updates. If every chunk is a separate message and every message triggers a redraw, typing lags. Three rules prevent that:
+
+- **One redraw per frame at most.** A change marks the view dirty; GPUI renders once per frame.
+- **Batched reads.** The PTY reader reads whatever is available (up to about 64 KB) and sends one message per batch.
+- **Bounded channels.** If the core falls behind, the reader stops reading, the kernel's PTY buffer fills, and the program producing the output blocks. That is the usual terminal flow control, and it caps memory.
+
+Agent streams need nothing more than that: ACP updates are small and slow compared with PTY output. Re-render only the message being streamed, not the whole transcript.
+
+**The terminal emulator lives in the core.** The PTY task sends raw byte batches, and the core feeds them into the `alacritty_terminal` grid it owns. There is no shared state, copy mode and search read the grid directly, and tests feed bytes and snapshot the grid. The cost is that VT parsing runs on the UI thread, so a sustained flood can compete with typing.
+
+The emulator sits behind a terminal interface so it can move later. If typing lags during a flood (check by running `yes`, or `cat` on a large file, in one terminal while typing in another buffer), move the emulator into the terminal task behind a lock, as Zed and Alacritty do. That takes parsing off the UI thread at the cost of shared mutable state, the one exception principle 4 would then allow.
+
+## Open questions
+
+**Text model and files**
+
+- How a revert or formatter run keeps point, mark and markers. Likely by applying a computed diff (`similar` or `imara-diff`) instead of replacing the whole text. Also how a window's point follows edits made elsewhere (likely a marker in the buffer).
+- File watcher edge cases:
+  - ignoring the editor's own saves (compare against the stored hash);
+  - files deleted or renamed on disk;
+  - files open from outside the project roots, which no root watcher covers;
+  - atomic saves (write a temp file, then rename) versus symlinks and hard links;
+  - on Linux, inotify needs a watch per directory, so large ignored trees (`node_modules`, `deps`, `_build`, `target`) should be skipped.
+- File handling: encodings, CRLF line endings, final newline, very long lines, binary files, keeping file permissions on save.
+
+**Display**
+
+- The display model for the agent session buffer.
+
+**Editing**
+
+- Comment toggle (`M-;`), fill paragraph (`M-q`) in Markdown, query-replace, isearch versus swiper on `C-s`, save-as, recent files.
+- How TAB indentation rules are defined.
+- Specs for grep-based jump to definition, `file:line` jumps, and editing grep results in place.
+
+**Input and platform**
+
+- Keys on macOS:
+  - Option as Meta, or Option for special characters and dead keys;
+  - IME input;
+  - Cmd-C/V/Q and other Cmd bindings;
+  - bypassing GPUI's own keymap and action dispatch so that keys reach the editor's key trie;
+  - which key is the escape prefix in terminal char mode.
+- Mouse (selection, scrolling, clicks) and syncing the kill ring with the system clipboard.
+
+**Projects and workspaces**
+
+- Nested or overlapping roots, within one project or across projects.
+- Opening a single folder without a project.
+- What "switch project" does now that workspaces are bound to projects: jump to an existing workspace of that project, or create one.
+- Where the Messages buffer lives, given that every buffer belongs to one workspace.
+- Settings per language and per project (indent width, `.editorconfig`), themes and fonts.
+
+**Agents**
+
+- Whether the Claude Code and Codex adapters call `terminal/create`. If they don't, agent shell commands run inside the agent and never become terminal buffers.
+- Whether sessions started outside the editor can be listed for resume.
+- Whether the `agent-client-protocol` crate's connection types are `!Send`. If so, the ACP client runs on a single-threaded executor: GPUI's foreground executor or a dedicated thread.
 
 ## Testing
 
@@ -165,14 +307,15 @@ Each layer is tested on its own, and the assembled app is tested end to end with
 
 | Layer | How it is tested |
 | --- | --- |
-| Text model: rope, undo, markers, multiple cursors | Unit tests plus property tests (`proptest`) on random edit sequences and undo/redo round trips |
+| Text model: rope, undo, markers | Unit tests plus property tests (`proptest`) on random edit sequences and undo/redo round trips |
 | Commands and keymaps | Headless core driven by scripted key sequences; assertions on buffer text and point, snapshots of the display model (`insta`) |
-| Workspaces, tabs, session index | Temp-dir fixtures; tab lifecycle (closing kills its buffers); session index round trips |
-| File sync | External writes to temp repos; check that the right buffers auto-revert |
-| ACP client | A fake agent built on the same ACP crate, scripted to stream updates, request permissions, write files and create terminals; recorded transcripts from real Claude Code and Codex sessions replayed against the client |
+| Projects, workspaces, session index | Temp-dir fixtures; workspace lifecycle (killing a workspace kills its buffers); session index round trips |
+| File sync | External writes to temp repos; check that the right buffers auto-revert and that dirty buffers become conflicted |
+| ACP client | A fake agent built on the same ACP crate, scripted to stream updates, request permissions, write files to disk and create terminals; recorded transcripts from real Claude Code and Codex sessions replayed against the client |
 | Terminal | Byte streams fed into the emulator grid with snapshot assertions; PTY tests against small shell scripts |
+| Crash recovery | Kill the app mid-edit, relaunch, check the recovered buffers |
 | Frontend | Kept thin; a few screenshot tests of rendered windows |
-| Whole app | Launch with a test workspace and the fake agent, drive it with a key script, assert on files, buffers and tabs; a manual smoke run against the real agents before each milestone gate |
+| Whole app | Launch with a test project and the fake agent, drive it with a key script, assert on files, buffers and workspaces; a manual smoke run against the real agents before each milestone gate |
 
 ## Crate shortlist
 
@@ -181,16 +324,17 @@ All MVP choices are settled. Check each crate's current version and maintenance 
 | Area | Choice | Alternatives | Notes |
 | --- | --- | --- | --- |
 | ACP | `agent-client-protocol` | Hand-rolled JSON-RPC | Official Rust crate; also used to build the fake agent for tests |
-| Async runtime | `tokio` | — | Everything else assumes it |
-| GUI | GPUI | `iced`, `floem`, custom `wgpu` + `cosmic-text` | Decided; Zed's framework, strong on macOS |
+| Async runtime | `tokio` | — | For the services; GPUI runs its own executors |
+| GUI | GPUI | `iced`, `floem`, custom `wgpu` + `cosmic-text` | Decided; Zed's framework, strong on macOS, also runs on Linux |
 | Text storage | `ropey` | `crop` | Rope with line/char indexing; undo built on top |
 | Syntax | `tree-sitter` + grammars for Elixir, Rust, JS/TS, Markdown | `syntect` | Also gives structural motion |
 | Fuzzy matching | `nucleo` | `fuzzy-matcher` | Helix's matcher, fast on large lists |
-| Workspace search | `ignore` + `grep-searcher` | Shell out to `rg` | ripgrep's own library crates |
-| File watching | `notify` | — | One watcher per root; drives auto-revert |
+| Project search | `ignore` + `grep-searcher` | Shell out to `rg` | ripgrep's own library crates |
+| File watching | `notify` | — | One watcher per root; drives auto-revert. FSEvents on macOS, inotify on Linux |
 | PTY | `portable-pty` | `nix` directly | From the WezTerm project |
 | VT emulation | `alacritty_terminal` | — | Decided; Zed embeds the same crate |
-| Persistence | `rusqlite` + `serde_json` | `redb` | Session index in SQLite, transcripts as JSONL |
+| Persistence | `rusqlite` | `redb`, a plain TOML or JSON file | Session index only; no transcripts |
+| Platform dirs | `directories` | `dirs` | Application Support on macOS, XDG dirs on Linux |
 | Config | `serde` + `toml` | — | Decided: TOML everywhere |
 | Testing | `insta`, `proptest` | — | Snapshots and property tests |
 | Diagnostics | `tracing` | — | Piped into a Messages buffer |
@@ -200,9 +344,16 @@ All MVP choices are settled. Check each crate's current version and maintenance 
 
 Build the editor core first and add the agent at M3, so agent features land on a model that already works. Each phase ends with a gate you can test by using it.
 
-&#91;embedded content: milestone path · 6 phases, each with a gate\]
+| Phase | Scope | Gate |
+| --- | --- | --- |
+| M0 · Skeleton | Rope buffers, undo; window splits, keymap trie; minibuffer, find-file, save; auto-save and recovery | Edit and save a file using Emacs keys only |
+| M1 · Projects + workspaces | Primary repo + extra roots, project commands; finder + grep across repos; workspaces with their own layouts and buffers | Two workspaces on two different projects |
+| M2 · Terminal | PTY + VT emulator buffers; char mode and copy mode; shell integration marks; `$EDITOR` client | Run the test suite and make a git commit in a terminal buffer |
+| M3 · First agent | Claude Code via ACP; session buffer and modes; process environment; agent terminals as buffers (if the adapter uses `terminal/create`) | Land one real change with an agent, in the editor |
+| M4 · Sessions | Resume after restart via `session/load`; Claude + Codex side by side; extra roots, project preamble | One session makes a change across two repos |
+| M5 · Polish | Tree-sitter for 4 languages, TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results | Daily driver for real work, without LSP (knowingly deferred) |
 
-Phases are in order of dependency, not to scale; no dates are set. LSP, diff review, a dashboard with notifications, dired and worktree tasks come after M5.
+Phases are in order of dependency, not to scale; no dates are set. LSP, multiple cursors, ACP prompt features (`@file`, slash commands, image paste, tool-call diffs), agent status in the mode line, a dashboard with notifications, diff review, dired and worktree workflows come after M5.
 
 ## Sources
 
