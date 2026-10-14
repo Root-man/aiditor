@@ -33,6 +33,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - name: aiditor-core has no GPUI or Tokio dependency
-        run: "! cargo tree -p aiditor-core | grep -E '\\b(gpui|tokio) v'"
+        run: "cargo tree -p aiditor-core > tree.txt && ! grep -E '\\b(gpui|tokio) v' tree.txt"
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

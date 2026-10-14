@@ -53,12 +53,12 @@ mod tests {
     #[test]
     fn types_into_a_buffer() {
         let mut h = Harness::new(&[("src/a.txt", "on disk")]);
-        h.keys("hello RET wörld C-x C-s");
-        assert_eq!(h.text(), "hello\nwörld");
-        assert_eq!(h.point(), 11);
         assert_eq!(
             std::fs::read_to_string(h.path("src/a.txt")).unwrap(),
             "on disk"
         );
+        h.keys("hello RET wörld C-x C-s");
+        assert_eq!(h.text(), "hello\nwörld");
+        assert_eq!(h.point(), 11);
     }
 }
