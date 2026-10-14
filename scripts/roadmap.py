@@ -9,8 +9,8 @@ Dry run by default: reads the repo's existing milestones and issues and prints
 what it would create. Pass --apply to create them.
 
 Safe to re-run. Labels are upserted. Milestones and issues are matched by title,
-and existing ones are skipped and never edited. Sub-issue and "blocked by" links
-are only added where this run created the issue or its blocker.
+and existing ones are skipped and never edited. An issue is made a sub-issue of
+its epic when it is created; missing "blocked by" links are added on every run.
 
 Usage:
     scripts/roadmap.py                      # dry run, all milestones
@@ -45,7 +45,6 @@ class Item:
     parent: str | None = None
     blocked_by: list[str] = field(default_factory=list)
     number: int | None = None
-    created: bool = False
 
 
 def gh(*args: str, stdin: str | None = None) -> str:
@@ -162,6 +161,23 @@ def check_no_cycles(roadmap: dict) -> None:
         visit(key)
 
 
+def existing_blockers(repo: str) -> dict[int, set[int]]:
+    """Issue number → numbers of the issues it is already blocked by."""
+    owner, name = repo.split("/")
+    query = """query($owner: String!, $name: String!, $endCursor: String) {
+      repository(owner: $owner, name: $name) {
+        issues(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes { number blockedBy(first: 50) { nodes { number } } }
+        }
+      }
+    }"""
+    out = gh("api", "graphql", "--paginate", "-f", f"owner={owner}", "-f", f"name={name}",
+             "-f", f"query={query}",
+             "--jq", ".data.repository.issues.nodes[] | [.number, [.blockedBy.nodes[].number]] | tostring")
+    return {number: set(blockers) for number, blockers in map(json.loads, out.splitlines())}
+
+
 def all_titles_by_key(roadmap: dict) -> dict[str, str]:
     """Titles for every key in the roadmap, so blockers outside --only can still be found on GitHub."""
     titles = {}
@@ -225,7 +241,6 @@ def main() -> None:
             item.number = existing_issues[item.title]
             print(f"{indent}exists  #{item.number} {item.title}")
             continue
-        item.created = True
         cmd = ["issue", "create", "--repo", repo, "--title", item.title, "--body-file", "-",
                "--milestone", item.milestone]
         for label in item.labels:
@@ -243,9 +258,10 @@ def main() -> None:
         shown = f"#{item.number}" if item.number > 0 else "#new"
         print(f"{indent}create  {shown} {item.title}  [{', '.join(item.labels)}]")
 
-    # "Blocked by" links, only where this run created one side of the link.
+    # "Blocked by" links that are missing on GitHub.
     print("\nBlocked by")
     titles = all_titles_by_key(roadmap)
+    linked = existing_blockers(repo)
     for item in items:
         blockers = []
         for dep in item.blocked_by:
@@ -256,7 +272,7 @@ def main() -> None:
                     print(f"  skip    {item.title} ← {titles[dep]} (not on GitHub yet)")
                     continue
                 blocker = Item(dep, titles[dep], "", [], "", number=number)
-            if item.created or blocker.created:
+            if blocker.number not in linked.get(item.number, set()):
                 blockers.append(blocker)
         if not blockers:
             continue
