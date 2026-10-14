@@ -110,7 +110,7 @@ A buffer never knows which windows show it, and a window holds only a buffer id.
 
 Buffers have more than one content backend: a rope for file, scratch and Messages buffers, the emulator grid for terminals, and a structured transcript for agent sessions. The display model for the agent session buffer is not decided yet (see Open questions).
 
-Each workspace owns its buffers, and a buffer belongs to exactly one workspace. Killing a workspace kills its buffers. The same file can have several buffers: a file open in two workspaces has two, kept in sync through the disk. When the file changes on disk (a save from the other workspace, an agent's edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically.
+Each workspace owns its buffers, and a buffer belongs to exactly one workspace. Killing a workspace kills its buffers. The same file can have several buffers: a file open in two workspaces has two, kept in sync through the disk. When the file changes on disk (a save from the other workspace, an agent's edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically. The watcher reports every change, the editor's own saves included, and each buffer compares the new disk hash with its own: the buffer that saved sees no change, and the other buffers of that file revert.
 
 If the file changes on disk while its buffer has unsaved edits, the editor does not revert. It marks the buffer as conflicted, shows that in the mode line, and asks you to resolve it the next time you focus the buffer or try to save it. The choices are:
 
@@ -260,7 +260,6 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 - How a revert or formatter run keeps point, mark and markers. Likely by applying a computed diff (`similar` or `imara-diff`) instead of replacing the whole text. Also how a window's point follows edits made elsewhere (likely a marker in the buffer).
 - File watcher edge cases:
-  - ignoring the editor's own saves (compare against the stored hash);
   - files deleted or renamed on disk;
   - files open from outside the project roots, which no root watcher covers;
   - atomic saves (write a temp file, then rename) versus symlinks and hard links;
@@ -270,6 +269,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 **Display**
 
 - The display model for the agent session buffer.
+- Text layout: the MVP display uses monospace cells and truncates long lines. Whether to soft wrap (Markdown prose needs it) is part of the file-handling decision; a soft-wrap epic waits in M5 if the answer is "later".
 
 **Editing**
 
@@ -347,7 +347,7 @@ Build the editor core first and add the agent at M3, so agent features land on a
 | Phase | Scope | Gate |
 | --- | --- | --- |
 | M0 · Skeleton | Rope buffers, undo; window splits, keymap trie; minibuffer, find-file, save; auto-save and recovery | Edit and save a file using Emacs keys only |
-| M1 · Projects + workspaces | Primary repo + extra roots, project commands; finder + grep across repos; workspaces with their own layouts and buffers | Two workspaces on two different projects |
+| M1 · Projects + workspaces | Primary repo + extra roots, project commands; finder + grep across repos; workspaces with their own layouts and buffers | In two workspaces on different projects, find a file from an additional root, grep across two roots and jump to a hit, then keep editing while an external write auto-reverts another open buffer |
 | M2 · Terminal | PTY + VT emulator buffers; char mode and copy mode; shell integration marks; `$EDITOR` client | Run the test suite and make a git commit in a terminal buffer |
 | M3 · First agent | Claude Code via ACP; session buffer and modes; process environment; agent terminals as buffers (if the adapter uses `terminal/create`) | Land one real change with an agent, in the editor |
 | M4 · Sessions | Resume after restart via `session/load`; Claude + Codex side by side; extra roots, project preamble | One session makes a change across two repos |

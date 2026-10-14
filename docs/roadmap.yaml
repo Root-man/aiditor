@@ -1,0 +1,908 @@
+# MVP roadmap, turned into GitHub milestones and issues by scripts/roadmap.py.
+#
+# Structure: milestone (phase, with its gate) → epic (parent issue) → task (sub-issue, one PR).
+# The script adds a "Gate: <milestone>" issue at the end of each milestone, blocked by its epics.
+# M0 and M1 are broken down into tasks. M2–M5 have epics plus the decisions and spikes already known;
+# break them down when the milestone starts, and make each decision block the tasks it shapes.
+#
+# Item fields:
+#   key         unique id, used by blocked_by (never shown on GitHub)
+#   title       issue title; must be unique, since re-runs match existing issues by title
+#   labels      area/kind/platform labels. Tasks inherit their epic's area and platform labels.
+#               Epics get "epic" and tasks get "feature" automatically, unless a task already
+#               has a kind label (decision, spike)
+#   design      anchor in docs/editor.md; tasks inherit their epic's
+#   body        description (markdown)
+#   acceptance  checklist rendered under "Acceptance criteria"
+#   blocked_by  keys of issues this one waits for
+
+repo: Root-man/aiditor
+design_doc: https://github.com/Root-man/aiditor/blob/main/docs/editor.md
+
+labels:
+  # area
+  - { name: core, color: "1d76db", description: "Core state, command loop, model" }
+  - { name: text, color: "0e8a16", description: "Rope buffers, markers, undo, editing commands" }
+  - { name: keymap, color: "5319e7", description: "Commands, keymaps, key sequences" }
+  - { name: minibuffer, color: "c5def5", description: "Minibuffer, completion, search UIs" }
+  - { name: frontend, color: "fbca04", description: "GPUI frontend and display model" }
+  - { name: files, color: "c2e0c6", description: "Opening, saving, watching and reverting files" }
+  - { name: terminal, color: "000000", description: "PTY, VT emulator, terminal buffers" }
+  - { name: acp, color: "d93f0b", description: "ACP client, agents, sessions" }
+  - { name: project, color: "0052cc", description: "Projects and workspaces" }
+  - { name: persistence, color: "bfd4f2", description: "Session index, auto-save and recovery" }
+  - { name: infra, color: "ededed", description: "Build, CI, test harness" }
+  # kind
+  - { name: epic, color: "3e4b9e", description: "Parent issue grouping one feature area" }
+  - { name: feature, color: "a2eeef", description: "Implementation task, one PR" }
+  - { name: decision, color: "f9d0c4", description: "Open question to settle before dependent work" }
+  - { name: spike, color: "fef2c0", description: "Time-boxed investigation" }
+  - { name: gate, color: "b60205", description: "Milestone gate, tested by hand" }
+  # platform
+  - { name: macos, color: "e4e669", description: "macOS-specific" }
+  - { name: linux, color: "d4c5f9", description: "Linux-specific" }
+
+milestones:
+  # ───────────────────────────────────────────── M0 ─────────────────────────────────────────────
+  - key: m0
+    title: "M0 · Skeleton"
+    description: "Rope buffers, undo, window splits, keymap trie, minibuffer, find-file, save, auto-save and recovery."
+    gate: "Edit and save a file using Emacs keys only."
+    epics:
+      - key: m0-setup
+        title: "Project setup: crate layout, CI, test harness"
+        labels: [infra]
+        design: "#testing"
+        body: |
+          Split the single crate into a workspace that enforces the core/frontend boundary, get CI green on both platforms, and provide the headless harness most tasks test with.
+        tasks:
+          - key: m0-crates
+            title: "Split into a cargo workspace: aiditor-core, aiditor-services, aiditor"
+            body: |
+              `aiditor-core` holds editor state and has no GPUI or Tokio dependency. `aiditor-services` holds the async I/O tasks. `aiditor` is the binary that hosts the core on GPUI's main thread and starts the Tokio runtime. Move the current dependencies to the crates that use them. (Not `core`: that name collides with Rust's built-in crate and breaks `::core::` paths in derive macros.)
+            acceptance:
+              - "`cargo build` and `cargo test` pass on macOS and Linux"
+              - "`cargo tree -p aiditor-core` shows neither `gpui` nor `tokio`"
+          - key: m0-ci
+            title: "CI on macOS and Linux"
+            labels: [macos, linux]
+            body: |
+              GitHub Actions running fmt, clippy and tests on macOS and Linux, with the Linux system packages GPUI needs and a cargo cache.
+            acceptance:
+              - "`cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` run on both platforms"
+              - "The check from the crate split (aiditor-core has no GPUI/Tokio) runs in CI"
+            blocked_by: [m0-crates]
+          - key: m0-tracing
+            title: "Logging with tracing"
+            body: |
+              `tracing` with `tracing-subscriber` and an env filter, writing to stderr for now. The Messages buffer picks it up later.
+            acceptance:
+              - "`RUST_LOG` controls the log level"
+            blocked_by: [m0-crates]
+          - key: m0-harness
+            title: "Test harness: headless core driven by key scripts"
+            body: |
+              A test helper that creates a core with temp-dir files, feeds it a key script (`"hello C-x C-s"`), and exposes buffer text and point for assertions. Once the display builder lands, it also exposes the display model for `insta` snapshots. Every task whose acceptance says "key-script tests" depends on this one.
+            acceptance:
+              - "One test types into a buffer through the harness and checks text and point"
+            blocked_by: [m0-command-loop]
+
+      - key: m0-frontend
+        title: "Frontend: GPUI host for the core"
+        labels: [frontend]
+        design: "#the-core-runs-on-the-ui-thread"
+        body: |
+          The GPUI app that holds the core on the main thread, draws its display model and feeds it input. Starts with spikes, because everything else depends on GPUI doing what the design assumes, and gets a walking skeleton running early so every later task lands in a working app.
+        tasks:
+          - key: m0-spike-gpui
+            title: "Spike: GPUI drawing, raw keys, IME, Tokio and CI"
+            labels: [spike, macos, linux]
+            body: |
+              Time-box: 3 days. Throwaway code, findings written to `docs/spikes/gpui.md`. Answer:
+              - Can we draw monospace lines with styled spans and a cursor from our own model, at frame rate, on macOS and Linux?
+              - Can we receive raw key-down events with all modifiers before GPUI's keymap and actions see them?
+              - How do Option-as-Meta and Option-for-characters (dead keys) look at the event level on macOS?
+              - How does IME (marked text) reach us through GPUI's input handler?
+              - Can a Tokio runtime on background threads send to a channel that a GPUI foreground task drains?
+              - Can GPUI render on CI runners for screenshot tests (on Linux: a display server and software Vulkan), or does it have a headless test platform? If neither works cheaply, screenshot tests become manual checks.
+            acceptance:
+              - "Findings doc answers every question, with a recommendation for each"
+          - key: m0-spike-session-display
+            title: "Decide: display model for the session buffer"
+            labels: [decision, spike]
+            design: "#open-questions"
+            body: |
+              Time-box: 2 days, can run in parallel with the GPUI spike's later questions. The design doc says "visible lines with styled spans" cannot express the session buffer: rendered markdown, collapsible tool calls, the plan, and a read-only transcript above an editable prompt. Decide how the display model covers it (block or widget regions, folded regions, read-only text properties) and how the text projection works for search, mark and kill, so the display builder is built once in M0 instead of reworked in M3. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md, including what it changes in the display model"
+            blocked_by: [m0-spike-gpui]
+          - key: m0-decide-keys
+            title: "Decide: key handling on macOS"
+            labels: [decision, macos]
+            design: "#open-questions"
+            body: |
+              Option as Meta or Option for special characters and dead keys (or per side); IME input; Cmd-C/V/Q and other Cmd bindings; how keys bypass GPUI's keymap to reach the key trie. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+            blocked_by: [m0-spike-gpui]
+          - key: m0-walking-skeleton
+            title: "Walking skeleton: open, type and save in a GPUI window"
+            labels: [macos, linux]
+            body: |
+              `aiditor FILE` opens the file into a rope buffer through the core, draws it in one window, accepts typing and arrow keys, and saves with `C-x C-s`. Key handling and drawing are hardcoded and minimal; later tasks replace each piece (key trie, display builder, file service). From here on, every task lands in an app you can run.
+            acceptance:
+              - "Edit and save a real file on macOS and Linux"
+            blocked_by: [m0-spike-gpui, m0-core-skeleton, m0-buffer]
+          - key: m0-frontend-render
+            title: "Render the display model in GPUI"
+            body: |
+              Replace the skeleton's drawing: each window's visible lines, styled spans, cursor and region, the mode lines, the echo area and the minibuffer, laid out by the split tree. Font family and size come from settings. Report the frame size and cell metrics to the core on resize.
+            acceptance:
+              - "Splits render with the right sizes; resizing the frame re-lays them out"
+              - "Screenshot tests if the GPUI spike showed they can run in CI; otherwise a manual checklist in the PR"
+            blocked_by: [m0-walking-skeleton, m0-display, m0-splits, m0-config]
+          - key: m0-frontend-input
+            title: "Feed key and mouse events to the core"
+            body: |
+              Replace the skeleton's key handling: translate GPUI key events into the core's key representation according to the key-handling decision, including IME text, plus the mouse events the clipboard-and-mouse decision puts in the MVP.
+            acceptance:
+              - "Every key in the default keymap reaches the core on macOS and Linux"
+            blocked_by: [m0-walking-skeleton, m0-decide-keys, m0-decide-clipboard, m0-keytrie]
+
+      - key: m0-text
+        title: "Text model: buffers, markers, undo"
+        labels: [text, core]
+        design: "#core-data-model"
+        body: |
+          The buffer model everything else sits on: a rope backend, markers that follow edits, and undo grouped per command.
+        tasks:
+          - key: m0-buffer
+            title: "Rope buffer with an edit API"
+            body: |
+              Buffer ids and a buffer registry; insert and delete by char offset on a `ropey` rope; line/column conversions; modified flag; file binding. Model the content backend so terminal and session backends can be added later.
+            acceptance:
+              - "Unit tests for edits, offsets and line/column conversion, including non-ASCII text"
+            blocked_by: [m0-crates]
+          - key: m0-markers
+            title: "Markers that follow edits"
+            body: |
+              Markers with insertion type (stay before or move after text inserted at them). Window point and mark will be markers, so edits made elsewhere move them correctly.
+            acceptance:
+              - "Markers before, at and after an edit move correctly for both insertion types, for inserts and deletes"
+            blocked_by: [m0-buffer]
+          - key: m0-undo
+            title: "Undo and redo grouped per command"
+            body: |
+              Linear undo with a redo stack, per buffer. One group per command; consecutive self-inserts amalgamate (like Emacs's 20 characters). Undo restores point.
+            acceptance:
+              - "Undo/redo round trips restore text and point"
+            blocked_by: [m0-buffer]
+          - key: m0-text-proptest
+            title: "Property tests for the text model"
+            body: |
+              `proptest` over random edit sequences: undo all returns the original text, redo all returns the final text, markers stay in bounds.
+            acceptance:
+              - "Property tests run in CI"
+            blocked_by: [m0-markers, m0-undo]
+
+      - key: m0-commands
+        title: "Core loop, commands and keymaps"
+        labels: [keymap, core]
+        design: "#commands-and-keymaps"
+        body: |
+          The core's skeleton (state machine, effects, service bridge, timers) and Emacs's command model on top of it: named commands with argument specs, a command loop, layered keymaps resolved by a key-sequence trie, prefix arguments, keymaps in TOML.
+        tasks:
+          - key: m0-core-skeleton
+            title: "Core state machine, effects, service bridge and timers"
+            labels: [frontend]
+            body: |
+              The `Core`, `Msg`, `Effects` and `Ctx` types and `handle(&mut Core, Msg) -> Effects`. The app starts the Tokio runtime, hands services a sender, and drains their results into the core from a GPUI foreground task. Timers (one-shot and repeating, cancellable) arrive as messages; auto-save, the which-key delay and debounced grep use them.
+            acceptance:
+              - "A test service's result reaches the core as a message"
+              - "Timers fire as messages in tests, driven by a fake clock"
+            blocked_by: [m0-crates, m0-spike-gpui]
+          - key: m0-registry
+            title: "Command registry and argument specs"
+            body: |
+              Commands with a name, an argument spec (prefix arg, region, prompted string) and a handler `fn(&mut Ctx, Args) -> Result`. Errors go to the echo area.
+            acceptance:
+              - "Commands can be looked up by name and called with arguments from tests"
+            blocked_by: [m0-core-skeleton]
+          - key: m0-keytrie
+            title: "Key sequences and keymap layering"
+            body: |
+              A trie of key sequences with prefix keys (`C-x`, `C-c`, `C-x 4`). Lookup order: transient map → minor-mode maps → major-mode map → global map. Undefined keys show a message; `C-g` cancels a pending prefix.
+            acceptance:
+              - "A minor-mode binding shadows a global one; removing the mode restores it"
+            blocked_by: [m0-registry]
+          - key: m0-command-loop
+            title: "Command loop"
+            body: |
+              Key event → key sequence → command → effects. Tracks this/last command, sets the undo boundary per command, and records the key stream so keyboard macros (M5) can be added without changing the loop.
+            acceptance:
+              - "Key sequences fed to the core run commands and update buffers"
+            blocked_by: [m0-registry, m0-keytrie, m0-undo]
+          - key: m0-prefix-arg
+            title: "Prefix argument"
+            body: |
+              `C-u`, repeated `C-u`, `M-<digit>`, `C-u <digits>` and `C--`, passed to every command.
+            acceptance:
+              - "A test command receives 3 for `C-u 3`, 16 for `C-u C-u` and -1 for `C--`"
+            blocked_by: [m0-command-loop, m0-harness]
+          - key: m0-keymap-toml
+            title: "Keymaps from TOML, reloadable"
+            body: |
+              A bundled default keymap file and user overrides from the config dir, loaded through the settings module. Bad entries are reported in the echo area and the rest still loads.
+            acceptance:
+              - "Changing a binding in the user file and reloading takes effect without restart"
+            blocked_by: [m0-keytrie, m0-config]
+          - key: m0-which-key
+            title: "Hint after a prefix key"
+            body: |
+              After a short delay (a timer) on a prefix key, show the keys that can follow and their commands, which-key style, as part of the display model.
+            acceptance:
+              - "Pressing `C-x` and waiting lists the `C-x` bindings (display snapshot)"
+            blocked_by: [m0-keytrie, m0-display, m0-core-skeleton]
+
+      - key: m0-editing
+        title: "Basic editing commands"
+        labels: [text]
+        design: "#commands-and-keymaps"
+        body: |
+          Enough Emacs editing to pass the M0 gate without touching the mouse.
+        tasks:
+          - key: m0-motion
+            title: "Motion commands"
+            body: |
+              `C-f/b/n/p`, `M-f/b`, `C-a/e`, `M-</>`, `C-v/M-v`, `C-l`, with a goal column for vertical motion, honouring the prefix argument.
+            acceptance:
+              - "Key-script tests for each command, including `C-u 3 C-f`"
+            blocked_by: [m0-window-model, m0-prefix-arg, m0-harness]
+          - key: m0-insert-delete
+            title: "Insertion and deletion commands"
+            body: |
+              Self-insert, `RET`, `C-j`, `C-o`, `C-d`, `DEL`, `M-d`, `M-DEL`, honouring the prefix argument.
+            acceptance:
+              - "Key-script tests for each command, including `C-u 3 a`"
+            blocked_by: [m0-window-model, m0-prefix-arg, m0-harness]
+          - key: m0-mark-region
+            title: "Mark, region and C-g"
+            body: |
+              `C-SPC`, `C-x C-x`, the mark ring, an active region highlighted in the display, and `C-g` to deactivate the mark and quit.
+            acceptance:
+              - "Region shows in display snapshots; `C-g` clears it"
+            blocked_by: [m0-window-model, m0-command-loop, m0-display, m0-harness]
+          - key: m0-decide-clipboard
+            title: "Decide: system clipboard and mouse in the MVP"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              How the kill ring syncs with the system clipboard, and which mouse interactions (click to move point, drag to select, scroll) are in the MVP. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m0-kill-ring
+            title: "Kill ring and yank"
+            body: |
+              `C-k`, `C-w`, `M-w`, `C-y`, `M-y`. Consecutive kills append to the same entry. Syncs with the system clipboard as decided.
+            acceptance:
+              - "Two consecutive `C-k` yank back as one entry"
+            blocked_by: [m0-mark-region, m0-decide-clipboard]
+
+      - key: m0-windows
+        title: "Windows and the display model"
+        labels: [core, frontend]
+        design: "#core-data-model"
+        body: |
+          Windows as viewports onto buffers, split trees, and the display model the frontend draws.
+        tasks:
+          - key: m0-window-model
+            title: "Window model: point, mark and scroll"
+            body: |
+              A window shows one buffer and holds its point and mark (as markers) and its scroll position; scrolling keeps point visible. One window per frame until split commands land.
+            acceptance:
+              - "Unit tests: an edit before point moves point; scrolling follows point"
+            blocked_by: [m0-markers]
+          - key: m0-display
+            title: "Display builder"
+            body: |
+              Per window: visible lines with styled spans, cursor, region overlay and a mode line, built from core state for the current frame size, following the session-buffer display decision. Monospace cells; long lines follow the file-handling decision (truncated until then).
+            acceptance:
+              - "`insta` snapshots of the display model through the harness"
+            blocked_by: [m0-window-model, m0-spike-session-display, m0-harness]
+          - key: m0-splits
+            title: "Split-tree commands"
+            body: |
+              Split tree with ratios; `C-x 2`, `C-x 3`, `C-x o`, `C-x 0`, `C-x 1`. Each window keeps its own point and scroll position.
+            acceptance:
+              - "Two windows on the same buffer keep separate points"
+              - "Display snapshots of horizontal and vertical splits"
+            blocked_by: [m0-window-model, m0-command-loop, m0-display]
+          - key: m0-echo
+            title: "Echo area"
+            body: |
+              Messages and errors shown in the echo area, cleared on the next key; `C-g` shows "Quit".
+            acceptance:
+              - "Command errors appear in the echo area and in display snapshots"
+            blocked_by: [m0-display]
+
+      - key: m0-minibuffer
+        title: "Minibuffer and completion"
+        labels: [minibuffer]
+        design: "#commands-and-keymaps"
+        body: |
+          A real one-line buffer for every prompt, with history and a vertical fuzzy completion list. Hosts `M-x`, `find-file` and buffer switching in M0.
+        tasks:
+          - key: m0-mb-core
+            title: "Minibuffer as a buffer"
+            body: |
+              One-line buffer with its own keymap and a prompt; `RET` returns, `C-g` aborts; history rings per prompt kind with `M-p`/`M-n`. Normal editing commands work inside it.
+            acceptance:
+              - "A command can prompt for a string from a key script"
+            blocked_by: [m0-command-loop, m0-display]
+          - key: m0-mb-completion
+            title: "Fuzzy completion list"
+            body: |
+              A vertical list of candidates matched with `nucleo`, `C-n`/`C-p` to move the selection, `TAB` to complete. `nucleo` runs matching on its own worker threads; the core feeds it candidates and polls it with `tick()` after input and on each frame, so no Tokio service is needed.
+            acceptance:
+              - "Typing filters candidates; snapshots show the list"
+            blocked_by: [m0-mb-core]
+          - key: m0-mx
+            title: "M-x"
+            body: |
+              Completes over all commands and shows each command's key binding.
+            acceptance:
+              - "`M-x` runs a registered command by name and shows its binding in the list"
+            blocked_by: [m0-mb-completion]
+          - key: m0-find-file
+            title: "find-file"
+            body: |
+              `C-x C-f` with path completion from the current buffer's directory; opens an existing file or creates a new buffer for a new one.
+            acceptance:
+              - "Opening an existing file and a new file both work"
+            blocked_by: [m0-mb-completion, m0-file-io]
+          - key: m0-switch-buffer
+            title: "Switch and kill buffers"
+            body: |
+              `C-x b` with completion over buffers (most recent first), `C-x 4 b`, and `C-x k`. Scoping to the workspace comes in M1.
+            acceptance:
+              - "Switching back to a buffer restores its last point"
+            blocked_by: [m0-mb-completion, m0-splits]
+
+      - key: m0-files
+        title: "Files, settings, scratch and Messages buffers"
+        labels: [files, core]
+        design: "#core-data-model"
+        body: |
+          Settings loading, opening and saving files safely, the built-in buffers, and quitting without losing work.
+        tasks:
+          - key: m0-config
+            title: "Settings: TOML loading and reload"
+            body: |
+              One settings module for every TOML file: bundled defaults plus user files from the config dir (`directories` crate), validated with serde, errors reported in the echo area, reloaded by command. Keymaps, project files, the agent registry, formatters, theme and font all go through it. M0 settings: font family and size, a default theme.
+            acceptance:
+              - "Changing the font size and reloading takes effect"
+              - "A bad value reports an error and keeps the previous value"
+            blocked_by: [m0-core-skeleton]
+          - key: m0-decide-files
+            title: "Decide: file handling rules"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Encodings, CRLF line endings, final newline, binary files, keeping file permissions on save, atomic saves versus symlinks and hard links, and long lines: truncate or soft wrap (Markdown is first-class, so wrapping matters). Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m0-file-io
+            title: "Open and save files with a hash check"
+            body: |
+              File reads and writes run in a service, replacing the walking skeleton's direct writes. Loading records the content hash; `C-x C-s` checks the disk hash first and refuses with a message if the file changed (the full conflict flow comes in M1).
+            acceptance:
+              - "Saving over a file changed on disk is refused"
+              - "File permissions survive a save"
+            blocked_by: [m0-buffer, m0-core-skeleton, m0-decide-files]
+          - key: m0-special-buffers
+            title: "Scratch and Messages buffers"
+            body: |
+              A scratch buffer on startup. A Messages buffer that collects echo-area messages and `tracing` output.
+            acceptance:
+              - "Echo-area messages and log lines appear in Messages"
+            blocked_by: [m0-buffer, m0-tracing, m0-echo]
+          - key: m0-quit
+            title: "Quit with unsaved buffers"
+            body: |
+              `C-x C-c` offers to save each modified file buffer before quitting.
+            acceptance:
+              - "Quitting with a modified buffer prompts; declining keeps the editor open"
+            blocked_by: [m0-file-io, m0-mb-core]
+
+      - key: m0-crash
+        title: "Crash safety: auto-save and recovery"
+        labels: [persistence]
+        design: "#subsystems"
+        body: |
+          Unsaved edits survive a crash: auto-save files outside the repos, recovery on launch, and panics in commands that don't take the editor down.
+        tasks:
+          - key: m0-autosave
+            title: "Auto-save dirty buffers to the recovery dir"
+            body: |
+              About 2 s after the last edit, and at least every 30 s while dirty (timers), write the buffer's text to the recovery dir under the platform data dir, with the original path, base disk hash and time. Written by a service via temp file and rename. Deleted on save, revert or kill. Covers file and scratch buffers.
+            acceptance:
+              - "Recovery files appear while a buffer is dirty and disappear after save"
+              - "Nothing is ever written inside the project's directories"
+            blocked_by: [m0-file-io, m0-core-skeleton]
+          - key: m0-recovery
+            title: "Recover buffers on launch"
+            body: |
+              If recovery files exist at launch, list them; for each, open it as a dirty buffer with the recovered text, or discard it. (Compare with disk arrives with the diff buffer in M1.)
+            acceptance:
+              - "A recovered buffer opens dirty, bound to its original file"
+            blocked_by: [m0-autosave, m0-mb-completion]
+          - key: m0-catch-unwind
+            title: "Contain panics in commands"
+            body: |
+              Run each command under `catch_unwind`. Log the panic and backtrace to Messages, note that the command's state may be inconsistent, and keep running.
+            acceptance:
+              - "A test command that panics leaves the editor running and logs to Messages"
+              - "CI fails if any build profile sets `panic = \"abort\"`, which would silently disable this"
+            blocked_by: [m0-command-loop, m0-special-buffers]
+          - key: m0-crash-e2e
+            title: "End-to-end crash recovery test"
+            labels: [infra]
+            body: |
+              A headless binary (core and services, no GPUI) driven by a key script: edit a file, kill the process, relaunch, check the recovered buffer. It tests the same recovery path without needing a GUI on CI runners.
+            acceptance:
+              - "Test runs in CI on both platforms"
+            blocked_by: [m0-recovery, m0-harness]
+
+  # ───────────────────────────────────────────── M1 ─────────────────────────────────────────────
+  - key: m1
+    title: "M1 · Projects + workspaces"
+    description: "Primary repo + extra roots, project commands, finder and grep across repos, workspaces with their own layouts and buffers, file sync."
+    gate: "In two workspaces on different projects, find a file from an additional root, grep across two roots and jump to a hit, then keep editing while an external write auto-reverts another open buffer."
+    epics:
+      - key: m1-projects
+        title: "Projects: project files and commands"
+        labels: [project]
+        design: "#projects"
+        body: |
+          A project is a TOML file in the config dir listing a primary repo and additional roots with role lines.
+        tasks:
+          - key: m1-project-file
+            title: "Project file format and loading"
+            body: |
+              TOML schema, loaded through the settings module: name, primary repo, additional roots (path and role line), default agent. Validate that paths exist and are absolute; report errors in the echo area.
+            acceptance:
+              - "Round-trip tests for the project file; invalid files give clear errors"
+          - key: m1-decide-roots
+            title: "Decide: nested roots and folders without a project"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Nested or overlapping roots within one project or across projects; whether and how to open a single folder without a project. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m1-project-commands
+            title: "Project commands"
+            body: |
+              Create a project, add or remove a root, edit a root's role line, set the default agent, open the project file for editing. All as keys and `M-x`.
+            acceptance:
+              - "A project can be created and edited entirely from the editor"
+            blocked_by: [m1-project-file, m1-decide-roots]
+          - key: m1-decide-switch
+            title: "Decide: what \"switch project\" does"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Now that workspaces are bound to projects: jump to an existing workspace of that project, create one, or ask. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+
+      - key: m1-workspaces
+        title: "Workspaces"
+        labels: [project, core]
+        design: "#workspaces"
+        body: |
+          A workspace holds everything for one task: its own buffers and window configuration, bound to one project.
+        tasks:
+          - key: m1-decide-messages
+            title: "Decide: where the Messages buffer lives"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Every buffer belongs to one workspace, but Messages collects output from everywhere. Global exception, one per workspace, or something else. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m1-ws-model
+            title: "Workspace model and buffer ownership"
+            body: |
+              Workspaces bound to a project; every buffer belongs to exactly one workspace (Messages as decided); opening a file already open in another workspace creates a second buffer; a new workspace starts with a scratch buffer; killing a workspace kills its buffers.
+            acceptance:
+              - "Lifecycle tests: kill a workspace, its buffers are gone, other workspaces are untouched"
+            blocked_by: [m1-project-file, m1-decide-messages]
+          - key: m1-ws-windows
+            title: "Window configuration per workspace"
+            body: |
+              Each workspace keeps its own split tree; switching workspaces restores it.
+            acceptance:
+              - "Switching away and back restores splits, buffers and points"
+            blocked_by: [m1-ws-model]
+          - key: m1-ws-commands
+            title: "Workspace commands"
+            body: |
+              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`.
+            acceptance:
+              - "Key-script tests for each command"
+            blocked_by: [m1-ws-model, m1-decide-switch]
+          - key: m1-ws-strip
+            title: "Workspace strip in the frontend"
+            labels: [frontend]
+            body: |
+              A strip along the top showing each workspace's name and project, highlighting the current one.
+            acceptance:
+              - "Screenshot test with two workspaces if CI can run them; otherwise a manual checklist in the PR"
+            blocked_by: [m1-ws-commands]
+          - key: m1-ws-scoped-switch
+            title: "Scope buffer switching to the workspace"
+            body: |
+              `C-x b` and the buffer switcher list only the current workspace's buffers.
+            acceptance:
+              - "Buffers from another workspace don't appear"
+            blocked_by: [m1-ws-model]
+
+      - key: m1-finder
+        title: "File finder across project roots"
+        labels: [minibuffer, project]
+        design: "#subsystems"
+        body: |
+          Find any file in any root of the project, with live preview.
+        tasks:
+          - key: m1-file-index
+            title: "File index service"
+            body: |
+              Walk all project roots with `ignore` (respecting `.gitignore`) off the core thread; refresh on demand. (Refresh on file events is wired up with the watcher.)
+            acceptance:
+              - "Indexing a large repo doesn't block typing"
+            blocked_by: [m1-project-file]
+          - key: m1-preview
+            title: "Live preview from the minibuffer"
+            body: |
+              A generic preview hook: moving the selection shows the candidate in the selected window; `C-g` restores the previous window state. Used by buffer switching, the file finder and grep.
+            acceptance:
+              - "Preview then `C-g` leaves windows exactly as before"
+            blocked_by: [m1-ws-windows]
+          - key: m1-find-in-project
+            title: "Find file across roots"
+            body: |
+              Candidates are relative paths prefixed by the root's name, matched with `nucleo`, with live preview.
+            acceptance:
+              - "Files from the primary repo and an additional root are both found"
+            blocked_by: [m1-file-index, m1-preview]
+
+      - key: m1-search
+        title: "Project grep and swiper"
+        labels: [minibuffer]
+        design: "#subsystems"
+        body: |
+          consult-style project grep and swiper-style in-buffer search, plus jump history.
+        tasks:
+          - key: m1-decide-editing
+            title: "Decide: C-s and the remaining editing commands"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Isearch versus swiper on `C-s` (needed for the swiper task), and which of comment toggle (`M-;`), fill paragraph (`M-q`) in Markdown, query-replace, save-as and recent files are in the MVP and when. Implementation goes into M5's editing epic unless the decision pulls something earlier. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m1-grep-service
+            title: "Grep service"
+            body: |
+              `grep-searcher` over all roots with `ignore`; streams results to the core; a new query cancels the previous search; results capped.
+            acceptance:
+              - "Cancelling a search on a large repo stops it promptly"
+            blocked_by: [m1-project-file]
+          - key: m1-grep-ui
+            title: "Project grep in the minibuffer"
+            body: |
+              Live results as you type (debounced with a timer), preview of the selected hit, `RET` jumps to it.
+            acceptance:
+              - "Key-script test: search, move, jump"
+            blocked_by: [m1-grep-service, m1-preview]
+          - key: m1-swiper
+            title: "Swiper-style line search"
+            body: |
+              List the current buffer's matching lines in the minibuffer with preview; `RET` jumps. Bound as the `C-s` decision says.
+            acceptance:
+              - "Key-script test: search, move, jump"
+            blocked_by: [m1-preview, m1-decide-editing]
+          - key: m1-jump-history
+            title: "Jump history"
+            body: |
+              Record a position before every jump (grep hit, file finder, swiper, buffer switch); commands to go back and forward across buffers.
+            acceptance:
+              - "Back after a grep jump returns to the original position"
+            blocked_by: [m1-grep-ui]
+
+      - key: m1-sync
+        title: "File watching, auto-revert and conflicts"
+        labels: [files, core]
+        design: "#core-data-model"
+        body: |
+          Buffers follow the disk: clean buffers auto-revert, dirty ones become conflicted and are resolved by hand.
+        tasks:
+          - key: m1-decide-watcher
+            title: "Decide: file watcher edge cases"
+            labels: [decision, linux]
+            design: "#open-questions"
+            body: |
+              Files deleted or renamed on disk, files open from outside the project roots, skipping large ignored trees under inotify on Linux. (The editor's own saves are already settled: the watcher reports them, and each buffer filters by comparing hashes.) Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m1-revert-diff
+            title: "Revert by applying a diff"
+            labels: [text]
+            body: |
+              Compute a diff between buffer and new text off the core thread (`similar` or `imara-diff`) and apply it as one undo group, so point, mark and markers survive.
+            acceptance:
+              - "Point stays on the same line after a revert that changes lines above it"
+          - key: m1-watcher
+            title: "File watcher service"
+            body: |
+              `notify` watchers for the project roots and for open files outside them, with debounced events. The watcher reports every change, including the editor's own saves; filtering happens per buffer. File creates and deletes also refresh the file index.
+            acceptance:
+              - "External writes produce one event per change after debouncing"
+              - "Creating or deleting a file updates the file finder"
+            blocked_by: [m1-decide-watcher, m1-project-file, m1-file-index]
+          - key: m1-auto-revert
+            title: "Auto-revert clean buffers"
+            body: |
+              On a change event, each buffer visiting the file compares the new disk hash with its own stored hash. The buffer that just saved sees no change; every other clean buffer of that file reverts, in every workspace.
+            acceptance:
+              - "A save in one workspace reverts the same file's buffer in another, and leaves the saving buffer alone"
+            blocked_by: [m1-watcher, m1-revert-diff, m1-ws-model]
+          - key: m1-diff-view
+            title: "Diff buffer: buffer against disk"
+            body: |
+              A read-only buffer showing a unified diff of a buffer's text against its file on disk, built from the revert diff. Used by the conflict flow and by M0's recovered buffers.
+            acceptance:
+              - "A recovered buffer can be compared with its file on disk"
+            blocked_by: [m1-revert-diff]
+          - key: m1-conflict
+            title: "Conflict flow for dirty buffers"
+            body: |
+              A dirty buffer whose file changes is marked conflicted in the mode line. On focus or save, offer: keep mine, take disk (unsaved text stays in undo), or compare (opens the diff buffer).
+            acceptance:
+              - "Each of the three choices behaves as described in docs/editor.md"
+            blocked_by: [m1-auto-revert, m1-diff-view]
+          - key: m1-sync-tests
+            title: "File sync test suite"
+            labels: [infra]
+            body: |
+              External writes to temp repos: the right buffers auto-revert, dirty buffers become conflicted, a buffer's own save doesn't revert it.
+            acceptance:
+              - "Suite runs in CI on both platforms"
+            blocked_by: [m1-conflict]
+
+  # ───────────────────────────────────────────── M2 ─────────────────────────────────────────────
+  - key: m2
+    title: "M2 · Terminal"
+    description: "PTY + VT emulator buffers, char and copy mode, shell integration, $EDITOR client."
+    gate: "Run the test suite and make a git commit in a terminal buffer."
+    epics:
+      - key: m2-pty
+        title: "PTY service"
+        labels: [terminal]
+        design: "#output-floods"
+        body: |
+          `portable-pty` running the user's shell as a login shell. Batched reads (up to ~64 KB per message), a bounded channel for backpressure, resize. Break down when M2 starts.
+      - key: m2-emulator
+        title: "Terminal buffers: emulator in the core"
+        labels: [terminal, frontend]
+        design: "#output-floods"
+        body: |
+          `alacritty_terminal` grid owned by the core as a buffer content backend; rendering of colours, cursor shapes and wide characters; one redraw per frame. Includes the flood check from the design doc (`yes` in one terminal while typing in another). Break down when M2 starts.
+      - key: m2-modes
+        title: "Char mode and copy mode"
+        labels: [terminal, keymap]
+        design: "#subsystems"
+        body: |
+          Char mode sends almost every key to the shell; copy mode turns scrollback into a read-only buffer with Emacs motion, search and kill. Break down when M2 starts.
+        tasks:
+          - key: m2-decide-escape
+            title: "Decide: escape prefix key in char mode"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Which key stays with the editor in char mode, given readline's use of `C-a`, `C-e`, `C-x` and friends. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+      - key: m2-shell-integration
+        title: "Shell integration: OSC 133 and OSC 7"
+        labels: [terminal]
+        design: "#subsystems"
+        body: |
+          Prompt marks for jump-to-prompt and per-command output capture; cwd tracking. Break down when M2 starts.
+      - key: m2-editor-client
+        title: "$EDITOR client for terminal buffers"
+        labels: [terminal]
+        design: "#subsystems"
+        body: |
+          Terminals set `EDITOR`/`VISUAL` to a small client that opens the file in a buffer in the terminal's workspace and blocks until the edit is finished or aborted. Mechanism to be decided (likely a Unix socket). Break down when M2 starts.
+
+  # ───────────────────────────────────────────── M3 ─────────────────────────────────────────────
+  - key: m3
+    title: "M3 · First agent"
+    description: "Claude Code via ACP, session buffer and modes, process environment, agent terminals as buffers."
+    gate: "Land one real change with an agent, in the editor."
+    epics:
+      - key: m3-env
+        title: "Process environment capture"
+        labels: [core, macos, linux]
+        design: "#subsystems"
+        body: |
+          Inherit the environment when launched from a shell; otherwise capture it per project with an interactive login shell in the primary repo, with a marker, a timeout and a fallback; env overrides from the agent registry and project file; a re-capture command. Break down when M3 starts.
+      - key: m3-acp-client
+        title: "Agent registry and ACP client"
+        labels: [acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Agent registry in TOML; one process per session with stderr to a log buffer; `initialize` and `session/new` with `cwd` set to the primary repo (additional directories come in M4); no fs capabilities advertised. Break down when M3 starts.
+        tasks:
+          - key: m3-spike-acp
+            title: "Spike: ACP crate threading"
+            labels: [spike]
+            body: |
+              Time-box: 1 day. Are the `agent-client-protocol` crate's connection types `!Send`? Decide whether the ACP client runs on GPUI's foreground executor or a dedicated single-threaded runtime, and record it in `docs/editor.md`. Cheap enough to do any time before M3.
+            acceptance:
+              - "Answer and choice recorded in docs/editor.md"
+      - key: m3-fake-agent
+        title: "Fake agent and transcript replay tests"
+        labels: [acp, infra]
+        design: "#testing"
+        body: |
+          A fake agent built on the ACP crate, scripted to stream updates, request permissions, write files to disk and create terminals; recorded Claude Code and Codex transcripts replayed against the client. Break down when M3 starts.
+      - key: m3-session-buffer
+        title: "Session buffer"
+        labels: [acp, frontend]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Rich chat view with a text projection underneath and an editable prompt area, built on the display model decided in M0 ("Decide: display model for the session buffer"). Break down when M3 starts.
+      - key: m3-modes
+        title: "Session modes and permission prompts"
+        labels: [acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Default mode per agent from config, a key to cycle modes, permission requests answered inline in the session buffer. Break down when M3 starts.
+      - key: m3-agent-terminals
+        title: "Agent terminals as terminal buffers"
+        labels: [acp, terminal]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Handle `terminal/create` and friends by spawning terminal buffers in the session's workspace, if the adapters use it.
+        tasks:
+          - key: m3-decide-terminal-create
+            title: "Check: do the adapters call terminal/create?"
+            labels: [decision, acp]
+            design: "#open-questions"
+            body: |
+              Check whether claude-agent-acp and codex-acp call `terminal/create` when the client advertises terminals. If neither does, drop this epic. Cheap enough to do any time before M3. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Answer recorded in docs/editor.md"
+
+  # ───────────────────────────────────────────── M4 ─────────────────────────────────────────────
+  - key: m4
+    title: "M4 · Sessions"
+    description: "Resume after restart via session/load, Claude and Codex side by side, extra roots, project preamble."
+    gate: "One session makes a change across two repos."
+    epics:
+      - key: m4-index
+        title: "Session index in SQLite"
+        labels: [persistence, acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Index of ACP session id, agent, project, `cwd` and additional directories, title, last activity and status, under the platform data dir. No transcripts. Break down when M4 starts.
+      - key: m4-resume
+        title: "Resume sessions with session/load"
+        labels: [acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          A resume command listing the project's past sessions; `session/load` replays history into a new session buffer in the current workspace. Break down when M4 starts.
+        tasks:
+          - key: m4-spike-external-sessions
+            title: "Spike: list sessions started outside the editor"
+            labels: [spike]
+            body: |
+              Can the adapters list their own sessions (for example ones started in the Claude Code CLI) so the resume list can include them? Cheap enough to do any time before M4.
+            acceptance:
+              - "Answer recorded in docs/editor.md"
+      - key: m4-codex
+        title: "Codex adapter"
+        labels: [acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Codex via codex-acp in the agent registry, with its modes; sessions with Claude Code and Codex side by side in one workspace. Break down when M4 starts.
+      - key: m4-preamble
+        title: "Additional directories and the roots preamble"
+        labels: [acp, project]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Pass the project's other roots as `additionalDirectories`; the first prompt carries a preamble listing the roots and their role lines. Break down when M4 starts.
+
+  # ───────────────────────────────────────────── M5 ─────────────────────────────────────────────
+  - key: m5
+    title: "M5 · Polish"
+    description: "Tree-sitter for four languages, TAB indentation, formatters, registers, macros, navigation features."
+    gate: "Daily driver for real work, without LSP (knowingly deferred)."
+    epics:
+      - key: m5-treesitter
+        title: "Tree-sitter parsing service and highlighting"
+        labels: [text]
+        design: "#subsystems"
+        body: |
+          Incremental parsing off the core thread for Elixir, Rust, JS/TS and Markdown; highlighting, folding and structural motion. Break down when M5 starts.
+      - key: m5-indent
+        title: "TAB indentation"
+        labels: [text]
+        design: "#commands-and-keymaps"
+        body: |
+          TAB indents the current line for the buffer's language. Break down after the decisions below.
+        tasks:
+          - key: m5-decide-indent
+            title: "Decide: how indentation rules are defined"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Tree-sitter indent queries (as Helix does) or hand-written rules per language. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m5-decide-settings
+            title: "Decide: per-language and per-project settings, themes, fonts"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Indent width and style per language and project, `.editorconfig` support, themes and fonts beyond M0's single defaults. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+      - key: m5-soft-wrap
+        title: "Soft wrap"
+        labels: [text, frontend]
+        design: "#open-questions"
+        body: |
+          If the M0 file-handling decision kept long lines truncated, add soft wrap: visual lines in the display builder, for vertical motion and for scrolling. Markdown prose needs it. Break down when M5 starts.
+      - key: m5-format
+        title: "Formatter commands"
+        labels: [text]
+        design: "#commands-and-keymaps"
+        body: |
+          A format command per language (`mix format`, `rustfmt`, prettier) configured in TOML, run with the project's environment, applied as a diff. Not on save. Break down when M5 starts.
+      - key: m5-registers-macros
+        title: "Registers and keyboard macros"
+        labels: [keymap, text]
+        design: "#commands-and-keymaps"
+        body: |
+          Text and position registers; keyboard macro recording and playback on top of the command loop's recorded key stream. Break down when M5 starts.
+      - key: m5-navigation
+        title: "Jump to definition and file:line jumps"
+        labels: [minibuffer]
+        design: "#subsystems"
+        body: |
+          Grep-based jump to definition, and jumping to `file:line` from terminal output, grep hits and agent tool calls. Break down after the spec decision.
+        tasks:
+          - key: m5-decide-navigation
+            title: "Decide: specs for jump to definition and file:line jumps"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Per-language definition patterns for grep, how `file:line` references are detected in terminal and session buffers, and the keys. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+      - key: m5-wgrep
+        title: "Editable grep results"
+        labels: [minibuffer, text]
+        design: "#subsystems"
+        body: |
+          Export grep results to a buffer, edit the lines, and write the changes back to the files, wgrep style. The spec is written when M5 is broken down.
+      - key: m5-editing
+        title: "Remaining editing commands"
+        labels: [text]
+        design: "#open-questions"
+        body: |
+          Implement the commands chosen in M1's "Decide: C-s and the remaining editing commands". Break down when M5 starts.
