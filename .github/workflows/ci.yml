@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read Rust version from .tool-versions
+        run: echo "RUST_VERSION=$(awk '$1 == "rust" {print $2}' .tool-versions)" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+      - name: Install GPUI system packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev
+      # GPUI compiles its Metal shaders at build time; newer Xcode ships the Metal toolchain separately.
+      - name: Install Metal toolchain
+        if: runner.os == 'macOS'
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - name: aiditor-core has no GPUI or Tokio dependency
+        run: "cargo tree -p aiditor-core > tree.txt && ! grep -E '\\b(gpui|tokio) v' tree.txt"
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

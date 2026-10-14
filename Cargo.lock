@@ -87,25 +87,44 @@ dependencies = [
 name = "aiditor"
 version = "0.1.0"
 dependencies = [
- "agent-client-protocol",
- "alacritty_terminal",
+ "aiditor-core",
+ "aiditor-services",
  "gpui",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "aiditor-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "insta",
+ "proptest",
+ "ropey",
+ "serde",
+ "tempfile",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
+name = "aiditor-services"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
  "grep-regex",
  "grep-searcher",
  "ignore",
- "insta",
  "notify",
  "nucleo",
  "portable-pty",
- "proptest",
- "ropey",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
- "toml 1.1.8+spec-1.1.0",
  "tracing",
- "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-elixir",
  "tree-sitter-javascript",
