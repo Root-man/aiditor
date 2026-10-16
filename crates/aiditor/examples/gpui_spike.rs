@@ -56,7 +56,7 @@ impl Spike {
         self.cursor = range.start + s.len();
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
         let named = matches!(
@@ -93,7 +93,6 @@ impl Spike {
                     Some(_) => None,
                     None => Some(stress_lines()),
                 };
-                window.request_animation_frame();
             }
             "q" if m.platform => cx.quit(),
             "enter" => self.insert(self.cursor..self.cursor, "\n"),
