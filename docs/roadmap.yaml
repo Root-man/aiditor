@@ -139,7 +139,7 @@ milestones:
               Replace the skeleton's drawing: each window's visible lines, styled spans, cursor and region, the mode lines, the echo area and the minibuffer, laid out by the split tree. Font family and size come from settings. Report the frame size and cell metrics to the core on resize.
             acceptance:
               - "Splits render with the right sizes; resizing the frame re-lays them out"
-              - "Screenshot tests if the GPUI spike showed they can run in CI; otherwise a manual checklist in the PR"
+              - "A manual rendering checklist in the PR (no screenshot tests, see docs/spikes/gpui.md)"
             blocked_by: [m0-walking-skeleton, m0-display, m0-splits, m0-config]
           - key: m0-frontend-input
             title: "Feed key and mouse events to the core"
