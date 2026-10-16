@@ -1,6 +1,6 @@
 //! Throwaway spike for issue #7: drawing, raw keys, Option/dead keys, IME, Tokio -> GPUI.
 //! Run with `cargo run -p aiditor --example gpui_spike`. Events are logged in the window and on stderr.
-//! F1 toggles Option-as-Meta, F2 toggles the frame-rate stress view, Cmd-Q quits.
+//! F1 toggles Option-as-Meta, F2 toggles the frame-rate stress view, Cmd-Q quits. `SPIKE_STRESS=1` starts in the stress view.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -526,7 +526,7 @@ fn main() {
                         cursor: 0,
                         marked: None,
                         option_as_meta: false,
-                        stress: None,
+                        stress: std::env::var_os("SPIKE_STRESS").map(|_| stress_lines()),
                         scroll: 0,
                         log: VecDeque::new(),
                         frames: VecDeque::new(),
