@@ -314,7 +314,7 @@ Each layer is tested on its own, and the assembled app is tested end to end with
 | ACP client | A fake agent built on the same ACP crate, scripted to stream updates, request permissions, write files to disk and create terminals; recorded transcripts from real Claude Code and Codex sessions replayed against the client |
 | Terminal | Byte streams fed into the emulator grid with snapshot assertions; PTY tests against small shell scripts |
 | Crash recovery | Kill the app mid-edit, relaunch, check the recovered buffers |
-| Frontend | Kept thin; a few screenshot tests of rendered windows |
+| Frontend | Kept thin; rendering checked by hand, no screenshot tests (see [docs/spikes/gpui.md](spikes/gpui.md)) |
 | Whole app | Launch with a test project and the fake agent, drive it with a key script, assert on files, buffers and workspaces; a manual smoke run against the real agents before each milestone gate |
 
 ## Crate shortlist
