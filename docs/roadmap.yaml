@@ -305,7 +305,7 @@ milestones:
           - key: m0-display
             title: "Display builder"
             body: |
-              Per window: visible lines with styled spans, cursor, region overlay and a mode line, built from core state for the current frame size, following the session-buffer display decision. Monospace cells; long lines follow the file-handling decision (truncated until then).
+              Per window: visible lines (each with its own height) with styled spans, folds (invisible ranges with a placeholder), whole-line decorations, cursor, region overlay and a mode line, built from core state for the current frame size, following the session-buffer display decision. Monospace font, but positions come from shaped lines, not a cell grid, so faces can later carry their own font and size. Long lines follow the file-handling decision (truncated until then).
             acceptance:
               - "`insta` snapshots of the display model through the harness"
             blocked_by: [m0-window-model, m0-spike-session-display, m0-harness]
@@ -764,7 +764,7 @@ milestones:
         labels: [acp, frontend]
         design: "#acp-integration-and-session-management"
         body: |
-          Rich chat view with a text projection underneath and an editable prompt area, built on the display model decided in M0 ("Decide: display model for the session buffer"). Break down when M3 starts.
+          A rope buffer the core renders the transcript into: markdown with hidden markup, folded tool calls, read-only text above a comint-style prompt, as decided in M0 ("Decide: display model for the session buffer"). Needs soft wrap: pull the soft-wrap epic forward if it is still in M5. Break down when M3 starts.
       - key: m3-modes
         title: "Session modes and permission prompts"
         labels: [acp]
@@ -906,3 +906,16 @@ milestones:
         design: "#open-questions"
         body: |
           Implement the commands chosen in M1's "Decide: C-s and the remaining editing commands". Break down when M5 starts.
+
+  # ───────────────────────────────────────────── M6 ─────────────────────────────────────────────
+  - key: m6
+    title: "M6 · Rich session buffer"
+    description: "After the MVP: block rows and proportional faces bring the session buffer up to Zed's agent panel."
+    gate: "A session with headings, prose, code, a permission request and a tool-call diff reads like Zed's agent panel, and search, mark and kill still work across it."
+    epics:
+      - key: m6-rich-session
+        title: "Block rows and proportional faces"
+        labels: [frontend, acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Option C of the session-buffer display decision: block rows (non-text rows between lines, with their own height, that point skips) for permission cards, tool-call diffs and images; faces that carry a font family and size for proportional prose and larger headings. Selectable content stays text. Break down when M6 starts.

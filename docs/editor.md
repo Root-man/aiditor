@@ -108,7 +108,7 @@ A project defines the filesystem scope; a workspace is the unit of work inside i
 
 A buffer never knows which windows show it, and a window holds only a buffer id. That separation keeps `C-x b`, `C-x 4 b` and per-workspace window configurations cheap.
 
-Buffers have more than one content backend: a rope for file, scratch and Messages buffers, the emulator grid for terminals, and a structured transcript for agent sessions. The display model for the agent session buffer is not decided yet (see Open questions).
+Buffers have more than one content backend: a rope for file, scratch and Messages buffers, the emulator grid for terminals, and a structured transcript for agent sessions, which the core renders into a rope (see Session buffer under ACP integration).
 
 Each workspace owns its buffers, and a buffer belongs to exactly one workspace. Killing a workspace kills its buffers. The same file can have several buffers: a file open in two workspaces has two, kept in sync through the disk. When the file changes on disk (a save from the other workspace, an agent's edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically. The watcher reports every change, the editor's own saves included, and each buffer compares the new disk hash with its own: the buffer that saved sees no change, and the other buffers of that file revert.
 
@@ -180,7 +180,10 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 - **Agent registry.** Claude Code (claude-agent-acp) and Codex (the maintained @agentclientprotocol/codex-acp) in TOML: command, args, env, and a default mode per agent. Processes start with the environment described under Process environment.
 - **One process per session.** A crash ends only that session; the agent's stderr goes to a log buffer.
 - **Session manager.** Keeps an index of sessions: ACP session id, agent, project, `cwd` and additional directories, title, last activity, status. It stores no transcript. The index is the only state that survives a restart. A resume command lists the project's past sessions and continues the chosen one in the current workspace with `session/load`, which replays the history into the session buffer; `session/resume` does not replay history, so it isn't used. Both adapters support loading across processes ([ConnectOnion's adapter matrix](https://docs.connectonion.com/useful-tools/acp-agent)). If the agent can list its own sessions, the resume list also shows sessions started outside the editor, such as in the Claude Code CLI; adapter support is to be checked.
-- **Session buffer.** A rich chat view like the Claude Code and Codex apps: rendered markdown, collapsible tool calls, the agent's plan, the current mode, and a multi-line prompt area at the bottom with Emacs editing. Underneath the rendering is a text projection, so swiper search, mark and kill, and copying all work with Emacs keys. **Its display model is to be decided:** the "visible lines with styled spans" model used for other buffers cannot express rendered markdown, collapsible blocks, or a read-only transcript above an editable prompt.
+- **Session buffer.** A rich chat view like the Claude Code and Codex apps: rendered markdown, collapsible tool calls, the agent's plan, the current mode, and a multi-line prompt area at the bottom with Emacs editing. Swiper search, mark and kill, and copying all work with Emacs keys.
+  - **Display model (decided in [#8](https://github.com/Root-man/aiditor/issues/8)).** The session buffer is a rope like any other buffer. The structured transcript is the source of truth; the core renders it into the rope as markdown text with properties: faces, `read-only`, `invisible` (hidden markup and folded tool calls) and line decorations (code-block background, a rule beside tool calls). The markup stays in the text and is only hidden, so search matches it and kill or copy yield markdown. Permission prompts and plan entries are text with key-bound buttons.
+  - **One buffer, as in comint.** Everything before the prompt marker is read-only; streamed output is inserted above it, and only the message being streamed is re-rendered, at most once per frame. The text projection is the buffer itself, so search, mark and kill need nothing extra.
+  - **Monospace in the MVP.** After the MVP, block rows (non-text rows between lines that point skips) and faces with their own font and size bring it up to Zed's agent panel: proportional prose, larger headings, cards for permissions and diffs.
 - **Status.** Expect two or three concurrent sessions. Mode-line status, a dashboard and notifications come after the MVP.
 - **After the MVP:** `@file` mentions, slash commands (`available_commands_update`), image paste, and rendering the diffs that tool calls include.
 
@@ -222,7 +225,7 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 - **Recovery on launch.** If recovery files exist, the editor opens a list of them. For each one you can open it as a dirty buffer holding the recovered text, compare it with the disk, or discard it.
 - **Contain panics.** Each command runs under `catch_unwind`. A panicking command is logged to the Messages buffer with a backtrace, and the editor keeps running. The state that command touched may be inconsistent, and the log entry says so.
 
-**Frontend.** A native GUI built on GPUI, targeting macOS and also running on Linux for development; one frame only. The core produces a display model: per window, the visible lines with styled spans, cursors and overlays; the frontend draws it and feeds input events back. Keeping that boundary means the frontend stays thin and the core is testable without it.
+**Frontend.** A native GUI built on GPUI, targeting macOS and also running on Linux for development; one frame only. The core produces a display model: per window, the visible lines (each with its own height) with styled spans, folds (invisible ranges with a placeholder), whole-line decorations, cursors and overlays. Positions come from shaped lines, not a cell grid, so a face can later carry its own font and size; the frontend draws it and feeds input events back. Keeping that boundary means the frontend stays thin and the core is testable without it.
 
 **Runtime.** Tokio for the async services, on background threads. The core runs on GPUI's main thread; see below.
 
@@ -268,8 +271,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Display**
 
-- The display model for the agent session buffer.
-- Text layout: the MVP display uses monospace cells and truncates long lines. Whether to soft wrap (Markdown prose needs it) is part of the file-handling decision; a soft-wrap epic waits in M5 if the answer is "later".
+- Text layout: the MVP display uses a monospace font and truncates long lines. Whether to soft wrap file buffers (Markdown prose needs it) is part of the file-handling decision; a soft-wrap epic waits in M5 if the answer is "later". The session buffer needs soft wrap by M3 whatever that answer is.
 
 **Editing**
 
@@ -349,11 +351,11 @@ Build the editor core first and add the agent at M3, so agent features land on a
 | M0 · Skeleton | Rope buffers, undo; window splits, keymap trie; minibuffer, find-file, save; auto-save and recovery | Edit and save a file using Emacs keys only |
 | M1 · Projects + workspaces | Primary repo + extra roots, project commands; finder + grep across repos; workspaces with their own layouts and buffers | In two workspaces on different projects, find a file from an additional root, grep across two roots and jump to a hit, then keep editing while an external write auto-reverts another open buffer |
 | M2 · Terminal | PTY + VT emulator buffers; char mode and copy mode; shell integration marks; `$EDITOR` client | Run the test suite and make a git commit in a terminal buffer |
-| M3 · First agent | Claude Code via ACP; session buffer and modes; process environment; agent terminals as buffers (if the adapter uses `terminal/create`) | Land one real change with an agent, in the editor |
+| M3 · First agent | Claude Code via ACP; session buffer (with soft wrap) and modes; process environment; agent terminals as buffers (if the adapter uses `terminal/create`) | Land one real change with an agent, in the editor |
 | M4 · Sessions | Resume after restart via `session/load`; Claude + Codex side by side; extra roots, project preamble | One session makes a change across two repos |
 | M5 · Polish | Tree-sitter for 4 languages, TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results | Daily driver for real work, without LSP (knowingly deferred) |
 
-Phases are in order of dependency, not to scale; no dates are set. LSP, multiple cursors, ACP prompt features (`@file`, slash commands, image paste, tool-call diffs), agent status in the mode line, a dashboard with notifications, diff review, dired and worktree workflows come after M5.
+Phases are in order of dependency, not to scale; no dates are set. LSP, multiple cursors, ACP prompt features (`@file`, slash commands, image paste, tool-call diffs), block rows and proportional faces in the session buffer, agent status in the mode line, a dashboard with notifications, diff review, dired and worktree workflows come after M5.
 
 ## Sources
 
