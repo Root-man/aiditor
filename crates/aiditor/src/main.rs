@@ -222,7 +222,7 @@ impl Render for Editor {
                 d.tick.as_secs_f64() * 1000.,
             )
         });
-        let line_height = px(self.core.settings().font_size * 1.4);
+        let line_height = px(self.core.settings().line_height());
         let message = self.core.message().map(str::to_string);
         let bars = message.is_some() as usize + stats.is_some() as usize;
         let height = window.viewport_size().height - line_height * bars as f32;

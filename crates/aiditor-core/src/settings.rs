@@ -43,6 +43,8 @@ pub struct Theme {
     pub background: u32,
     pub foreground: u32,
     pub cursor: u32,
+    /// The region's background.
+    pub region: u32,
 }
 
 impl Settings {
@@ -56,6 +58,11 @@ impl Settings {
             ));
         }
         Ok(settings)
+    }
+
+    /// The height of one line of text in px.
+    pub fn line_height(&self) -> f32 {
+        self.font_size * 1.4
     }
 }
 
@@ -79,9 +86,13 @@ mod tests {
 
     #[test]
     fn user_keys_override_and_the_rest_stay_default() {
-        let s = Settings::parse(Some("font_size = 18\n[theme]\ncursor = 0x00ff00")).unwrap();
+        let s = Settings::parse(Some(
+            "font_size = 18\n[theme]\ncursor = 0x00ff00\nregion = 0x123456",
+        ))
+        .unwrap();
         assert_eq!(s.font_size, 18.0);
         assert_eq!(s.theme.cursor, 0x00ff00);
+        assert_eq!(s.theme.region, 0x123456);
         assert_eq!(s.theme.background, Settings::default().theme.background);
     }
 
