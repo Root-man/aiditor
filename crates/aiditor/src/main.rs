@@ -226,7 +226,19 @@ impl Render for Editor {
         });
         let line_height = px(self.core.settings().line_height());
         let message = self.core.message().map(str::to_string);
-        let bars = message.is_some() as usize + stats.is_some() as usize;
+        // shortcut: the hint on one clipped line; the display-model renderer lays it out in columns.
+        let hint = self.core.hint().map(|hint| {
+            let entries = hint
+                .entries
+                .iter()
+                .map(|(key, what)| format!("{key} {what}"));
+            format!(
+                "{}-  {}",
+                hint.keys,
+                entries.collect::<Vec<_>>().join("   ")
+            )
+        });
+        let bars = message.is_some() as usize + hint.is_some() as usize + stats.is_some() as usize;
         let height = window.viewport_size().height - line_height * bars as f32;
         let rows = ((height / line_height) as usize).max(1);
         let top = self.core.scroll(rows);
@@ -263,6 +275,7 @@ impl Render for Editor {
             .text_size(px(settings.font_size))
             .children(stats.map(|s| div().h(line_height).whitespace_nowrap().child(s)))
             .child(div().flex_1().overflow_hidden().children(lines))
+            .children(hint.map(|h| div().h(line_height).whitespace_nowrap().child(h)))
             .children(message.map(|m| div().h(line_height).whitespace_nowrap().child(m)));
         if let Some(debug) = &mut self.debug {
             debug.render = start.elapsed();

@@ -11,6 +11,15 @@ pub struct WindowDisplay {
     pub mode_line: String,
 }
 
+/// The which-key hint shown while a prefix waits: the pending keys and what can follow them.
+#[derive(Debug, PartialEq)]
+pub struct Hint {
+    /// The pending keys in `kbd` form.
+    pub keys: String,
+    /// Each next key and its command name, or `+prefix`, sorted by key.
+    pub entries: Vec<(String, String)>,
+}
+
 /// One display line: a buffer line, or several joined by a fold.
 #[derive(Debug, PartialEq)]
 pub struct Line {

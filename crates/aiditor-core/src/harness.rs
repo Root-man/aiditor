@@ -646,6 +646,48 @@ mod tests {
     }
 
     #[test]
+    fn c_x_hint_lists_its_bindings_after_the_delay() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x").advance(999 * MS);
+        assert_eq!(h.core.hint(), None, "before the delay");
+        h.advance(MS);
+        insta::assert_debug_snapshot!(h.core.hint());
+    }
+
+    #[test]
+    fn hint_marks_prefixes_and_follows_layers() {
+        let mut h = Harness::new(&[]);
+        echo_commands(&mut h, "C-x 4 f");
+        bind_mode(&mut h, "test-mode", "C-x u", "two");
+        buffer(&mut h).minor_modes.push("test-mode");
+        h.keys("C-x").advance(1000 * MS);
+        let entries = h.core.hint().unwrap().entries;
+        for entry in [("4", "+prefix"), ("u", "two"), ("C-s", "save-buffer")] {
+            let entry = (entry.0.to_string(), entry.1.to_string());
+            assert!(entries.contains(&entry), "{entry:?}: {entries:?}");
+        }
+        h.keys("4").advance(1000 * MS);
+        let hint = h.core.hint().unwrap();
+        assert_eq!(hint.keys, "C-x 4");
+        assert_eq!(hint.entries, [("f".to_string(), "one".to_string())]);
+    }
+
+    #[test]
+    fn the_next_key_hides_the_hint_and_restarts_the_delay() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x").advance(1000 * MS);
+        assert!(h.core.hint().is_some());
+        h.keys("C-g a").advance(1000 * MS);
+        assert_eq!(h.core.hint(), None, "C-g hides it and no timer is left");
+        h.keys("C-x")
+            .advance(600 * MS)
+            .keys("C-s")
+            .advance(600 * MS);
+        assert_eq!(h.core.hint(), None, "a finished sequence cancels the timer");
+        assert_eq!(h.core.next_deadline(), None);
+    }
+
+    #[test]
     fn undefined_keys_are_reported() {
         let mut h = Harness::new(&[]);
         h.keys("C-x C-q");
