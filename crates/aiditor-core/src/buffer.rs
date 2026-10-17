@@ -64,6 +64,8 @@ impl Buffers {
             next_marker: 0,
             props: Vec::new(),
             history: History::default(),
+            major_mode: "fundamental-mode",
+            minor_modes: Vec::new(),
         })
     }
 
@@ -79,6 +81,8 @@ impl Buffers {
             next_marker: 0,
             props: Vec::new(),
             history: History::default(),
+            major_mode: "fundamental-mode",
+            minor_modes: Vec::new(),
         })
     }
 
@@ -118,6 +122,10 @@ pub struct Buffer {
     /// Text properties as (start, end) marker pairs, oldest first.
     props: Vec<(MarkerId, MarkerId, Prop)>,
     history: History,
+    /// Names the major mode's keymap in `Core`.
+    pub major_mode: &'static str,
+    /// Names the minor modes' keymaps in `Core`, highest priority first.
+    pub minor_modes: Vec<&'static str>,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.

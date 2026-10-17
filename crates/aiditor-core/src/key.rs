@@ -1,6 +1,6 @@
 //! Keys and Emacs `kbd`-style key descriptions such as `"hello C-x C-s"`.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyCode {
     Char(char),
     Return,
@@ -13,7 +13,7 @@ pub enum KeyCode {
     Down,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
     pub code: KeyCode,
     pub ctrl: bool,
@@ -28,6 +28,29 @@ impl Key {
             ctrl: false,
             meta: false,
             shift: false,
+        }
+    }
+}
+
+/// Writes the key the way `parse_keys` reads it, such as `C-x`, `M-S-a` or `<left>`.
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for (held, prefix) in [(self.ctrl, "C-"), (self.meta, "M-"), (self.shift, "S-")] {
+            if held {
+                f.write_str(prefix)?;
+            }
+        }
+        match self.code {
+            KeyCode::Char(' ') => f.write_str("SPC"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Return => f.write_str("RET"),
+            KeyCode::Tab => f.write_str("TAB"),
+            KeyCode::Backspace => f.write_str("DEL"),
+            KeyCode::Escape => f.write_str("ESC"),
+            KeyCode::Left => f.write_str("<left>"),
+            KeyCode::Right => f.write_str("<right>"),
+            KeyCode::Up => f.write_str("<up>"),
+            KeyCode::Down => f.write_str("<down>"),
         }
     }
 }
@@ -111,6 +134,14 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn display_round_trips_through_parse() {
+        let script = "h C-x M-S-a RET SPC C-- TAB DEL ESC <left> C-<down> <up> <right>";
+        let keys = parse_keys(script).unwrap();
+        let shown: Vec<String> = keys.iter().map(Key::to_string).collect();
+        assert_eq!(shown.join(" "), script);
     }
 
     #[test]

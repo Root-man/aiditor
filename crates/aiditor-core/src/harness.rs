@@ -476,4 +476,138 @@ mod tests {
         h.start_timer(100 * MS, None, msg('b'));
         assert_eq!(h.core.next_deadline(), Some(t0 + 100 * MS));
     }
+
+    /// Registers `one`, `two` and `three`, which each fail with their name so it shows on the
+    /// message line, and binds `keys` to `one` in the global map.
+    fn echo_commands(h: &mut Harness, keys: &str) {
+        let handlers: [(&'static str, crate::command::Handler); 3] = [
+            ("one", |_, _| Err("one".into())),
+            ("two", |_, _| Err("two".into())),
+            ("three", |_, _| Err("three".into())),
+        ];
+        for (name, handler) in handlers {
+            h.core.register(Command {
+                name,
+                spec: ArgSpec::default(),
+                handler,
+            });
+        }
+        h.core
+            .keymaps
+            .get_mut("global")
+            .unwrap()
+            .bind(keys, "one")
+            .unwrap();
+    }
+
+    fn bind_mode(h: &mut Harness, mode: &'static str, keys: &str, command: &'static str) {
+        let map = h.core.keymaps.entry(mode).or_default();
+        map.bind(keys, command).unwrap();
+    }
+
+    fn buffer(h: &mut Harness) -> &mut crate::buffer::Buffer {
+        let id = h.core.window.buffer();
+        h.core.buffers.get_mut(id).unwrap()
+    }
+
+    #[test]
+    fn minor_mode_shadows_global_until_removed() {
+        let mut h = Harness::new(&[]);
+        echo_commands(&mut h, "C-c a");
+        bind_mode(&mut h, "test-mode", "C-c a", "two");
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+        buffer(&mut h).minor_modes.push("test-mode");
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("two"));
+        buffer(&mut h).minor_modes.clear();
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+        assert_eq!(h.text(), "");
+    }
+
+    #[test]
+    fn major_mode_sits_between_minor_and_global() {
+        let mut h = Harness::new(&[]);
+        echo_commands(&mut h, "M-z");
+        bind_mode(&mut h, "major", "M-z", "two");
+        bind_mode(&mut h, "minor", "M-z", "three");
+        buffer(&mut h).major_mode = "major";
+        buffer(&mut h).minor_modes.push("minor");
+        h.keys("M-z");
+        assert_eq!(h.core.message(), Some("three"));
+        buffer(&mut h).minor_modes.clear();
+        h.keys("M-z");
+        assert_eq!(h.core.message(), Some("two"));
+    }
+
+    #[test]
+    fn mode_prefix_keeps_global_keys_under_it() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        h.open("a.txt");
+        echo_commands(&mut h, "C-c a");
+        bind_mode(&mut h, "test-mode", "C-x a", "two");
+        buffer(&mut h).minor_modes.push("test-mode");
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("a.txt"), "x");
+        h.keys("C-x a");
+        assert_eq!(h.core.message(), Some("two"));
+    }
+
+    #[test]
+    fn transient_map_wins_once() {
+        let mut h = Harness::new(&[]);
+        echo_commands(&mut h, "C-c a");
+        let mut transient = crate::keymap::Keymap::default();
+        transient.bind("C-c a", "two").unwrap();
+        h.core.transient = Some(transient);
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("two"));
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+        // C-g cancelling a prefix ends the sequence, so it takes the transient map too.
+        let mut transient = crate::keymap::Keymap::default();
+        transient.bind("C-c a", "two").unwrap();
+        h.core.transient = Some(transient);
+        h.keys("C-c C-g C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+    }
+
+    #[test]
+    fn two_level_prefix_runs_once() {
+        let mut h = Harness::new(&[]);
+        echo_commands(&mut h, "C-x 4 f");
+        h.keys("C-x 4");
+        assert_eq!(h.core.message(), None);
+        h.keys("f");
+        assert_eq!(h.core.message(), Some("one"));
+        h.keys("f");
+        assert_eq!((h.text().as_str(), h.core.message()), ("f", None));
+    }
+
+    #[test]
+    fn undefined_keys_are_reported() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x C-q");
+        assert_eq!(h.core.message(), Some("C-x C-q is undefined"));
+        h.keys("M-z");
+        assert_eq!(h.core.message(), Some("M-z is undefined"));
+        h.keys("TAB");
+        assert_eq!(h.core.message(), Some("TAB is undefined"));
+        h.keys("ab");
+        assert_eq!((h.text().as_str(), h.core.message()), ("ab", None));
+    }
+
+    #[test]
+    fn c_g_quits_a_prefix_and_on_its_own() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        h.open("a.txt");
+        h.keys("x C-x C-g");
+        assert_eq!(h.core.message(), Some("Quit"));
+        h.keys("C-s");
+        assert_eq!(h.core.message(), Some("C-s is undefined"));
+        assert_eq!(h.disk("a.txt"), "");
+        h.keys("C-g");
+        assert_eq!(h.core.message(), Some("Quit"));
+    }
 }
