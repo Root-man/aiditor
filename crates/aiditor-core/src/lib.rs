@@ -6,6 +6,7 @@ mod harness;
 pub mod key;
 pub mod settings;
 pub mod timer;
+pub mod window;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ use buffer::{Buffer, BufferId, Buffers};
 use key::{Key, KeyCode};
 use settings::Settings;
 use timer::{TimerId, Timers};
+use window::Window;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
@@ -96,11 +98,11 @@ impl Ctx<'_> {
             core.prefix_c_x = true;
             return;
         }
+        let point = core.window.point(&core.buffers);
         let buffer = core
             .buffers
-            .get_mut(core.current)
+            .get_mut(core.window.buffer())
             .expect("current buffer is live");
-        let point = core.point;
         let moved = match key.code {
             _ if key.ctrl || key.meta => return tracing::debug!(?key, "key is undefined"),
             KeyCode::Char(c) => buffer
@@ -113,7 +115,7 @@ impl Ctx<'_> {
                 .map(|()| point.saturating_sub(1)),
             KeyCode::Left => Ok(point.saturating_sub(1)),
             KeyCode::Right => Ok((point + 1).min(buffer.len_chars())),
-            // shortcut: no goal column, so a short line in between loses the column; add one with the window model.
+            // shortcut: no goal column, so a short line in between loses the column; the motion commands add one.
             KeyCode::Up => buffer
                 .line_col(point)
                 .and_then(|(line, col)| buffer.char_idx(line.saturating_sub(1), col)),
@@ -122,14 +124,14 @@ impl Ctx<'_> {
                 .map(|(line, col)| buffer.char_idx(line + 1, col).unwrap_or(point)),
             _ => return tracing::debug!(?key, "key is undefined"),
         };
-        match moved {
-            Ok(p) => core.point = p,
+        match moved.and_then(|p| core.window.set_point(&mut core.buffers, p)) {
+            Ok(()) => {}
             Err(err) => tracing::debug!(%err, ?key, "edit failed"),
         }
     }
 
     fn save(&mut self) {
-        let id = self.core.current;
+        let id = self.core.window.buffer();
         let buffer = self.core.current();
         match &buffer.file {
             Some(path) => self.effects.push(Effect::Save {
@@ -142,11 +144,11 @@ impl Ctx<'_> {
     }
 }
 
-/// shortcut: one current buffer and hardcoded editing keys; the window model and command loop replace it.
+/// shortcut: hardcoded editing keys; the command loop replaces them.
 pub struct Core {
     buffers: Buffers,
-    current: BufferId,
-    point: usize,
+    /// The frame's one window, showing the current buffer, until splits land.
+    window: Window,
     timers: Timers,
     /// shortcut: `C-x` was the last key; the key trie replaces it.
     prefix_c_x: bool,
@@ -158,11 +160,11 @@ pub struct Core {
 impl Default for Core {
     fn default() -> Self {
         let mut buffers = Buffers::default();
-        let current = buffers.create("*scratch*");
+        let scratch = buffers.create("*scratch*");
+        let window = Window::new(&mut buffers, scratch);
         Core {
             buffers,
-            current,
-            point: 0,
+            window,
             timers: Timers::default(),
             prefix_c_x: false,
             settings: Settings::default(),
@@ -190,8 +192,8 @@ impl Core {
 
     /// Visits `path` in a new current buffer holding `text`, already read from it.
     pub fn open(&mut self, path: &Path, text: &str) {
-        self.current = self.buffers.create_for_file(path, text);
-        self.point = 0;
+        let id = self.buffers.create_for_file(path, text);
+        self.window.show(&mut self.buffers, id);
     }
 
     /// When the app must wake the core with `Msg::Tick`, if any timer is live.
@@ -201,7 +203,7 @@ impl Core {
 
     pub fn current(&self) -> &Buffer {
         self.buffers
-            .get(self.current)
+            .get(self.window.buffer())
             .expect("current buffer is live")
     }
 
@@ -219,6 +221,11 @@ impl Core {
 
     /// Point as a char offset into the buffer.
     pub fn point(&self) -> usize {
-        self.point
+        self.window.point(&self.buffers)
+    }
+
+    /// The window's first line once point's line is among the `rows` it shows.
+    pub fn scroll(&mut self, rows: usize) -> usize {
+        self.window.scroll(&self.buffers, rows)
     }
 }

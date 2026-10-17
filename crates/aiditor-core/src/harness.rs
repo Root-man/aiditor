@@ -207,6 +207,22 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_follows_point_through_keys() {
+        let mut h = Harness::new(&[("a.txt", "0\n1\n2\n3\n4\n5")]);
+        h.keys("x");
+        h.open("a.txt");
+        assert_eq!((h.core.current().name.as_str(), h.point()), ("a.txt", 0));
+        h.keys("<down> <down> <down> <down>");
+        assert_eq!(h.core.scroll(3), 2);
+        h.keys("<up> <up>");
+        assert_eq!(h.core.scroll(3), 2);
+        h.keys("<up>");
+        assert_eq!(h.core.scroll(3), 1);
+        h.open("a.txt");
+        assert_eq!((h.point(), h.core.scroll(3)), (0, 0));
+    }
+
+    #[test]
     fn c_x_c_r_reloads_settings_and_keeps_them_on_error() {
         let mut h = Harness::new(&[("settings.toml", "font_size = 18")]);
         assert_eq!(h.core.settings().font_size, 14.0);

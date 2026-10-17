@@ -108,6 +108,8 @@ A project defines the filesystem scope; a workspace is the unit of work inside i
 
 A buffer never knows which windows show it, and a window holds only a buffer id. That separation keeps `C-x b`, `C-x 4 b` and per-workspace window configurations cheap.
 
+A window's point and mark are markers in its buffer, so edits made elsewhere move them. Its first visible line moves only as far as needed to keep point's line on screen; the core does that at redisplay, given the rows the frontend can show.
+
 Buffers have more than one content backend: a rope for file, scratch and Messages buffers, the emulator grid for terminals, and a structured transcript for agent sessions, which the core renders into a rope (see Session buffer under ACP integration).
 
 Each workspace owns its buffers, and a buffer belongs to exactly one workspace. Killing a workspace kills its buffers. The same file can have several buffers: a file open in two workspaces has two, kept in sync through the disk. When the file changes on disk (a save from the other workspace, an agent's edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically. The watcher reports every change, the editor's own saves included, and each buffer compares the new disk hash with its own: the buffer that saved sees no change, and the other buffers of that file revert.
