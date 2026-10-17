@@ -29,8 +29,8 @@ struct Editor {
     tx: mpsc::Sender<Msg>,
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
-    /// The user's settings file, if the config dir is known.
-    settings_file: Option<PathBuf>,
+    /// Where the user's settings and keymap files are, if known.
+    config_dir: Option<PathBuf>,
     /// Set by `--debug`: the stats line drawn at the top.
     debug: Option<Debug>,
 }
@@ -69,7 +69,7 @@ impl Editor {
             focus: cx.focus_handle(),
             tx,
             timer: None,
-            settings_file: args.settings_file,
+            config_dir: args.config_dir,
             debug: args.debug.then(Debug::default),
         }
     }
@@ -94,8 +94,10 @@ impl Editor {
                     }
                 }
                 Effect::LoadSettings => {
-                    let text = read_settings(self.settings_file.as_deref());
-                    self.handle(Msg::SettingsLoaded(text), cx)
+                    let dir = self.config_dir.clone();
+                    let read = |name| read_config(dir.as_deref(), name);
+                    self.handle(Msg::SettingsLoaded(read("settings.toml")), cx);
+                    self.handle(Msg::KeymapLoaded(read("keymap.toml")), cx);
                 }
             }
         }
@@ -152,12 +154,12 @@ fn spawn_heartbeat(cx: &mut Context<Editor>) {
     .detach();
 }
 
-/// The settings file's text; `None` when there is no file or no config dir.
-fn read_settings(path: Option<&Path>) -> Result<Option<String>, String> {
-    let Some(path) = path else {
+/// The text of the config file `name`; `None` when there is no file or no config dir.
+fn read_config(dir: Option<&Path>, name: &str) -> Result<Option<String>, String> {
+    let Some(path) = dir.map(|dir| dir.join(name)) else {
         return Ok(None);
     };
-    match std::fs::read_to_string(path) {
+    match std::fs::read_to_string(&path) {
         Ok(text) => Ok(Some(text)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(format!("{}: {err}", path.display())),
@@ -274,19 +276,18 @@ const USAGE: &str = "usage: aiditor [--config-dir DIR] [--debug] [FILE]";
 #[derive(Debug, Default, PartialEq)]
 struct Args {
     file: Option<PathBuf>,
-    /// `settings.toml` in `--config-dir`, or in the platform config dir.
-    settings_file: Option<PathBuf>,
+    /// `--config-dir`, or the platform config dir.
+    config_dir: Option<PathBuf>,
     debug: bool,
 }
 
 fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let mut parsed = Args::default();
-    let mut config_dir = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--debug") => parsed.debug = true,
             Some("--config-dir") => {
-                config_dir = Some(PathBuf::from(
+                parsed.config_dir = Some(PathBuf::from(
                     args.next().ok_or("--config-dir needs a DIR")?,
                 ))
             }
@@ -296,11 +297,9 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
             _ => return Err("more than one FILE".into()),
         }
     }
-    parsed.settings_file = config_dir
-        .or_else(|| {
-            directories::ProjectDirs::from("", "", "aiditor").map(|d| d.config_dir().to_owned())
-        })
-        .map(|dir| dir.join("settings.toml"));
+    parsed.config_dir = parsed.config_dir.or_else(|| {
+        directories::ProjectDirs::from("", "", "aiditor").map(|d| d.config_dir().to_owned())
+    });
     Ok(parsed)
 }
 
@@ -323,8 +322,15 @@ fn main() {
         std::process::exit(2);
     });
     let mut core = Core::default();
-    let settings = read_settings(args.settings_file.as_deref());
-    core.handle(Instant::now(), Msg::SettingsLoaded(settings));
+    let dir = args.config_dir.as_deref();
+    core.handle(
+        Instant::now(),
+        Msg::SettingsLoaded(read_config(dir, "settings.toml")),
+    );
+    core.handle(
+        Instant::now(),
+        Msg::KeymapLoaded(read_config(dir, "keymap.toml")),
+    );
     if let Some(arg) = args.file.take() {
         let path = std::path::absolute(&arg).unwrap_or(arg);
         let text = match std::fs::read_to_string(&path) {
@@ -374,10 +380,7 @@ mod tests {
     fn parses_flags_and_file() {
         let args = parse(&["--debug", "--config-dir", "/tmp/c", "a.txt"]).unwrap();
         assert_eq!(args.file, Some(PathBuf::from("a.txt")));
-        assert_eq!(
-            args.settings_file,
-            Some(PathBuf::from("/tmp/c/settings.toml"))
-        );
+        assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/c")));
         assert!(args.debug);
         assert!(!parse(&[]).unwrap().debug);
     }

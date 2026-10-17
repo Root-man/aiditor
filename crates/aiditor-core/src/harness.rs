@@ -66,6 +66,8 @@ impl Harness {
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
+                    let text = std::fs::read_to_string(self.path("keymap.toml")).ok();
+                    self.core.handle(self.now, Msg::KeymapLoaded(Ok(text)));
                 }
             }
         }
@@ -412,6 +414,64 @@ mod tests {
     }
 
     #[test]
+    fn c_x_c_r_reloads_keymaps_and_reverts_removed_bindings() {
+        let mut h = Harness::new(&[("keymap.toml", "[global]\n\"C-x u\" = \"undo-redo\"")]);
+        h.keys("C-x C-r ab C-/");
+        assert_eq!(h.text(), "");
+        h.keys("C-x u");
+        assert_eq!(h.text(), "ab");
+        std::fs::remove_file(h.path("keymap.toml")).unwrap();
+        h.keys("C-x C-r C-x u");
+        assert_eq!(h.text(), "");
+        assert_eq!(h.core.message(), None);
+    }
+
+    #[test]
+    fn changed_binding_takes_effect_on_reload() {
+        let mut h = Harness::new(&[("keymap.toml", "[global]\n\"C-c a\" = \"one\"")]);
+        echo_commands(&mut h, "C-c z");
+        h.keys("C-x C-r C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+        std::fs::write(h.path("keymap.toml"), "[global]\n\"C-c a\" = \"two\"").unwrap();
+        h.keys("C-x C-r C-c a");
+        assert_eq!(h.core.message(), Some("two"));
+    }
+
+    #[test]
+    fn bad_keymap_entries_are_reported_and_the_rest_loads() {
+        let user = "[global]\n\"C-c a\" = \"one\"\n\"C-c b\" = \"no-such-command\"\n\"C-xy\" = \"one\"\n[test-mode]\n\"C-c m\" = \"two\"";
+        let mut h = Harness::new(&[("keymap.toml", user)]);
+        echo_commands(&mut h, "C-c z");
+        h.keys("C-x C-r");
+        let msg = h.core.message().unwrap().to_owned();
+        assert!(msg.starts_with("keymap: "), "{msg}");
+        for needle in ["C-c b", "no-such-command", "C-xy"] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+        buffer(&mut h).minor_modes.push("test-mode");
+        h.keys("C-c m");
+        assert_eq!(h.core.message(), Some("two"));
+    }
+
+    #[test]
+    fn invalid_keymap_file_keeps_the_keymaps_in_effect() {
+        let mut h = Harness::new(&[("keymap.toml", "[global]\n\"C-c a\" = \"one\"")]);
+        echo_commands(&mut h, "C-c z");
+        h.keys("C-x C-r");
+        std::fs::write(h.path("keymap.toml"), "[global").unwrap();
+        h.keys("C-x C-r");
+        assert!(h.core.message().unwrap().starts_with("keymap: "));
+        h.keys("C-c a");
+        assert_eq!(h.core.message(), Some("one"));
+        h.core
+            .handle(h.now, Msg::KeymapLoaded(Err("permission denied".into())));
+        // Appended after the command's message, since no key came between.
+        assert_eq!(h.core.message(), Some("one; keymap: permission denied"));
+    }
+
+    #[test]
     fn unreadable_settings_file_is_reported() {
         let mut h = Harness::new(&[]);
         h.core
@@ -501,7 +561,7 @@ mod tests {
     }
 
     fn bind_mode(h: &mut Harness, mode: &'static str, keys: &str, command: &'static str) {
-        let map = h.core.keymaps.entry(mode).or_default();
+        let map = h.core.keymaps.entry(mode.into()).or_default();
         map.bind(keys, command).unwrap();
     }
 

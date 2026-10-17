@@ -4,6 +4,42 @@ use std::collections::HashMap;
 
 use crate::key::{Key, parse_keys};
 
+pub const BUNDLED: &str = include_str!("../keymap.toml");
+
+/// Keymaps by name from the `bundled` keymap file with `user`'s entries bound over it, plus
+/// why each bad entry was skipped. `command` returns the registered name for a command name.
+/// Only text that is not TOML fails the whole load.
+pub fn parse(
+    bundled: &str,
+    user: Option<&str>,
+    command: impl Fn(&str) -> Option<&'static str>,
+) -> Result<(HashMap<String, Keymap>, Vec<String>), String> {
+    let mut maps: HashMap<String, Keymap> = HashMap::new();
+    let mut errors = Vec::new();
+    // Bound in order rather than merged as tables, so a user entry wins however it is spelled.
+    for text in [Some(bundled), user].into_iter().flatten() {
+        let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
+        for (name, entries) in table {
+            let Some(entries) = entries.as_table() else {
+                errors.push(format!("{name} is not a table of bindings"));
+                continue;
+            };
+            let map = maps.entry(name).or_default();
+            for (keys, value) in entries {
+                let bound = value
+                    .as_str()
+                    .ok_or_else(|| format!("{value} is not a command name"))
+                    .and_then(|name| command(name).ok_or(format!("no command named {name}")))
+                    .and_then(|name| map.bind(keys, name));
+                if let Err(err) = bound {
+                    errors.push(format!("{keys}: {err}"));
+                }
+            }
+        }
+    }
+    Ok((maps, errors))
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keymap(HashMap<Key, Binding>);
 
@@ -54,6 +90,53 @@ mod tests {
 
     fn lookup<'a>(map: &'a Keymap, keys: &str) -> Option<&'a Binding> {
         map.lookup(&parse_keys(keys).unwrap())
+    }
+
+    fn known(name: &str) -> Option<&'static str> {
+        ["undo", "save"].into_iter().find(|c| *c == name)
+    }
+
+    #[test]
+    fn user_entries_bind_over_bundled_and_bad_ones_are_skipped() {
+        let bundled = r#"
+            [global]
+            "C-x u" = "undo"
+            "C-x C-s" = "save"
+        "#;
+        let user = r#"
+            bad = 2
+            [global]
+            "C-x  u" = "save"
+            "C-xy" = "undo"
+            "C-c a" = "nope"
+            "C-c b" = 1
+            "C-c c" = "undo"
+            [mode]
+            "C-c d" = "undo"
+        "#;
+        let (maps, errors) = parse(bundled, Some(user), known).unwrap();
+        let global = &maps["global"];
+        assert_eq!(lookup(global, "C-x u"), Some(&Binding::Command("save")));
+        assert_eq!(lookup(global, "C-x C-s"), Some(&Binding::Command("save")));
+        assert_eq!(lookup(global, "C-c c"), Some(&Binding::Command("undo")));
+        assert_eq!(
+            lookup(&maps["mode"], "C-c d"),
+            Some(&Binding::Command("undo"))
+        );
+        assert_eq!(lookup(global, "C-c a"), None);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        for needle in [
+            "C-xy",
+            "no command named nope",
+            "1 is not a command name",
+            "bad is not a table",
+        ] {
+            assert!(
+                errors.iter().any(|e| e.contains(needle)),
+                "{needle}: {errors:?}"
+            );
+        }
+        assert!(parse(bundled, Some("[global"), known).is_err());
     }
 
     #[test]

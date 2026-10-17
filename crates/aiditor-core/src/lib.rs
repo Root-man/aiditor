@@ -34,6 +34,8 @@ pub enum Msg {
     Saved(BufferId),
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
+    /// The user's keymap file, the same way.
+    KeymapLoaded(Result<Option<String>, String>),
 }
 
 /// Work the app carries out for the core.
@@ -44,7 +46,8 @@ pub enum Effect {
         path: PathBuf,
         text: Rope,
     },
-    /// Read the user's settings file and send `Msg::SettingsLoaded`.
+    /// Read the user's settings and keymap files and send `Msg::SettingsLoaded` and
+    /// `Msg::KeymapLoaded`.
     LoadSettings,
 }
 
@@ -106,7 +109,18 @@ impl Ctx<'_> {
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
                     Ok(settings) => self.core.settings = settings,
-                    Err(err) => self.core.message = Some(format!("settings: {err}")),
+                    Err(err) => self.core.report(format!("settings: {err}")),
+                }
+            }
+            Msg::KeymapLoaded(text) => {
+                match text.and_then(|text| self.core.parse_keymaps(text.as_deref())) {
+                    Ok((keymaps, errors)) => {
+                        self.core.keymaps = keymaps;
+                        if !errors.is_empty() {
+                            self.core.report(format!("keymap: {}", errors.join("; ")));
+                        }
+                    }
+                    Err(err) => self.core.report(format!("keymap: {err}")),
                 }
             }
             Msg::Tick => {}
@@ -267,7 +281,7 @@ pub struct Core {
     window: Window,
     timers: Timers,
     /// Keymaps by mode name, plus `global`.
-    keymaps: HashMap<&'static str, Keymap>,
+    keymaps: HashMap<String, Keymap>,
     /// Looked up before every other keymap, for the next key sequence only.
     transient: Option<Keymap>,
     /// The keys of a sequence that is still a prefix.
@@ -358,33 +372,6 @@ impl Default for Core {
                 Ok(())
             }),
         ];
-        let mut global = Keymap::default();
-        // Linux reports C-? and C-_ with shift held, macOS without.
-        for (keys, command) in [
-            ("C-/", "undo"),
-            ("C-_", "undo"),
-            ("C-S-_", "undo"),
-            ("C-x u", "undo"),
-            ("C-?", "undo-redo"),
-            ("C-S-?", "undo-redo"),
-            ("C-x C-s", "save-buffer"),
-            ("C-x C-r", "reload-settings"),
-            ("C-g", "keyboard-quit"),
-            ("C-u", "universal-argument"),
-            ("C--", "negative-argument"),
-            ("M-0", "digit-argument"),
-            ("M-1", "digit-argument"),
-            ("M-2", "digit-argument"),
-            ("M-3", "digit-argument"),
-            ("M-4", "digit-argument"),
-            ("M-5", "digit-argument"),
-            ("M-6", "digit-argument"),
-            ("M-7", "digit-argument"),
-            ("M-8", "digit-argument"),
-            ("M-9", "digit-argument"),
-        ] {
-            global.bind(keys, command).expect("default keys parse");
-        }
         let commands = builtins
             .map(|(name, handler)| {
                 let spec = ArgSpec::default();
@@ -398,11 +385,11 @@ impl Default for Core {
                 )
             })
             .into();
-        Core {
+        let mut core = Core {
             buffers,
             window,
             timers: Timers::default(),
-            keymaps: [("global", global)].into(),
+            keymaps: HashMap::new(),
             transient: None,
             pending: Vec::new(),
             this_command: None,
@@ -414,11 +401,33 @@ impl Default for Core {
             settings: Settings::default(),
             commands,
             message: None,
-        }
+        };
+        let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
+        assert!(errors.is_empty(), "bundled keymap: {errors:?}");
+        core.keymaps = keymaps;
+        core
     }
 }
 
 impl Core {
+    /// The bundled keymaps with the user's keymap file text, if any, bound over them.
+    fn parse_keymaps(
+        &self,
+        user: Option<&str>,
+    ) -> Result<(HashMap<String, Keymap>, Vec<String>), String> {
+        keymap::parse(keymap::BUNDLED, user, |name| {
+            self.commands.get_key_value(name).map(|(name, _)| *name)
+        })
+    }
+
+    /// Shows `msg` on the message line, after what a load already put there this key.
+    fn report(&mut self, msg: String) {
+        self.message = Some(match self.message.take() {
+            Some(old) => format!("{old}; {msg}"),
+            None => msg,
+        });
+    }
+
     /// The pending sequence's binding in the first keymap that binds it: transient, the current
     /// buffer's minor modes, its major mode, then global.
     fn lookup(&self) -> Option<&Binding> {
@@ -429,7 +438,7 @@ impl Core {
             .chain([&buffer.major_mode, &"global"]);
         self.transient
             .iter()
-            .chain(modes.filter_map(|mode| self.keymaps.get(mode)))
+            .chain(modes.filter_map(|mode| self.keymaps.get(*mode)))
             .find_map(|map| map.lookup(&self.pending))
     }
 
