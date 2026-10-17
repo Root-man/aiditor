@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use crate::{Core, Ctx, Effect, Msg, display::WindowDisplay, key::parse_keys, timer::TimerId};
+use crate::{
+    Core, Ctx, Effect, Effects, Msg, command::Args, display::WindowDisplay, key::parse_keys,
+    timer::TimerId,
+};
 
 pub struct Harness {
     pub core: Core,
@@ -37,21 +40,35 @@ impl Harness {
     /// Feeds a `kbd`-style script such as `"hello C-x C-s"`, carrying out effects as the app does.
     pub fn keys(&mut self, script: &str) -> &mut Self {
         for key in parse_keys(script).unwrap() {
-            for effect in self.core.handle(self.now, Msg::Key(key)) {
-                match effect {
-                    Effect::Save { buffer, path, text } => {
-                        if std::fs::write(path, text.to_string()).is_ok() {
-                            self.core.handle(self.now, Msg::Saved(buffer));
-                        }
+            let effects = self.core.handle(self.now, Msg::Key(key));
+            self.run(effects);
+        }
+        self
+    }
+
+    /// Calls the command `name` with `args`, carrying out its effects as the app does.
+    pub fn call(&mut self, name: &str, args: Args) -> &mut Self {
+        let mut ctx = self.ctx();
+        ctx.call(name, args);
+        let effects = ctx.effects;
+        self.run(effects);
+        self
+    }
+
+    fn run(&mut self, effects: Effects) {
+        for effect in effects {
+            match effect {
+                Effect::Save { buffer, path, text } => {
+                    if std::fs::write(path, text.to_string()).is_ok() {
+                        self.core.handle(self.now, Msg::Saved(buffer));
                     }
-                    Effect::LoadSettings => {
-                        let text = std::fs::read_to_string(self.path("settings.toml")).ok();
-                        self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
-                    }
+                }
+                Effect::LoadSettings => {
+                    let text = std::fs::read_to_string(self.path("settings.toml")).ok();
+                    self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
                 }
             }
         }
-        self
     }
 
     /// Visits `name` in the temp dir, reading it as the app does; a missing file is empty.
@@ -106,6 +123,7 @@ impl Harness {
 
 mod tests {
     use super::*;
+    use crate::command::{ArgSpec, Command};
     use crate::key::{Key, KeyCode};
     use crate::settings::Settings;
 
@@ -184,6 +202,99 @@ mod tests {
         };
         h.core.handle(h.now, Msg::Key(key));
         assert_eq!(h.text(), "a");
+    }
+
+    /// Registers `test-cmd` with `spec`; it shows the args it got on the message line.
+    fn test_cmd(h: &mut Harness, spec: ArgSpec) {
+        h.core.register(Command {
+            name: "test-cmd",
+            spec,
+            handler: |ctx, args| {
+                ctx.core.message = Some(format!("{args:?}"));
+                Ok(())
+            },
+        });
+    }
+
+    #[test]
+    fn calls_a_command_by_name_with_its_args() {
+        let mut h = Harness::new(&[]);
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                region: false,
+                prompts: &["Text: "],
+            },
+        );
+        let args = Args {
+            prefix: Some(3),
+            strings: vec!["hello".into()],
+            ..Args::default()
+        };
+        h.call("test-cmd", args.clone());
+        assert_eq!(h.core.message(), Some(format!("{args:?}").as_str()));
+        h.core.message = None;
+        h.call("test-cmd", Args::default());
+        assert_eq!(h.core.message(), Some("test-cmd: no answer for \"Text: \""));
+        h.call("no-such-command", Args::default());
+        assert_eq!(h.core.message(), Some("No command named no-such-command"));
+    }
+
+    #[test]
+    fn region_comes_from_the_caller_or_point_and_mark() {
+        let mut h = Harness::new(&[]);
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                region: true,
+                prompts: &[],
+            },
+        );
+        h.keys("abcde <left>");
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            Some("The mark is not set now, so there is no region")
+        );
+        let given = Args {
+            region: Some(0..2),
+            ..Args::default()
+        };
+        h.call("test-cmd", given.clone());
+        assert_eq!(h.core.message(), Some(format!("{given:?}").as_str()));
+        h.core.window.set_mark(&mut h.core.buffers, 1).unwrap();
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            Some("Args { prefix: None, region: Some(1..4), strings: [] }")
+        );
+    }
+
+    #[test]
+    fn handler_errors_go_to_the_message_line() {
+        let mut h = Harness::new(&[]);
+        h.core.register(Command {
+            name: "fail",
+            spec: ArgSpec::default(),
+            handler: |_, _| Err("boom".into()),
+        });
+        h.call("fail", Args::default());
+        assert_eq!(h.core.message(), Some("boom"));
+    }
+
+    #[test]
+    fn builtins_are_callable_by_name() {
+        let mut h = Harness::new(&[("a.txt", ""), ("settings.toml", "font_size = 18")]);
+        h.open("a.txt");
+        h.keys("ab");
+        h.call("undo", Args::default());
+        assert_eq!(h.text(), "");
+        h.call("undo-redo", Args::default());
+        assert_eq!(h.text(), "ab");
+        h.call("save-buffer", Args::default());
+        assert_eq!(h.disk("a.txt"), "ab");
+        h.call("reload-settings", Args::default());
+        assert_eq!(h.core.settings().font_size, 18.0);
     }
 
     #[test]

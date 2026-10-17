@@ -1,6 +1,7 @@
 //! Editor state. A plain state machine with no GPUI or Tokio dependency.
 
 pub mod buffer;
+pub mod command;
 pub mod display;
 #[cfg(test)]
 mod harness;
@@ -9,12 +10,14 @@ pub mod settings;
 pub mod timer;
 pub mod window;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
 use buffer::{Buffer, BufferId, Buffers};
+use command::{ArgSpec, Args, Command};
 use key::{Key, KeyCode};
 use settings::Settings;
 use timer::{TimerId, Timers};
@@ -59,6 +62,35 @@ impl Ctx<'_> {
 
     pub fn cancel_timer(&mut self, id: TimerId) {
         self.core.timers.cancel(id)
+    }
+
+    /// Runs the command `name` with `args`, filling the region from point and mark if the
+    /// command needs it; any error goes to the message line.
+    pub fn call(&mut self, name: &str, args: Args) {
+        if let Err(err) = self.try_call(name, args) {
+            self.core.message = Some(err);
+        }
+    }
+
+    fn try_call(&mut self, name: &str, mut args: Args) -> Result<(), String> {
+        let command = *self
+            .core
+            .commands
+            .get(name)
+            .ok_or_else(|| format!("No command named {name}"))?;
+        if command.spec.region && args.region.is_none() {
+            let core = &*self.core;
+            let point = core.window.point(&core.buffers);
+            let mark = core
+                .window
+                .mark(&core.buffers)
+                .ok_or("The mark is not set now, so there is no region")?;
+            args.region = Some(point.min(mark)..point.max(mark));
+        }
+        if let Some(prompt) = command.spec.prompts.get(args.strings.len()) {
+            return Err(format!("{name}: no answer for {prompt:?}"));
+        }
+        (command.handler)(self, args)
     }
 
     fn dispatch(&mut self, msg: Msg) {
@@ -109,16 +141,16 @@ impl Ctx<'_> {
             || unshifted == ctrl('_')
             || (prefixed && key == Key::plain(KeyCode::Char('u')))
         {
-            return self.undo(false);
+            return self.call("undo", Args::default());
         }
         if unshifted == ctrl('?') {
-            return self.undo(true);
+            return self.call("undo-redo", Args::default());
         }
         if prefixed {
             return if key == ctrl('s') {
-                self.save()
+                self.call("save-buffer", Args::default())
             } else if key == ctrl('r') {
-                self.effects.push(Effect::LoadSettings)
+                self.call("reload-settings", Args::default())
             } else {
                 tracing::debug!(?key, "C-x key is undefined")
             };
@@ -200,6 +232,7 @@ pub struct Core {
     /// Typed chars in the current undo group, for amalgamation.
     self_inserts: usize,
     settings: Settings,
+    commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
 }
@@ -209,6 +242,37 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
+        let builtins: [(&'static str, command::Handler); 4] = [
+            ("undo", |ctx, _| {
+                ctx.undo(false);
+                Ok(())
+            }),
+            ("undo-redo", |ctx, _| {
+                ctx.undo(true);
+                Ok(())
+            }),
+            ("save-buffer", |ctx, _| {
+                ctx.save();
+                Ok(())
+            }),
+            ("reload-settings", |ctx, _| {
+                ctx.effects.push(Effect::LoadSettings);
+                Ok(())
+            }),
+        ];
+        let commands = builtins
+            .map(|(name, handler)| {
+                let spec = ArgSpec::default();
+                (
+                    name,
+                    Command {
+                        name,
+                        spec,
+                        handler,
+                    },
+                )
+            })
+            .into();
         Core {
             buffers,
             window,
@@ -216,6 +280,7 @@ impl Default for Core {
             prefix_c_x: false,
             self_inserts: 0,
             settings: Settings::default(),
+            commands,
             message: None,
         }
     }
@@ -242,6 +307,11 @@ impl Core {
     pub fn open(&mut self, path: &Path, text: &str) {
         let id = self.buffers.create_for_file(path, text);
         self.window.show(&mut self.buffers, id);
+    }
+
+    /// Adds `command`, replacing any command of the same name.
+    pub fn register(&mut self, command: Command) {
+        self.commands.insert(command.name, command);
     }
 
     /// When the app must wake the core with `Msg::Tick`, if any timer is live.

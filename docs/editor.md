@@ -150,7 +150,7 @@ Emacs has part of this. Since Emacs 27, `tab-bar-mode` gives each tab its own wi
 
 Copy Emacs's model, not just its key chords: named interactive commands, layered keymaps resolved by a key-sequence trie, and a minibuffer for every prompt. Bindings are Emacs-flavoured; exact keys are settled as each feature is built.
 
-- **Command registry.** Each command has a name (`find-file`, `workspace-new`, `agent-send-region`), an argument spec (prefix arg, region, prompted string), and a handler `fn(&mut Ctx, Args) -> Result`. `M-x` lists them all with fuzzy completion.
+- **Command registry.** Each command has a name (`find-file`, `workspace-new`, `agent-send-region`), an argument spec (prefix arg, region, prompted string), and a handler `fn(&mut Ctx, Args) -> Result`. `M-x` lists them all with fuzzy completion. (Decided in [#20](https://github.com/Root-man/aiditor/issues/20): every call carries the prefix argument, so the spec declares only the region and the prompts; a region command called without a region gets point to mark, and fails with no mark; errors from the call or the handler go to the echo area.)
 - **Keymap layering**, highest priority first: transient map (after `C-x`, during isearch) → minor-mode maps of the current buffer → major-mode map → global map.
 - **Key sequences** resolve through a trie, so prefix keys (`C-x`, `C-c`, `C-x 4`) work naturally, with a which-key style hint after a short delay.
 - **Prefix argument** (`C-u`, `M-<digit>`) is passed to every command.
