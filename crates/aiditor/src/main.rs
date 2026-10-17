@@ -22,8 +22,6 @@ const FONT: &str = if cfg!(target_os = "macos") {
 struct Editor {
     core: Core,
     focus: FocusHandle,
-    /// The first line drawn; moves only to keep point's line on screen.
-    top: usize,
     #[expect(
         dead_code,
         reason = "keeps the channel open; effects will clone it into services"
@@ -69,7 +67,6 @@ impl Editor {
         Editor {
             core,
             focus: cx.focus_handle(),
-            top: 0,
             tx,
             timer: None,
             settings_file: args.settings_file,
@@ -225,21 +222,21 @@ impl Render for Editor {
                 d.tick.as_secs_f64() * 1000.,
             )
         });
-        let settings = self.core.settings();
-        let theme = &settings.theme;
-        let line_height = px(settings.font_size * 1.4);
+        let line_height = px(self.core.settings().font_size * 1.4);
         let message = self.core.message().map(str::to_string);
-        let buffer = self.core.current();
-        let modified = if buffer.modified() { " *" } else { "" };
-        window.set_window_title(&format!("{}{modified}", buffer.name));
         let bars = message.is_some() as usize + stats.is_some() as usize;
         let height = window.viewport_size().height - line_height * bars as f32;
         let rows = ((height / line_height) as usize).max(1);
+        let top = self.core.scroll(rows);
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let buffer = self.core.current();
+        let modified = if buffer.modified() { " *" } else { "" };
+        window.set_window_title(&format!("{}{modified}", buffer.name));
         let (line, col) = buffer.line_col(self.core.point()).unwrap_or_default();
-        self.top = self.top.clamp(line.saturating_sub(rows - 1), line);
         let text = buffer.text();
         // shortcut: whole lines as div text, no tabs or horizontal scroll; the display-model renderer replaces it.
-        let lines = (self.top..text.len_lines().min(self.top + rows)).map(|i| {
+        let lines = (top..text.len_lines().min(top + rows)).map(|i| {
             let s = text.line(i).to_string();
             let s = s.trim_end_matches('\n');
             let row = div().h(line_height).flex().whitespace_nowrap();
