@@ -401,4 +401,11 @@ mod tests {
         // As GPUI on Linux reports Ctrl+Shift+/; the core ignores the shift.
         assert_eq!(key("ctrl-shift-?"), [ctrl('?', true)]);
     }
+
+    #[test]
+    fn prefix_argument_keys_reach_the_core() {
+        let key = |s| to_keys(&Keystroke::parse(s).unwrap());
+        let keys = [key("ctrl-u"), key("ctrl--"), key("alt-3")].concat();
+        assert_eq!(keys, aiditor_core::key::parse_keys("C-u C-- M-3").unwrap());
+    }
 }

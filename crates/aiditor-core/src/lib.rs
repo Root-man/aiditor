@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use ropey::Rope;
 
 use buffer::{Buffer, BufferId, Buffers};
-use command::{ArgSpec, Args, Command};
+use command::{ArgSpec, Args, Command, Prefix};
 use key::{Key, KeyCode};
 use keymap::{Binding, Keymap};
 use settings::Settings;
@@ -142,6 +142,7 @@ impl Ctx<'_> {
         if !core.pending.is_empty() && key == quit {
             core.pending.clear();
             core.transient = None;
+            core.prefix_arg = None;
             core.message = Some("Quit".into());
             core.last_command = Some("keyboard-quit");
             return;
@@ -154,10 +155,21 @@ impl Ctx<'_> {
         };
         let keys = std::mem::take(&mut core.pending);
         core.transient = None;
+        let prefix = core.prefix_arg.take();
         if let Some(name) = command {
             core.this_command = Some(name);
-            self.call(name, Args::default());
-            self.core.last_command = self.core.this_command.take();
+            core.this_keys = keys;
+            let args = Args {
+                prefix,
+                ..Args::default()
+            };
+            self.call(name, args);
+            let core = &mut *self.core;
+            let this = core.this_command.take();
+            // Prefix argument commands keep the last command, like prefix keys.
+            if core.prefix_arg.is_none() {
+                core.last_command = this;
+            }
             return;
         }
         core.last_command = None;
@@ -219,6 +231,21 @@ impl Ctx<'_> {
         }
     }
 
+    /// Leaves `prefix` for the next command, and the keys that extend it for the next key.
+    fn set_prefix(&mut self, prefix: Prefix) {
+        let mut map = Keymap::default();
+        for digit in 0..10 {
+            map.bind(&digit.to_string(), "digit-argument")
+                .expect("digits parse");
+        }
+        map.bind("C-u", "universal-argument").expect("C-u parses");
+        if !matches!(prefix, Prefix::Number(_)) {
+            map.bind("-", "negative-argument").expect("- parses");
+        }
+        self.core.prefix_arg = Some(prefix);
+        self.core.transient = Some(map);
+    }
+
     fn save(&mut self) {
         let id = self.core.window.buffer();
         let buffer = self.core.current();
@@ -249,6 +276,10 @@ pub struct Core {
     this_command: Option<&'static str>,
     /// The command the previous complete key sequence ran; `None` if it ran none.
     last_command: Option<&'static str>,
+    /// The prefix argument being built, for the next command.
+    prefix_arg: Option<Prefix>,
+    /// The keys of the sequence that ran the current or last command.
+    this_keys: Vec<Key>,
     /// Every key received since recording started, for keyboard macros.
     recording: Option<Vec<Key>>,
     /// Typed chars in the current undo group, for amalgamation.
@@ -264,7 +295,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 5] = [
+        let builtins: [(&'static str, command::Handler); 8] = [
             ("undo", |ctx, _| {
                 ctx.undo(false);
                 Ok(())
@@ -279,6 +310,47 @@ impl Default for Core {
             }),
             ("reload-settings", |ctx, _| {
                 ctx.effects.push(Effect::LoadSettings);
+                Ok(())
+            }),
+            ("universal-argument", |ctx, args| {
+                let prefix = match args.prefix {
+                    None => Prefix::Universal(4),
+                    Some(Prefix::Universal(n)) => Prefix::Universal(n.saturating_mul(4)),
+                    Some(Prefix::Minus) => Prefix::Universal(-4),
+                    // After digits C-u ends the number, so the next digit is not part of it.
+                    number @ Some(Prefix::Number(_)) => {
+                        ctx.core.prefix_arg = number;
+                        return Ok(());
+                    }
+                };
+                ctx.set_prefix(prefix);
+                Ok(())
+            }),
+            ("digit-argument", |ctx, args| {
+                let digit = match ctx.core.this_keys.last().map(|key| key.code) {
+                    Some(KeyCode::Char(c)) => c.to_digit(10),
+                    _ => None,
+                }
+                .ok_or("digit-argument must be run by a digit key")?;
+                let digit = i64::from(digit);
+                let prefix = match args.prefix {
+                    Some(Prefix::Number(n)) => {
+                        let digit = if n < 0 { -digit } else { digit };
+                        Prefix::Number(n.saturating_mul(10).saturating_add(digit))
+                    }
+                    Some(Prefix::Minus) if digit == 0 => Prefix::Minus,
+                    Some(Prefix::Minus) => Prefix::Number(-digit),
+                    _ => Prefix::Number(digit),
+                };
+                ctx.set_prefix(prefix);
+                Ok(())
+            }),
+            ("negative-argument", |ctx, args| {
+                match args.prefix {
+                    Some(Prefix::Number(n)) => ctx.set_prefix(Prefix::Number(n.saturating_neg())),
+                    Some(Prefix::Minus) => {}
+                    _ => ctx.set_prefix(Prefix::Minus),
+                }
                 Ok(())
             }),
             ("keyboard-quit", |ctx, _| {
@@ -298,6 +370,18 @@ impl Default for Core {
             ("C-x C-s", "save-buffer"),
             ("C-x C-r", "reload-settings"),
             ("C-g", "keyboard-quit"),
+            ("C-u", "universal-argument"),
+            ("C--", "negative-argument"),
+            ("M-0", "digit-argument"),
+            ("M-1", "digit-argument"),
+            ("M-2", "digit-argument"),
+            ("M-3", "digit-argument"),
+            ("M-4", "digit-argument"),
+            ("M-5", "digit-argument"),
+            ("M-6", "digit-argument"),
+            ("M-7", "digit-argument"),
+            ("M-8", "digit-argument"),
+            ("M-9", "digit-argument"),
         ] {
             global.bind(keys, command).expect("default keys parse");
         }
@@ -323,6 +407,8 @@ impl Default for Core {
             pending: Vec::new(),
             this_command: None,
             last_command: None,
+            prefix_arg: None,
+            this_keys: Vec::new(),
             recording: None,
             self_inserts: 0,
             settings: Settings::default(),
