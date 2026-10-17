@@ -350,7 +350,10 @@ mod tests {
         assert_eq!((h.text().as_str(), h.point()), ("ab", 2));
         h.keys("DEL DEL DEL");
         assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        assert_eq!(h.core.message(), Some("Beginning of buffer"));
         assert!(h.core.current().modified());
+        h.keys("abcd C-u 2 DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("ab", 2));
     }
 
     #[test]
@@ -486,6 +489,93 @@ mod tests {
         assert_eq!(h.point(), 9, "negative goes back");
         h.keys("C-u 99999999999 M-b");
         assert_eq!(h.point(), 0);
+    }
+
+    #[test]
+    fn editing_keys_run_editing_commands() {
+        let mut h = on("ab cd");
+        for (keys, name) in [
+            ("x", "self-insert-command"),
+            ("RET", "newline"),
+            ("C-j", "electric-newline-and-maybe-indent"),
+            ("C-o", "open-line"),
+            ("C-d", "delete-char"),
+            ("DEL", "delete-backward-char"),
+            ("M-d", "kill-word"),
+            ("M-DEL", "backward-kill-word"),
+        ] {
+            h.keys(keys);
+            assert_eq!(h.core.last_command(), Some(name), "{keys}");
+        }
+    }
+
+    #[test]
+    fn typing_repeats_by_the_prefix_argument() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-u 3 a");
+        assert_eq!((h.text().as_str(), h.point()), ("aaa", 3));
+        assert_eq!(h.core.last_command(), Some("self-insert-command"));
+        h.keys("C-/");
+        assert_eq!(h.text(), "", "one undo group");
+        h.keys("C-u RET");
+        assert_eq!((h.text().as_str(), h.point()), ("\n\n\n\n", 4));
+        h.keys("C-u 0 b");
+        assert_eq!(h.text(), "\n\n\n\n");
+        h.keys("C-- a");
+        assert_eq!(h.text(), "\n\n\n\n");
+        assert_eq!(h.core.message(), Some("Negative repetition argument -1"));
+    }
+
+    #[test]
+    fn newline_keys() {
+        let mut h = Harness::new(&[]);
+        h.keys("a C-u 2 C-j");
+        assert_eq!((h.text().as_str(), h.point()), ("a\n\n", 3));
+        let mut h = on("ab");
+        h.keys("C-f C-u 2 C-o");
+        assert_eq!((h.text().as_str(), h.point()), ("a\n\nb", 1));
+        h.keys("C-- C-o");
+        assert_eq!(h.core.message(), Some("Negative repetition argument -1"));
+    }
+
+    #[test]
+    fn delete_char_and_its_ends() {
+        let mut h = on("abc");
+        h.keys("C-d");
+        assert_eq!((h.text().as_str(), h.point()), ("bc", 0));
+        let mut h = on("abc");
+        h.keys("M-> C-- 2 C-d");
+        assert_eq!((h.text().as_str(), h.point()), ("a", 1));
+        let mut h = on("abc");
+        h.keys("C-u 2 C-f C-u 2 C-d");
+        assert_eq!(h.text(), "abc");
+        assert_eq!(h.core.message(), Some("End of buffer"));
+        h.keys("C-- 3 DEL");
+        assert_eq!(
+            h.text(),
+            "abc",
+            "negative DEL deletes forward, past the end"
+        );
+        assert_eq!(h.core.message(), Some("End of buffer"));
+    }
+
+    #[test]
+    fn kill_word_keys() {
+        let mut h = on("foo bar baz");
+        h.keys("M-d");
+        assert_eq!((h.text().as_str(), h.point()), (" bar baz", 0));
+        let mut h = on("foo bar baz");
+        h.keys("C-u 2 M-d");
+        assert_eq!(h.text(), " baz");
+        let mut h = on("foo bar");
+        h.keys("M-> M-DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("foo ", 4));
+        h.keys("C-- M-d");
+        assert_eq!(
+            (h.text().as_str(), h.point()),
+            ("", 0),
+            "negative goes back"
+        );
     }
 
     #[test]
@@ -948,7 +1038,7 @@ mod tests {
         h.keys("C-g");
         assert_eq!(h.core.last_command(), Some("keyboard-quit"));
         h.keys("C-c t a");
-        assert_eq!(h.core.last_command(), None);
+        assert_eq!(h.core.last_command(), Some("self-insert-command"));
         h.keys("C-c t C-x C-q");
         assert_eq!(h.core.last_command(), None);
     }
@@ -1030,9 +1120,9 @@ mod tests {
         assert_eq!(prefix_after(&mut h, "C-u 3 C-g C-c p"), shows(None));
         assert_eq!(prefix_after(&mut h, "C-u C-x C-g C-c p"), shows(None));
         assert_eq!(prefix_after(&mut h, "C-u 3 a C-c p"), shows(None));
-        // After digits, C-u ends the number: the next digit types.
+        // After digits, C-u ends the number: the next digit types that many times.
         h.keys("C-u 3 C-u 5");
-        assert!(h.text().ends_with("a5"));
+        assert!(h.text().ends_with("aaa555"), "{}", h.text());
     }
 
     #[test]
