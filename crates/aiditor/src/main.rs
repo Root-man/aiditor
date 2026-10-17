@@ -1,9 +1,60 @@
-use aiditor_core::Core;
-use gpui::{App, Application, Context, Window, WindowOptions, div, prelude::*};
+use std::time::Instant;
+
+use aiditor_core::{Core, Msg};
+use gpui::{App, Application, Context, Task, Window, WindowOptions, div, prelude::*};
+use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
 struct Editor {
     core: Core,
+    #[expect(
+        dead_code,
+        reason = "keeps the channel open; effects will clone it into services"
+    )]
+    tx: mpsc::Sender<Msg>,
+    /// Wakes the core at its next deadline; replacing it cancels the old one.
+    timer: Option<Task<()>>,
+}
+
+impl Editor {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let (tx, mut rx) = aiditor_services::channel();
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = rx.recv().await {
+                if this
+                    .update(cx, |editor, cx| editor.handle(msg, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Editor {
+            core: Core::default(),
+            tx,
+            timer: None,
+        }
+    }
+
+    /// Every message reaches the core here, so the timer is always re-armed.
+    fn handle(&mut self, msg: Msg, cx: &mut Context<Self>) {
+        #[expect(clippy::never_loop, reason = "Effect has no variants yet")]
+        for effect in self.core.handle(Instant::now(), msg) {
+            match effect {}
+        }
+        self.timer = self.core.next_deadline().map(|deadline| {
+            let wait = cx
+                .background_executor()
+                .timer(deadline.saturating_duration_since(Instant::now()));
+            cx.spawn(async move |this, cx| {
+                wait.await;
+                this.update(cx, |editor, cx| editor.handle(Msg::Tick, cx))
+                    .ok();
+            })
+        });
+        cx.notify();
+    }
 }
 
 impl Render for Editor {
@@ -28,12 +79,8 @@ fn main() {
     tracing::info!("starting");
 
     Application::new().run(|cx: &mut App| {
-        cx.open_window(WindowOptions::default(), |_, cx| {
-            cx.new(|_| Editor {
-                core: Core::default(),
-            })
-        })
-        .expect("failed to open a window");
+        cx.open_window(WindowOptions::default(), |_, cx| cx.new(Editor::new))
+            .expect("failed to open a window");
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
