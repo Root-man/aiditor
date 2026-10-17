@@ -136,7 +136,7 @@ milestones:
           - key: m0-frontend-render
             title: "Render the display model in GPUI"
             body: |
-              Replace the skeleton's drawing: each window's visible lines, styled spans, cursor and region, the mode lines, the echo area and the minibuffer, laid out by the split tree. Font family and size come from settings. Report the frame size and cell metrics to the core on resize.
+              Replace the skeleton's drawing: each window's visible lines, styled spans, cursor and region, the mode lines, the echo area and the minibuffer, laid out by the split tree. Font family and size come from settings. Add per-frame shaping time to the `--debug` stats line. Report the frame size and cell metrics to the core on resize.
             acceptance:
               - "Splits render with the right sizes; resizing the frame re-lays them out"
               - "A manual rendering checklist in the PR (no screenshot tests, see docs/spikes/gpui.md)"

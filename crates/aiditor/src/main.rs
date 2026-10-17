@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::io::ErrorKind;
-use std::path::PathBuf;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use aiditor_core::key::{Key, KeyCode};
 use aiditor_core::{Core, Effect, Msg};
@@ -29,10 +31,26 @@ struct Editor {
     tx: mpsc::Sender<Msg>,
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
+    /// The user's settings file, if the config dir is known.
+    settings_file: Option<PathBuf>,
+    /// Set by `--debug`: the stats line drawn at the top.
+    debug: Option<Debug>,
+}
+
+#[derive(Default)]
+struct Debug {
+    /// When the last frames were rendered, for the frame rate.
+    frames: VecDeque<Instant>,
+    /// How long the core took to handle the last message.
+    handle: Duration,
+    /// How long building the last frame's elements took.
+    render: Duration,
+    /// How long the last heartbeat took from a Tokio task to the UI thread.
+    tick: Duration,
 }
 
 impl Editor {
-    fn new(core: Core, cx: &mut Context<Self>) -> Self {
+    fn new(core: Core, args: Args, cx: &mut Context<Self>) -> Self {
         let (tx, mut rx) = aiditor_services::channel();
         cx.spawn(async move |this, cx| {
             while let Some(msg) = rx.recv().await {
@@ -45,18 +63,28 @@ impl Editor {
             }
         })
         .detach();
+        if args.debug {
+            spawn_heartbeat(cx);
+        }
         Editor {
             core,
             focus: cx.focus_handle(),
             top: 0,
             tx,
             timer: None,
+            settings_file: args.settings_file,
+            debug: args.debug.then(Debug::default),
         }
     }
 
     /// Every message reaches the core here, so the timer is always re-armed.
     fn handle(&mut self, msg: Msg, cx: &mut Context<Self>) {
-        for effect in self.core.handle(Instant::now(), msg) {
+        let start = Instant::now();
+        let effects = self.core.handle(start, msg);
+        if let Some(debug) = &mut self.debug {
+            debug.handle = start.elapsed();
+        }
+        for effect in effects {
             match effect {
                 // shortcut: a synchronous, non-atomic write on the UI thread; the file service (#46) replaces it.
                 Effect::Save { buffer, path, text } => {
@@ -68,7 +96,10 @@ impl Editor {
                         Err(err) => tracing::error!(path = %path.display(), %err, "save failed"),
                     }
                 }
-                Effect::LoadSettings => self.handle(Msg::SettingsLoaded(read_settings()), cx),
+                Effect::LoadSettings => {
+                    let text = read_settings(self.settings_file.as_deref());
+                    self.handle(Msg::SettingsLoaded(text), cx)
+                }
             }
         }
         self.timer = self.core.next_deadline().map(|deadline| {
@@ -95,13 +126,41 @@ impl Editor {
     }
 }
 
-/// The user's `settings.toml` in the platform config dir; `None` when it or the dir doesn't exist.
-fn read_settings() -> Result<Option<String>, String> {
-    let Some(dirs) = directories::ProjectDirs::from("", "", "aiditor") else {
+/// Sends a timestamp from Tokio every second, the way services message the UI, to measure that hop.
+fn spawn_heartbeat(cx: &mut Context<Editor>) {
+    let (tx, mut rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            if tx.send(Instant::now()).await.is_err() {
+                break;
+            }
+        }
+    });
+    cx.spawn(async move |this, cx| {
+        while let Some(sent) = rx.recv().await {
+            let tick = sent.elapsed();
+            let alive = this.update(cx, |editor, cx| {
+                if let Some(debug) = &mut editor.debug {
+                    debug.tick = tick;
+                }
+                cx.notify();
+            });
+            if alive.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// The settings file's text; `None` when there is no file or no config dir.
+fn read_settings(path: Option<&Path>) -> Result<Option<String>, String> {
+    let Some(path) = path else {
         return Ok(None);
     };
-    let path = dirs.config_dir().join("settings.toml");
-    match std::fs::read_to_string(&path) {
+    match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(format!("{}: {err}", path.display())),
@@ -151,6 +210,21 @@ fn to_keys(ks: &Keystroke) -> Vec<Key> {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let start = Instant::now();
+        let stats = self.debug.as_mut().map(|d| {
+            d.frames.push_back(start);
+            if d.frames.len() > 120 {
+                d.frames.pop_front();
+            }
+            let span = start - d.frames[0];
+            let fps = (d.frames.len() - 1) as f64 / span.as_secs_f64().max(f64::EPSILON);
+            format!(
+                "{fps:.0} fps | render {:.2} ms | core {:.2} ms | tokio tick {:.2} ms",
+                d.render.as_secs_f64() * 1000.,
+                d.handle.as_secs_f64() * 1000.,
+                d.tick.as_secs_f64() * 1000.,
+            )
+        });
         let settings = self.core.settings();
         let theme = &settings.theme;
         let line_height = px(settings.font_size * 1.4);
@@ -158,12 +232,8 @@ impl Render for Editor {
         let buffer = self.core.current();
         let modified = if buffer.modified() { " *" } else { "" };
         window.set_window_title(&format!("{}{modified}", buffer.name));
-        let height = window.viewport_size().height
-            - if message.is_some() {
-                line_height
-            } else {
-                px(0.)
-            };
+        let bars = message.is_some() as usize + stats.is_some() as usize;
+        let height = window.viewport_size().height - line_height * bars as f32;
         let rows = ((height / line_height) as usize).max(1);
         let (line, col) = buffer.line_col(self.core.point()).unwrap_or_default();
         self.top = self.top.clamp(line.saturating_sub(rows - 1), line);
@@ -181,7 +251,7 @@ impl Render for Editor {
                 .child(div().w(px(2.)).h_full().bg(rgb(theme.cursor)))
                 .child(s[split..].to_string())
         });
-        div()
+        let root = div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
@@ -192,9 +262,49 @@ impl Render for Editor {
             .text_color(rgb(theme.foreground))
             .font_family(settings.font_family.clone().unwrap_or(FONT.into()))
             .text_size(px(settings.font_size))
+            .children(stats.map(|s| div().h(line_height).whitespace_nowrap().child(s)))
             .child(div().flex_1().overflow_hidden().children(lines))
-            .children(message.map(|m| div().h(line_height).whitespace_nowrap().child(m)))
+            .children(message.map(|m| div().h(line_height).whitespace_nowrap().child(m)));
+        if let Some(debug) = &mut self.debug {
+            debug.render = start.elapsed();
+        }
+        root
     }
+}
+
+const USAGE: &str = "usage: aiditor [--config-dir DIR] [--debug] [FILE]";
+
+#[derive(Debug, Default, PartialEq)]
+struct Args {
+    file: Option<PathBuf>,
+    /// `settings.toml` in `--config-dir`, or in the platform config dir.
+    settings_file: Option<PathBuf>,
+    debug: bool,
+}
+
+fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
+    let mut parsed = Args::default();
+    let mut config_dir = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--debug") => parsed.debug = true,
+            Some("--config-dir") => {
+                config_dir = Some(PathBuf::from(
+                    args.next().ok_or("--config-dir needs a DIR")?,
+                ))
+            }
+            Some("-h" | "--help") => return Err(USAGE.into()),
+            Some(flag) if flag.starts_with('-') => return Err(format!("unknown flag {flag}")),
+            _ if parsed.file.is_none() => parsed.file = Some(PathBuf::from(arg)),
+            _ => return Err("more than one FILE".into()),
+        }
+    }
+    parsed.settings_file = config_dir
+        .or_else(|| {
+            directories::ProjectDirs::from("", "", "aiditor").map(|d| d.config_dir().to_owned())
+        })
+        .map(|dir| dir.join("settings.toml"));
+    Ok(parsed)
 }
 
 fn main() {
@@ -207,10 +317,19 @@ fn main() {
         )
         .init();
 
+    let mut args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|err| {
+        if err == USAGE {
+            println!("{USAGE}");
+            std::process::exit(0);
+        }
+        eprintln!("aiditor: {err}\n{USAGE}");
+        std::process::exit(2);
+    });
     let mut core = Core::default();
-    core.handle(Instant::now(), Msg::SettingsLoaded(read_settings()));
-    if let Some(arg) = std::env::args_os().nth(1) {
-        let path = std::path::absolute(&arg).unwrap_or_else(|_| PathBuf::from(arg));
+    let settings = read_settings(args.settings_file.as_deref());
+    core.handle(Instant::now(), Msg::SettingsLoaded(settings));
+    if let Some(arg) = args.file.take() {
+        let path = std::path::absolute(&arg).unwrap_or(arg);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
@@ -230,7 +349,7 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         let window = cx
             .open_window(WindowOptions::default(), |_, cx| {
-                cx.new(|cx| Editor::new(core, cx))
+                cx.new(|cx| Editor::new(core, args, cx))
             })
             .expect("failed to open a window");
         window
@@ -244,4 +363,32 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, String> {
+        parse_args(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn parses_flags_and_file() {
+        let args = parse(&["--debug", "--config-dir", "/tmp/c", "a.txt"]).unwrap();
+        assert_eq!(args.file, Some(PathBuf::from("a.txt")));
+        assert_eq!(
+            args.settings_file,
+            Some(PathBuf::from("/tmp/c/settings.toml"))
+        );
+        assert!(args.debug);
+        assert!(!parse(&[]).unwrap().debug);
+    }
+
+    #[test]
+    fn rejects_bad_arguments() {
+        for bad in [&["--config-dir"][..], &["--nope"], &["a", "b"]] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
 }
