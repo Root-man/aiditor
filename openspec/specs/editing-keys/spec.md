@@ -1,7 +1,7 @@
 # editing-keys Specification
 
 ## Purpose
-The plain keys that insert and delete text in the current buffer when no keymap binds them.
+The commands that insert and delete text at point, the keys bound to them, and typing, each honouring the prefix argument as Emacs does.
 
 ## Requirements
 

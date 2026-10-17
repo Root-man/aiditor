@@ -137,7 +137,7 @@ impl Ctx<'_> {
     }
 
     /// Adds `key` to the pending sequence and runs what the keymaps bind it to; an unbound
-    /// plain key falls back to the hardcoded editing keys.
+    /// plain char runs `self-insert-command`.
     fn key(&mut self, key: Key) {
         let core = &mut *self.core;
         if let Some(keys) = &mut core.recording {
@@ -181,6 +181,8 @@ impl Ctx<'_> {
                 return;
             }
             Some(Binding::Command(name)) => Some(*name),
+            // An unbound plain char still types, as #21 decided.
+            None if self_insert => Some("self-insert-command"),
             None => None,
         };
         let keys = std::mem::take(&mut core.pending);
@@ -203,37 +205,8 @@ impl Ctx<'_> {
             return;
         }
         core.last_command = None;
-        let undefined = |core: &mut Core| {
-            let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
-            core.message = Some(format!("{} is undefined", keys.join(" ")));
-        };
-        if keys.len() > 1 || key.ctrl || key.meta {
-            return undefined(core);
-        }
-        let buffer = core
-            .buffers
-            .get_mut(core.window.buffer())
-            .expect("current buffer is live");
-        let moved = match key.code {
-            KeyCode::Char(c) => buffer
-                .insert(point, c.encode_utf8(&mut [0; 4]))
-                .map(|()| point + 1),
-            KeyCode::Return => buffer.insert(point, "\n").map(|()| point + 1),
-            // At 0 this deletes the empty range, a no-op.
-            KeyCode::Backspace => buffer
-                .delete(point.saturating_sub(1)..point)
-                .map(|()| point.saturating_sub(1)),
-            KeyCode::Tab
-            | KeyCode::Escape
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down => return undefined(core),
-        };
-        match moved.and_then(|p| core.window.set_point(&mut core.buffers, p)) {
-            Ok(()) => {}
-            Err(err) => tracing::debug!(%err, ?key, "edit failed"),
-        }
+        let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
+        core.message = Some(format!("{} is undefined", keys.join(" ")));
     }
 
     /// Undoes the current buffer's last group, or redoes the last undone one, and restores point.
@@ -318,8 +291,50 @@ impl Ctx<'_> {
         self.goto(p)
     }
 
-    /// Moves over `n` words, a word being a run of alphanumerics; backward when `n` is negative.
+    /// Inserts `text` `n` times at point, moving point after it unless `stay`.
+    fn insert_n(&mut self, text: &str, n: i64, stay: bool) -> Result<(), String> {
+        let n = usize::try_from(n).map_err(|_| format!("Negative repetition argument {n}"))?;
+        let point = self.core.point();
+        // shortcut: a huge count allocates without limit, as in Emacs; cap it if that bites.
+        let text = text.repeat(n);
+        self.core
+            .current_mut()
+            .insert(point, &text)
+            .map_err(|err| err.to_string())?;
+        if stay {
+            return Ok(());
+        }
+        self.goto(point + text.chars().count())
+    }
+
+    /// Deletes `n` chars after point, or `-n` before it; one that would pass an end deletes nothing.
+    fn delete_n(&mut self, n: i64) -> Result<(), String> {
+        let target = (self.core.point() as i64).saturating_add(n);
+        if target < 0 {
+            return Err("Beginning of buffer".into());
+        }
+        if target > self.core.current().len_chars() as i64 {
+            return Err("End of buffer".into());
+        }
+        self.delete_to(target as usize)
+    }
+
+    /// Deletes between point and `target`; point's marker moves to the range's start.
+    fn delete_to(&mut self, target: usize) -> Result<(), String> {
+        let point = self.core.point();
+        self.core
+            .current_mut()
+            .delete(point.min(target)..point.max(target))
+            .map_err(|err| err.to_string())
+    }
+
     fn forward_word(&mut self, n: i64) -> Result<(), String> {
+        self.goto(self.word_end(n))
+    }
+
+    /// Where `n` words on from point end, a word being a run of alphanumerics; backward when `n`
+    /// is negative.
+    fn word_end(&self, n: i64) -> usize {
         let buffer = self.core.current();
         let (text, len) = (buffer.text(), buffer.len_chars());
         let word = |i: usize| text.char(i).is_alphanumeric();
@@ -344,7 +359,7 @@ impl Ctx<'_> {
                 break;
             }
         }
-        self.goto(p)
+        p
     }
 
     /// Moves `n - 1` lines, stopping at the first or last, then to that line's start or end.
@@ -455,7 +470,6 @@ impl Ctx<'_> {
     }
 }
 
-/// shortcut: unbound plain keys edit through hardcoded code; the editing commands bind them.
 pub struct Core {
     buffers: Buffers,
     /// The frame's one window, showing the current buffer, until splits land.
@@ -498,7 +512,35 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 21] = [
+        let builtins: [(&'static str, command::Handler); 29] = [
+            ("self-insert-command", |ctx, args| {
+                let c = match ctx.core.this_keys.last().map(|key| key.code) {
+                    Some(KeyCode::Char(c)) => c,
+                    _ => return Err("self-insert-command must be run by a character key".into()),
+                };
+                ctx.insert_n(c.encode_utf8(&mut [0; 4]), args.count(), false)
+            }),
+            ("newline", |ctx, args| {
+                ctx.insert_n("\n", args.count(), false)
+            }),
+            // shortcut: no indentation yet, so the same as newline; the indentation issue indents here.
+            ("electric-newline-and-maybe-indent", |ctx, args| {
+                ctx.insert_n("\n", args.count(), false)
+            }),
+            ("open-line", |ctx, args| {
+                ctx.insert_n("\n", args.count(), true)
+            }),
+            ("delete-char", |ctx, args| ctx.delete_n(args.count())),
+            ("delete-backward-char", |ctx, args| {
+                ctx.delete_n(args.count().saturating_neg())
+            }),
+            // shortcut: the killed text is dropped, not saved; the kill-ring issue saves it.
+            ("kill-word", |ctx, args| {
+                ctx.delete_to(ctx.word_end(args.count()))
+            }),
+            ("backward-kill-word", |ctx, args| {
+                ctx.delete_to(ctx.word_end(args.count().saturating_neg()))
+            }),
             ("forward-char", |ctx, args| ctx.forward_char(args.count())),
             ("backward-char", |ctx, args| {
                 ctx.forward_char(args.count().saturating_neg())
@@ -740,6 +782,12 @@ impl Core {
     pub fn current(&self) -> &Buffer {
         self.buffers
             .get(self.window.buffer())
+            .expect("current buffer is live")
+    }
+
+    fn current_mut(&mut self) -> &mut Buffer {
+        self.buffers
+            .get_mut(self.window.buffer())
             .expect("current buffer is live")
     }
 

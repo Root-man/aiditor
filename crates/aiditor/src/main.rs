@@ -432,4 +432,22 @@ mod tests {
         let script = "C-f M-< M-S-> <left>";
         assert_eq!(keys, aiditor_core::key::parse_keys(script).unwrap());
     }
+
+    #[test]
+    fn editing_keys_reach_the_core() {
+        let key = |s| to_keys(&Keystroke::parse(s).unwrap());
+        let keys = [
+            "enter",
+            "ctrl-j",
+            "ctrl-o",
+            "ctrl-d",
+            "backspace",
+            "alt-d",
+            "alt-backspace",
+        ]
+        .map(key)
+        .concat();
+        let script = "RET C-j C-o C-d DEL M-d M-DEL";
+        assert_eq!(keys, aiditor_core::key::parse_keys(script).unwrap());
+    }
 }
