@@ -6,7 +6,8 @@ edition = "2024"
 # No gpui or tokio here: the core is a plain state machine (CI checks this).
 [dependencies]
 alacritty_terminal = "0.26.0"
-ropey = "1.6.1"
+# Only LF breaks lines, so line numbers match compilers and grep.
+ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 tracing = "0.1.44"

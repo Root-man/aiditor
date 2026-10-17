@@ -60,5 +60,8 @@ mod tests {
         h.keys("hello RET wörld C-x C-s");
         assert_eq!(h.text(), "hello\nwörld");
         assert_eq!(h.point(), 11);
+        assert!(h.core.current().modified());
+        assert_eq!(h.core.current().name, "*scratch*");
+        assert!(h.core.current().file.is_none());
     }
 }
