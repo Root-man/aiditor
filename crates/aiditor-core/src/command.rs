@@ -31,6 +31,13 @@ pub struct Args {
     pub strings: Vec<String>,
 }
 
+impl Args {
+    /// The prefix argument's value, 1 without one, like Emacs's `prefix-numeric-value`.
+    pub fn count(&self) -> i64 {
+        self.prefix.map_or(1, Prefix::value)
+    }
+}
+
 /// A prefix argument in Emacs's raw form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prefix {

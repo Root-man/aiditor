@@ -424,4 +424,12 @@ mod tests {
         let keys = [key("ctrl-u"), key("ctrl--"), key("alt-3")].concat();
         assert_eq!(keys, aiditor_core::key::parse_keys("C-u C-- M-3").unwrap());
     }
+
+    #[test]
+    fn motion_keys_reach_the_core() {
+        let key = |s| to_keys(&Keystroke::parse(s).unwrap());
+        let keys = [key("ctrl-f"), key("alt-<"), key("alt-shift->"), key("left")].concat();
+        let script = "C-f M-< M-S-> <left>";
+        assert_eq!(keys, aiditor_core::key::parse_keys(script).unwrap());
+    }
 }
