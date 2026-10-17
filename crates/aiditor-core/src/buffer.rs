@@ -549,6 +549,43 @@ mod tests {
                 proptest::prop_assert_eq!(b.marker(advance), Some(find(b, '>')));
             }
         }
+
+        /// Undo all restores the original text, redo all the final one, and markers never leave the text.
+        #[test]
+        fn undo_redo_round_trip_random_edits(
+            start in "[a-zé🙂\n]{0,8}",
+            markers in proptest::collection::vec((0..20usize, proptest::bool::ANY), 0..4),
+            ops in proptest::collection::vec((0..3u8, 0..20usize, 0..4usize, "[a-zé🙂\n]{0,3}"), 0..30),
+        ) {
+            let (mut buffers, id) = with_text(&start);
+            let b = buffers.get_mut(id).unwrap();
+            let ms: Vec<_> = markers
+                .iter()
+                .map(|&(at, advance)| {
+                    let kind = if advance { InsertionType::Advance } else { InsertionType::Stay };
+                    b.add_marker(at % (b.len_chars() + 1), kind).unwrap()
+                })
+                .collect();
+            let in_bounds = |b: &Buffer| ms.iter().all(|&m| b.marker(m).unwrap() <= b.len_chars());
+            for (op, at, len, text) in ops {
+                let at = at % (b.len_chars() + 1);
+                match op {
+                    0 => b.insert(at, &text).unwrap(),
+                    1 => b.delete(at..(at + len).min(b.len_chars())).unwrap(),
+                    _ => b.undo_boundary(at),
+                }
+                proptest::prop_assert!(in_bounds(b));
+            }
+            let end = b.text().to_string();
+            while b.undo().is_some() {
+                proptest::prop_assert!(in_bounds(b));
+            }
+            proptest::prop_assert_eq!(b.text().to_string(), start);
+            while b.redo().is_some() {
+                proptest::prop_assert!(in_bounds(b));
+            }
+            proptest::prop_assert_eq!(b.text().to_string(), end);
+        }
     }
 
     #[test]
