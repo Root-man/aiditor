@@ -6,6 +6,7 @@ pub mod display;
 #[cfg(test)]
 mod harness;
 pub mod key;
+pub mod keymap;
 pub mod settings;
 pub mod timer;
 pub mod window;
@@ -19,6 +20,7 @@ use ropey::Rope;
 use buffer::{Buffer, BufferId, Buffers};
 use command::{ArgSpec, Args, Command};
 use key::{Key, KeyCode};
+use keymap::{Binding, Keymap};
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::Window;
@@ -111,56 +113,58 @@ impl Ctx<'_> {
         }
     }
 
+    /// Adds `key` to the pending sequence and runs what the keymaps bind it to; an unbound
+    /// plain key falls back to the hardcoded editing keys.
     fn key(&mut self, key: Key) {
         let core = &mut *self.core;
         core.message = None;
-        let ctrl = |c| Key {
-            ctrl: true,
-            ..Key::plain(KeyCode::Char(c))
-        };
         let point = core.window.point(&core.buffers);
+        // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
+        let self_insert = matches!(key.code, KeyCode::Char(_))
+            && !key.ctrl
+            && !key.meta
+            && core.pending.is_empty();
+        if !(self_insert && (1..20).contains(&core.self_inserts)) {
+            core.buffers
+                .get_mut(core.window.buffer())
+                .expect("current buffer is live")
+                .undo_boundary(point);
+            core.self_inserts = 0;
+        }
+        core.self_inserts += usize::from(self_insert);
+        let quit = Key {
+            ctrl: true,
+            ..Key::plain(KeyCode::Char('g'))
+        };
+        if !core.pending.is_empty() && key == quit {
+            core.pending.clear();
+            core.transient = None;
+            core.message = Some("Quit".into());
+            return;
+        }
+        core.pending.push(key);
+        let command = match core.lookup() {
+            Some(Binding::Prefix(_)) => return,
+            Some(Binding::Command(name)) => Some(*name),
+            None => None,
+        };
+        let keys = std::mem::take(&mut core.pending);
+        core.transient = None;
+        if let Some(name) = command {
+            return self.call(name, Args::default());
+        }
+        let undefined = |core: &mut Core| {
+            let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
+            core.message = Some(format!("{} is undefined", keys.join(" ")));
+        };
+        if keys.len() > 1 || key.ctrl || key.meta {
+            return undefined(core);
+        }
         let buffer = core
             .buffers
             .get_mut(core.window.buffer())
             .expect("current buffer is live");
-        // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
-        let self_insert =
-            matches!(key.code, KeyCode::Char(_)) && !key.ctrl && !key.meta && !core.prefix_c_x;
-        if !(self_insert && (1..20).contains(&core.self_inserts)) {
-            buffer.undo_boundary(point);
-            core.self_inserts = 0;
-        }
-        core.self_inserts += usize::from(self_insert);
-        // Linux reports C-? and C-_ with shift held, macOS without.
-        let unshifted = Key {
-            shift: false,
-            ..key
-        };
-        let prefixed = std::mem::take(&mut core.prefix_c_x);
-        if unshifted == ctrl('/')
-            || unshifted == ctrl('_')
-            || (prefixed && key == Key::plain(KeyCode::Char('u')))
-        {
-            return self.call("undo", Args::default());
-        }
-        if unshifted == ctrl('?') {
-            return self.call("undo-redo", Args::default());
-        }
-        if prefixed {
-            return if key == ctrl('s') {
-                self.call("save-buffer", Args::default())
-            } else if key == ctrl('r') {
-                self.call("reload-settings", Args::default())
-            } else {
-                tracing::debug!(?key, "C-x key is undefined")
-            };
-        }
-        if key == ctrl('x') {
-            core.prefix_c_x = true;
-            return;
-        }
         let moved = match key.code {
-            _ if key.ctrl || key.meta => return tracing::debug!(?key, "key is undefined"),
             KeyCode::Char(c) => buffer
                 .insert(point, c.encode_utf8(&mut [0; 4]))
                 .map(|()| point + 1),
@@ -178,7 +182,7 @@ impl Ctx<'_> {
             KeyCode::Down => buffer
                 .line_col(point)
                 .map(|(line, col)| buffer.char_idx(line + 1, col).unwrap_or(point)),
-            _ => return tracing::debug!(?key, "key is undefined"),
+            KeyCode::Tab | KeyCode::Escape => return undefined(core),
         };
         match moved.and_then(|p| core.window.set_point(&mut core.buffers, p)) {
             Ok(()) => {}
@@ -221,14 +225,18 @@ impl Ctx<'_> {
     }
 }
 
-/// shortcut: hardcoded editing keys; the command loop replaces them.
+/// shortcut: unbound plain keys edit through hardcoded code; the editing commands bind them.
 pub struct Core {
     buffers: Buffers,
     /// The frame's one window, showing the current buffer, until splits land.
     window: Window,
     timers: Timers,
-    /// shortcut: `C-x` was the last key; the key trie replaces it.
-    prefix_c_x: bool,
+    /// Keymaps by mode name, plus `global`.
+    keymaps: HashMap<&'static str, Keymap>,
+    /// Looked up before every other keymap, for the next key sequence only.
+    transient: Option<Keymap>,
+    /// The keys of a sequence that is still a prefix.
+    pending: Vec<Key>,
     /// Typed chars in the current undo group, for amalgamation.
     self_inserts: usize,
     settings: Settings,
@@ -242,7 +250,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 4] = [
+        let builtins: [(&'static str, command::Handler); 5] = [
             ("undo", |ctx, _| {
                 ctx.undo(false);
                 Ok(())
@@ -259,7 +267,26 @@ impl Default for Core {
                 ctx.effects.push(Effect::LoadSettings);
                 Ok(())
             }),
+            ("keyboard-quit", |ctx, _| {
+                ctx.core.message = Some("Quit".into());
+                Ok(())
+            }),
         ];
+        let mut global = Keymap::default();
+        // Linux reports C-? and C-_ with shift held, macOS without.
+        for (keys, command) in [
+            ("C-/", "undo"),
+            ("C-_", "undo"),
+            ("C-S-_", "undo"),
+            ("C-x u", "undo"),
+            ("C-?", "undo-redo"),
+            ("C-S-?", "undo-redo"),
+            ("C-x C-s", "save-buffer"),
+            ("C-x C-r", "reload-settings"),
+            ("C-g", "keyboard-quit"),
+        ] {
+            global.bind(keys, command).expect("default keys parse");
+        }
         let commands = builtins
             .map(|(name, handler)| {
                 let spec = ArgSpec::default();
@@ -277,7 +304,9 @@ impl Default for Core {
             buffers,
             window,
             timers: Timers::default(),
-            prefix_c_x: false,
+            keymaps: [("global", global)].into(),
+            transient: None,
+            pending: Vec::new(),
             self_inserts: 0,
             settings: Settings::default(),
             commands,
@@ -287,6 +316,20 @@ impl Default for Core {
 }
 
 impl Core {
+    /// The pending sequence's binding in the first keymap that binds it: transient, the current
+    /// buffer's minor modes, its major mode, then global.
+    fn lookup(&self) -> Option<&Binding> {
+        let buffer = self.current();
+        let modes = buffer
+            .minor_modes
+            .iter()
+            .chain([&buffer.major_mode, &"global"]);
+        self.transient
+            .iter()
+            .chain(modes.filter_map(|mode| self.keymaps.get(mode)))
+            .find_map(|map| map.lookup(&self.pending))
+    }
+
     /// Handles `msg` at `now`, then fires the timers due by then.
     pub fn handle(&mut self, now: Instant, msg: Msg) -> Effects {
         let mut ctx = Ctx {
