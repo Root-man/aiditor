@@ -2,10 +2,17 @@
 
 use crate::buffer::{Buffer, BufferId, Buffers, Error, InsertionType, MarkerId};
 
+/// How many marks the ring keeps, Emacs's `mark-ring-max`.
+const MARK_RING_MAX: usize = 16;
+
 pub struct Window {
     buffer: BufferId,
     point: MarkerId,
     mark: Option<MarkerId>,
+    /// Whether the region shows, as in Emacs's transient-mark-mode.
+    active: bool,
+    /// Earlier marks, most recent first.
+    ring: Vec<MarkerId>,
     /// The first line shown; moves only to keep point's line visible.
     top: usize,
     /// The lines shown at the last redisplay, 1 before the first.
@@ -24,6 +31,8 @@ impl Window {
                 .add_marker(0, InsertionType::Stay)
                 .expect("0 is in every buffer"),
             mark: None,
+            active: false,
+            ring: Vec::new(),
             top: 0,
             rows: 1,
         }
@@ -37,7 +46,7 @@ impl Window {
     pub fn show(&mut self, buffers: &mut Buffers, buffer: BufferId) {
         if let Some(old) = buffers.get_mut(self.buffer) {
             old.remove_marker(self.point);
-            if let Some(m) = self.mark {
+            for &m in self.mark.iter().chain(&self.ring) {
                 old.remove_marker(m);
             }
         }
@@ -73,6 +82,53 @@ impl Window {
                 Ok(())
             }
         }
+    }
+
+    /// Sets the mark at `char_idx`, pushing the old one onto the mark ring.
+    pub fn push_mark(
+        &mut self,
+        buffers: &mut Buffers,
+        char_idx: usize,
+        activate: bool,
+    ) -> Result<(), Error> {
+        let buffer = buffers
+            .get_mut(self.buffer)
+            .ok_or(Error::NoSuchBuffer(self.buffer))?;
+        let new = buffer.add_marker(char_idx, InsertionType::Stay)?;
+        if let Some(old) = self.mark.replace(new) {
+            self.ring.insert(0, old);
+            if self.ring.len() > MARK_RING_MAX {
+                buffer.remove_marker(self.ring.pop().expect("ring is full"));
+            }
+        }
+        self.active = activate;
+        Ok(())
+    }
+
+    /// Makes the ring's first mark the mark and puts the old one at the ring's end, deactivated.
+    pub fn pop_mark(&mut self) {
+        if let Some(old) = self.mark
+            && !self.ring.is_empty()
+        {
+            self.ring.push(old);
+            self.mark = Some(self.ring.remove(0));
+        }
+        self.active = false;
+    }
+
+    /// The mark ring's positions, most recent first.
+    pub fn ring(&self, buffers: &Buffers) -> Vec<usize> {
+        let buffer = buffers.get(self.buffer).expect("window buffer is live");
+        self.ring.iter().filter_map(|&m| buffer.marker(m)).collect()
+    }
+
+    /// Whether the mark is set and active.
+    pub fn active(&self) -> bool {
+        self.active && self.mark.is_some()
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 
     /// Moves the first line just far enough that point's line is among the `rows` shown, and returns it.
@@ -138,6 +194,31 @@ mod tests {
     }
 
     #[test]
+    fn mark_ring_pushes_pops_and_drops_the_oldest() {
+        let (mut buffers, mut w) = window_on("abcdefghijklmnopqrstuvwxyz");
+        w.pop_mark();
+        assert_eq!(w.mark(&buffers), None, "nothing to pop");
+        w.push_mark(&mut buffers, 0, true).unwrap();
+        let first = w.mark.unwrap();
+        for p in 1..18 {
+            w.push_mark(&mut buffers, p, p % 2 == 0).unwrap();
+        }
+        assert_eq!((w.mark(&buffers), w.active()), (Some(17), false));
+        assert_eq!(w.ring(&buffers), (1..17).rev().collect::<Vec<_>>());
+        w.set_active(true);
+        w.pop_mark();
+        assert_eq!((w.mark(&buffers), w.active()), (Some(16), false));
+        assert_eq!(w.ring(&buffers)[..2], [15, 14]);
+        assert_eq!(w.ring(&buffers).last(), Some(&17));
+        let buffer = buffers.get(w.buffer()).unwrap();
+        assert_eq!(
+            buffer.marker(first),
+            None,
+            "the dropped mark's marker is removed"
+        );
+    }
+
+    #[test]
     fn scrolling_follows_point() {
         // Every line is two chars, so line n starts at 2n.
         let (mut buffers, mut w) = window_on("0\n1\n2\n3\n4\n5\n6");
@@ -154,15 +235,18 @@ mod tests {
         let (mut buffers, mut w) = window_on("abc");
         let old = w.buffer();
         w.set_point(&mut buffers, 2).unwrap();
-        w.set_mark(&mut buffers, 1).unwrap();
-        let (point, mark) = (w.point, w.mark.unwrap());
+        w.push_mark(&mut buffers, 1, true).unwrap();
+        w.push_mark(&mut buffers, 0, true).unwrap();
+        let (point, mark, ring) = (w.point, w.mark.unwrap(), w.ring[0]);
         let new = buffers.create("n");
         w.show(&mut buffers, new);
         assert_eq!(
             (w.buffer(), w.point(&buffers), w.mark(&buffers)),
             (new, 0, None)
         );
+        assert_eq!((w.ring(&buffers), w.active()), (vec![], false));
         let old = buffers.get(old).unwrap();
-        assert_eq!((old.marker(point), old.marker(mark)), (None, None));
+        let markers = [point, mark, ring].map(|m| old.marker(m));
+        assert_eq!(markers, [None; 3]);
     }
 }

@@ -1,0 +1,21 @@
+---
+source: crates/aiditor-core/src/harness.rs
+expression: h.display(1).lines
+---
+[
+    Line {
+        number: 0,
+        height: 19.6,
+        spans: [
+            Span {
+                text: "hello",
+                face: Face {
+                    fg: None,
+                    bg: None,
+                },
+                fold: false,
+            },
+        ],
+        decorations: [],
+    },
+]
