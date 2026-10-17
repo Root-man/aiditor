@@ -73,6 +73,11 @@ impl Keymap {
         Ok(())
     }
 
+    /// Every key this map binds directly, with its binding, in no order.
+    pub fn bindings(&self) -> impl Iterator<Item = (&Key, &Binding)> {
+        self.0.iter()
+    }
+
     /// What `keys` is bound to, or `None` if this map leaves it unbound.
     pub fn lookup(&self, keys: &[Key]) -> Option<&Binding> {
         let (first, rest) = keys.split_first()?;

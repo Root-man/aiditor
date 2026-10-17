@@ -36,7 +36,12 @@ pub enum Msg {
     SettingsLoaded(Result<Option<String>, String>),
     /// The user's keymap file, the same way.
     KeymapLoaded(Result<Option<String>, String>),
+    /// The prefix hint's delay passed with the prefix still pending.
+    Hint,
 }
+
+/// How long a prefix waits before the hint shows, Emacs's `echo-keystrokes`.
+const HINT_DELAY: Duration = Duration::from_secs(1);
 
 /// Work the app carries out for the core.
 pub enum Effect {
@@ -123,6 +128,10 @@ impl Ctx<'_> {
                     Err(err) => self.core.report(format!("keymap: {err}")),
                 }
             }
+            Msg::Hint => {
+                self.core.hint_timer = None;
+                self.core.hint_shown = true;
+            }
             Msg::Tick => {}
         }
     }
@@ -135,6 +144,10 @@ impl Ctx<'_> {
             keys.push(key);
         }
         core.message = None;
+        if let Some(id) = core.hint_timer.take() {
+            core.timers.cancel(id);
+        }
+        core.hint_shown = false;
         let point = core.window.point(&core.buffers);
         // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
         let self_insert = matches!(key.code, KeyCode::Char(_))
@@ -163,7 +176,10 @@ impl Ctx<'_> {
         }
         core.pending.push(key);
         let command = match core.lookup() {
-            Some(Binding::Prefix(_)) => return,
+            Some(Binding::Prefix(_)) => {
+                core.hint_timer = Some(core.timers.start(self.now, HINT_DELAY, None, Msg::Hint));
+                return;
+            }
             Some(Binding::Command(name)) => Some(*name),
             None => None,
         };
@@ -286,6 +302,10 @@ pub struct Core {
     transient: Option<Keymap>,
     /// The keys of a sequence that is still a prefix.
     pending: Vec<Key>,
+    /// The timer that shows the hint for `pending`.
+    hint_timer: Option<TimerId>,
+    /// Whether the hint for `pending` is shown.
+    hint_shown: bool,
     /// The command the current key sequence runs, while it runs.
     this_command: Option<&'static str>,
     /// The command the previous complete key sequence ran; `None` if it ran none.
@@ -392,6 +412,8 @@ impl Default for Core {
             keymaps: HashMap::new(),
             transient: None,
             pending: Vec::new(),
+            hint_timer: None,
+            hint_shown: false,
             this_command: None,
             last_command: None,
             prefix_arg: None,
@@ -431,6 +453,11 @@ impl Core {
     /// The pending sequence's binding in the first keymap that binds it: transient, the current
     /// buffer's minor modes, its major mode, then global.
     fn lookup(&self) -> Option<&Binding> {
+        self.layers().find_map(|map| map.lookup(&self.pending))
+    }
+
+    /// The keymaps in lookup order.
+    fn layers(&self) -> impl Iterator<Item = &Keymap> {
         let buffer = self.current();
         let modes = buffer
             .minor_modes
@@ -439,7 +466,38 @@ impl Core {
         self.transient
             .iter()
             .chain(modes.filter_map(|mode| self.keymaps.get(*mode)))
-            .find_map(|map| map.lookup(&self.pending))
+    }
+
+    /// The hint for the pending prefix, once its delay has passed. Each next key shows the
+    /// binding of the first layer that binds it, as `lookup` would find.
+    pub fn hint(&self) -> Option<display::Hint> {
+        if !self.hint_shown {
+            return None;
+        }
+        let mut next = HashMap::new();
+        for map in self.layers() {
+            if let Some(Binding::Prefix(map)) = map.lookup(&self.pending) {
+                for (key, binding) in map.bindings() {
+                    next.entry(*key).or_insert(binding);
+                }
+            }
+        }
+        let mut entries: Vec<_> = next
+            .into_iter()
+            .map(|(key, binding)| {
+                let what = match binding {
+                    Binding::Command(name) => name.to_string(),
+                    Binding::Prefix(_) => "+prefix".into(),
+                };
+                (key.to_string(), what)
+            })
+            .collect();
+        entries.sort();
+        let keys: Vec<String> = self.pending.iter().map(Key::to_string).collect();
+        Some(display::Hint {
+            keys: keys.join(" "),
+            entries,
+        })
     }
 
     /// Handles `msg` at `now`, then fires the timers due by then.
