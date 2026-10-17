@@ -268,7 +268,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Text model and files**
 
-- How a revert or formatter run keeps point, mark and markers. Likely by applying a computed diff (`similar` or `imara-diff`) instead of replacing the whole text. Also how a window's point follows edits made elsewhere (likely a marker in the buffer).
+- How a revert or formatter run keeps point, mark and markers. Likely by applying a computed diff (`similar` or `imara-diff`) instead of replacing the whole text. (Decided: a window's point and mark follow edits made elsewhere as markers in the buffer, each staying before or moving past text inserted at it.)
 - File watcher edge cases:
   - files deleted or renamed on disk;
   - files open from outside the project roots, which no root watcher covers;

@@ -10,6 +10,19 @@ use ropey::Rope;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferId(u64);
 
+/// A position in one buffer that follows edits; ids are not reused within a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MarkerId(u64);
+
+/// What a marker does when text is inserted exactly at it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertionType {
+    /// Stays before the inserted text.
+    Stay,
+    /// Moves past the inserted text.
+    Advance,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     NoSuchBuffer(BufferId),
@@ -47,6 +60,8 @@ impl Buffers {
             content: Content::Text(Rope::new()),
             file: None,
             modified: false,
+            markers: BTreeMap::new(),
+            next_marker: 0,
         })
     }
 
@@ -58,6 +73,8 @@ impl Buffers {
             content: Content::Text(Rope::from_str(text)),
             file: Some(path.to_path_buf()),
             modified: false,
+            markers: BTreeMap::new(),
+            next_marker: 0,
         })
     }
 
@@ -91,6 +108,9 @@ pub struct Buffer {
     content: Content,
     pub file: Option<PathBuf>,
     modified: bool,
+    // shortcut: every edit walks all markers, fine for a few per buffer; index them if buffers get hundreds.
+    markers: BTreeMap<MarkerId, (usize, InsertionType)>,
+    next_marker: u64,
 }
 
 impl Buffer {
@@ -104,6 +124,12 @@ impl Buffer {
         match &mut self.content {
             Content::Text(rope) => rope.try_insert(char_idx, text)?,
         }
+        let n = text.chars().count();
+        for (pos, kind) in self.markers.values_mut() {
+            if *pos > char_idx || (*pos == char_idx && *kind == InsertionType::Advance) {
+                *pos += n;
+            }
+        }
         self.modified |= !text.is_empty();
         Ok(())
     }
@@ -111,10 +137,45 @@ impl Buffer {
     pub fn delete(&mut self, range: Range<usize>) -> Result<(), Error> {
         let changed = !range.is_empty();
         match &mut self.content {
-            Content::Text(rope) => rope.try_remove(range)?,
+            Content::Text(rope) => rope.try_remove(range.clone())?,
+        }
+        for (pos, _) in self.markers.values_mut() {
+            if *pos > range.start {
+                *pos = range.start.max(*pos - range.len());
+            }
         }
         self.modified |= changed;
         Ok(())
+    }
+
+    pub fn add_marker(&mut self, char_idx: usize, kind: InsertionType) -> Result<MarkerId, Error> {
+        if char_idx > self.len_chars() {
+            return Err(Error::OutOfRange);
+        }
+        let id = MarkerId(self.next_marker);
+        self.next_marker += 1;
+        self.markers.insert(id, (char_idx, kind));
+        Ok(id)
+    }
+
+    /// The marker's offset, or `None` once it is removed.
+    pub fn marker(&self, id: MarkerId) -> Option<usize> {
+        self.markers.get(&id).map(|&(pos, _)| pos)
+    }
+
+    /// Moves a live marker to `char_idx`; a removed one is not brought back.
+    pub fn set_marker(&mut self, id: MarkerId, char_idx: usize) -> Result<(), Error> {
+        if char_idx > self.len_chars() {
+            return Err(Error::OutOfRange);
+        }
+        if let Some((pos, _)) = self.markers.get_mut(&id) {
+            *pos = char_idx;
+        }
+        Ok(())
+    }
+
+    pub fn remove_marker(&mut self, id: MarkerId) {
+        self.markers.remove(&id);
     }
 
     pub fn len_chars(&self) -> usize {
@@ -233,6 +294,95 @@ mod tests {
         b.set_saved();
         assert!(!b.modified());
         assert_eq!(b.text(), "x");
+    }
+
+    #[test]
+    fn markers_are_added_moved_and_removed() {
+        let (mut buffers, id) = with_text("hello");
+        let b = buffers.get_mut(id).unwrap();
+        let m = b.add_marker(2, InsertionType::Stay).unwrap();
+        assert_eq!(b.marker(m), Some(2));
+        assert_eq!(b.add_marker(6, InsertionType::Stay), Err(Error::OutOfRange));
+        assert_eq!(b.set_marker(m, 6), Err(Error::OutOfRange));
+        b.set_marker(m, 5).unwrap();
+        assert_eq!(b.marker(m), Some(5));
+        b.remove_marker(m);
+        assert_eq!(b.marker(m), None);
+        b.set_marker(m, 1).unwrap();
+        assert_eq!(b.marker(m), None);
+    }
+
+    /// Markers at each of `at`, of both insertion types, after `edit`: (stay, advance) per marker.
+    fn markers_after(
+        text: &str,
+        at: &[usize],
+        edit: impl FnOnce(&mut Buffer),
+    ) -> Vec<(usize, usize)> {
+        let (mut buffers, id) = with_text(text);
+        let b = buffers.get_mut(id).unwrap();
+        let ms: Vec<_> = at
+            .iter()
+            .map(|&p| {
+                let stay = b.add_marker(p, InsertionType::Stay).unwrap();
+                (stay, b.add_marker(p, InsertionType::Advance).unwrap())
+            })
+            .collect();
+        edit(b);
+        ms.iter()
+            .map(|&(s, a)| (b.marker(s).unwrap(), b.marker(a).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn inserts_move_markers_by_insertion_type() {
+        let moved = markers_after("abcd", &[1, 2, 3], |b| b.insert(2, "XY").unwrap());
+        assert_eq!(moved, [(1, 1), (2, 4), (5, 5)]);
+        let moved = markers_after("añb", &[1, 2], |b| b.insert(1, "🙂").unwrap());
+        assert_eq!(moved, [(1, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn deletes_move_markers_to_the_range_start() {
+        let moved = markers_after("abcde", &[0, 1, 2, 3, 4], |b| b.delete(1..3).unwrap());
+        assert_eq!(moved, [(0, 0), (1, 1), (1, 1), (1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn refused_edits_leave_markers() {
+        let moved = markers_after("hello", &[3], |b| {
+            b.insert(6, "x").unwrap_err();
+            b.delete(2..9).unwrap_err();
+        });
+        assert_eq!(moved, [(3, 3)]);
+    }
+
+    proptest::proptest! {
+        /// Between `<` and `>`, whatever is inserted there, a stay marker keeps right after `<`
+        /// and an advance marker right before `>`.
+        #[test]
+        fn markers_follow_edits_elsewhere(
+            edits in proptest::collection::vec((proptest::bool::ANY, 0..20usize, 0..4usize, "[a-zé]{0,3}"), 0..30),
+        ) {
+            let (mut buffers, id) = with_text("ab<>cd");
+            let b = buffers.get_mut(id).unwrap();
+            let stay = b.add_marker(3, InsertionType::Stay).unwrap();
+            let advance = b.add_marker(3, InsertionType::Advance).unwrap();
+            let find = |b: &Buffer, s| b.text().chars().position(|c| c == s).unwrap();
+            for (insert, at, len, text) in edits {
+                let at = at % (b.len_chars() + 1);
+                if insert {
+                    b.insert(at, &text).unwrap();
+                } else {
+                    let end = (at + len).min(b.len_chars());
+                    // The sentinels stay so there is something to check against.
+                    if !b.text().slice(at..end).chars().any(|c| c == '<' || c == '>') {
+                        b.delete(at..end).unwrap();
+                    }
+                }
+                proptest::prop_assert_eq!(b.marker(stay), Some(find(b, '<') + 1));
+                proptest::prop_assert_eq!(b.marker(advance), Some(find(b, '>')));
+            }
+        }
     }
 
     #[test]
