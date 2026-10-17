@@ -7,6 +7,10 @@ pub enum KeyCode {
     Tab,
     Backspace,
     Escape,
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +32,7 @@ impl Key {
     }
 }
 
-/// Parses whitespace-separated words like Emacs's `kbd`: `C-x`, `M-S-a`, `RET`, `SPC`;
+/// Parses whitespace-separated words like Emacs's `kbd`: `C-x`, `M-S-a`, `RET`, `SPC`, `<left>`;
 /// a word without modifiers that is not a key name types each of its characters.
 pub fn parse_keys(s: &str) -> Result<Vec<Key>, String> {
     let mut keys = Vec::new();
@@ -50,6 +54,10 @@ pub fn parse_keys(s: &str) -> Result<Vec<Key>, String> {
             "DEL" => Some(KeyCode::Backspace),
             "ESC" => Some(KeyCode::Escape),
             "SPC" => Some(KeyCode::Char(' ')),
+            "<left>" => Some(KeyCode::Left),
+            "<right>" => Some(KeyCode::Right),
+            "<up>" => Some(KeyCode::Up),
+            "<down>" => Some(KeyCode::Down),
             _ => None,
         };
         let modified = key.ctrl || key.meta || key.shift;
@@ -80,7 +88,7 @@ mod tests {
 
     #[test]
     fn parses_words_modifiers_and_names() {
-        let keys = parse_keys("hé C-x C-s M-S-a RET SPC C--").unwrap();
+        let keys = parse_keys("hé C-x C-s M-S-a RET SPC C-- <left> C-<down>").unwrap();
         assert_eq!(
             keys,
             [
@@ -96,6 +104,11 @@ mod tests {
                 Key::plain(KeyCode::Return),
                 Key::plain(KeyCode::Char(' ')),
                 ctrl('-'),
+                Key::plain(KeyCode::Left),
+                Key {
+                    ctrl: true,
+                    ..Key::plain(KeyCode::Down)
+                },
             ]
         );
     }

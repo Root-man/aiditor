@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use crate::{Core, Ctx, Msg, key::parse_keys, timer::TimerId};
+use crate::{Core, Ctx, Effect, Msg, key::parse_keys, timer::TimerId};
 
 pub struct Harness {
     pub core: Core,
@@ -34,12 +34,32 @@ impl Harness {
         self.dir.path().join(name)
     }
 
-    /// Feeds a `kbd`-style script such as `"hello C-x C-s"`.
+    /// Feeds a `kbd`-style script such as `"hello C-x C-s"`, carrying out effects as the app does.
     pub fn keys(&mut self, script: &str) -> &mut Self {
         for key in parse_keys(script).unwrap() {
-            self.core.handle(self.now, Msg::Key(key));
+            for effect in self.core.handle(self.now, Msg::Key(key)) {
+                match effect {
+                    Effect::Save { buffer, path, text } => {
+                        if std::fs::write(path, text.to_string()).is_ok() {
+                            self.core.handle(self.now, Msg::Saved(buffer));
+                        }
+                    }
+                }
+            }
         }
         self
+    }
+
+    /// Visits `name` in the temp dir, reading it as the app does; a missing file is empty.
+    pub fn open(&mut self, name: &str) -> &mut Self {
+        let path = self.path(name);
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        self.core.open(&path, &text);
+        self
+    }
+
+    pub fn disk(&self, name: &str) -> String {
+        std::fs::read_to_string(self.path(name)).unwrap()
     }
 
     /// Moves the fake clock on and wakes the core, as the app does at a deadline.
@@ -97,6 +117,88 @@ mod tests {
         assert!(h.core.current().modified());
         assert_eq!(h.core.current().name, "*scratch*");
         assert!(h.core.current().file.is_none());
+    }
+
+    #[test]
+    fn opens_edits_and_saves_a_file() {
+        let mut h = Harness::new(&[("a.txt", "hello")]);
+        h.open("a.txt");
+        assert_eq!(h.core.current().name, "a.txt");
+        assert_eq!(h.core.current().file, Some(h.path("a.txt")));
+        assert!(!h.core.current().modified());
+        assert_eq!(h.point(), 0);
+        h.keys("<right> X");
+        assert!(h.core.current().modified());
+        assert_eq!(h.disk("a.txt"), "hello");
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "hXello");
+        assert!(!h.core.current().modified());
+    }
+
+    #[test]
+    fn missing_file_opens_empty_and_is_written_on_save() {
+        let mut h = Harness::new(&[]);
+        h.open("new.txt");
+        assert_eq!(h.text(), "");
+        assert!(!h.path("new.txt").exists());
+        h.keys("hi C-x C-s");
+        assert_eq!(h.disk("new.txt"), "hi");
+    }
+
+    #[test]
+    fn failed_save_keeps_the_buffer_modified() {
+        let mut h = Harness::new(&[]);
+        h.open("no/such/dir/a.txt");
+        h.keys("x C-x C-s");
+        assert!(h.core.current().modified());
+        assert_eq!(h.text(), "x");
+    }
+
+    #[test]
+    fn c_x_then_another_key_does_nothing() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        h.open("a.txt");
+        h.keys("C-x a C-x C-x b");
+        assert_eq!(h.text(), "b");
+        assert_eq!(h.disk("a.txt"), "");
+    }
+
+    #[test]
+    fn del_deletes_back_and_stops_at_the_start() {
+        let mut h = Harness::new(&[]);
+        h.keys("abc DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("ab", 2));
+        h.keys("DEL DEL DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        assert!(h.core.current().modified());
+    }
+
+    #[test]
+    fn left_and_right_cross_lines_and_stop_at_the_ends() {
+        let mut h = Harness::new(&[]);
+        h.keys("ab RET cd <left> <left>");
+        assert_eq!(h.point(), 3);
+        h.keys("<left>");
+        assert_eq!(h.point(), 2);
+        h.keys("<right> <right> <right> <right>");
+        assert_eq!(h.point(), 5);
+        h.keys("<left> <left> <left> <left> <left> <left>");
+        assert_eq!(h.point(), 0);
+    }
+
+    #[test]
+    fn up_and_down_keep_the_column_clamped() {
+        let mut h = Harness::new(&[("a.txt", "abcd\nx\nwxyz")]);
+        h.open("a.txt");
+        h.keys("<up> <right> <right> <right> <down>");
+        assert_eq!(h.point(), 6);
+        h.keys("<down>");
+        assert_eq!(h.point(), 8);
+        h.keys("<down>");
+        assert_eq!(h.point(), 8);
+        h.keys("<up> <up>");
+        assert_eq!(h.point(), 1);
+        assert!(!h.core.current().modified());
     }
 
     #[test]
