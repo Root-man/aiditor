@@ -114,6 +114,7 @@ name = "aiditor-services"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "aiditor-core",
  "grep-regex",
  "grep-searcher",
  "ignore",

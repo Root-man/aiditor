@@ -241,7 +241,8 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 GPUI does not run on Tokio. It has its own executors: a foreground executor on the main thread, where all UI code and rendering run, and a background thread pool. The core runs on that main thread.
 
-- **The core is a plain Rust crate** with no GPUI dependency, written as a state machine: `handle(&mut Core, Msg) -> Effects`. Tests drive that function directly, without a frontend.
+- **The core is a plain Rust crate** with no GPUI dependency, written as a state machine: `handle(&mut Core, now, Msg) -> Effects`. The caller passes the time, so the core never reads the clock. Tests drive that function directly, without a frontend, on a fake clock.
+- **Timers live in the core** as deadlines, each carrying the message it delivers. Due timers fire on every `handle`; the app keeps one GPUI timer armed for `next_deadline()` and wakes the core with `Msg::Tick` when it passes.
 - **The frontend holds the core** and calls it directly for each input event. Rendering reads core state directly; the display model is not copied across threads.
 - **Services run on a Tokio runtime** on background threads. Their results arrive on channels that a GPUI foreground task drains into the core.
 - **The core never does slow work.** Anything CPU-heavy (grep, fuzzy matching, parsing, large diffs) goes to a service, because a slow core freezes the UI.
