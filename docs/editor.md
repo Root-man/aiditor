@@ -158,6 +158,12 @@ Copy Emacs's model, not just its key chords: named interactive commands, layered
 - **Indentation.** TAB indents the current line for the buffer's language. How the indentation rules are defined is to be decided (tree-sitter indent queries, as Helix uses, are one option).
 - **Formatters** run as a command, configured per language in TOML (`mix format`, `rustfmt`, prettier), with the project's process environment. They do not run on save in the MVP.
 - **Prefixes.** One prefix for workspace commands and one for agent commands (new session, send region or buffer, switch session, cycle mode, cancel turn).
+- **Keys from the frontend** (decided in [#9](https://github.com/Root-man/aiditor/issues/9), from the [GPUI spike](spikes/gpui.md)). GPUI's own keymap stays empty, and the editor view's `on_key_down` sorts keys into two streams:
+  - *Commands.* A key with Ctrl, Cmd or Fn held, with Option held in Meta mode, one that types nothing, or RET, TAB, DEL or ESC is consumed and sent to the key trie as `Msg::Key`. Cmd is the `s-` (super) modifier; the global keymap binds `s-c`, `s-v`, `s-x`, `s-z`, `s-s`, `s-q`, `s-w` and `s-h` by default (what copy and paste do is part of the clipboard decision).
+  - *Typing.* Every other key propagates to the platform's text input, so dead keys and IMEs work. Text arrives through GPUI's input handler as `Msg::Insert { text, replace }`; `replace` is an optional range (in UTF-16 units, converted by the core) for input methods that rewrite text already typed, such as macOS press-and-hold, and that rewrite is a normal undoable edit. Self-insert, keyboard macros and the test harness all handle `Insert`; in key scripts, plain characters are `Insert`s.
+  - *Option on macOS.* One setting: Option as Meta (default) or Option for characters and dead keys. Left and right Option cannot be told apart. On Linux, Alt is always Meta.
+  - *IME marked text* is a preedit overlay in the window's display state, never in the rope, so it stays out of undo, auto-save and macros.
+  - *Non-Latin layouts.* A modified key resolves by the character it types, so `C-ч` is just unbound, as in Emacs.
 - **Multiple cursors** come after the MVP. When they land, they are part of the window's selection state, editing commands run once per cursor, and the whole run is one undo group.
 
 Keymaps and all other settings live in TOML files, reloadable at runtime. There is no scripting language.
@@ -223,7 +229,7 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 - **Auto-save files.** About two seconds after the last edit, and at least every 30 seconds while a buffer is dirty, its text is written to a recovery dir under the platform data dir. Never next to the file, so repos, the file watcher, agents and `git status` never see it. Each recovery file records the original path, the hash of the disk version the buffer was based on, and the time. The core hands a copy of the rope to the persistence service (cheap: `ropey` ropes share their nodes), which writes it to a temp name and renames it. Saving, reverting or killing the buffer deletes the recovery file. File and scratch buffers are covered; terminals and session buffers are not.
 - **Recovery on launch.** If recovery files exist, the editor opens a list of them. For each one you can open it as a dirty buffer holding the recovered text, compare it with the disk, or discard it.
-- **Contain panics.** Each command runs under `catch_unwind`. A panicking command is logged to the Messages buffer with a backtrace, and the editor keeps running. The state that command touched may be inconsistent, and the log entry says so.
+- **Contain panics.** Each command runs under `catch_unwind`. A panicking command is logged to the Messages buffer with a backtrace, and the editor keeps running. The state that command touched may be inconsistent, and the log entry says so. The frontend also wraps every call into the core in `catch_unwind`: on macOS, keys are handled inside an Objective-C callback, where a panic aborts the process instead of unwinding.
 
 **Frontend.** A native GUI built on GPUI, targeting macOS and also running on Linux for development; one frame only. The core produces a display model: per window, the visible lines (each with its own height) with styled spans, folds (invisible ranges with a placeholder), whole-line decorations, cursors and overlays. Positions come from shaped lines, not a cell grid, so a face can later carry its own font and size; the frontend draws it and feeds input events back. Keeping that boundary means the frontend stays thin and the core is testable without it.
 
@@ -281,12 +287,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Input and platform**
 
-- Keys on macOS:
-  - Option as Meta, or Option for special characters and dead keys;
-  - IME input;
-  - Cmd-C/V/Q and other Cmd bindings;
-  - bypassing GPUI's own keymap and action dispatch so that keys reach the editor's key trie;
-  - which key is the escape prefix in terminal char mode.
+- Which key is the escape prefix in terminal char mode.
 - Mouse (selection, scrolling, clicks) and syncing the kill ring with the system clipboard.
 
 **Projects and workspaces**
