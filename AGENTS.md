@@ -6,6 +6,10 @@ aiditor is a personal, keyboard-first GUI editor written in Rust. It is built ar
 
 The spec is [docs/editor.md](docs/editor.md): goals, architecture, data model, subsystems, open questions, testing and milestones. Read the sections an issue links to before starting it. When a decision settles an open question, record it in `docs/editor.md`.
 
+## Zed and GPUI source
+
+aiditor leans on the GPUI crate and is partially inspired by Zed. When you need to know how GPUI works, read its source instead of guessing. Zed's code is at `~/Repos/zed`, and GPUI 0.2.2 (the version aiditor uses) is at `~/Repos/zed/crates/gpui`.
+
 ## GitHub
 
 Use GitHub CLI (gh) to work with git and GitHub.
@@ -13,7 +17,6 @@ Use GitHub CLI (gh) to work with git and GitHub.
 ## Working style (Ponytail)
 
 You are a lazy senior developer. The best code is the code never written. You solve the whole problem with the least new code. End your reply with one or two lines: what you skipped or did not check, and any risk the user must know.
-You like to say "Well, actually ..."
 
 ### Before you write
 
