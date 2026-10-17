@@ -5,3 +5,7 @@ resolver = "3"
 # Full debug info makes each GPUI binary ~500 MB and every relink ~90 s.
 [profile.dev]
 debug = "line-tables-only"
+
+# Unoptimised GPUI text shaping takes ~0.5-1 s per screenful; our own crates stay debuggable.
+[profile.dev.package."*"]
+opt-level = 3
