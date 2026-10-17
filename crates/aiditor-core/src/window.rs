@@ -8,6 +8,8 @@ pub struct Window {
     mark: Option<MarkerId>,
     /// The first line shown; moves only to keep point's line visible.
     top: usize,
+    /// The lines shown at the last redisplay, 1 before the first.
+    rows: usize,
 }
 
 impl Window {
@@ -23,6 +25,7 @@ impl Window {
                 .expect("0 is in every buffer"),
             mark: None,
             top: 0,
+            rows: 1,
         }
     }
 
@@ -38,7 +41,11 @@ impl Window {
                 old.remove_marker(m);
             }
         }
-        *self = Window::new(buffers, buffer);
+        let rows = self.rows;
+        *self = Window {
+            rows,
+            ..Window::new(buffers, buffer)
+        };
     }
 
     pub fn point(&self, buffers: &Buffers) -> usize {
@@ -72,8 +79,18 @@ impl Window {
     pub fn scroll(&mut self, buffers: &Buffers, rows: usize) -> usize {
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
         let (line, _) = buffer.line_col(self.point(buffers)).unwrap_or_default();
-        self.top = self.top.clamp(line.saturating_sub(rows.max(1) - 1), line);
+        self.rows = rows.max(1);
+        self.top = self.top.clamp(line.saturating_sub(self.rows - 1), line);
         self.top
+    }
+
+    /// Shows from `line` on; the next `scroll` moves it if point's line is not shown.
+    pub fn set_top(&mut self, line: usize) {
+        self.top = line;
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
     }
 
     fn live<'a>(&self, buffers: &'a mut Buffers) -> Result<&'a mut Buffer, Error> {
