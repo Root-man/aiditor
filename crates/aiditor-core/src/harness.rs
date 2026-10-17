@@ -44,6 +44,10 @@ impl Harness {
                             self.core.handle(self.now, Msg::Saved(buffer));
                         }
                     }
+                    Effect::LoadSettings => {
+                        let text = std::fs::read_to_string(self.path("settings.toml")).ok();
+                        self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
+                    }
                 }
             }
         }
@@ -97,6 +101,7 @@ impl Harness {
 mod tests {
     use super::*;
     use crate::key::{Key, KeyCode};
+    use crate::settings::Settings;
 
     const MS: Duration = Duration::from_millis(1);
 
@@ -199,6 +204,31 @@ mod tests {
         h.keys("<up> <up>");
         assert_eq!(h.point(), 1);
         assert!(!h.core.current().modified());
+    }
+
+    #[test]
+    fn c_x_c_r_reloads_settings_and_keeps_them_on_error() {
+        let mut h = Harness::new(&[("settings.toml", "font_size = 18")]);
+        assert_eq!(h.core.settings().font_size, 14.0);
+        h.keys("C-x C-r");
+        assert_eq!(h.core.settings().font_size, 18.0);
+        assert_eq!(h.core.message(), None);
+        std::fs::write(h.path("settings.toml"), "font_size = \"big\"").unwrap();
+        h.keys("C-x C-r");
+        assert_eq!(h.core.settings().font_size, 18.0);
+        assert!(h.core.message().unwrap().starts_with("settings: "));
+        h.keys("a");
+        assert_eq!(h.core.message(), None);
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
+    fn unreadable_settings_file_is_reported() {
+        let mut h = Harness::new(&[]);
+        h.core
+            .handle(h.now, Msg::SettingsLoaded(Err("permission denied".into())));
+        assert_eq!(h.core.message(), Some("settings: permission denied"));
+        assert_eq!(h.core.settings(), &Settings::default());
     }
 
     #[test]

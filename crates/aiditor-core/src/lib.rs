@@ -4,6 +4,7 @@ pub mod buffer;
 #[cfg(test)]
 mod harness;
 pub mod key;
+pub mod settings;
 pub mod timer;
 
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use ropey::Rope;
 
 use buffer::{Buffer, BufferId, Buffers};
 use key::{Key, KeyCode};
+use settings::Settings;
 use timer::{TimerId, Timers};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +24,8 @@ pub enum Msg {
     Tick,
     /// The app wrote the buffer's text to its file.
     Saved(BufferId),
+    /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
+    SettingsLoaded(Result<Option<String>, String>),
 }
 
 /// Work the app carries out for the core.
@@ -32,6 +36,8 @@ pub enum Effect {
         path: PathBuf,
         text: Rope,
     },
+    /// Read the user's settings file and send `Msg::SettingsLoaded`.
+    LoadSettings,
 }
 
 pub type Effects = Vec<Effect>;
@@ -60,12 +66,19 @@ impl Ctx<'_> {
                     buffer.set_saved();
                 }
             }
+            Msg::SettingsLoaded(text) => {
+                match text.and_then(|text| Settings::parse(text.as_deref())) {
+                    Ok(settings) => self.core.settings = settings,
+                    Err(err) => self.core.message = Some(format!("settings: {err}")),
+                }
+            }
             Msg::Tick => {}
         }
     }
 
     fn key(&mut self, key: Key) {
         let core = &mut *self.core;
+        core.message = None;
         let ctrl = |c| Key {
             ctrl: true,
             ..Key::plain(KeyCode::Char(c))
@@ -73,6 +86,8 @@ impl Ctx<'_> {
         if std::mem::take(&mut core.prefix_c_x) {
             return if key == ctrl('s') {
                 self.save()
+            } else if key == ctrl('r') {
+                self.effects.push(Effect::LoadSettings)
             } else {
                 tracing::debug!(?key, "C-x key is undefined")
             };
@@ -135,6 +150,9 @@ pub struct Core {
     timers: Timers,
     /// shortcut: `C-x` was the last key; the key trie replaces it.
     prefix_c_x: bool,
+    settings: Settings,
+    /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
+    message: Option<String>,
 }
 
 impl Default for Core {
@@ -147,6 +165,8 @@ impl Default for Core {
             point: 0,
             timers: Timers::default(),
             prefix_c_x: false,
+            settings: Settings::default(),
+            message: None,
         }
     }
 }
@@ -187,6 +207,14 @@ impl Core {
 
     pub fn text(&self) -> String {
         self.current().text().to_string()
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
     }
 
     /// Point as a char offset into the buffer.

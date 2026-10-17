@@ -1,0 +1,9 @@
+# Bundled defaults. Copy any key to settings.toml in the config dir to override it.
+
+# font_family = "Menlo"  # unset: Menlo on macOS, Noto Sans Mono on Linux
+font_size = 14.0
+
+[theme]
+background = 0x1e1e1e
+foreground = 0xd4d4d4
+cursor = 0xffcc00
