@@ -117,6 +117,9 @@ impl Ctx<'_> {
     /// plain key falls back to the hardcoded editing keys.
     fn key(&mut self, key: Key) {
         let core = &mut *self.core;
+        if let Some(keys) = &mut core.recording {
+            keys.push(key);
+        }
         core.message = None;
         let point = core.window.point(&core.buffers);
         // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
@@ -140,6 +143,7 @@ impl Ctx<'_> {
             core.pending.clear();
             core.transient = None;
             core.message = Some("Quit".into());
+            core.last_command = Some("keyboard-quit");
             return;
         }
         core.pending.push(key);
@@ -151,8 +155,12 @@ impl Ctx<'_> {
         let keys = std::mem::take(&mut core.pending);
         core.transient = None;
         if let Some(name) = command {
-            return self.call(name, Args::default());
+            core.this_command = Some(name);
+            self.call(name, Args::default());
+            self.core.last_command = self.core.this_command.take();
+            return;
         }
+        core.last_command = None;
         let undefined = |core: &mut Core| {
             let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
             core.message = Some(format!("{} is undefined", keys.join(" ")));
@@ -237,6 +245,12 @@ pub struct Core {
     transient: Option<Keymap>,
     /// The keys of a sequence that is still a prefix.
     pending: Vec<Key>,
+    /// The command the current key sequence runs, while it runs.
+    this_command: Option<&'static str>,
+    /// The command the previous complete key sequence ran; `None` if it ran none.
+    last_command: Option<&'static str>,
+    /// Every key received since recording started, for keyboard macros.
+    recording: Option<Vec<Key>>,
     /// Typed chars in the current undo group, for amalgamation.
     self_inserts: usize,
     settings: Settings,
@@ -307,6 +321,9 @@ impl Default for Core {
             keymaps: [("global", global)].into(),
             transient: None,
             pending: Vec::new(),
+            this_command: None,
+            last_command: None,
+            recording: None,
             self_inserts: 0,
             settings: Settings::default(),
             commands,
@@ -374,6 +391,24 @@ impl Core {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    pub fn this_command(&self) -> Option<&'static str> {
+        self.this_command
+    }
+
+    pub fn last_command(&self) -> Option<&'static str> {
+        self.last_command
+    }
+
+    /// Starts keeping every key received, dropping any keys kept so far.
+    pub fn start_recording(&mut self) {
+        self.recording = Some(Vec::new());
+    }
+
+    /// Stops recording and returns the keys kept, or `None` if not recording.
+    pub fn take_recording(&mut self) -> Option<Vec<Key>> {
+        self.recording.take()
     }
 
     pub fn message(&self) -> Option<&str> {

@@ -610,4 +610,86 @@ mod tests {
         h.keys("C-g");
         assert_eq!(h.core.message(), Some("Quit"));
     }
+
+    /// Binds `C-c t` to `test-insert`, which inserts `hi` and shows this and last command.
+    fn insert_cmd(h: &mut Harness) {
+        h.core.register(Command {
+            name: "test-insert",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                let core = &mut *ctx.core;
+                core.message = Some(format!(
+                    "{:?} {:?}",
+                    core.this_command(),
+                    core.last_command()
+                ));
+                let point = core.window.point(&core.buffers);
+                let id = core.window.buffer();
+                core.buffers
+                    .get_mut(id)
+                    .unwrap()
+                    .insert(point, "hi")
+                    .unwrap();
+                core.window.set_point(&mut core.buffers, point + 2).unwrap();
+                Ok(())
+            },
+        });
+        bind_mode(h, "global", "C-c t", "test-insert");
+    }
+
+    #[test]
+    fn key_sequences_run_commands_and_track_the_last_one() {
+        let mut h = Harness::new(&[]);
+        insert_cmd(&mut h);
+        h.keys("C-c t");
+        assert_eq!(h.text(), "hi");
+        assert_eq!(h.core.message(), Some("Some(\"test-insert\") None"));
+        h.keys("C-c t");
+        assert_eq!(h.text(), "hihi");
+        assert_eq!(
+            h.core.message(),
+            Some("Some(\"test-insert\") Some(\"test-insert\")")
+        );
+        assert_eq!(h.core.this_command(), None);
+        h.keys("C-x");
+        assert_eq!(h.core.last_command(), Some("test-insert"));
+        h.keys("C-g");
+        assert_eq!(h.core.last_command(), Some("keyboard-quit"));
+        h.keys("C-c t a");
+        assert_eq!(h.core.last_command(), None);
+        h.keys("C-c t C-x C-q");
+        assert_eq!(h.core.last_command(), None);
+    }
+
+    #[test]
+    fn nested_calls_leave_command_tracking_alone() {
+        let mut h = Harness::new(&[]);
+        h.core.register(Command {
+            name: "test-nested",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                ctx.call("undo", Args::default());
+                Ok(())
+            },
+        });
+        bind_mode(&mut h, "global", "C-c n", "test-nested");
+        h.keys("a C-c n");
+        assert_eq!(h.text(), "");
+        assert_eq!(h.core.last_command(), Some("test-nested"));
+    }
+
+    #[test]
+    fn records_the_key_stream_until_taken() {
+        let mut h = Harness::new(&[]);
+        h.keys("x");
+        assert_eq!(h.core.take_recording(), None);
+        h.core.start_recording();
+        h.keys("a C-x C-g b");
+        assert_eq!(
+            h.core.take_recording(),
+            Some(parse_keys("a C-x C-g b").unwrap())
+        );
+        h.keys("c");
+        assert_eq!(h.core.take_recording(), None);
+    }
 }
