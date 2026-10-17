@@ -86,7 +86,35 @@ impl Ctx<'_> {
             ctrl: true,
             ..Key::plain(KeyCode::Char(c))
         };
-        if std::mem::take(&mut core.prefix_c_x) {
+        let point = core.window.point(&core.buffers);
+        let buffer = core
+            .buffers
+            .get_mut(core.window.buffer())
+            .expect("current buffer is live");
+        // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
+        let self_insert =
+            matches!(key.code, KeyCode::Char(_)) && !key.ctrl && !key.meta && !core.prefix_c_x;
+        if !(self_insert && (1..20).contains(&core.self_inserts)) {
+            buffer.undo_boundary(point);
+            core.self_inserts = 0;
+        }
+        core.self_inserts += usize::from(self_insert);
+        // Linux reports C-? and C-_ with shift held, macOS without.
+        let unshifted = Key {
+            shift: false,
+            ..key
+        };
+        let prefixed = std::mem::take(&mut core.prefix_c_x);
+        if unshifted == ctrl('/')
+            || unshifted == ctrl('_')
+            || (prefixed && key == Key::plain(KeyCode::Char('u')))
+        {
+            return self.undo(false);
+        }
+        if unshifted == ctrl('?') {
+            return self.undo(true);
+        }
+        if prefixed {
             return if key == ctrl('s') {
                 self.save()
             } else if key == ctrl('r') {
@@ -99,11 +127,6 @@ impl Ctx<'_> {
             core.prefix_c_x = true;
             return;
         }
-        let point = core.window.point(&core.buffers);
-        let buffer = core
-            .buffers
-            .get_mut(core.window.buffer())
-            .expect("current buffer is live");
         let moved = match key.code {
             _ if key.ctrl || key.meta => return tracing::debug!(?key, "key is undefined"),
             KeyCode::Char(c) => buffer
@@ -131,6 +154,27 @@ impl Ctx<'_> {
         }
     }
 
+    /// Undoes the current buffer's last group, or redoes the last undone one, and restores point.
+    fn undo(&mut self, redo: bool) {
+        let core = &mut *self.core;
+        let buffer = core
+            .buffers
+            .get_mut(core.window.buffer())
+            .expect("current buffer is live");
+        let point = if redo { buffer.redo() } else { buffer.undo() };
+        match point {
+            Some(p) => {
+                if let Err(err) = core.window.set_point(&mut core.buffers, p) {
+                    tracing::debug!(%err, "undo left point out of range");
+                }
+            }
+            None => {
+                let what = if redo { "redo" } else { "undo" };
+                core.message = Some(format!("No further {what} information"));
+            }
+        }
+    }
+
     fn save(&mut self) {
         let id = self.core.window.buffer();
         let buffer = self.core.current();
@@ -153,6 +197,8 @@ pub struct Core {
     timers: Timers,
     /// shortcut: `C-x` was the last key; the key trie replaces it.
     prefix_c_x: bool,
+    /// Typed chars in the current undo group, for amalgamation.
+    self_inserts: usize,
     settings: Settings,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -168,6 +214,7 @@ impl Default for Core {
             window,
             timers: Timers::default(),
             prefix_c_x: false,
+            self_inserts: 0,
             settings: Settings::default(),
             message: None,
         }

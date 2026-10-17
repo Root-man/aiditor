@@ -156,7 +156,7 @@ Copy Emacs's model, not just its key chords: named interactive commands, layered
 - **Prefix argument** (`C-u`, `M-<digit>`) is passed to every command.
 - **Minibuffer** is a real one-line buffer with its own keymap, history rings and a vertical fuzzy completion list. It hosts the consult-style commands (buffers, files across project roots, project grep, `M-x`) with live preview, and the swiper-style in-buffer search.
 - **Kill ring, mark ring, registers and keyboard macros** belong in the core, because they depend on the command loop.
-- **Undo** is linear with a redo stack, per buffer, and grouped per command. An auto-revert from disk is one undo group, so an agent's edit to an open file can be undone in one step.
+- **Undo** is linear with a redo stack, per buffer, and grouped per command. An auto-revert from disk is one undo group, so an agent's edit to an open file can be undone in one step. (Decided in [#16](https://github.com/Root-man/aiditor/issues/16): redo is a separate stack, not Emacs's undo-of-undo, and a new edit clears it; up to 20 consecutive typed characters share a group; undo puts point where it was before the command, redo where it was after. Undo is `C-/`, `C-_` and `C-x u`, redo is `C-?`.)
 - **Indentation.** TAB indents the current line for the buffer's language. How the indentation rules are defined is to be decided (tree-sitter indent queries, as Helix uses, are one option).
 - **Formatters** run as a command, configured per language in TOML (`mix format`, `rustfmt`, prettier), with the project's process environment. They do not run on save in the MVP.
 - **Prefixes.** One prefix for workspace commands and one for agent commands (new session, send region or buffer, switch session, cycle mode, cancel turn).

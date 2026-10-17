@@ -388,4 +388,17 @@ mod tests {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
     }
+
+    #[test]
+    fn undo_and_redo_keys_reach_the_core_with_ctrl() {
+        let key = |s| to_keys(&Keystroke::parse(s).unwrap());
+        let ctrl = |c, shift| Key {
+            ctrl: true,
+            shift,
+            ..Key::plain(KeyCode::Char(c))
+        };
+        assert_eq!(key("ctrl-/"), [ctrl('/', false)]);
+        // As GPUI on Linux reports Ctrl+Shift+/; the core ignores the shift.
+        assert_eq!(key("ctrl-shift-?"), [ctrl('?', true)]);
+    }
 }

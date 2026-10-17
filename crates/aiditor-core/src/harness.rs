@@ -131,6 +131,62 @@ mod tests {
     }
 
     #[test]
+    fn undo_restores_text_and_point() {
+        let mut h = Harness::new(&[]);
+        h.keys("abc <left> DEL C-/");
+        assert_eq!((h.text().as_str(), h.point()), ("abc", 2));
+        let mut h = Harness::new(&[]);
+        h.keys("ab RET c C-/ C-_ C-x u");
+        assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        h.keys("C-? C-? C-?");
+        assert_eq!((h.text().as_str(), h.point()), ("ab\nc", 4));
+        assert_eq!(h.core.message(), None);
+        h.keys("C-?");
+        assert_eq!(h.core.message(), Some("No further redo information"));
+    }
+
+    #[test]
+    fn a_new_edit_clears_redo() {
+        let mut h = Harness::new(&[]);
+        h.keys("ab C-/ x C-?");
+        assert_eq!(h.text(), "x");
+        assert_eq!(h.core.message(), Some("No further redo information"));
+    }
+
+    #[test]
+    fn typing_amalgamates_up_to_twenty_chars() {
+        let mut h = Harness::new(&[]);
+        h.keys("hello C-/");
+        assert_eq!(h.text(), "");
+        h.keys("abcdefghijklmnopqrstuvwxy C-/");
+        assert_eq!(h.text(), "abcdefghijklmnopqrst");
+        let mut h = Harness::new(&[]);
+        h.keys("ab <left> <right> cd C-/");
+        assert_eq!(h.text(), "ab");
+    }
+
+    #[test]
+    fn nothing_to_undo() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-/");
+        assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        assert_eq!(h.core.message(), Some("No further undo information"));
+    }
+
+    #[test]
+    fn redo_ignores_shift() {
+        let mut h = Harness::new(&[]);
+        h.keys("a C-/");
+        let key = Key {
+            ctrl: true,
+            shift: true,
+            ..Key::plain(KeyCode::Char('?'))
+        };
+        h.core.handle(h.now, Msg::Key(key));
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
     fn opens_edits_and_saves_a_file() {
         let mut h = Harness::new(&[("a.txt", "hello")]);
         h.open("a.txt");
