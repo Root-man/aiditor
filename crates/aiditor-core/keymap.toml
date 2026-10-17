@@ -1,0 +1,26 @@
+# Bundled keymaps. Copy an entry to keymap.toml in the config dir to rebind it.
+# Each table is a keymap: `global`, or a mode's name. Keys are `kbd`-style sequences.
+
+[global]
+# Linux reports C-? and C-_ with shift held, macOS without.
+"C-/" = "undo"
+"C-_" = "undo"
+"C-S-_" = "undo"
+"C-x u" = "undo"
+"C-?" = "undo-redo"
+"C-S-?" = "undo-redo"
+"C-x C-s" = "save-buffer"
+"C-x C-r" = "reload-settings"
+"C-g" = "keyboard-quit"
+"C-u" = "universal-argument"
+"C--" = "negative-argument"
+"M-0" = "digit-argument"
+"M-1" = "digit-argument"
+"M-2" = "digit-argument"
+"M-3" = "digit-argument"
+"M-4" = "digit-argument"
+"M-5" = "digit-argument"
+"M-6" = "digit-argument"
+"M-7" = "digit-argument"
+"M-8" = "digit-argument"
+"M-9" = "digit-argument"

@@ -168,7 +168,7 @@ Copy Emacs's model, not just its key chords: named interactive commands, layered
   - *Non-Latin layouts.* A modified key resolves by the character it types, so `C-ч` is just unbound, as in Emacs.
 - **Multiple cursors** come after the MVP. When they land, they are part of the window's selection state, editing commands run once per cursor, and the whole run is one undo group.
 
-Keymaps and all other settings live in TOML files, reloadable at runtime. There is no scripting language.
+Keymaps and all other settings live in TOML files, reloadable at runtime. There is no scripting language. (Decided in [#24](https://github.com/Root-man/aiditor/issues/24): keymaps live in their own `keymap.toml`, bundled and in the config dir beside `settings.toml`, with one table per keymap (`[global]` or a mode name) mapping `kbd` sequences to command names; the user file is bound over the bundled one entry by entry; unlike settings, a bad entry (bad keys, unknown command, a value that is not a name) is skipped and reported while the rest loads, and only a file that is unreadable or not TOML keeps the keymaps in effect; `C-x C-r` reloads both files. Unbinding a default key is not supported yet.)
 
 ## ACP integration and session management
 
