@@ -1,0 +1,53 @@
+---
+source: crates/aiditor-core/src/display.rs
+expression: h.display(1).lines
+---
+[
+    Line {
+        number: 0,
+        height: 19.6,
+        spans: [
+            Span {
+                text: "hello ",
+                face: Face {
+                    fg: None,
+                    bg: None,
+                },
+                fold: false,
+            },
+            Span {
+                text: "wo",
+                face: Face {
+                    fg: Some(
+                        16711680,
+                    ),
+                    bg: None,
+                },
+                fold: false,
+            },
+            Span {
+                text: "r",
+                face: Face {
+                    fg: Some(
+                        255,
+                    ),
+                    bg: Some(
+                        1118481,
+                    ),
+                },
+                fold: false,
+            },
+            Span {
+                text: "ld",
+                face: Face {
+                    fg: Some(
+                        16711680,
+                    ),
+                    bg: None,
+                },
+                fold: false,
+            },
+        ],
+        decorations: [],
+    },
+]

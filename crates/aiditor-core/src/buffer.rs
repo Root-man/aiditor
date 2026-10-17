@@ -62,6 +62,7 @@ impl Buffers {
             modified: false,
             markers: BTreeMap::new(),
             next_marker: 0,
+            props: Vec::new(),
         })
     }
 
@@ -75,6 +76,7 @@ impl Buffers {
             modified: false,
             markers: BTreeMap::new(),
             next_marker: 0,
+            props: Vec::new(),
         })
     }
 
@@ -111,6 +113,33 @@ pub struct Buffer {
     // shortcut: every edit walks all markers, fine for a few per buffer; index them if buffers get hundreds.
     markers: BTreeMap<MarkerId, (usize, InsertionType)>,
     next_marker: u64,
+    /// Text properties as (start, end) marker pairs, oldest first.
+    props: Vec<(MarkerId, MarkerId, Prop)>,
+}
+
+/// Colors as 0xRRGGBB; `None` keeps whatever is under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Face {
+    pub fg: Option<u32>,
+    pub bg: Option<u32>,
+}
+
+/// Something drawn across a whole line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decoration {
+    Background(u32),
+    /// A rule beside the line, like the one beside tool calls.
+    Rule(u32),
+}
+
+/// A text property on a char range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prop {
+    Face(Face),
+    /// Hidden text, shown as this placeholder (empty for none).
+    Invisible(String),
+    /// Applies to every line the range touches.
+    Line(Decoration),
 }
 
 impl Buffer {
@@ -141,7 +170,7 @@ impl Buffer {
         }
         for (pos, _) in self.markers.values_mut() {
             if *pos > range.start {
-                *pos = range.start.max(*pos - range.len());
+                *pos = range.start.max(pos.saturating_sub(range.len()));
             }
         }
         self.modified |= changed;
@@ -172,6 +201,25 @@ impl Buffer {
             *pos = char_idx;
         }
         Ok(())
+    }
+
+    /// Puts `prop` on `range`; text inserted inside it extends it, at its edges does not.
+    pub fn add_property(&mut self, range: Range<usize>, prop: Prop) -> Result<(), Error> {
+        if range.start > range.end || range.end > self.len_chars() {
+            return Err(Error::OutOfRange);
+        }
+        let start = self.add_marker(range.start, InsertionType::Advance)?;
+        let end = self.add_marker(range.end, InsertionType::Stay)?;
+        self.props.push((start, end, prop));
+        Ok(())
+    }
+
+    /// The non-empty property ranges, oldest first.
+    pub fn properties(&self) -> impl Iterator<Item = (Range<usize>, &Prop)> {
+        self.props.iter().filter_map(|(s, e, prop)| {
+            let range = self.marker(*s)?..self.marker(*e)?;
+            (!range.is_empty()).then_some((range, prop))
+        })
     }
 
     pub fn remove_marker(&mut self, id: MarkerId) {
@@ -345,6 +393,12 @@ mod tests {
     fn deletes_move_markers_to_the_range_start() {
         let moved = markers_after("abcde", &[0, 1, 2, 3, 4], |b| b.delete(1..3).unwrap());
         assert_eq!(moved, [(0, 0), (1, 1), (1, 1), (1, 1), (2, 2)]);
+        let moved = markers_after("abcdefgh", &[3], |b| b.delete(1..7).unwrap());
+        assert_eq!(
+            moved,
+            [(1, 1)],
+            "a marker inside a range longer than its offset"
+        );
     }
 
     #[test]
@@ -383,6 +437,21 @@ mod tests {
                 proptest::prop_assert_eq!(b.marker(advance), Some(find(b, '>')));
             }
         }
+    }
+
+    #[test]
+    fn properties_follow_edits() {
+        let (mut buffers, id) = with_text("abcdef");
+        let b = buffers.get_mut(id).unwrap();
+        let face = Prop::Face(Face::default());
+        b.add_property(2..4, face.clone()).unwrap();
+        for at in [3, 2, 6] {
+            b.insert(at, "X").unwrap();
+        }
+        assert_eq!(b.properties().collect::<Vec<_>>(), [(3..6, &face)]);
+        b.delete(1..7).unwrap();
+        assert_eq!(b.properties().count(), 0, "deleted whole");
+        assert_eq!(b.add_property(1..9, face), Err(Error::OutOfRange));
     }
 
     #[test]

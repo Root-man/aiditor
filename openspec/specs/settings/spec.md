@@ -18,11 +18,15 @@ The editor SHALL ship bundled default settings and SHALL read the user's `settin
 - **THEN** the bundled defaults apply and no error is reported
 
 ### Requirement: M0 settings cover font and theme
-The settings SHALL hold a font family, a font size and a default theme of background, foreground and cursor colors, and the frame SHALL draw with them. An unset font family SHALL mean the platform's monospace font.
+The settings SHALL hold a font family, a font size and a default theme of background, foreground, cursor and region colors, and the frame SHALL draw with them. An unset font family SHALL mean the platform's monospace font.
 
 #### Scenario: Font size drawn
 - **WHEN** the font size setting is 18
 - **THEN** buffer text is drawn at 18 px
+
+#### Scenario: Region color
+- **WHEN** the user file sets the theme's region color
+- **THEN** the display model highlights the region in that color
 
 ### Requirement: Invalid settings are rejected whole
 A settings file that is not valid TOML, has a value of the wrong type, a font size outside 6 to 72, or a key the editor does not know SHALL be rejected. The editor SHALL show an error naming the problem and SHALL keep the settings it had before.

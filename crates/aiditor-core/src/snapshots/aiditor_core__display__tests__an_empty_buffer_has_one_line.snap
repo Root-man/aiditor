@@ -1,0 +1,21 @@
+---
+source: crates/aiditor-core/src/display.rs
+expression: h.display(3)
+---
+WindowDisplay {
+    lines: [
+        Line {
+            number: 0,
+            height: 19.6,
+            spans: [],
+            decorations: [],
+        },
+    ],
+    cursor: Some(
+        (
+            0,
+            0,
+        ),
+    ),
+    mode_line: "-- *scratch*  1:0",
+}

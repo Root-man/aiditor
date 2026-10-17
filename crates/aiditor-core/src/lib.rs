@@ -1,6 +1,7 @@
 //! Editor state. A plain state machine with no GPUI or Tokio dependency.
 
 pub mod buffer;
+pub mod display;
 #[cfg(test)]
 mod harness;
 pub mod key;
@@ -222,6 +223,18 @@ impl Core {
     /// Point as a char offset into the buffer.
     pub fn point(&self) -> usize {
         self.window.point(&self.buffers)
+    }
+
+    /// The window's display model for a window `height` px high, mode line included.
+    pub fn display(&mut self, height: f32) -> display::WindowDisplay {
+        let rows = ((height / self.settings.line_height()) as usize)
+            .saturating_sub(1)
+            .max(1);
+        // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
+        let top = self.window.scroll(&self.buffers, rows);
+        let buffer = self.current();
+        let (point, mark) = (self.point(), self.window.mark(&self.buffers));
+        display::build(buffer, top, rows, point, mark, &self.settings)
     }
 
     /// The window's first line once point's line is among the `rows` it shows.

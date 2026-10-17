@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use crate::{Core, Ctx, Effect, Msg, key::parse_keys, timer::TimerId};
+use crate::{Core, Ctx, Effect, Msg, display::WindowDisplay, key::parse_keys, timer::TimerId};
 
 pub struct Harness {
     pub core: Core,
@@ -95,6 +95,12 @@ impl Harness {
 
     pub fn point(&self) -> usize {
         self.core.point()
+    }
+
+    /// The display model for a window `rows` text lines high, plus its mode line.
+    pub fn display(&mut self, rows: usize) -> WindowDisplay {
+        let height = (rows + 1) as f32 * self.core.settings().line_height();
+        self.core.display(height)
     }
 }
 

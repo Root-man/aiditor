@@ -1,0 +1,72 @@
+---
+source: crates/aiditor-core/src/display.rs
+expression: h.display(5)
+---
+WindowDisplay {
+    lines: [
+        Line {
+            number: 0,
+            height: 19.6,
+            spans: [
+                Span {
+                    text: "a",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: false,
+                },
+            ],
+            decorations: [],
+        },
+        Line {
+            number: 1,
+            height: 19.6,
+            spans: [
+                Span {
+                    text: "b",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: false,
+                },
+                Span {
+                    text: "…",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: true,
+                },
+            ],
+            decorations: [
+                Rule(
+                    8947848,
+                ),
+            ],
+        },
+        Line {
+            number: 4,
+            height: 19.6,
+            spans: [
+                Span {
+                    text: "e",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: false,
+                },
+            ],
+            decorations: [],
+        },
+    ],
+    cursor: Some(
+        (
+            2,
+            1,
+        ),
+    ),
+    mode_line: "** *scratch*  5:1",
+}

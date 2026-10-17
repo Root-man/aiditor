@@ -99,7 +99,7 @@ A project defines the filesystem scope; a workspace is the unit of work inside i
 | Primary repo | The root whose agent config is used: AGENTS.md, CLAUDE.md, MCP server list, agent settings | Path, role line | In the project file |
 | Additional root | Another repo or folder the agent gets filesystem access to | Path, role line | In the project file |
 | Workspace | Everything for one task, tied to one project | Window configuration, its buffers (files, terminals, agent sessions) | No |
-| Buffer | Content plus metadata, independent of any window, owned by one workspace | Content backend, undo history, major and minor modes, markers, file binding or kind | No (auto-save files aside, see Crash safety) |
+| Buffer | Content plus metadata, independent of any window, owned by one workspace | Content backend, undo history, major and minor modes, markers, text properties (face, invisible with a placeholder, line decoration), file binding or kind | No (auto-save files aside, see Crash safety) |
 | Buffer kind | File, Terminal, AgentSession, Messages, Scratch | Kind-specific payload (PTY handle, session id) | No |
 | Window | A viewport onto one buffer | Buffer id, point, mark, scroll position | No |
 | Window configuration | Split tree of windows (`C-x 2` / `C-x 3`) | Windows, split ratios, selected window | No |

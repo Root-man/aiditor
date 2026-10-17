@@ -1,0 +1,60 @@
+---
+source: crates/aiditor-core/src/display.rs
+expression: h.display(10)
+---
+WindowDisplay {
+    lines: [
+        Line {
+            number: 0,
+            height: 19.6,
+            spans: [
+                Span {
+                    text: "one",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: false,
+                },
+            ],
+            decorations: [],
+        },
+        Line {
+            number: 1,
+            height: 19.6,
+            spans: [
+                Span {
+                    text: "two",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: false,
+                },
+            ],
+            decorations: [],
+        },
+        Line {
+            number: 2,
+            height: 19.6,
+            spans: [
+                Span {
+                    text: "three",
+                    face: Face {
+                        fg: None,
+                        bg: None,
+                    },
+                    fold: false,
+                },
+            ],
+            decorations: [],
+        },
+    ],
+    cursor: Some(
+        (
+            1,
+            2,
+        ),
+    ),
+    mode_line: "-- a.txt  2:2",
+}
