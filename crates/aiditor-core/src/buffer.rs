@@ -60,6 +60,7 @@ impl Buffers {
             content: Content::Text(Rope::new()),
             file: None,
             modified: false,
+            tick: 0,
             markers: BTreeMap::new(),
             next_marker: 0,
             props: Vec::new(),
@@ -77,6 +78,7 @@ impl Buffers {
             content: Content::Text(Rope::from_str(text)),
             file: Some(path.to_path_buf()),
             modified: false,
+            tick: 0,
             markers: BTreeMap::new(),
             next_marker: 0,
             props: Vec::new(),
@@ -116,6 +118,8 @@ pub struct Buffer {
     content: Content,
     pub file: Option<PathBuf>,
     modified: bool,
+    /// Counts text changes, like Emacs's `buffer-modified-tick`.
+    tick: u64,
     // shortcut: every edit walks all markers, fine for a few per buffer; index them if buffers get hundreds.
     markers: BTreeMap<MarkerId, (usize, InsertionType)>,
     next_marker: u64,
@@ -280,6 +284,7 @@ impl Buffer {
             }
         }
         self.modified |= !text.is_empty();
+        self.tick += u64::from(!text.is_empty());
         Ok(())
     }
 
@@ -294,6 +299,7 @@ impl Buffer {
             }
         }
         self.modified |= changed;
+        self.tick += u64::from(changed);
         Ok(())
     }
 
@@ -375,6 +381,10 @@ impl Buffer {
 
     pub fn modified(&self) -> bool {
         self.modified
+    }
+
+    pub fn tick(&self) -> u64 {
+        self.tick
     }
 
     pub fn set_saved(&mut self) {

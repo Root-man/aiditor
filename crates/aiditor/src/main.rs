@@ -189,7 +189,8 @@ fn to_keys(ks: &Keystroke) -> Vec<Key> {
         "down" => KeyCode::Down,
         // With Ctrl or Alt held, the key's own character, so C-x stays C-x whatever Option would type.
         _ if m.control || m.alt => {
-            let mut chars = ks.key.chars();
+            let name = if ks.key == "space" { " " } else { &ks.key };
+            let mut chars = name.chars();
             return match (chars.next(), chars.next()) {
                 (Some(c), None) => vec![key(KeyCode::Char(c))],
                 _ => Vec::new(),
@@ -449,5 +450,15 @@ mod tests {
         .concat();
         let script = "RET C-j C-o C-d DEL M-d M-DEL";
         assert_eq!(keys, aiditor_core::key::parse_keys(script).unwrap());
+    }
+
+    #[test]
+    fn mark_keys_reach_the_core() {
+        let key = |s| to_keys(&Keystroke::parse(s).unwrap());
+        let keys = [key("ctrl-space"), key("ctrl-x"), key("ctrl-x")].concat();
+        assert_eq!(
+            keys,
+            aiditor_core::key::parse_keys("C-SPC C-x C-x").unwrap()
+        );
     }
 }

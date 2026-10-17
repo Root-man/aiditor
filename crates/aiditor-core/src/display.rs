@@ -269,8 +269,18 @@ mod tests {
             [("hello".into(), None)],
             "no mark, no region"
         );
-        h.core.window.set_mark(&mut h.core.buffers, 0).unwrap();
+        h.core
+            .window
+            .push_mark(&mut h.core.buffers, 0, true)
+            .unwrap();
         assert_eq!(spans(&mut h), [("hel".into(), region), ("lo".into(), None)]);
+        h.core.window.set_active(false);
+        assert_eq!(
+            spans(&mut h),
+            [("hello".into(), None)],
+            "inactive mark, no region"
+        );
+        h.core.window.set_active(true);
         prop(&mut h, 1..5, Prop::Face(RED));
         insta::assert_debug_snapshot!(h.display(1).lines);
     }

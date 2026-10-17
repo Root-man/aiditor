@@ -51,3 +51,5 @@
 "DEL" = "delete-backward-char"
 "M-d" = "kill-word"
 "M-DEL" = "backward-kill-word"
+"C-SPC" = "set-mark-command"
+"C-x C-x" = "exchange-point-and-mark"

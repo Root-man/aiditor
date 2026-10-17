@@ -597,10 +597,19 @@ mod tests {
     fn buffer_ends() {
         let mut h = on("ab\ncd");
         h.keys("C-f C-f M->");
-        assert_eq!(h.point(), 5);
+        assert_eq!((h.point(), h.core.message()), (5, Some("Mark set")));
         h.keys("M-<");
         assert_eq!(h.point(), 0);
-        assert_eq!(h.core.window.mark(&h.core.buffers), None);
+        assert_eq!(mark(&h), (Some(5), false));
+        assert_eq!(h.core.window.ring(&h.core.buffers), [2]);
+        let mut h = on("ab\ncd");
+        h.keys("C-f C-f C-SPC M->");
+        assert_eq!(
+            (h.point(), mark(&h)),
+            (5, (Some(2), true)),
+            "an active region keeps its mark"
+        );
+        assert_eq!(h.core.window.ring(&h.core.buffers), []);
         let mut h = on(&"123456789\n".repeat(10));
         h.keys("C-u 5 M-<");
         assert_eq!(h.point(), 60);
@@ -608,6 +617,97 @@ mod tests {
         assert_eq!(h.point(), 80, "after the line holding char 70");
         h.keys("C-u M->");
         assert_eq!(h.point(), 100, "plain C-u is no count");
+        assert_eq!(mark(&h), (Some(60), false), "plain C-u pushes no mark");
+    }
+
+    /// The mark and whether it is active.
+    fn mark(h: &Harness) -> (Option<usize>, bool) {
+        (h.core.window.mark(&h.core.buffers), h.core.window.active())
+    }
+
+    #[test]
+    fn c_spc_sets_the_mark_and_repeats_toggle_it() {
+        let mut h = on("hello");
+        h.keys("C-SPC");
+        assert_eq!(h.core.message(), Some("Mark set"));
+        h.keys("C-f C-f");
+        assert_eq!((h.point(), mark(&h)), (2, (Some(0), true)));
+        h.keys("C-f C-SPC");
+        assert_eq!(mark(&h), (Some(3), true));
+        assert_eq!(
+            h.core.window.ring(&h.core.buffers),
+            [0],
+            "the old mark is pushed"
+        );
+        h.keys("C-SPC");
+        assert_eq!(
+            (mark(&h), h.core.message()),
+            ((Some(3), false), Some("Mark deactivated"))
+        );
+        h.keys("C-SPC");
+        assert_eq!(
+            (mark(&h), h.core.message()),
+            ((Some(3), true), Some("Mark activated"))
+        );
+    }
+
+    #[test]
+    fn c_u_c_spc_pops_the_mark() {
+        let mut h = on("hello");
+        h.keys("C-u C-SPC");
+        assert_eq!(
+            (h.point(), h.core.message()),
+            (0, Some("No mark set in this buffer"))
+        );
+        h.keys("C-f C-SPC C-f C-f C-SPC C-e C-u C-SPC");
+        assert_eq!((h.point(), mark(&h)), (3, (Some(1), false)));
+        assert_eq!(h.core.window.ring(&h.core.buffers), [3]);
+        h.keys("C-SPC");
+        assert_eq!(mark(&h), (Some(3), true), "C-SPC after a pop sets the mark");
+    }
+
+    #[test]
+    fn c_x_c_x_exchanges_point_and_mark() {
+        let mut h = on("hello");
+        h.keys("C-x C-x");
+        assert_eq!(
+            (h.point(), h.core.message()),
+            (0, Some("No mark set in this buffer"))
+        );
+        h.keys("C-f C-SPC C-SPC C-f C-f C-f C-x C-x");
+        assert_eq!((h.point(), mark(&h)), (1, (Some(4), true)));
+    }
+
+    #[test]
+    fn editing_deactivates_the_mark() {
+        let mut h = on("hello");
+        h.keys("C-SPC C-f x");
+        assert_eq!(mark(&h), (Some(0), false));
+        assert_eq!(h.display(1).lines[0].spans.len(), 1, "no region shown");
+        h.keys("C-x C-x C-/");
+        assert!(!h.core.window.active(), "undo is a change too");
+    }
+
+    #[test]
+    fn visiting_a_file_drops_the_mark_and_ring() {
+        let mut h = Harness::new(&[("a.txt", "abc")]);
+        h.keys("x C-SPC C-SPC C-SPC");
+        h.open("a.txt");
+        assert_eq!(mark(&h), (None, false));
+        assert_eq!(h.core.window.ring(&h.core.buffers), []);
+    }
+
+    #[test]
+    fn region_shows_until_c_g() {
+        let mut h = on("hello");
+        h.keys("C-SPC C-f C-f");
+        insta::assert_debug_snapshot!(h.display(1).lines);
+        h.keys("C-g");
+        assert_eq!(
+            (mark(&h), h.core.message()),
+            ((Some(0), false), Some("Quit"))
+        );
+        insta::assert_debug_snapshot!(h.display(1).lines);
     }
 
     #[test]

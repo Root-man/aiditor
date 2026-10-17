@@ -77,8 +77,13 @@ impl Ctx<'_> {
     /// Runs the command `name` with `args`, filling the region from point and mark if the
     /// command needs it; any error goes to the message line.
     pub fn call(&mut self, name: &str, args: Args) {
+        let (buffer, tick) = (self.core.window.buffer(), self.core.current().tick());
         if let Err(err) = self.try_call(name, args) {
             self.core.message = Some(err);
+        }
+        // A command that changes the buffer deactivates the mark, as in Emacs.
+        if self.core.window.buffer() == buffer && self.core.current().tick() != tick {
+            self.core.window.set_active(false);
         }
     }
 
@@ -245,6 +250,61 @@ impl Ctx<'_> {
         self.core.transient = Some(map);
     }
 
+    /// Sets the mark at point, pushing the old one; on a repeat, toggles the region instead.
+    fn set_mark_command(&mut self, prefix: Option<Prefix>) -> Result<(), String> {
+        if matches!(prefix, Some(Prefix::Universal(_))) {
+            return self.pop_to_mark();
+        }
+        let core = &mut *self.core;
+        if core.last_command == Some("set-mark-command")
+            && core.window.mark(&core.buffers).is_some()
+        {
+            let active = !core.window.active();
+            core.window.set_active(active);
+            let what = if active { "activated" } else { "deactivated" };
+            core.message = Some(format!("Mark {what}"));
+            return Ok(());
+        }
+        self.push_mark(true)
+    }
+
+    /// Pushes the mark at point and says so.
+    fn push_mark(&mut self, activate: bool) -> Result<(), String> {
+        let core = &mut *self.core;
+        let point = core.point();
+        core.window
+            .push_mark(&mut core.buffers, point, activate)
+            .map_err(|err| err.to_string())?;
+        core.message = Some("Mark set".into());
+        Ok(())
+    }
+
+    /// Moves point to the mark and the mark to the ring's next one.
+    fn pop_to_mark(&mut self) -> Result<(), String> {
+        let mark = self.mark()?;
+        self.goto(mark)?;
+        self.core.window.pop_mark();
+        // So a C-SPC right after sets a new mark rather than toggling, as in Emacs.
+        self.core.this_command = Some("pop-to-mark-command");
+        Ok(())
+    }
+
+    fn exchange_point_and_mark(&mut self) -> Result<(), String> {
+        let mark = self.mark()?;
+        let core = &mut *self.core;
+        let point = core.point();
+        core.window
+            .set_mark(&mut core.buffers, point)
+            .map_err(|err| err.to_string())?;
+        core.window.set_active(true);
+        self.goto(mark)
+    }
+
+    fn mark(&self) -> Result<usize, String> {
+        let core = &*self.core;
+        (core.window.mark(&core.buffers)).ok_or_else(|| "No mark set in this buffer".into())
+    }
+
     /// Moves point to `p`, which must be in the buffer.
     fn goto(&mut self, p: usize) -> Result<(), String> {
         let core = &mut *self.core;
@@ -382,6 +442,9 @@ impl Ctx<'_> {
     /// Goes to the start, or the end, of the buffer; a number N goes N tenths in from that end,
     /// then to the next line's start.
     fn buffer_end(&mut self, prefix: Option<Prefix>, end: bool) -> Result<(), String> {
+        if !self.core.window.active() && !matches!(prefix, Some(Prefix::Universal(_))) {
+            self.push_mark(false)?;
+        }
         let buffer = self.core.current();
         let len = buffer.len_chars() as i64;
         let Some(n) = prefix.filter(|p| !matches!(p, Prefix::Universal(_))) else {
@@ -512,7 +575,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 29] = [
+        let builtins: [(&'static str, command::Handler); 31] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -632,7 +695,14 @@ impl Default for Core {
                 }
                 Ok(())
             }),
+            ("set-mark-command", |ctx, args| {
+                ctx.set_mark_command(args.prefix)
+            }),
+            ("exchange-point-and-mark", |ctx, _| {
+                ctx.exchange_point_and_mark()
+            }),
             ("keyboard-quit", |ctx, _| {
+                ctx.core.window.set_active(false);
                 ctx.core.message = Some("Quit".into());
                 Ok(())
             }),
@@ -834,7 +904,8 @@ impl Core {
         // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
         let top = self.window.scroll(&self.buffers, rows);
         let buffer = self.current();
-        let (point, mark) = (self.point(), self.window.mark(&self.buffers));
+        let point = self.point();
+        let mark = (self.window.mark(&self.buffers)).filter(|_| self.window.active());
         display::build(buffer, top, rows, point, mark, &self.settings)
     }
 

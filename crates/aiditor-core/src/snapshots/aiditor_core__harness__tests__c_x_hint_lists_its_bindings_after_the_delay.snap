@@ -15,6 +15,10 @@ Some(
                 "save-buffer",
             ),
             (
+                "C-x",
+                "exchange-point-and-mark",
+            ),
+            (
                 "u",
                 "undo",
             ),
