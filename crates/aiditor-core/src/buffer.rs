@@ -63,6 +63,7 @@ impl Buffers {
             markers: BTreeMap::new(),
             next_marker: 0,
             props: Vec::new(),
+            history: History::default(),
         })
     }
 
@@ -77,6 +78,7 @@ impl Buffers {
             markers: BTreeMap::new(),
             next_marker: 0,
             props: Vec::new(),
+            history: History::default(),
         })
     }
 
@@ -115,6 +117,32 @@ pub struct Buffer {
     next_marker: u64,
     /// Text properties as (start, end) marker pairs, oldest first.
     props: Vec<(MarkerId, MarkerId, Prop)>,
+    history: History,
+}
+
+/// One recorded edit: where, and the text inserted or deleted there.
+#[derive(Clone, Debug)]
+enum Change {
+    Insert(usize, String),
+    Delete(usize, String),
+}
+
+/// The edits of one command, and point before and after it.
+struct Group {
+    changes: Vec<Change>,
+    before: usize,
+    after: usize,
+}
+
+// shortcut: history grows without bound; cap it when long sessions show memory growth.
+#[derive(Default)]
+struct History {
+    undo: Vec<Group>,
+    redo: Vec<Group>,
+    /// The last undo group still takes edits.
+    open: bool,
+    /// Point at the last boundary, for the next group.
+    before: Option<usize>,
 }
 
 /// Colors as 0xRRGGBB; `None` keeps whatever is under it.
@@ -150,6 +178,90 @@ impl Buffer {
     }
 
     pub fn insert(&mut self, char_idx: usize, text: &str) -> Result<(), Error> {
+        self.raw_insert(char_idx, text)?;
+        self.record(Change::Insert(char_idx, text.to_string()));
+        Ok(())
+    }
+
+    pub fn delete(&mut self, range: Range<usize>) -> Result<(), Error> {
+        let deleted = self.text().get_slice(range.clone()).map(String::from);
+        self.raw_delete(range.clone())?;
+        self.record(Change::Delete(range.start, deleted.unwrap_or_default()));
+        Ok(())
+    }
+
+    /// Ends the open undo group with point at `point`; the next edit starts a group with point there.
+    pub fn undo_boundary(&mut self, point: usize) {
+        let h = &mut self.history;
+        if std::mem::take(&mut h.open) {
+            h.undo.last_mut().expect("open group exists").after = point;
+        }
+        h.before = Some(point);
+    }
+
+    /// Reverts the last undo group; returns point before it, or `None` with nothing to undo.
+    pub fn undo(&mut self) -> Option<usize> {
+        self.history.open = false;
+        let group = self.history.undo.pop()?;
+        for change in group.changes.iter().rev() {
+            self.apply(change, true);
+        }
+        let point = group.before;
+        self.history.redo.push(group);
+        Some(point)
+    }
+
+    /// Re-applies the last undone group; returns point after it, or `None` with nothing to redo.
+    pub fn redo(&mut self) -> Option<usize> {
+        let group = self.history.redo.pop()?;
+        for change in &group.changes {
+            self.apply(change, false);
+        }
+        let point = group.after;
+        self.history.undo.push(group);
+        Some(point)
+    }
+
+    /// Applies `change`, or its inverse, without recording it.
+    fn apply(&mut self, change: &Change, inverse: bool) {
+        let result = match (change, inverse) {
+            (Change::Insert(at, text), false) | (Change::Delete(at, text), true) => {
+                self.raw_insert(*at, text)
+            }
+            (Change::Insert(at, text), true) | (Change::Delete(at, text), false) => {
+                self.raw_delete(*at..*at + text.chars().count())
+            }
+        };
+        result.expect("history replays onto the text it was recorded on");
+    }
+
+    fn record(&mut self, change: Change) {
+        let (at, text) = match &change {
+            Change::Insert(at, text) | Change::Delete(at, text) => (*at, text),
+        };
+        if text.is_empty() {
+            return;
+        }
+        let h = &mut self.history;
+        h.redo.clear();
+        if !h.open {
+            h.open = true;
+            h.undo.push(Group {
+                changes: Vec::new(),
+                before: h.before.take().unwrap_or(at),
+                after: at,
+            });
+        }
+        let group = h.undo.last_mut().expect("open group exists");
+        // Until a boundary says where point went, assume just after the edit.
+        group.after = match change {
+            Change::Insert(..) => at + text.chars().count(),
+            Change::Delete(..) => at,
+        };
+        group.changes.push(change);
+    }
+
+    fn raw_insert(&mut self, char_idx: usize, text: &str) -> Result<(), Error> {
         match &mut self.content {
             Content::Text(rope) => rope.try_insert(char_idx, text)?,
         }
@@ -163,7 +275,7 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn delete(&mut self, range: Range<usize>) -> Result<(), Error> {
+    fn raw_delete(&mut self, range: Range<usize>) -> Result<(), Error> {
         let changed = !range.is_empty();
         match &mut self.content {
             Content::Text(rope) => rope.try_remove(range.clone())?,
@@ -452,6 +564,48 @@ mod tests {
         b.delete(1..7).unwrap();
         assert_eq!(b.properties().count(), 0, "deleted whole");
         assert_eq!(b.add_property(1..9, face), Err(Error::OutOfRange));
+    }
+
+    #[test]
+    fn undo_and_redo_groups() {
+        let (mut buffers, id) = with_text("");
+        let b = buffers.get_mut(id).unwrap();
+        assert_eq!(b.undo(), None);
+        b.undo_boundary(0);
+        b.insert(0, "ab").unwrap();
+        b.insert(2, "c").unwrap();
+        b.undo_boundary(3);
+        b.insert(9, "x").unwrap_err();
+        b.insert(3, "").unwrap();
+        b.delete(1..1).unwrap();
+        b.undo_boundary(3);
+        b.delete(0..1).unwrap();
+        b.undo_boundary(0);
+        assert_eq!(b.text(), "bc");
+        assert_eq!(b.undo(), Some(3), "point before the delete");
+        assert_eq!(b.text(), "abc");
+        assert_eq!(b.undo(), Some(0), "refused and empty edits made no group");
+        assert_eq!(b.text(), "");
+        assert_eq!(b.undo(), None);
+        assert_eq!(b.redo(), Some(3));
+        assert_eq!(b.redo(), Some(0));
+        assert_eq!(b.text(), "bc");
+        assert_eq!(b.redo(), None);
+        b.undo();
+        b.insert(0, "z").unwrap();
+        assert_eq!(b.redo(), None, "a new edit clears redo");
+        assert_eq!(b.text(), "zabc");
+    }
+
+    #[test]
+    fn undo_without_boundaries_uses_the_edit_position() {
+        let (mut buffers, id) = with_text("héllo");
+        let b = buffers.get_mut(id).unwrap();
+        b.delete(1..3).unwrap();
+        assert_eq!(b.undo(), Some(1));
+        assert_eq!(b.text(), "héllo");
+        assert_eq!(b.redo(), Some(1));
+        assert_eq!(b.text(), "hlo");
     }
 
     #[test]
