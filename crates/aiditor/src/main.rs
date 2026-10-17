@@ -5,13 +5,12 @@ use std::time::Instant;
 use aiditor_core::key::{Key, KeyCode};
 use aiditor_core::{Core, Effect, Msg};
 use gpui::{
-    App, Application, Context, FocusHandle, KeyDownEvent, Keystroke, Pixels, Task, Window,
-    WindowOptions, div, prelude::*, px, rgb,
+    App, Application, Context, FocusHandle, KeyDownEvent, Keystroke, Task, Window, WindowOptions,
+    div, prelude::*, px, rgb,
 };
 use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
-const LINE_HEIGHT: Pixels = px(20.);
 const FONT: &str = if cfg!(target_os = "macos") {
     "Menlo"
 } else {
@@ -69,6 +68,7 @@ impl Editor {
                         Err(err) => tracing::error!(path = %path.display(), %err, "save failed"),
                     }
                 }
+                Effect::LoadSettings => self.handle(Msg::SettingsLoaded(read_settings()), cx),
             }
         }
         self.timer = self.core.next_deadline().map(|deadline| {
@@ -92,6 +92,19 @@ impl Editor {
         for key in keys {
             self.handle(Msg::Key(key), cx);
         }
+    }
+}
+
+/// The user's `settings.toml` in the platform config dir; `None` when it or the dir doesn't exist.
+fn read_settings() -> Result<Option<String>, String> {
+    let Some(dirs) = directories::ProjectDirs::from("", "", "aiditor") else {
+        return Ok(None);
+    };
+    let path = dirs.config_dir().join("settings.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("{}: {err}", path.display())),
     }
 }
 
@@ -138,10 +151,20 @@ fn to_keys(ks: &Keystroke) -> Vec<Key> {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let line_height = px(settings.font_size * 1.4);
+        let message = self.core.message().map(str::to_string);
         let buffer = self.core.current();
         let modified = if buffer.modified() { " *" } else { "" };
         window.set_window_title(&format!("{}{modified}", buffer.name));
-        let rows = ((window.viewport_size().height / LINE_HEIGHT) as usize).max(1);
+        let height = window.viewport_size().height
+            - if message.is_some() {
+                line_height
+            } else {
+                px(0.)
+            };
+        let rows = ((height / line_height) as usize).max(1);
         let (line, col) = buffer.line_col(self.core.point()).unwrap_or_default();
         self.top = self.top.clamp(line.saturating_sub(rows - 1), line);
         let text = buffer.text();
@@ -149,13 +172,13 @@ impl Render for Editor {
         let lines = (self.top..text.len_lines().min(self.top + rows)).map(|i| {
             let s = text.line(i).to_string();
             let s = s.trim_end_matches('\n');
-            let row = div().h(LINE_HEIGHT).flex().whitespace_nowrap();
+            let row = div().h(line_height).flex().whitespace_nowrap();
             if i != line {
                 return row.child(s.to_string());
             }
             let split = s.char_indices().nth(col).map_or(s.len(), |(b, _)| b);
             row.child(s[..split].to_string())
-                .child(div().w(px(2.)).h_full().bg(rgb(0xffcc00)))
+                .child(div().w(px(2.)).h_full().bg(rgb(theme.cursor)))
                 .child(s[split..].to_string())
         });
         div()
@@ -163,11 +186,14 @@ impl Render for Editor {
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
             .overflow_hidden()
-            .bg(rgb(0x1e1e1e))
-            .text_color(rgb(0xd4d4d4))
-            .font_family(FONT)
-            .text_size(px(14.))
-            .children(lines)
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.background))
+            .text_color(rgb(theme.foreground))
+            .font_family(settings.font_family.clone().unwrap_or(FONT.into()))
+            .text_size(px(settings.font_size))
+            .child(div().flex_1().overflow_hidden().children(lines))
+            .children(message.map(|m| div().h(line_height).whitespace_nowrap().child(m)))
     }
 }
 
@@ -182,6 +208,7 @@ fn main() {
         .init();
 
     let mut core = Core::default();
+    core.handle(Instant::now(), Msg::SettingsLoaded(read_settings()));
     if let Some(arg) = std::env::args_os().nth(1) {
         let path = std::path::absolute(&arg).unwrap_or_else(|_| PathBuf::from(arg));
         let text = match std::fs::read_to_string(&path) {
