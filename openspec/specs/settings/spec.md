@@ -18,7 +18,7 @@ The editor SHALL ship bundled default settings and SHALL read the user's `settin
 - **THEN** the bundled defaults apply and no error is reported
 
 ### Requirement: M0 settings cover font and theme
-The settings SHALL hold a font family, a font size, a default theme of background, foreground, cursor and region colors, and `option_as_meta`, and the frame SHALL draw with them. An unset font family SHALL mean the platform's monospace font. `option_as_meta` SHALL default to true and SHALL only matter on macOS.
+The settings SHALL hold a font family, a font size, a default theme of background, foreground, cursor, region, mode line and inactive mode line colors, and `option_as_meta`, and the frame SHALL draw with them. An unset font family SHALL mean the platform's monospace font. `option_as_meta` SHALL default to true and SHALL only matter on macOS.
 
 #### Scenario: Font size drawn
 - **WHEN** the font size setting is 18
@@ -27,6 +27,10 @@ The settings SHALL hold a font family, a font size, a default theme of backgroun
 #### Scenario: Region color
 - **WHEN** the user file sets the theme's region color
 - **THEN** the display model highlights the region in that color
+
+#### Scenario: Mode line colors
+- **WHEN** the user file sets the theme's `mode_line` color
+- **THEN** the selected window's mode line is drawn on it and the other mode lines keep the default inactive color
 
 #### Scenario: Option as Meta by default
 - **WHEN** no user file sets `option_as_meta`
