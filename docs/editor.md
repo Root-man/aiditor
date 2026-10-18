@@ -122,6 +122,15 @@ If the file changes on disk while its buffer has unsaved edits, the editor does 
 
 Every save also checks the file's hash on disk against the last version the buffer loaded or saved, so a change the watcher missed is still caught before it can be overwritten.
 
+**File handling** (decided in [#45](https://github.com/Root-man/aiditor/issues/45)), with Emacs's defaults where they fit:
+
+- **Encoding.** UTF-8 only. A UTF-8 byte-order mark is kept: stripped on load, written back on save. Other encodings come in M5 ([#155](https://github.com/Root-man/aiditor/issues/155): detect with `encoding_rs`, write back in the original encoding).
+- **Line endings.** The first line break in the file sets its ending, LF or CRLF; a file without one is LF. The buffer always holds LF, a save writes the file's ending back, and the mode line shows `(DOS)` for CRLF files.
+- **Final newline.** A save adds a newline when the text doesn't end with one, as Emacs's text and prog modes do (`require-final-newline`).
+- **Binary files.** A file with a NUL byte in its first 8 KB, or one that isn't valid UTF-8, is refused with the reason in the echo area. A file named on the command line opens as an empty read-only buffer instead, so the app still starts.
+- **Saving.** Saves are atomic: write a temp file in the same directory as the target and rename it over the target, after copying the old file's mode to the temp file. A symlink is followed and its target replaced, never the link itself. A file with more than one hard link, or a directory where the rename isn't allowed, is written in place instead, so links stay shared. Owner and group are not copied.
+- **Long lines.** Truncated at the window edge in M0, with Emacs's automatic horizontal scroll (`auto-hscroll-mode` set to `current-line`, [#153](https://github.com/Root-man/aiditor/issues/153)): point's line scrolls sideways to keep point visible, and the other lines stay put. Soft wrap comes in M5 ([#112](https://github.com/Root-man/aiditor/issues/112)), Emacs-like: file buffers wrap by default, Markdown and text at word boundaries (`visual-line-mode`), code at the window edge with a continuation marker, and `toggle-truncate-lines` switches a buffer back to truncation.
+
 How a revert keeps point, mark and markers, and several file-watcher edge cases, are still to be decided (see Open questions).
 
 ## Projects
@@ -281,13 +290,12 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 - File watcher edge cases:
   - files deleted or renamed on disk;
   - files open from outside the project roots, which no root watcher covers;
-  - atomic saves (write a temp file, then rename) versus symlinks and hard links;
+  - files replaced by another program's atomic save (a rename over the watched file);
   - on Linux, inotify needs a watch per directory, so large ignored trees (`node_modules`, `deps`, `_build`, `target`) should be skipped.
-- File handling: encodings, CRLF line endings, final newline, very long lines, binary files, keeping file permissions on save.
 
 **Display**
 
-- Text layout: the MVP display uses a monospace font and truncates long lines. Whether to soft wrap file buffers (Markdown prose needs it) is part of the file-handling decision; a soft-wrap epic waits in M5 if the answer is "later". The session buffer needs soft wrap by M3 whatever that answer is.
+- The session buffer needs soft wrap by M3, before file buffers get it in M5 (see File handling): pull #112 forward or wrap the session buffer on its own.
 
 **Editing**
 
