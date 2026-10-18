@@ -481,13 +481,21 @@ impl Render for Editor {
                     false => format!(" [{message}]"),
                 };
                 let cursor = div().w(px(2.)).h(line_height).bg(rgb(theme.cursor));
-                line()
+                let prompt = line()
                     .flex()
                     .child(format!("{}{}", mb.prompt, &text[..byte]))
                     .child(cursor)
-                    .child(format!("{}{message}", &text[byte..]))
+                    .child(format!("{}{message}", &text[byte..]));
+                let candidates = mb.candidates.into_iter().enumerate().map(|(i, c)| {
+                    let row = line().child(c);
+                    match Some(i) == mb.selected {
+                        true => row.bg(rgb(theme.region)),
+                        false => row,
+                    }
+                });
+                div().child(prompt).children(candidates)
             }
-            None => line().child(message),
+            None => div().child(line().child(message)),
         };
         let root = div()
             .track_focus(&self.focus)
@@ -1045,6 +1053,43 @@ mod tests {
         let message = editor.read_with(cx, |e, _| e.core.message().map(str::to_string));
         assert_eq!(message.as_deref(), Some("got hi"));
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "");
+    }
+
+    #[gpui::test]
+    fn a_completing_prompt_filters_and_picks(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.register(Command {
+                name: "ask",
+                spec: ArgSpec {
+                    prompts: &["Pick: "],
+                    completion: Some(|_, _| vec!["apple".into(), "banana".into()]),
+                    ..ArgSpec::default()
+                },
+                handler: |_, args| Err(format!("got {}", args.strings[0])),
+            });
+            let keymap = r#"global = { "C-c p" = "ask" }"#;
+            e.handle(Msg::KeymapLoaded(Ok(Some(keymap.into()))), cx);
+        });
+        cx.simulate_keystrokes("ctrl-c p");
+        cx.simulate_input("an");
+        cx.run_until_parked();
+        // The matcher's threads may still be running; the core's repoll timer catches up.
+        let listed = |cx: &mut VisualTestContext| {
+            editor.update(cx, |e, _| e.core.minibuffer().unwrap().candidates)
+        };
+        for _ in 0..100 {
+            if listed(cx).len() == 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert_eq!(listed(cx), ["banana"]);
+        cx.simulate_keystrokes("enter");
+        let message = editor.read_with(cx, |e, _| e.core.message().map(str::to_string));
+        assert_eq!(message.as_deref(), Some("got banana"));
     }
 
     #[gpui::test]

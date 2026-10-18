@@ -35,6 +35,10 @@ pub struct FrameDisplay {
 pub struct Minibuffer {
     pub prompt: String,
     pub display: WindowDisplay,
+    /// The completion list's shown rows, best match first; empty without completion.
+    pub candidates: Vec<String>,
+    /// Which of `candidates` is selected.
+    pub selected: Option<usize>,
 }
 
 #[derive(Debug, PartialEq)]

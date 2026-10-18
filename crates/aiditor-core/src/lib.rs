@@ -14,8 +14,11 @@ pub mod window;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nucleo::Nucleo;
+use nucleo::pattern::{CaseMatching, Normalization};
 use ropey::Rope;
 
 use buffer::{Buffer, BufferId, Buffers};
@@ -76,6 +79,12 @@ const KILL_RING_MAX: usize = 60;
 /// How many answers each prompt's history keeps, Emacs's `history-length`.
 const HISTORY_MAX: usize = 100;
 
+/// How many candidates the completion list shows, Vertico's `vertico-count`.
+const COMPLETION_ROWS: usize = 10;
+
+/// How long the core waits for the matcher before trying again on a timer.
+const REPOLL: Duration = Duration::from_millis(16);
+
 /// The minibuffer's window, kept outside the split tree.
 const MINIBUFFER: WindowId = WindowId(usize::MAX);
 
@@ -91,6 +100,29 @@ struct Minibuffer {
     index: usize,
     /// What was typed before the first history move.
     input: String,
+    /// The completion list, when the command completes over candidates.
+    completion: Option<Completion>,
+}
+
+/// The selection in a completing minibuffer's list of matches.
+struct Completion {
+    /// The text the matcher's pattern was last set from.
+    pattern: String,
+    /// The selected match, best first.
+    selected: usize,
+    /// The first match shown, so the shown rows hold the selection.
+    top: usize,
+}
+
+impl Completion {
+    /// Selects match `selected`, scrolling the shown rows only as far as needed.
+    fn select(&mut self, selected: usize) {
+        self.selected = selected;
+        self.top = self
+            .top
+            .min(selected)
+            .max((selected + 1).saturating_sub(COMPLETION_ROWS));
+    }
 }
 
 /// Work the app carries out for the core.
@@ -155,7 +187,7 @@ impl Ctx<'_> {
             args.region = Some(point.min(mark)..point.max(mark));
         }
         if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
-            return self.read_string(command.name, args, prompt);
+            return self.read_string(command, args, prompt);
         }
         (command.handler)(self, args)
     }
@@ -163,7 +195,7 @@ impl Ctx<'_> {
     /// Opens the minibuffer at `prompt`; its answer then calls `command` again.
     fn read_string(
         &mut self,
-        command: &'static str,
+        command: Command,
         args: Args,
         prompt: &'static str,
     ) -> Result<(), String> {
@@ -171,18 +203,41 @@ impl Ctx<'_> {
         if core.minibuffer.is_some() {
             return Err("Command attempted to use minibuffer while in minibuffer".into());
         }
+        let completion = command.spec.completion.map(|candidates| {
+            let candidates = candidates(core, &args);
+            // One matcher for the core, as each one starts a thread pool.
+            let matcher = core.matcher.get_or_insert_with(|| {
+                Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1)
+            });
+            matcher.restart(true);
+            (matcher.pattern).reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
+            let injector = matcher.injector();
+            for c in candidates {
+                injector.push(c, |c, cols| cols[0] = c.as_str().into());
+            }
+            Completion {
+                pattern: String::new(),
+                selected: 0,
+                top: 0,
+            }
+        });
         // A fresh buffer per prompt, so undo and markers never carry over.
         let id = core.buffers.create(" *Minibuf-1*");
-        core.buffers.get_mut(id).expect("just created").major_mode = "minibuffer-mode";
+        let buffer = core.buffers.get_mut(id).expect("just created");
+        buffer.major_mode = "minibuffer-mode";
+        if completion.is_some() {
+            buffer.minor_modes.push("minibuffer-completion");
+        }
         let window = Window::new(&mut core.buffers, id);
         core.others.insert(MINIBUFFER, window);
         core.minibuffer = Some(Minibuffer {
-            command,
+            command: command.name,
             args,
             prompt,
             from: core.selected,
             index: 0,
             input: String::new(),
+            completion,
         });
         core.select(MINIBUFFER);
         Ok(())
@@ -190,7 +245,10 @@ impl Ctx<'_> {
 
     /// Closes the minibuffer and calls its command with the text as the next string.
     fn exit_minibuffer(&mut self) -> Result<(), String> {
-        let text = self.core.text();
+        let text = self
+            .core
+            .selected_candidate()
+            .unwrap_or_else(|| self.core.text());
         let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
         let history = self.core.history.entry(mb.prompt).or_default();
         if !text.is_empty() && history.first() != Some(&text) {
@@ -225,11 +283,30 @@ impl Ctx<'_> {
             0 => mb.input.clone(),
             i => items[i - 1].clone(),
         };
-        let buffer = core.current_mut();
+        self.set_text(&new)
+    }
+
+    /// Replaces the current buffer's text with `new`, point at its end.
+    fn set_text(&mut self, new: &str) -> Result<(), String> {
+        let buffer = self.core.current_mut();
         let len = buffer.len_chars();
         buffer.delete(0..len).map_err(|err| err.to_string())?;
-        buffer.insert(0, &new).map_err(|err| err.to_string())?;
+        buffer.insert(0, new).map_err(|err| err.to_string())?;
         self.goto(new.chars().count())
+    }
+
+    /// Moves the completion selection `n` matches down, up when negative, stopping at the ends.
+    fn next_completion(&mut self, n: i64) -> Result<(), String> {
+        let count = self.core.matches();
+        let completion = (self.core.minibuffer.as_mut())
+            .and_then(|mb| mb.completion.as_mut())
+            .ok_or("Not completing")?;
+        if count == 0 {
+            return Err("No match".into());
+        }
+        let target = (completion.selected as i64).saturating_add(n);
+        completion.select(target.clamp(0, count as i64 - 1) as usize);
+        Ok(())
     }
 
     /// Fails with `err` while the minibuffer is selected.
@@ -985,6 +1062,10 @@ pub struct Core {
     minibuffer: Option<Minibuffer>,
     /// Each prompt's answers, newest first.
     history: HashMap<&'static str, Vec<String>>,
+    /// The fuzzy matcher for completion, made on first use.
+    matcher: Option<Nucleo<String>>,
+    /// The timer that polls the matcher again while it is still matching.
+    repoll: Option<TimerId>,
     /// The column a run of line motions aims for.
     goal_column: usize,
     /// Where the last `recenter-top-bottom` put point's line: middle, top or bottom.
@@ -1008,7 +1089,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 45] = [
+        let builtins: [(&'static str, command::Handler); 48] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1155,6 +1236,16 @@ impl Default for Core {
                 ctx.core.message = Some("Quit".into());
                 Ok(())
             }),
+            ("minibuffer-next-completion", |ctx, args| {
+                ctx.next_completion(args.count())
+            }),
+            ("minibuffer-previous-completion", |ctx, args| {
+                ctx.next_completion(args.count().saturating_neg())
+            }),
+            ("minibuffer-complete", |ctx, _| {
+                let text = ctx.core.selected_candidate().ok_or("No match")?;
+                ctx.set_text(&text)
+            }),
             ("previous-history-element", |ctx, args| {
                 ctx.history_element(args.count())
             }),
@@ -1213,6 +1304,8 @@ impl Default for Core {
             self_inserts: 0,
             minibuffer: None,
             history: HashMap::new(),
+            matcher: None,
+            repoll: None,
             goal_column: 0,
             recenter: 0,
             kill_ring: VecDeque::new(),
@@ -1337,7 +1430,59 @@ impl Core {
                 ctx.dispatch(msg);
             }
         }
-        ctx.effects
+        let effects = ctx.effects;
+        self.poll_completion(now);
+        effects
+    }
+
+    /// Matches the completing minibuffer's text against its candidates, waiting up to 10 ms,
+    /// and polls again on a timer while the matcher is still running.
+    fn poll_completion(&mut self, now: Instant) {
+        let text = self.text();
+        let Some(completion) = (self.minibuffer.as_mut()).and_then(|mb| mb.completion.as_mut())
+        else {
+            return;
+        };
+        let matcher = self
+            .matcher
+            .as_mut()
+            .expect("a completing minibuffer has a matcher");
+        if completion.pattern != text {
+            // Text that extends the old pattern lets nucleo narrow the last matches.
+            let append = text.starts_with(&completion.pattern);
+            (matcher.pattern).reparse(0, &text, CaseMatching::Smart, Normalization::Smart, append);
+            completion.pattern = text;
+            completion.select(0);
+        }
+        if let Some(id) = self.repoll.take() {
+            self.timers.cancel(id);
+        }
+        if matcher.tick(10).running {
+            self.repoll = Some(self.timers.start(now, REPOLL, None, Msg::Tick));
+        }
+    }
+
+    /// How many candidates match, 0 when not completing.
+    fn matches(&self) -> usize {
+        match (&self.minibuffer, &self.matcher) {
+            (
+                Some(Minibuffer {
+                    completion: Some(_),
+                    ..
+                }),
+                Some(m),
+            ) => m.snapshot().matched_item_count() as usize,
+            _ => 0,
+        }
+    }
+
+    /// The selected candidate, if the minibuffer is completing and anything matches.
+    fn selected_candidate(&self) -> Option<String> {
+        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
+        let snapshot = self.matcher.as_ref()?.snapshot();
+        let last = snapshot.matched_item_count().checked_sub(1)?;
+        let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
+        Some(item.data.clone())
     }
 
     /// Visits `path` in a new current buffer holding `text`, already read from it.
@@ -1443,11 +1588,27 @@ impl Core {
 
     /// The open minibuffer's prompt and the line holding its point.
     pub fn minibuffer(&mut self) -> Option<display::Minibuffer> {
-        let prompt = self.minibuffer.as_ref()?.prompt.to_string();
+        let mb = self.minibuffer.as_ref()?;
+        let prompt = mb.prompt.to_string();
+        let (mut candidates, mut selected) = (Vec::new(), None);
+        if let (Some(completion), Some(matcher)) = (&mb.completion, &mut self.matcher) {
+            matcher.tick(0);
+            let snapshot = matcher.snapshot();
+            let count = snapshot.matched_item_count() as usize;
+            let rows = completion.top.min(count)..(completion.top + COMPLETION_ROWS).min(count);
+            let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
+            candidates = items.map(|item| item.data.clone()).collect();
+            selected = (count > 0).then(|| completion.selected.min(count - 1) - rows.start);
+        }
         // The minibuffer is selected while open; one row, as the height leaves out a mode line.
         let height = 2. * self.settings.line_height();
         let display = window_display(&mut self.window, &self.buffers, &self.settings, height);
-        Some(display::Minibuffer { prompt, display })
+        Some(display::Minibuffer {
+            prompt,
+            display,
+            candidates,
+            selected,
+        })
     }
 
     /// Closes the minibuffer, selecting the window it was opened from again.

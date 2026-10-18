@@ -75,3 +75,11 @@
 "C-g" = "abort-minibuffers"
 "M-p" = "previous-history-element"
 "M-n" = "next-history-element"
+
+# A minor mode of a minibuffer that completes over candidates.
+[minibuffer-completion]
+"C-n" = "minibuffer-next-completion"
+"<down>" = "minibuffer-next-completion"
+"C-p" = "minibuffer-previous-completion"
+"<up>" = "minibuffer-previous-completion"
+"TAB" = "minibuffer-complete"

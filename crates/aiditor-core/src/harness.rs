@@ -71,7 +71,17 @@ impl Harness {
     pub fn send(&mut self, msg: Msg) -> &mut Self {
         let effects = self.core.handle(self.now, msg);
         self.run(effects);
+        self.settle();
         self
+    }
+
+    /// Waits for the completion matcher's threads, so tests see settled matches.
+    fn settle(&mut self) {
+        self.core.poll_completion(self.now);
+        let core = &mut self.core;
+        while let (Some(_), Some(matcher)) = (&core.minibuffer, &mut core.matcher)
+            && matcher.tick(50).running
+        {}
     }
 
     /// Calls the command `name` with `args`, carrying out its effects as the app does.
@@ -80,6 +90,7 @@ impl Harness {
         ctx.call(name, args);
         let effects = ctx.effects;
         self.run(effects);
+        self.settle();
         self
     }
 
@@ -1934,5 +1945,96 @@ mod tests {
         insta::assert_debug_snapshot!(frame.minibuffer);
         h.keys("C-g");
         assert_eq!(h.frame(800., 600.).minibuffer, None);
+    }
+
+    /// Registers `ask` completing over `candidates` at the prompt `Pick: `, bound to `C-c p`.
+    fn ask_completing(h: &mut Harness, candidates: fn(&Core, &Args) -> Vec<String>) {
+        test_cmd(
+            h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(candidates),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(h, "global", "C-c p", "test-cmd");
+    }
+
+    fn fruit(_: &Core, _: &Args) -> Vec<String> {
+        ["apple", "banana", "cherry"].map(String::from).into()
+    }
+
+    fn listed(h: &mut Harness) -> (Vec<String>, Option<usize>) {
+        let mb = h.core.minibuffer().unwrap();
+        (mb.candidates, mb.selected)
+    }
+
+    #[test]
+    fn typing_filters_candidates() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p");
+        assert_eq!(listed(&mut h), (fruit(&h.core, &Args::default()), Some(0)));
+        h.keys("an");
+        assert_eq!(listed(&mut h), (vec!["banana".into()], Some(0)));
+        h.keys("DEL DEL ch");
+        assert_eq!(listed(&mut h).0, ["cherry"]);
+        h.keys("C-g");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p");
+        assert_eq!(listed(&mut h), (vec![], None), "a plain prompt has no list");
+    }
+
+    #[test]
+    fn c_n_and_c_p_move_the_selection() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p C-n C-n C-n");
+        assert_eq!(listed(&mut h).1, Some(2), "stops at the last");
+        h.keys("C-p");
+        assert_eq!(listed(&mut h).1, Some(1));
+        h.keys("C-u 5 C-p");
+        assert_eq!(listed(&mut h).1, Some(0), "stops at the first");
+        h.keys("C-n a");
+        assert_eq!(listed(&mut h).1, Some(0), "typing selects the first match");
+        h.keys("zzz C-n");
+        assert_eq!(h.core.message(), Some("No match"));
+        h.keys("C-g");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p ab C-p C-n");
+        assert_eq!(h.text(), "ab", "C-n and C-p keep their global bindings");
+    }
+
+    #[test]
+    fn tab_completes_and_ret_picks_the_selection() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p C-n TAB");
+        assert_eq!((h.text().as_str(), h.point()), ("banana", 6));
+        h.keys("C-g C-c p ch RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["cherry"])));
+        h.keys("C-c p zzz TAB");
+        assert_eq!(h.core.message(), Some("No match"));
+        h.keys("RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["zzz"])));
+    }
+
+    #[test]
+    fn the_frame_shows_the_completion_list() {
+        let mut h = on("");
+        ask_completing(&mut h, |_, _| {
+            (1..=15).map(|i| format!("item {i}")).collect()
+        });
+        h.keys("C-c p C-u 12 C-n");
+        let mb = h.frame(800., 600.).minibuffer.unwrap();
+        assert_eq!((mb.candidates.len(), mb.selected), (10, Some(9)));
+        insta::assert_debug_snapshot!((mb.candidates, mb.selected));
+        h.keys("C-u 9 C-p");
+        assert_eq!(
+            listed(&mut h).1,
+            Some(0),
+            "scrolls up only as far as needed"
+        );
+        assert_eq!(listed(&mut h).0[0], "item 4");
     }
 }
