@@ -687,19 +687,22 @@ mod tests {
         ] {
             assert_eq!(key(stroke, true).as_deref(), want, "{stroke}");
         }
-        let typed = |s: &str| Keystroke {
-            key_char: Some(s.into()),
-            ..Keystroke::parse(s).unwrap()
+        // A key that types, with the text the platform reports for it.
+        let typed = |stroke: &str, text: &str| Keystroke {
+            key_char: Some(text.into()),
+            ..Keystroke::parse(stroke).unwrap()
         };
-        assert_eq!(to_key(&typed("a"), true), None);
-        assert_eq!(to_key(&typed("shift-a"), true), None);
-        // Option for characters is macOS only; Linux's Alt stays Meta.
+        assert_eq!(to_key(&typed("a", "a"), true), None);
+        assert_eq!(to_key(&typed("shift-a", "A"), true), None);
+        // Option for characters is macOS only; Linux's Alt stays Meta. macOS reports Option-e's
+        // dead key as the accent and a no-break space.
         let alt_e = if cfg!(target_os = "macos") {
             None
         } else {
-            Some("M-e")
+            Some("M-e".to_string())
         };
-        assert_eq!(key("alt-e", false).as_deref(), alt_e);
+        let option_e = typed("alt-e", "\u{b4}\u{a0}");
+        assert_eq!(to_key(&option_e, false).map(|k| k.to_string()), alt_e);
         assert_eq!(key("alt-e", true).as_deref(), Some("M-e"));
     }
 
