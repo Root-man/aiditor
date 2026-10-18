@@ -11,6 +11,7 @@ use aiditor_core::key::{Key, KeyCode};
 use aiditor_core::settings::Theme;
 use aiditor_core::window::WindowId;
 use aiditor_core::{Core, Effect, Msg};
+use aiditor_services::files;
 use gpui::{
     App, Application, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Font, GlobalElementId,
@@ -30,10 +31,7 @@ const FONT: &str = if cfg!(target_os = "macos") {
 struct Editor {
     core: Core,
     focus: FocusHandle,
-    #[expect(
-        dead_code,
-        reason = "keeps the channel open; effects will clone it into services"
-    )]
+    /// Services send their results to the core on this.
     tx: mpsc::Sender<Msg>,
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
@@ -105,15 +103,26 @@ impl Editor {
         }
         for effect in effects {
             match effect {
-                // shortcut: a synchronous, non-atomic write on the UI thread; the file service (#46) replaces it.
-                Effect::Save { buffer, path, text } => {
-                    match std::fs::write(&path, text.to_string()) {
-                        Ok(()) => {
-                            tracing::info!(path = %path.display(), "saved");
-                            self.handle(Msg::Saved(buffer), cx);
+                Effect::Save {
+                    buffer,
+                    tick,
+                    path,
+                    bytes,
+                    hash,
+                } => {
+                    let tx = self.tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = files::write(&path, &bytes, hash);
+                        match &result {
+                            Ok(_) => tracing::info!(path = %path.display(), "saved"),
+                            Err(err) => tracing::error!(%err, "save failed"),
                         }
-                        Err(err) => tracing::error!(path = %path.display(), %err, "save failed"),
-                    }
+                        _ = tx.blocking_send(Msg::Saved {
+                            buffer,
+                            tick,
+                            result,
+                        });
+                    });
                 }
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
@@ -869,15 +878,11 @@ fn main() {
     );
     if let Some(arg) = args.file.take() {
         let path = std::path::absolute(&arg).unwrap_or(arg);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
-            Err(err) => {
-                eprintln!("aiditor: {}: {err}", path.display());
-                std::process::exit(1);
-            }
-        };
-        core.open(&path, &text);
+        let file = files::read(&path).unwrap_or_else(|err| {
+            eprintln!("aiditor: {}: {err}", path.display());
+            std::process::exit(1);
+        });
+        core.open(&path, file);
     }
 
     // Services run here, on background threads; GPUI owns the main thread.
@@ -977,7 +982,7 @@ mod tests {
     ) -> (gpui::Entity<Editor>, &'a mut VisualTestContext) {
         let (editor, cx) = cx.add_window_view(|_, cx| {
             let mut core = Core::default();
-            core.open(Path::new("/nonexistent/t.txt"), text);
+            core.open(Path::new("/nonexistent/t.txt"), Some((text.into(), 0)));
             Editor::new(core, Args::default(), cx)
         });
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));
@@ -1025,6 +1030,9 @@ mod tests {
 
     #[gpui::test]
     fn every_bundled_binding_reaches_the_core(cx: &mut TestAppContext) {
+        // `C-x C-s` hands the save to Tokio's blocking pool.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
         let (editor, cx) = editor(cx, "");
         let (maps, _) = keymap::parse(keymap::BUNDLED, None, |_| Some("any")).unwrap();
         let mut script = Vec::new();

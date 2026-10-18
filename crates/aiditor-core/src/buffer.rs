@@ -27,6 +27,7 @@ pub enum InsertionType {
 pub enum Error {
     NoSuchBuffer(BufferId),
     OutOfRange,
+    ReadOnly,
 }
 
 impl fmt::Display for Error {
@@ -34,6 +35,7 @@ impl fmt::Display for Error {
         match self {
             Error::NoSuchBuffer(id) => write!(f, "no buffer {}", id.0),
             Error::OutOfRange => f.write_str("position out of range"),
+            Error::ReadOnly => f.write_str("Buffer is read-only"),
         }
     }
 }
@@ -61,6 +63,10 @@ impl Buffers {
             name: name.to_string(),
             content: Content::Text(Rope::new()),
             file: None,
+            crlf: false,
+            bom: false,
+            disk: None,
+            read_only: false,
             modified: false,
             tick: 0,
             markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
@@ -141,6 +147,13 @@ pub struct Buffer {
     pub name: String,
     content: Content,
     pub file: Option<PathBuf>,
+    /// The file's line breaks are CRLF, written back on save.
+    pub crlf: bool,
+    /// The file starts with a UTF-8 byte-order mark, written back on save.
+    pub bom: bool,
+    /// The hash of the file's bytes as last loaded or saved; `None` when there was no file.
+    pub disk: Option<u64>,
+    pub read_only: bool,
     modified: bool,
     /// Counts text changes, like Emacs's `buffer-modified-tick`.
     tick: u64,
@@ -300,6 +313,9 @@ impl Buffer {
     }
 
     fn raw_insert(&mut self, char_idx: usize, text: &str) -> Result<(), Error> {
+        if self.read_only && !text.is_empty() {
+            return Err(Error::ReadOnly);
+        }
         match &mut self.content {
             Content::Text(rope) => rope.try_insert(char_idx, text)?,
         }
@@ -316,6 +332,9 @@ impl Buffer {
 
     fn raw_delete(&mut self, range: Range<usize>) -> Result<(), Error> {
         let changed = !range.is_empty();
+        if self.read_only && changed {
+            return Err(Error::ReadOnly);
+        }
         match &mut self.content {
             Content::Text(rope) => rope.try_remove(range.clone())?,
         }
@@ -416,6 +435,38 @@ impl Buffer {
     pub fn set_saved(&mut self) {
         self.modified = false;
     }
+
+    /// The text as the file's bytes: its BOM and line ending, as loaded.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = String::with_capacity(self.text().len_bytes() + 3);
+        if self.bom {
+            out.push('\u{feff}');
+        }
+        for chunk in self.text().chunks() {
+            match self.crlf {
+                true => out.push_str(&chunk.replace('\n', "\r\n")),
+                false => out.push_str(chunk),
+            }
+        }
+        out.into_bytes()
+    }
+}
+
+/// A file's bytes as buffer text, and whether it used CRLF and a BOM; or why it is refused.
+pub fn decode(bytes: &[u8]) -> Result<(String, bool, bool), &'static str> {
+    let bom = bytes.starts_with(b"\xEF\xBB\xBF");
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return Err("binary file");
+    }
+    let text =
+        std::str::from_utf8(&bytes[if bom { 3 } else { 0 }..]).map_err(|_| "not valid UTF-8")?;
+    // The first line break sets the ending; lone CRs stay in the text.
+    let crlf = text.find('\n').is_some_and(|i| text[..i].ends_with('\r'));
+    let text = match crlf {
+        true => text.replace("\r\n", "\n"),
+        false => text.to_string(),
+    };
+    Ok((text, crlf, bom))
 }
 
 #[cfg(test)]
@@ -500,6 +551,34 @@ mod tests {
         assert_eq!(b.delete(reversed), Err(Error::OutOfRange));
         assert_eq!(b.text(), "hello");
         assert!(!b.modified());
+    }
+
+    #[test]
+    fn decodes_and_encodes_bom_and_line_endings() {
+        assert_eq!(decode(b"a\nb\r\n"), Ok(("a\nb\r\n".into(), false, false)));
+        assert_eq!(decode(b"a\r\nb\r\n"), Ok(("a\nb\n".into(), true, false)));
+        assert_eq!(decode(b"\xEF\xBB\xBFhi"), Ok(("hi".into(), false, true)));
+        assert_eq!(decode(b""), Ok((String::new(), false, false)));
+        assert_eq!(decode(b"a\0b"), Err("binary file"));
+        assert_eq!(decode(b"caf\xE9"), Err("not valid UTF-8"));
+        // A NUL past the first 8 KB is valid UTF-8 text.
+        let late = [vec![b'a'; 8192], vec![0]].concat();
+        assert!(decode(&late).is_ok());
+
+        let (mut buffers, id) = with_text("a\nb\n");
+        let b = buffers.get_mut(id).unwrap();
+        (b.crlf, b.bom) = (true, true);
+        assert_eq!(b.encode(), b"\xEF\xBB\xBFa\r\nb\r\n");
+    }
+
+    #[test]
+    fn read_only_buffers_refuse_edits() {
+        let (mut buffers, id) = with_text("x");
+        let b = buffers.get_mut(id).unwrap();
+        b.read_only = true;
+        assert_eq!(b.insert(0, "y"), Err(Error::ReadOnly));
+        assert_eq!(b.delete(0..1), Err(Error::ReadOnly));
+        assert_eq!(b.text(), "x");
     }
 
     #[test]
