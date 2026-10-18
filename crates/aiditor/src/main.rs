@@ -805,14 +805,13 @@ fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -> (String, 
     let text: String = spans.map(|s| s.text.as_str()).collect();
     let col = mb.display.cursor.map_or(usize::MAX, |(_, col)| col);
     let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
+    // The echo line is shaped as one line; a prompt or message may name a buffer with newlines.
+    let prompt = mb.prompt.replace('\n', "^J");
     let message = match message.is_empty() {
         true => String::new(),
-        false => format!(" [{message}]"),
+        false => format!(" [{}]", message.replace('\n', "^J")),
     };
-    (
-        format!("{}{text}{message}", mb.prompt),
-        mb.prompt.len() + byte,
-    )
+    (format!("{prompt}{text}{message}"), prompt.len() + byte)
 }
 
 /// `line`'s text with `marked` spliced in at char column `at`, one run per span, and the byte

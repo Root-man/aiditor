@@ -178,7 +178,12 @@ pub fn build(
     WindowDisplay {
         lines,
         cursor,
-        mode_line: format!("{state} {}{dos}  {}:{c}", buffer.name, l + 1),
+        // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
+        mode_line: format!(
+            "{state} {}{dos}  {}:{c}",
+            buffer.name.replace('\n', "^J"),
+            l + 1
+        ),
     }
 }
 
@@ -337,5 +342,12 @@ mod tests {
         assert_eq!(h.display(5).mode_line, "-- a.txt  1:0");
         h.keys("<down> <down> <right> x");
         assert_eq!(h.display(5).mode_line, "** a.txt  3:2");
+    }
+
+    #[test]
+    fn mode_line_shows_newlines_in_a_buffer_name_as_caret_j() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x b a C-o RET");
+        assert_eq!(h.display(5).mode_line, "-- a^J  1:0");
     }
 }
