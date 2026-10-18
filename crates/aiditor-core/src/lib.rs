@@ -24,7 +24,7 @@ use key::{Key, KeyCode};
 use keymap::{Binding, Keymap};
 use settings::Settings;
 use timer::{TimerId, Timers};
-use window::Window;
+use window::{Tree, Window, WindowId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
@@ -737,6 +737,49 @@ impl Ctx<'_> {
         core.window.set_top(line.saturating_sub(row as usize));
     }
 
+    /// Splits the selected window in two, the new one below or right of it.
+    fn split_window(&mut self, side_by_side: bool) {
+        let core = &mut *self.core;
+        let id = WindowId(core.next_window);
+        core.next_window += 1;
+        let new = core.window.split(&mut core.buffers);
+        core.others.insert(id, new);
+        core.tree.split(core.selected, id, side_by_side);
+    }
+
+    /// Selects the window `n` on from the selected one in tree order, wrapping round.
+    fn other_window(&mut self, n: i64) {
+        let core = &mut *self.core;
+        let leaves = core.tree.leaves();
+        let at = leaves.iter().position(|&id| id == core.selected);
+        let at = at.expect("the selected window is in the tree") as i64;
+        let next = (at + n.rem_euclid(leaves.len() as i64)) as usize % leaves.len();
+        core.select(leaves[next]);
+    }
+
+    /// Deletes the selected window, selecting the sibling that takes its space.
+    fn delete_window(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let old = core.selected;
+        let next = (core.tree.remove(old))
+            .ok_or("Attempt to delete minibuffer or sole ordinary window")?;
+        core.select(next);
+        core.others
+            .remove(&old)
+            .expect("deleted window is live")
+            .release(&mut core.buffers);
+        Ok(())
+    }
+
+    /// Deletes every window but the selected one.
+    fn delete_other_windows(&mut self) {
+        let core = &mut *self.core;
+        for (_, window) in core.others.drain() {
+            window.release(&mut core.buffers);
+        }
+        core.tree = Tree::Leaf(core.selected);
+    }
+
     fn save(&mut self) {
         let id = self.core.window.buffer();
         let buffer = self.core.current();
@@ -753,8 +796,14 @@ impl Ctx<'_> {
 
 pub struct Core {
     buffers: Buffers,
-    /// The frame's one window, showing the current buffer, until splits land.
+    /// The selected window, showing the current buffer.
     window: Window,
+    selected: WindowId,
+    /// Every window but the selected one.
+    others: HashMap<WindowId, Window>,
+    tree: Tree,
+    /// The id the next new window gets.
+    next_window: usize,
     timers: Timers,
     /// Keymaps by mode name, plus `global`.
     keymaps: HashMap<String, Keymap>,
@@ -801,7 +850,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 36] = [
+        let builtins: [(&'static str, command::Handler); 41] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -935,6 +984,23 @@ impl Default for Core {
             ("exchange-point-and-mark", |ctx, _| {
                 ctx.exchange_point_and_mark()
             }),
+            ("split-window-below", |ctx, _| {
+                ctx.split_window(false);
+                Ok(())
+            }),
+            ("split-window-right", |ctx, _| {
+                ctx.split_window(true);
+                Ok(())
+            }),
+            ("other-window", |ctx, args| {
+                ctx.other_window(args.count());
+                Ok(())
+            }),
+            ("delete-window", |ctx, _| ctx.delete_window()),
+            ("delete-other-windows", |ctx, _| {
+                ctx.delete_other_windows();
+                Ok(())
+            }),
             ("keyboard-quit", |ctx, _| {
                 ctx.core.window.set_active(false);
                 ctx.core.message = Some("Quit".into());
@@ -968,6 +1034,10 @@ impl Default for Core {
         let mut core = Core {
             buffers,
             window,
+            selected: WindowId(0),
+            others: HashMap::new(),
+            tree: Tree::Leaf(WindowId(0)),
+            next_window: 1,
             timers: Timers::default(),
             keymaps: HashMap::new(),
             transient: None,
@@ -1170,21 +1240,68 @@ impl Core {
         self.window.point(&self.buffers)
     }
 
-    /// The window's display model for a window `height` px high, mode line included.
+    /// The selected window's display model for a window `height` px high, mode line included.
     pub fn display(&mut self, height: f32) -> display::WindowDisplay {
-        let rows = ((height / self.settings.line_height()) as usize)
-            .saturating_sub(1)
-            .max(1);
-        // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
-        let top = self.window.scroll(&self.buffers, rows);
-        let buffer = self.current();
-        let point = self.point();
-        let mark = (self.window.mark(&self.buffers)).filter(|_| self.window.active());
-        display::build(buffer, top, rows, point, mark, &self.settings)
+        window_display(&mut self.window, &self.buffers, &self.settings, height)
+    }
+
+    /// Every window's display model, laid out in a frame `width` by `height` px.
+    pub fn frame(&mut self, width: f32, height: f32) -> display::FrameDisplay {
+        let frame = display::Rect {
+            x: 0.,
+            y: 0.,
+            width,
+            height,
+        };
+        let windows = (self.tree.layout(frame).into_iter())
+            .map(|(id, rect)| {
+                let selected = id == self.selected;
+                let window = match selected {
+                    true => &mut self.window,
+                    false => self.others.get_mut(&id).expect("tree windows are live"),
+                };
+                let display = window_display(window, &self.buffers, &self.settings, rect.height);
+                display::FrameWindow {
+                    rect,
+                    selected,
+                    display,
+                }
+            })
+            .collect();
+        display::FrameDisplay { windows }
+    }
+
+    /// Makes window `id` the selected one.
+    fn select(&mut self, id: WindowId) {
+        if id == self.selected {
+            return;
+        }
+        let window = self.others.remove(&id).expect("selected window is live");
+        let old = std::mem::replace(&mut self.window, window);
+        self.others.insert(self.selected, old);
+        self.selected = id;
     }
 
     /// The window's first line once point's line is among the `rows` it shows.
     pub fn scroll(&mut self, rows: usize) -> usize {
         self.window.scroll(&self.buffers, rows)
     }
+}
+
+/// `window`'s display model for a window `height` px high, mode line included.
+fn window_display(
+    window: &mut Window,
+    buffers: &Buffers,
+    settings: &Settings,
+    height: f32,
+) -> display::WindowDisplay {
+    let rows = ((height / settings.line_height()) as usize)
+        .saturating_sub(1)
+        .max(1);
+    // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
+    let top = window.scroll(buffers, rows);
+    let buffer = buffers.get(window.buffer()).expect("window buffer is live");
+    let point = window.point(buffers);
+    let mark = window.mark(buffers).filter(|_| window.active());
+    display::build(buffer, top, rows, point, mark, settings)
 }
