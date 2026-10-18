@@ -1915,6 +1915,61 @@ mod tests {
         insta::assert_debug_snapshot!(h.frame(800., 600.));
     }
 
+    /// Each shown line's text and the cursor of a frame's first window.
+    fn shown(frame: &FrameDisplay) -> (Vec<String>, Option<(usize, usize)>) {
+        let d = &frame.windows[0].display;
+        let text = |l: &crate::display::Line| l.spans.iter().map(|s| s.text.as_str()).collect();
+        (d.lines.iter().map(text).collect(), d.cursor)
+    }
+
+    #[test]
+    fn point_s_line_scrolls_sideways_to_keep_point_visible() {
+        let long: String = (0..100).map(|i| char::from(b'a' + i % 26)).collect();
+        let mut h = on(&format!("{long}\n{long}\n{long}"));
+        h.keys("C-n");
+        // 40 columns of 8 px cells.
+        let (width, height) = (320., 600.);
+        h.keys("C-e");
+        let (lines, cursor) = shown(&h.frame(width, height));
+        assert_eq!(lines, [&long, &long[61..], &long]);
+        assert_eq!(cursor, Some((1, 39)));
+        h.keys("C-a");
+        let (lines, cursor) = shown(&h.frame(width, height));
+        assert_eq!((lines, cursor), (vec![long.clone(); 3], Some((1, 0))));
+    }
+
+    #[test]
+    fn the_minibuffer_line_scrolls_sideways() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        // 20 columns, 14 after the prompt.
+        h.frame(160., 600.);
+        h.keys("C-c p abcdefghijklmnopqrstuvwxyzABCD");
+        let mb = h.core.minibuffer().unwrap();
+        let text: String = mb.display.lines[0].spans.iter().map(|s| &*s.text).collect();
+        assert_eq!(
+            (text.as_str(), mb.display.cursor),
+            ("rstuvwxyzABCD", Some((0, 13)))
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_scrolled_line_lands_on_the_clicked_char() {
+        let long: String = (0..100).map(|i| char::from(b'a' + i % 26)).collect();
+        let mut h = on(&format!("{long}\n{long}"));
+        h.keys("C-e");
+        h.frame(320., 600.);
+        let click = |line| Msg::Click {
+            window: WindowId(0),
+            line,
+            col: 0,
+        };
+        h.send(click(0));
+        assert_eq!(h.point(), 61);
+        h.send(click(1));
+        assert_eq!(h.point(), 101, "another line is not scrolled");
+    }
+
     #[test]
     fn clicks_select_and_scrolls_keep_the_selected_window() {
         let mut h = twenty_lines();
