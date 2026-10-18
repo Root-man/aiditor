@@ -18,7 +18,7 @@ The editor SHALL ship bundled default settings and SHALL read the user's `settin
 - **THEN** the bundled defaults apply and no error is reported
 
 ### Requirement: M0 settings cover font and theme
-The settings SHALL hold a font family, a font size and a default theme of background, foreground, cursor and region colors, and the frame SHALL draw with them. An unset font family SHALL mean the platform's monospace font.
+The settings SHALL hold a font family, a font size, a default theme of background, foreground, cursor and region colors, and `option_as_meta`, and the frame SHALL draw with them. An unset font family SHALL mean the platform's monospace font. `option_as_meta` SHALL default to true and SHALL only matter on macOS.
 
 #### Scenario: Font size drawn
 - **WHEN** the font size setting is 18
@@ -27,6 +27,10 @@ The settings SHALL hold a font family, a font size and a default theme of backgr
 #### Scenario: Region color
 - **WHEN** the user file sets the theme's region color
 - **THEN** the display model highlights the region in that color
+
+#### Scenario: Option as Meta by default
+- **WHEN** no user file sets `option_as_meta`
+- **THEN** `option_as_meta` is true
 
 ### Requirement: Invalid settings are rejected whole
 A settings file that is not valid TOML, has a value of the wrong type, a font size outside 6 to 72, or a key the editor does not know SHALL be rejected. The editor SHALL show an error naming the problem and SHALL keep the settings it had before.
