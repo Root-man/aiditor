@@ -111,4 +111,5 @@ FrameDisplay {
             },
         },
     ],
+    message: None,
 }

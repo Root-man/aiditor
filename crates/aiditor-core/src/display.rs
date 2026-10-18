@@ -24,6 +24,8 @@ pub struct Rect {
 #[derive(Debug, PartialEq)]
 pub struct FrameDisplay {
     pub windows: Vec<FrameWindow>,
+    /// The echo area's text, if a message is shown.
+    pub message: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]

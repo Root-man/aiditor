@@ -1319,7 +1319,10 @@ impl Core {
                 }
             })
             .collect();
-        display::FrameDisplay { windows }
+        display::FrameDisplay {
+            windows,
+            message: self.message.clone(),
+        }
     }
 
     /// Makes window `id` the selected one.
