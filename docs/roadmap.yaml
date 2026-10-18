@@ -910,6 +910,21 @@ milestones:
               - "In `find-file`, going from a directory with 10 entries to one with 5 keeps 10 rows (5 empty) and the windows above don't move"
               - "The next minibuffer starts at the height its own candidates need"
             blocked_by: [m0-find-file]
+      - key: m5-crash
+        title: "Crash safety beyond commands"
+        labels: [frontend]
+        design: "#subsystems"
+        body: |
+          Crash safety that M0 left out. Break down when M5 starts.
+        tasks:
+          - key: m5-frontend-catch-unwind
+            title: "Contain panics outside commands"
+            body: |
+              #52 wraps only command calls in `catch_unwind`, so a panic while the frontend applies a service result, fires a timer or renders still ends the process; on macOS, inside the key callback, it aborts. Wrap every frontend call into the core in `catch_unwind` and report it the same way: echo line plus panic and backtrace in `*Messages*`.
+            acceptance:
+              - "A panic while applying a service result or firing a timer leaves the editor running and logs to Messages"
+              - "On macOS, a panic during key handling doesn't abort the process"
+            blocked_by: [m0-catch-unwind]
       - key: m5-format
         title: "Formatter commands"
         labels: [text]
