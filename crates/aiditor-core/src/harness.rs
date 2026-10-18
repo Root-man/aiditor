@@ -2285,6 +2285,42 @@ mod tests {
         );
     }
 
+    fn messages(h: &Harness) -> Option<String> {
+        let id = h.core.buffers.find("*Messages*")?;
+        Some(h.core.buffers.get(id).unwrap().text().to_string())
+    }
+
+    #[test]
+    fn echo_messages_and_log_lines_go_to_messages() {
+        let mut h = Harness::new(&[]);
+        assert_eq!(messages(&h), None);
+        h.keys("C-g C-g M-z");
+        h.send(Msg::Log("WARN aiditor: careful".into()));
+        assert_eq!(
+            messages(&h).unwrap(),
+            "Quit\nQuit\nM-z is undefined\nWARN aiditor: careful\n"
+        );
+        // Each part of a joined message gets its own line.
+        h.send(Msg::SettingsLoaded(Err("e1".into())));
+        h.send(Msg::KeymapLoaded(Err("e2".into())));
+        assert!(
+            messages(&h)
+                .unwrap()
+                .ends_with("careful\nsettings: e1\nkeymap: e2\n")
+        );
+    }
+
+    #[test]
+    fn messages_is_read_only_and_made_again_after_a_kill() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-g C-x b *Messages* RET a");
+        assert_eq!(name(&h), "*Messages*");
+        assert_eq!(h.core.message(), Some("Buffer is read-only"));
+        assert_eq!(h.text(), "Quit\nBuffer is read-only\n");
+        h.keys("C-x k RET C-g");
+        assert_eq!(messages(&h).unwrap(), "Quit\n");
+    }
+
     #[test]
     fn c_x_k_kills_the_current_buffer_in_every_window() {
         let mut h = Harness::new(&[("a", "1")]);
@@ -2297,6 +2333,9 @@ mod tests {
         assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*");
         h.keys("C-x k nope RET");
         assert_eq!(h.core.message(), Some("No such buffer nope"));
+        // That message made *Messages*.
+        assert_eq!(h.core.buffers.recent().count(), 2);
+        h.keys("C-x k *Messages* RET");
         assert_eq!(h.core.buffers.recent().count(), 1);
         // Killing the last buffer leaves a new, empty *scratch*.
         h.keys("x C-x k RET");
@@ -2419,7 +2458,8 @@ mod tests {
         h.keys("C-x C-f M-RET");
         assert_eq!(name(&h), "a.txt");
         assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/")));
-        assert_eq!(h.core.buffers.recent().count(), 2);
+        // a.txt, *scratch* and *Messages*.
+        assert_eq!(h.core.buffers.recent().count(), 3);
     }
 
     #[test]

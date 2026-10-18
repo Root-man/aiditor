@@ -249,6 +249,14 @@ impl Buffer {
         Ok(())
     }
 
+    /// Appends `text` at the end, past read-only and without undo, as Emacs logs to `*Messages*`.
+    pub fn append(&mut self, text: &str) {
+        let read_only = std::mem::take(&mut self.read_only);
+        let end = self.len_chars();
+        self.raw_insert(end, text).expect("the end is in range");
+        self.read_only = read_only;
+    }
+
     /// Ends the open undo group with point at `point`; the next edit starts a group with point there.
     pub fn undo_boundary(&mut self, point: usize) {
         let h = &mut self.history;
@@ -587,6 +595,17 @@ mod tests {
         assert_eq!(b.insert(0, "y"), Err(Error::ReadOnly));
         assert_eq!(b.delete(0..1), Err(Error::ReadOnly));
         assert_eq!(b.text(), "x");
+    }
+
+    #[test]
+    fn append_passes_read_only_without_undo() {
+        let (mut buffers, id) = with_text("x");
+        let b = buffers.get_mut(id).unwrap();
+        b.read_only = true;
+        b.append("y\n");
+        assert_eq!(b.text(), "xy\n");
+        assert!(b.read_only);
+        assert_eq!(b.undo(), None);
     }
 
     #[test]

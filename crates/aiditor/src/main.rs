@@ -20,7 +20,9 @@ use gpui::{
     Window, WindowOptions, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use tokio::sync::mpsc;
-use tracing_subscriber::{EnvFilter, filter::LevelFilter};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{EnvFilter, Layer, filter::LevelFilter, fmt};
 
 const FONT: &str = if cfg!(target_os = "macos") {
     "Menlo"
@@ -64,8 +66,13 @@ struct Debug {
 }
 
 impl Editor {
-    fn new(core: Core, args: Args, cx: &mut Context<Self>) -> Self {
-        let (tx, mut rx) = aiditor_services::channel();
+    /// `channel` is the services channel, made first so `tracing` can log into it.
+    fn new(
+        core: Core,
+        args: Args,
+        (tx, mut rx): (mpsc::Sender<Msg>, mpsc::Receiver<Msg>),
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.spawn(async move |this, cx| {
             while let Some(msg) = rx.recv().await {
                 if this
@@ -864,14 +871,44 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
     Ok(parsed)
 }
 
+/// Sends each event `tracing` formats to the core as a `*Messages*` line.
+struct LogPipe(mpsc::Sender<Msg>);
+
+impl std::io::Write for LogPipe {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let line = String::from_utf8_lossy(buf).trim_end().to_string();
+        // shortcut: a line is dropped while the channel is full; give logs their own channel if lines go missing.
+        _ = self.0.try_send(Msg::Log(line));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The `tracing` layer that logs warnings and errors to `*Messages*`, formatted as stderr gets
+/// them but without colour.
+fn messages_layer<S>(tx: mpsc::Sender<Msg>) -> impl Layer<S>
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fmt::layer()
+        .with_ansi(false)
+        .with_writer(move || LogPipe(tx.clone()))
+        .with_filter(LevelFilter::WARN)
+}
+
 fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
+    let channel = aiditor_services::channel();
+    tracing_subscriber::registry()
+        .with(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::INFO.into())
                 .from_env_lossy(),
         )
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(messages_layer(channel.0.clone()))
         .init();
 
     let mut args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|err| {
@@ -909,7 +946,7 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         let window = cx
             .open_window(WindowOptions::default(), |_, cx| {
-                cx.new(|cx| Editor::new(core, args, cx))
+                cx.new(|cx| Editor::new(core, args, channel, cx))
             })
             .expect("failed to open a window");
         window
@@ -931,6 +968,25 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, String> {
         parse_args(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn warnings_reach_the_core_without_colour_and_info_does_not() {
+        let (tx, mut rx) = aiditor_services::channel();
+        let subscriber = tracing_subscriber::registry().with(messages_layer(tx));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("starting");
+            tracing::warn!(n = 1, "careful");
+        });
+        let Ok(Msg::Log(line)) = rx.try_recv() else {
+            panic!("no log line");
+        };
+        assert!(
+            line.contains("WARN") && line.ends_with("careful n=1"),
+            "{line}"
+        );
+        assert!(!line.contains('\x1b'), "{line}");
+        assert!(rx.try_recv().is_err(), "info is not logged");
     }
 
     #[test]
@@ -1000,7 +1056,7 @@ mod tests {
         let (editor, cx) = cx.add_window_view(|_, cx| {
             let mut core = Core::default();
             core.open(Path::new("/nonexistent/t.txt"), Some((text.into(), 0)));
-            Editor::new(core, Args::default(), cx)
+            Editor::new(core, Args::default(), aiditor_services::channel(), cx)
         });
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));
         cx.run_until_parked();

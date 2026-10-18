@@ -83,6 +83,8 @@ pub enum Msg {
     Hint,
     /// The system clipboard's text, sent before a key `Core::wants_clipboard` accepts.
     Clipboard(String),
+    /// A line the app logged, for `*Messages*`.
+    Log(String),
 }
 
 /// How long a prefix waits before the hint shows, Emacs's `echo-keystrokes`.
@@ -191,7 +193,7 @@ impl Ctx<'_> {
     pub fn call(&mut self, name: &str, args: Args) {
         let (buffer, tick) = (self.core.window.buffer(), self.core.current().tick());
         if let Err(err) = self.try_call(name, args) {
-            self.core.message = Some(err);
+            self.core.echo(err);
         }
         // A command that changes the buffer deactivates the mark, as in Emacs.
         if self.core.window.buffer() == buffer && self.core.current().tick() != tick {
@@ -380,7 +382,7 @@ impl Ctx<'_> {
                 if let Some(range) = replace
                     && let Err(err) = self.replace_utf16(range)
                 {
-                    self.core.message = Some(err);
+                    self.core.echo(err);
                     return;
                 }
                 for c in text.chars() {
@@ -422,9 +424,10 @@ impl Ctx<'_> {
                             buffer.set_saved();
                         }
                         let path = buffer.file.as_deref().unwrap_or(Path::new(""));
-                        self.core.message = Some(format!("Wrote {}", path.display()));
+                        let msg = format!("Wrote {}", path.display());
+                        self.core.echo(msg);
                     }
-                    (Some(_), Err(err)) => self.core.message = Some(err),
+                    (Some(_), Err(err)) => self.core.echo(err),
                 }
             }
             Msg::Listed { dir, result } => {
@@ -448,12 +451,12 @@ impl Ctx<'_> {
                             });
                         }
                     }
-                    Err(err) => core.message = Some(err),
+                    Err(err) => core.echo(err),
                 }
             }
             Msg::Opened { path, result } => match result {
                 Ok(file) => self.core.visit(&path, file, true),
-                Err(err) => self.core.message = Some(err),
+                Err(err) => self.core.echo(err),
             },
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
@@ -477,6 +480,7 @@ impl Ctx<'_> {
                 self.core.hint_shown = true;
             }
             Msg::Clipboard(text) => self.core.clipboard = Some(text),
+            Msg::Log(line) => self.core.log(&line),
             Msg::Tick => {}
         }
     }
@@ -515,7 +519,7 @@ impl Ctx<'_> {
             core.pending.clear();
             core.transient = None;
             core.prefix_arg = None;
-            core.message = Some("Quit".into());
+            core.echo("Quit".into());
             core.last_command = Some("keyboard-quit");
             return;
         }
@@ -551,7 +555,7 @@ impl Ctx<'_> {
         }
         core.last_command = None;
         let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
-        core.message = Some(format!("{} is undefined", keys.join(" ")));
+        core.echo(format!("{} is undefined", keys.join(" ")));
     }
 
     /// Pushes clipboard text the editor neither wrote nor took in onto the kill ring, saying
@@ -752,7 +756,7 @@ impl Ctx<'_> {
             }
             None => {
                 let what = if redo { "redo" } else { "undo" };
-                core.message = Some(format!("No further {what} information"));
+                core.echo(format!("No further {what} information"));
             }
         }
     }
@@ -784,7 +788,7 @@ impl Ctx<'_> {
             let active = !core.window.active();
             core.window.set_active(active);
             let what = if active { "activated" } else { "deactivated" };
-            core.message = Some(format!("Mark {what}"));
+            core.echo(format!("Mark {what}"));
             return Ok(());
         }
         self.push_mark(true)
@@ -797,7 +801,7 @@ impl Ctx<'_> {
         core.window
             .push_mark(&mut core.buffers, point, activate)
             .map_err(|err| err.to_string())?;
-        core.message = Some("Mark set".into());
+        core.echo("Mark set".into());
         Ok(())
     }
 
@@ -1388,7 +1392,7 @@ impl Default for Core {
             ("minibuffer-exit-input", |ctx, _| ctx.exit_minibuffer(true)),
             ("abort-minibuffers", |ctx, _| {
                 ctx.core.close_minibuffer().ok_or("Not in a minibuffer")?;
-                ctx.core.message = Some("Quit".into());
+                ctx.core.echo("Quit".into());
                 Ok(())
             }),
             ("minibuffer-next-completion", |ctx, args| {
@@ -1421,7 +1425,7 @@ impl Default for Core {
             }),
             ("keyboard-quit", |ctx, _| {
                 ctx.core.window.set_active(false);
-                ctx.core.message = Some("Quit".into());
+                ctx.core.echo("Quit".into());
                 Ok(())
             }),
         ];
@@ -1547,8 +1551,26 @@ impl Core {
         })
     }
 
+    /// Shows `msg` in the echo area and logs it to `*Messages*`.
+    fn echo(&mut self, msg: String) {
+        self.log(&msg);
+        self.message = Some(msg);
+    }
+
+    /// Appends `line` to `*Messages*`, making the buffer if there is none.
+    fn log(&mut self, line: &str) {
+        let id = self.buffers.find("*Messages*").unwrap_or_else(|| {
+            let id = self.buffers.create("*Messages*");
+            self.buffers.get_mut(id).expect("just created").read_only = true;
+            id
+        });
+        let buffer = self.buffers.get_mut(id).expect("found or created");
+        buffer.append(&format!("{line}\n"));
+    }
+
     /// Shows `msg` on the message line, after what a load already put there this key.
     fn report(&mut self, msg: String) {
+        self.log(&msg);
         self.message = Some(match self.message.take() {
             Some(old) => format!("{old}; {msg}"),
             None => msg,
@@ -1809,7 +1831,7 @@ impl Core {
         };
         if let Some(reason) = refused {
             let opened = if refuse { "" } else { ", opened read-only" };
-            self.message = Some(format!("{}: {reason}{opened}", path.display()));
+            self.echo(format!("{}: {reason}{opened}", path.display()));
             if refuse {
                 return;
             }
