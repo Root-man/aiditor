@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::Ctx;
+use crate::{Core, Ctx};
 
 pub type Handler = fn(&mut Ctx, Args) -> Result<(), String>;
 
@@ -22,6 +22,8 @@ pub struct ArgSpec {
     pub clipboard: bool,
     /// One string per prompt, in order.
     pub prompts: &'static [&'static str],
+    /// The candidates each prompt completes over, given the args so far.
+    pub completion: Option<fn(&Core, &Args) -> Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
