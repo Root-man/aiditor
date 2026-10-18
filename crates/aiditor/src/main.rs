@@ -9,10 +9,10 @@ use aiditor_core::buffer::Buffer;
 use aiditor_core::key::{Key, KeyCode};
 use aiditor_core::{Core, Effect, Msg};
 use gpui::{
-    App, Application, Bounds, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
-    ShapedLine, Task, TextRun, UTF16Selection, Window, WindowOptions, canvas, div, font,
-    prelude::*, px, rgb,
+    App, Application, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler,
+    FocusHandle, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
+    ScrollWheelEvent, ShapedLine, Task, TextRun, UTF16Selection, Window, WindowOptions, canvas,
+    div, font, prelude::*, px, rgb,
 };
 use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter};
@@ -109,6 +109,9 @@ impl Editor {
                         Err(err) => tracing::error!(path = %path.display(), %err, "save failed"),
                     }
                 }
+                Effect::SetClipboard(text) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text))
+                }
                 Effect::LoadSettings => {
                     let dir = self.config_dir.clone();
                     let read = |name| read_config(dir.as_deref(), name);
@@ -134,6 +137,12 @@ impl Editor {
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(key) = to_key(&ev.keystroke, self.core.settings().option_as_meta) {
             cx.stop_propagation();
+            // Read only for a kill or yank: the read is a round trip to the display server on Linux.
+            if self.core.wants_clipboard(key)
+                && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+            {
+                self.handle(Msg::Clipboard(text), cx);
+            }
             self.handle(Msg::Key(key), cx);
         }
     }
@@ -818,6 +827,17 @@ mod tests {
             e.unmark_text(window, cx);
         });
         assert_eq!(state(cx), ("😀éêü".into(), None, "😀éêü".into()));
+    }
+
+    #[gpui::test]
+    fn cmd_c_and_cmd_v_go_through_the_clipboard(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "ab");
+        cx.simulate_keystrokes("ctrl-space ctrl-e cmd-c");
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("ab"));
+        cx.write_to_clipboard(ClipboardItem::new_string("xyz".into()));
+        cx.simulate_keystrokes("cmd-v");
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "abxyz");
     }
 
     #[gpui::test]
