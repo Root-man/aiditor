@@ -394,11 +394,24 @@ milestones:
           - key: m0-file-io
             title: "Open and save files with a hash check"
             body: |
-              File reads and writes run in a service, replacing the walking skeleton's direct writes. Loading records the content hash; `C-x C-s` checks the disk hash first and refuses with a message if the file changed (the full conflict flow comes in M1).
+              File reads and writes run in a service, replacing the walking skeleton's direct writes. Loading records the content hash; `C-x C-s` checks the disk hash first and refuses with a message if the file changed (the full conflict flow comes in M1). Loading and saving follow the file-handling rules decided in #45: UTF-8 with the BOM kept, the file's line ending (LF or CRLF, `(DOS)` in the mode line) restored on save, a final newline added on save, binary files refused, and atomic saves that keep the mode, symlinks and hard links.
             acceptance:
               - "Saving over a file changed on disk is refused"
               - "File permissions survive a save"
+              - "A CRLF file saves with CRLF and a BOM survives a save"
+              - "A save adds a missing final newline"
+              - "A binary or non-UTF-8 file is refused with a message"
+              - "Saving through a symlink keeps the symlink; saving a hard-linked file keeps the link"
             blocked_by: [m0-buffer, m0-core-skeleton, m0-decide-files]
+          - key: m0-hscroll
+            title: "Horizontal scroll for long lines"
+            labels: [frontend]
+            body: |
+              Emacs's `auto-hscroll-mode` set to `current-line`, as decided in #45: each window has a horizontal scroll offset that moves so point stays visible, applied only to point's line; other lines stay truncated at the window edge.
+            acceptance:
+              - "`C-e` on a line wider than the window keeps the cursor visible (display snapshot)"
+              - "Other lines of the window are not shifted"
+            blocked_by: [m0-decide-files, m0-display]
           - key: m0-special-buffers
             title: "Scratch and Messages buffers"
             body: |
@@ -864,9 +877,24 @@ milestones:
       - key: m5-soft-wrap
         title: "Soft wrap"
         labels: [text, frontend]
-        design: "#open-questions"
+        design: "#core-data-model"
         body: |
-          If the M0 file-handling decision kept long lines truncated, add soft wrap: visual lines in the display builder, for vertical motion and for scrolling. Markdown prose needs it. Break down when M5 starts.
+          Soft wrap as decided in #45: visual lines in the display builder, for vertical motion and for scrolling. File buffers wrap by default, Markdown and text at word boundaries (`visual-line-mode`), code at the window edge with a continuation marker; `toggle-truncate-lines` switches a buffer back to truncation with horizontal scroll. Break down when M5 starts.
+      - key: m5-files
+        title: "File handling beyond UTF-8"
+        labels: [files]
+        design: "#core-data-model"
+        body: |
+          File handling that M0's rules left out. Break down when M5 starts.
+        tasks:
+          - key: m5-encodings
+            title: "Open and save files in other encodings"
+            body: |
+              M0 opens only UTF-8 and refuses other files as binary (#45). Detect the encoding of a non-UTF-8 file with `encoding_rs` (Latin-1, Windows-1252, UTF-16 with a BOM), decode it into the buffer, show the encoding in the mode line, and write the file back in its original encoding.
+            acceptance:
+              - "A Latin-1 file opens, edits and saves back as Latin-1"
+              - "A UTF-16 file with a BOM round-trips unchanged"
+            blocked_by: [m0-file-io]
       - key: m5-format
         title: "Formatter commands"
         labels: [text]
