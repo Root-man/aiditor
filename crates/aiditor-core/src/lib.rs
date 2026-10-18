@@ -90,6 +90,22 @@ pub enum Msg {
     Quit,
     /// An auto-save timer fired: write recovery files for buffers edited since the last one.
     AutoSave,
+    /// Recovery files an earlier session left, found at launch: offer each one.
+    Recover(Vec<Recovered>),
+}
+
+/// A recovery file read back: what `Effect::AutoSave` wrote, plus the visited file as it is now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recovered {
+    /// The recovery file itself.
+    pub file: PathBuf,
+    pub name: String,
+    pub path: Option<PathBuf>,
+    /// The hash of the disk version the text was based on.
+    pub hash: Option<u64>,
+    pub text: String,
+    /// The visited file's bytes and hash now, `None` when there is no file.
+    pub disk: Option<(Vec<u8>, u64)>,
 }
 
 /// How long after the last edit buffers are auto-saved, and the most edits wait while typing goes on.
@@ -189,6 +205,8 @@ pub enum Effect {
     },
     /// Delete `buffer`'s recovery file.
     DeleteAutoSave(BufferId),
+    /// Delete an earlier session's recovery file, recovered or discarded.
+    DeleteRecovery(PathBuf),
 }
 
 pub type Effects = Vec<Effect>;
@@ -532,6 +550,11 @@ impl Ctx<'_> {
                     }
                 }
             }
+            Msg::Recover(files) if !files.is_empty() => {
+                self.core.recovered.extend(files);
+                self.call("recover-buffers", Args::default());
+            }
+            Msg::Recover(_) => {}
             Msg::Tick => {}
         }
     }
@@ -1239,6 +1262,58 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Asks about the first recovered file, then handles its answer (the only string) and asks
+    /// about the next: `Yes` opens it as a modified buffer, anything else deletes it.
+    fn recover_buffers(&mut self, args: Args) -> Result<(), String> {
+        let core = &mut *self.core;
+        if let Some(answer) = args.strings.first() {
+            let r = core.recovered.remove(0);
+            let mut keep = false;
+            if answer.eq_ignore_ascii_case("yes") {
+                let id = match &r.path {
+                    Some(path) => {
+                        core.visit(path, r.disk, false);
+                        core.window.buffer()
+                    }
+                    None => match core.buffers.find(&r.name) {
+                        Some(id) if !core.buffers.get(id).expect("found").modified() => id,
+                        _ => core.buffers.create(&r.name),
+                    },
+                };
+                core.switch_to(id);
+                let point = core.window.point(&core.buffers);
+                let buffer = core.buffers.get_mut(id).expect("just shown");
+                let len = buffer.len_chars();
+                buffer.undo_boundary(point);
+                // Past read-only too: a file refused since keeps its text, though not auto-saved.
+                buffer.delete(0..len).expect("in range");
+                buffer.insert(0, &r.text).expect("in range");
+                if r.path.is_some() {
+                    buffer.disk = r.hash;
+                }
+                // Written under this session first, so the old file goes only once a copy exists.
+                keep = !autosaves(buffer);
+                self.dispatch(Msg::AutoSave);
+            }
+            if !keep {
+                self.effects.push(Effect::DeleteRecovery(r.file));
+            }
+        }
+        let Some(next) = self.core.recovered.first() else {
+            return match args.strings.is_empty() {
+                true => Err("No auto-saved buffers to recover".into()),
+                false => Ok(()),
+            };
+        };
+        let what = (next.path.as_ref()).map_or(next.name.clone(), |p| p.display().to_string());
+        let command = self.core.commands["recover-buffers"];
+        self.read_string(
+            command,
+            Args::default(),
+            format!("Recover auto-saved {what}? "),
+        )
+    }
+
     fn save(&mut self, id: BufferId) -> Result<(), String> {
         let buffer = self.core.buffers.get_mut(id).expect("saved buffer is live");
         let Some(path) = buffer.file.clone() else {
@@ -1329,6 +1404,8 @@ pub struct Core {
     /// The auto-save timers: restarted by each edit, and started by the first edit after a write.
     autosave_idle: Option<TimerId>,
     autosave_max: Option<TimerId>,
+    /// Earlier sessions' recovery files not yet recovered or discarded, oldest first.
+    recovered: Vec<Recovered>,
 }
 
 /// Whether `buffer` has edits a crash would lose: modified, and not read-only or hidden.
@@ -1341,7 +1418,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 56] = [
+        let builtins: [(&'static str, command::Handler); 57] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1504,6 +1581,7 @@ impl Default for Core {
                 Ok(())
             }),
             ("kill-buffer", |ctx, args| ctx.kill_buffer(args)),
+            ("recover-buffers", |ctx, args| ctx.recover_buffers(args)),
             ("exit-minibuffer", |ctx, _| ctx.exit_minibuffer(false)),
             ("minibuffer-exit-input", |ctx, _| ctx.exit_minibuffer(true)),
             ("abort-minibuffers", |ctx, _| {
@@ -1617,6 +1695,11 @@ impl Default for Core {
             }),
             ..ArgSpec::default()
         };
+        commands.get_mut("recover-buffers").expect("a builtin").spec = ArgSpec {
+            // The prompt is opened by the handler.
+            completion: Some(|_, _| vec!["Yes".into(), "No".into()]),
+            ..ArgSpec::default()
+        };
         commands.get_mut("kill-buffer").expect("a builtin").spec = ArgSpec {
             prompts: &["Kill buffer: "],
             // The second prompt, opened by the handler, confirms killing a modified buffer.
@@ -1663,6 +1746,7 @@ impl Default for Core {
             autosaved: HashMap::new(),
             autosave_idle: None,
             autosave_max: None,
+            recovered: Vec::new(),
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
