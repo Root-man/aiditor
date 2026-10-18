@@ -51,6 +51,8 @@ impl From<ropey::Error> for Error {
 pub struct Buffers {
     next: u64,
     map: BTreeMap<BufferId, Buffer>,
+    /// Every buffer, most recently shown first; new buffers go last, as in Emacs's `buffer-list`.
+    recent: Vec<BufferId>,
 }
 
 impl Buffers {
@@ -61,38 +63,59 @@ impl Buffers {
             file: None,
             modified: false,
             tick: 0,
-            markers: BTreeMap::new(),
-            next_marker: 0,
+            markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
+            next_marker: 1,
             props: Vec::new(),
             history: History::default(),
             major_mode: "fundamental-mode",
             minor_modes: Vec::new(),
+            point: MarkerId(0),
         })
     }
 
     /// A buffer visiting `path`, holding `text` already read from it.
     pub fn create_for_file(&mut self, path: &Path, text: &str) -> BufferId {
         let name = path.file_name().unwrap_or(path.as_os_str());
-        self.add(Buffer {
-            name: name.to_string_lossy().into_owned(),
-            content: Content::Text(Rope::from_str(text)),
-            file: Some(path.to_path_buf()),
-            modified: false,
-            tick: 0,
-            markers: BTreeMap::new(),
-            next_marker: 0,
-            props: Vec::new(),
-            history: History::default(),
-            major_mode: "fundamental-mode",
-            minor_modes: Vec::new(),
-        })
+        let id = self.create(&name.to_string_lossy());
+        let buffer = self.map.get_mut(&id).expect("just created");
+        buffer.content = Content::Text(Rope::from_str(text));
+        buffer.file = Some(path.to_path_buf());
+        id
     }
 
-    fn add(&mut self, buffer: Buffer) -> BufferId {
+    /// Adds `buffer`, appending `<2>`, `<3>`, ... to its name while another buffer has it.
+    fn add(&mut self, mut buffer: Buffer) -> BufferId {
+        let base = buffer.name.clone();
+        for n in 2.. {
+            if !self.map.values().any(|b| b.name == buffer.name) {
+                break;
+            }
+            buffer.name = format!("{base}<{n}>");
+        }
         let id = BufferId(self.next);
         self.next += 1;
         self.map.insert(id, buffer);
+        self.recent.push(id);
         id
+    }
+
+    /// Every buffer, most recently shown first.
+    pub fn recent(&self) -> impl Iterator<Item = (BufferId, &Buffer)> {
+        self.recent.iter().map(|&id| (id, &self.map[&id]))
+    }
+
+    /// Makes buffer `id` the most recently shown.
+    pub fn raise(&mut self, id: BufferId) {
+        self.recent.retain(|&b| b != id);
+        self.recent.insert(0, id);
+    }
+
+    /// The buffer named `name`.
+    pub fn find(&self, name: &str) -> Option<BufferId> {
+        self.map
+            .iter()
+            .find(|(_, b)| b.name == name)
+            .map(|(&id, _)| id)
     }
 
     pub fn get(&self, id: BufferId) -> Option<&Buffer> {
@@ -104,6 +127,7 @@ impl Buffers {
     }
 
     pub fn kill(&mut self, id: BufferId) -> Result<Buffer, Error> {
+        self.recent.retain(|&b| b != id);
         self.map.remove(&id).ok_or(Error::NoSuchBuffer(id))
     }
 }
@@ -130,6 +154,8 @@ pub struct Buffer {
     pub major_mode: &'static str,
     /// Names the minor modes' keymaps in `Core`, highest priority first.
     pub minor_modes: Vec<&'static str>,
+    /// The point of the last window that stopped showing this buffer, where the next one starts.
+    pub point: MarkerId,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.
@@ -400,6 +426,22 @@ mod tests {
         let mut buffers = Buffers::default();
         let id = buffers.create_for_file(Path::new("/t/a.txt"), text);
         (buffers, id)
+    }
+
+    #[test]
+    fn names_are_unique_and_order_is_most_recent_first() {
+        let mut buffers = Buffers::default();
+        let a = buffers.create("x");
+        let b = buffers.create_for_file(Path::new("/d/x"), "");
+        let c = buffers.create("x");
+        let names = |bs: &Buffers| bs.recent().map(|(_, b)| b.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&buffers), ["x", "x<2>", "x<3>"]);
+        assert_eq!(buffers.find("x<2>"), Some(b));
+        buffers.raise(c);
+        buffers.kill(a).unwrap();
+        assert_eq!(names(&buffers), ["x<3>", "x<2>"]);
+        assert_eq!(buffers.create("x<2>").0, 3);
+        assert_eq!(buffers.get(BufferId(3)).unwrap().name, "x<2><2>");
     }
 
     #[test]

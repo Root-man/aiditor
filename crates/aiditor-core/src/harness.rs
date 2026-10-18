@@ -1167,7 +1167,8 @@ mod tests {
         h.keys("4").advance(1000 * MS);
         let hint = h.core.hint().unwrap();
         assert_eq!(hint.keys, "C-x 4");
-        assert_eq!(hint.entries, [("f".to_string(), "one".to_string())]);
+        let f = ("f".to_string(), "one".to_string());
+        assert!(hint.entries.contains(&f), "{:?}", hint.entries);
     }
 
     #[test]
@@ -2095,5 +2096,98 @@ mod tests {
         bind_mode(&mut h, "m", "C-x 2", "undo");
         buffer(&mut h).minor_modes.push("m");
         assert_eq!(note(&mut h, "split-window-below"), "");
+    }
+
+    fn name(h: &Harness) -> &str {
+        h.core.current().name.as_str()
+    }
+
+    #[test]
+    fn c_x_b_lists_buffers_most_recent_first_and_goes_back() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").open("b");
+        h.core.buffers.create(" hidden");
+        h.keys("C-x b");
+        assert_eq!(
+            listed(&mut h),
+            (vec!["a".into(), "*scratch*".into(), "b".into()], Some(0))
+        );
+        h.keys("RET");
+        assert_eq!(name(&h), "a");
+        h.keys("C-x b RET");
+        assert_eq!(name(&h), "b");
+        h.keys("C-x b notes RET");
+        assert_eq!((name(&h), h.text().as_str()), ("notes", ""));
+    }
+
+    #[test]
+    fn two_files_with_one_name_get_unique_buffer_names() {
+        let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
+        h.open("a/x").open("b/x");
+        assert_eq!(h.core.buffer_names(true), ["x<2>", "x", "*scratch*"]);
+    }
+
+    #[test]
+    fn switching_back_restores_point() {
+        let mut h = Harness::new(&[("a", "hello")]);
+        h.open("a");
+        h.keys("C-f C-f C-f C-x b RET");
+        assert_eq!((name(&h), h.point()), ("*scratch*", 0));
+        h.keys("C-x b a RET");
+        assert_eq!((name(&h), h.point()), ("a", 3));
+    }
+
+    #[test]
+    fn c_x_4_b_switches_the_next_window() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        h.keys("C-x 4 b RET");
+        let leaves = h.core.tree.leaves();
+        assert_eq!((leaves.len(), h.core.selected), (2, leaves[1]));
+        assert_eq!(name(&h), "*scratch*");
+        let upper = h.core.others[&leaves[0]].buffer();
+        assert_eq!(h.core.buffers.get(upper).unwrap().name, "a");
+        // With two windows it uses the next one rather than splitting again.
+        h.keys("C-x 4 b RET");
+        assert_eq!(
+            (h.core.tree.leaves().len(), h.core.selected),
+            (2, leaves[0])
+        );
+    }
+
+    #[test]
+    fn c_x_k_kills_the_current_buffer_in_every_window() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        h.keys("C-x 2 C-x k");
+        assert_eq!(listed(&mut h).0, ["a", "*scratch*"]);
+        h.keys("RET");
+        assert_eq!((name(&h), h.core.buffers.find("a")), ("*scratch*", None));
+        let other = h.core.others[&WindowId(1)].buffer();
+        assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*");
+        h.keys("C-x k nope RET");
+        assert_eq!(h.core.message(), Some("No such buffer nope"));
+        assert_eq!(h.core.buffers.recent().count(), 1);
+        // Killing the last buffer leaves a new, empty *scratch*.
+        h.keys("x C-x k RET");
+        assert_eq!((name(&h), h.text().as_str()), ("*scratch*", ""));
+        assert_eq!(h.core.buffers.recent().count(), 1);
+    }
+
+    #[test]
+    fn killing_a_modified_file_buffer_asks() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        h.keys("x C-x k RET");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "Buffer modified; kill anyway? "
+        );
+        assert_eq!(listed(&mut h).0, ["no", "yes"]);
+        h.keys("RET");
+        assert_eq!((name(&h), h.text().as_str()), ("a", "x1"));
+        h.keys("C-x k RET yes RET");
+        assert_eq!(name(&h), "*scratch*");
+        assert_eq!(h.core.buffers.find("a"), None);
     }
 }
