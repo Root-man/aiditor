@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::{
-    Core, Ctx, Effect, Effects, Msg, command::Args, display::WindowDisplay, key::parse_keys,
+    Core, Ctx, Effect, Effects, Msg,
+    command::Args,
+    display::WindowDisplay,
+    key::{Key, KeyCode, parse_keys},
     timer::TimerId,
 };
 
@@ -38,11 +41,25 @@ impl Harness {
     }
 
     /// Feeds a `kbd`-style script such as `"hello C-x C-s"`, carrying out effects as the app does.
+    /// Plain chars arrive as typed text, the way the platform's text input sends them.
     pub fn keys(&mut self, script: &str) -> &mut Self {
         for key in parse_keys(script).unwrap() {
-            let effects = self.core.handle(self.now, Msg::Key(key));
-            self.run(effects);
+            let msg = match key.code {
+                KeyCode::Char(c) if key == Key::plain(key.code) => Msg::Insert {
+                    text: c.into(),
+                    replace: None,
+                },
+                _ => Msg::Key(key),
+            };
+            self.send(msg);
         }
+        self
+    }
+
+    /// Sends `msg` to the core, carrying out its effects as the app does.
+    pub fn send(&mut self, msg: Msg) -> &mut Self {
+        let effects = self.core.handle(self.now, msg);
+        self.run(effects);
         self
     }
 
@@ -124,9 +141,10 @@ impl Harness {
 }
 
 mod tests {
+    use std::ops::Range;
+
     use super::*;
     use crate::command::{ArgSpec, Command, Prefix};
-    use crate::key::{Key, KeyCode};
     use crate::settings::Settings;
 
     const MS: Duration = Duration::from_millis(1);
@@ -1233,5 +1251,85 @@ mod tests {
         assert_eq!(h.core.last_command(), Some("test-insert"));
         h.keys("C-c t");
         assert_eq!(h.core.last_command(), Some("test-insert"));
+    }
+
+    fn insert(text: &str, replace: Option<Range<usize>>) -> Msg {
+        Msg::Insert {
+            text: text.into(),
+            replace,
+        }
+    }
+
+    #[test]
+    fn cmd_z_undoes_and_z_types() {
+        let mut h = Harness::new(&[]);
+        h.keys("a z");
+        assert_eq!(h.text(), "az");
+        h.keys("s-z");
+        assert_eq!(h.text(), "");
+    }
+
+    #[test]
+    fn input_methods_replace_typed_text() {
+        let mut h = Harness::new(&[]);
+        h.keys("e").send(insert("é", Some(0..1)));
+        assert_eq!((h.text().as_str(), h.point()), ("é", 1));
+        h.keys("C-/");
+        assert_eq!(h.text(), "", "one undo removes it");
+        h.send(insert("😀e", None)).send(insert("é", Some(2..3)));
+        assert_eq!(h.text(), "😀é");
+        #[allow(
+            clippy::reversed_empty_ranges,
+            reason = "a reversed range is one of the bad inputs"
+        )]
+        for bad in [(2..9), (3..2)] {
+            h.send(insert("x", Some(bad.clone())));
+            assert_eq!(h.text(), "😀é", "{bad:?}");
+            assert!(h.core.message().unwrap().contains("outside"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn inserted_text_acts_as_typed_keys() {
+        let mut h = Harness::new(&[]);
+        h.send(insert("ab", None));
+        h.keys("C-x").send(insert("u", None));
+        assert_eq!(h.text(), "", "C-x u undoes");
+        h.keys("C-u").send(insert("3a", None));
+        assert_eq!(h.text(), "aaa");
+    }
+
+    #[test]
+    fn wheel_scrolls_keeping_point_visible() {
+        let mut h = twenty_lines();
+        h.core.scroll(3);
+        h.send(Msg::Scroll(5));
+        assert_eq!((h.core.scroll(3), h.point()), (5, line_start(&h, 5)));
+        h.send(Msg::Scroll(-2));
+        assert_eq!((h.core.scroll(3), h.point()), (3, line_start(&h, 5)));
+        h.send(Msg::Scroll(99)).send(Msg::Scroll(1));
+        assert_eq!((h.core.scroll(3), h.core.message()), (19, None));
+        h.send(Msg::Scroll(-99));
+        assert_eq!((h.core.scroll(3), h.core.message()), (0, None));
+    }
+
+    #[test]
+    fn click_moves_point_and_drops_mark_and_prefix() {
+        let mut h = on("abc\ndef");
+        h.keys("C-SPC C-f");
+        h.send(Msg::Click(5));
+        assert_eq!((h.point(), mark(&h).1), (5, false));
+        h.send(Msg::Click(99));
+        assert_eq!(h.point(), 7, "clamped to the end");
+        h.keys("C-x").send(Msg::Click(0)).keys("u");
+        assert_eq!(h.text(), "uabc\ndef", "no prefix pending");
+        h.keys("C-u").send(Msg::Click(5)).keys("x");
+        assert_eq!(h.text(), "uabc\nxdef", "no prefix argument");
+        h.keys("C-/");
+        assert_eq!(
+            h.text(),
+            "uabc\ndef",
+            "typing after a click is its own undo group"
+        );
     }
 }

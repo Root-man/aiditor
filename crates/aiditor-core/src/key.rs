@@ -19,6 +19,8 @@ pub struct Key {
     pub ctrl: bool,
     pub meta: bool,
     pub shift: bool,
+    /// Cmd on macOS, written `s-`.
+    pub super_: bool,
 }
 
 impl Key {
@@ -28,14 +30,20 @@ impl Key {
             ctrl: false,
             meta: false,
             shift: false,
+            super_: false,
         }
     }
 }
 
-/// Writes the key the way `parse_keys` reads it, such as `C-x`, `M-S-a` or `<left>`.
+/// Writes the key the way `parse_keys` reads it, such as `C-x`, `M-S-a`, `s-z` or `<left>`.
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for (held, prefix) in [(self.ctrl, "C-"), (self.meta, "M-"), (self.shift, "S-")] {
+        for (held, prefix) in [
+            (self.ctrl, "C-"),
+            (self.meta, "M-"),
+            (self.shift, "S-"),
+            (self.super_, "s-"),
+        ] {
             if held {
                 f.write_str(prefix)?;
             }
@@ -55,7 +63,7 @@ impl std::fmt::Display for Key {
     }
 }
 
-/// Parses whitespace-separated words like Emacs's `kbd`: `C-x`, `M-S-a`, `RET`, `SPC`, `<left>`;
+/// Parses whitespace-separated words like Emacs's `kbd`: `C-x`, `M-S-a`, `s-z`, `RET`, `SPC`, `<left>`;
 /// a word without modifiers that is not a key name types each of its characters.
 pub fn parse_keys(s: &str) -> Result<Vec<Key>, String> {
     let mut keys = Vec::new();
@@ -67,6 +75,7 @@ pub fn parse_keys(s: &str) -> Result<Vec<Key>, String> {
                 b'C' => key.ctrl = true,
                 b'M' => key.meta = true,
                 b'S' => key.shift = true,
+                b's' => key.super_ = true,
                 _ => break,
             }
             rest = &rest[2..];
@@ -83,7 +92,7 @@ pub fn parse_keys(s: &str) -> Result<Vec<Key>, String> {
             "<down>" => Some(KeyCode::Down),
             _ => None,
         };
-        let modified = key.ctrl || key.meta || key.shift;
+        let modified = key.ctrl || key.meta || key.shift || key.super_;
         let mut chars = rest.chars();
         match (named, chars.next(), chars.next()) {
             (Some(code), _, _) => keys.push(Key { code, ..key }),
@@ -138,10 +147,12 @@ mod tests {
 
     #[test]
     fn display_round_trips_through_parse() {
-        let script = "h C-x M-S-a RET SPC C-- TAB DEL ESC <left> C-<down> <up> <right>";
+        let script = "h C-x M-S-a RET SPC C-- TAB DEL ESC <left> C-<down> <up> <right> C-s-a s-z";
         let keys = parse_keys(script).unwrap();
         let shown: Vec<String> = keys.iter().map(Key::to_string).collect();
         assert_eq!(shown.join(" "), script);
+        let cmd = keys[keys.len() - 2];
+        assert!(cmd.ctrl && cmd.super_ && !cmd.meta);
     }
 
     #[test]

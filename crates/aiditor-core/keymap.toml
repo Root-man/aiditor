@@ -53,3 +53,6 @@
 "M-DEL" = "backward-kill-word"
 "C-SPC" = "set-mark-command"
 "C-x C-x" = "exchange-point-and-mark"
+# Cmd keys; s-c, s-x and s-v come with the kill ring, s-q, s-w and s-h with quitting.
+"s-z" = "undo"
+"s-s" = "save-buffer"

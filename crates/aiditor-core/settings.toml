@@ -2,6 +2,8 @@
 
 # font_family = "Menlo"  # unset: Menlo on macOS, Noto Sans Mono on Linux
 font_size = 14.0
+# macOS: Option as Meta, or false to type special characters and dead keys with it.
+option_as_meta = true
 
 [theme]
 background = 0x1e1e1e

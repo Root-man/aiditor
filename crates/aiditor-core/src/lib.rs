@@ -12,6 +12,7 @@ pub mod timer;
 pub mod window;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,16 @@ use window::Window;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
     Key(Key),
+    /// Text from the platform's text input, each char typed as a plain key. `replace`, in UTF-16
+    /// code units, is text an input method rewrites, deleted first.
+    Insert {
+        text: String,
+        replace: Option<Range<usize>>,
+    },
+    /// The wheel scrolled this many lines down the buffer, up when negative.
+    Scroll(i64),
+    /// A left click on the char at this offset.
+    Click(usize),
     /// Wakes the core when a timer is due; due timers fire on every message.
     Tick,
     /// The app wrote the buffer's text to its file.
@@ -111,6 +122,20 @@ impl Ctx<'_> {
     fn dispatch(&mut self, msg: Msg) {
         match msg {
             Msg::Key(key) => self.key(key),
+            Msg::Insert { text, replace } => {
+                if let Some(range) = replace
+                    && let Err(err) = self.replace_utf16(range)
+                {
+                    self.core.message = Some(err);
+                    return;
+                }
+                for c in text.chars() {
+                    self.key(Key::plain(KeyCode::Char(c)));
+                }
+            }
+            // At an end the wheel just stops, without C-v's message.
+            Msg::Scroll(lines) => _ = self.scroll_lines(lines),
+            Msg::Click(p) => self.click(p),
             Msg::Saved(id) => {
                 if let Some(buffer) = self.core.buffers.get_mut(id) {
                     buffer.set_saved();
@@ -212,6 +237,43 @@ impl Ctx<'_> {
         core.last_command = None;
         let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
         core.message = Some(format!("{} is undefined", keys.join(" ")));
+    }
+
+    /// Deletes the UTF-16 `range` of the current buffer and puts point at its start.
+    fn replace_utf16(&mut self, range: Range<usize>) -> Result<(), String> {
+        let text = self.core.current().text();
+        if range.start > range.end || range.end > text.len_utf16_cu() {
+            return Err(format!(
+                "Input method range {range:?} is outside the buffer"
+            ));
+        }
+        let (start, end) = (
+            text.utf16_cu_to_char(range.start),
+            text.utf16_cu_to_char(range.end),
+        );
+        self.goto(start)?;
+        self.delete_to(end)
+    }
+
+    /// Moves point to `p` like Emacs's `mouse-set-point`, dropping any pending prefix.
+    fn click(&mut self, p: usize) {
+        let core = &mut *self.core;
+        core.pending.clear();
+        core.transient = None;
+        core.prefix_arg = None;
+        if let Some(id) = core.hint_timer.take() {
+            core.timers.cancel(id);
+        }
+        core.hint_shown = false;
+        core.message = None;
+        // So the next typed char starts a new undo group.
+        core.self_inserts = 0;
+        core.window.set_active(false);
+        core.last_command = Some("mouse-set-point");
+        let len = core.current().len_chars();
+        if let Err(err) = self.goto(p.min(len)) {
+            tracing::debug!(%err, "click outside the buffer");
+        }
     }
 
     /// Undoes the current buffer's last group, or redoes the last undone one, and restores point.
