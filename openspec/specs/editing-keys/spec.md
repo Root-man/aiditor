@@ -39,6 +39,17 @@ A printable key without Ctrl or Meta that no keymap binds SHALL run `self-insert
 - **WHEN** `DEL` is pressed with point at 0
 - **THEN** the text and point do not change and the message is `Beginning of buffer`
 
+### Requirement: DEL and C-d delete an active region
+Without a prefix argument, `delete-backward-char` and `delete-char` SHALL delete the region instead when the mark is active and the region is not empty, without saving it to the kill ring, and point SHALL end at the region's start.
+
+#### Scenario: Delete the selected line
+- **WHEN** in `hello\nx` with point at 0, `C-e C-SPC C-a DEL` is pressed
+- **THEN** the text is `\nx`, point is 0 and the mark is inactive
+
+#### Scenario: A prefix deletes characters
+- **WHEN** in `hello` with point at 0, `C-SPC C-f C-f C-f C-u 1 DEL` is pressed
+- **THEN** the text is `helo`
+
 ### Requirement: C-j inserts a newline
 `C-j` SHALL run `electric-newline-and-maybe-indent`, which inserts newlines like `newline` until indentation exists.
 

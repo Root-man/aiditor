@@ -616,6 +616,18 @@ impl Ctx<'_> {
         self.goto(point + text.chars().count())
     }
 
+    /// `delete-char` and `delete-backward-char`: without a prefix an active, non-empty region is
+    /// deleted (not killed), as Emacs's `delete-active-region`; otherwise `delete_n`.
+    fn delete_char(&mut self, no_prefix: bool, n: i64) -> Result<(), String> {
+        let point = self.core.point();
+        match self.core.window.mark(&self.core.buffers) {
+            Some(mark) if no_prefix && self.core.window.active() && mark != point => {
+                self.delete_to(mark)
+            }
+            _ => self.delete_n(n),
+        }
+    }
+
     /// Deletes `n` chars after point, or `-n` before it; one that would pass an end deletes nothing.
     fn delete_n(&mut self, n: i64) -> Result<(), String> {
         let target = (self.core.point() as i64).saturating_add(n);
@@ -901,9 +913,11 @@ impl Default for Core {
             ("open-line", |ctx, args| {
                 ctx.insert_n("\n", args.count(), true)
             }),
-            ("delete-char", |ctx, args| ctx.delete_n(args.count())),
+            ("delete-char", |ctx, args| {
+                ctx.delete_char(args.prefix.is_none(), args.count())
+            }),
             ("delete-backward-char", |ctx, args| {
-                ctx.delete_n(args.count().saturating_neg())
+                ctx.delete_char(args.prefix.is_none(), args.count().saturating_neg())
             }),
             ("kill-word", |ctx, args| {
                 ctx.kill_to(ctx.word_end(args.count()))

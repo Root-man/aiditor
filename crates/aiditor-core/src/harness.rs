@@ -669,6 +669,22 @@ mod tests {
         assert_eq!(mark(&h), (Some(60), false), "plain C-u pushes no mark");
     }
 
+    #[test]
+    fn deletes_remove_an_active_region() {
+        for keys in ["C-e C-SPC C-a DEL", "C-a C-SPC C-e DEL", "C-SPC C-e C-d"] {
+            let mut h = on("hello\nx");
+            h.keys(keys);
+            assert_eq!((h.text().as_str(), h.point()), ("\nx", 0), "{keys}");
+            assert!(!mark(&h).1, "{keys}");
+        }
+        let mut h = on("hello");
+        h.keys("C-SPC C-f C-f C-g DEL");
+        assert_eq!(h.text(), "hllo", "an inactive mark deletes one char");
+        let mut h = on("hello");
+        h.keys("C-SPC C-f C-f C-f C-u 1 DEL");
+        assert_eq!(h.text(), "helo", "a prefix deletes chars, not the region");
+    }
+
     /// The mark and whether it is active.
     fn mark(h: &Harness) -> (Option<usize>, bool) {
         (h.core.window.mark(&h.core.buffers), h.core.window.active())
