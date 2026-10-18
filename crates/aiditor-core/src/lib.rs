@@ -11,7 +11,7 @@ pub mod settings;
 pub mod timer;
 pub mod window;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -49,10 +49,15 @@ pub enum Msg {
     KeymapLoaded(Result<Option<String>, String>),
     /// The prefix hint's delay passed with the prefix still pending.
     Hint,
+    /// The system clipboard's text, sent before a key `Core::wants_clipboard` accepts.
+    Clipboard(String),
 }
 
 /// How long a prefix waits before the hint shows, Emacs's `echo-keystrokes`.
 const HINT_DELAY: Duration = Duration::from_secs(1);
+
+/// How many entries the kill ring keeps, Emacs's `kill-ring-max`.
+const KILL_RING_MAX: usize = 60;
 
 /// Work the app carries out for the core.
 pub enum Effect {
@@ -65,6 +70,8 @@ pub enum Effect {
     /// Read the user's settings and keymap files and send `Msg::SettingsLoaded` and
     /// `Msg::KeymapLoaded`.
     LoadSettings,
+    /// Put this text on the system clipboard.
+    SetClipboard(String),
 }
 
 pub type Effects = Vec<Effect>;
@@ -121,7 +128,11 @@ impl Ctx<'_> {
 
     fn dispatch(&mut self, msg: Msg) {
         match msg {
-            Msg::Key(key) => self.key(key),
+            Msg::Key(key) => {
+                self.key(key);
+                // The clipboard text was for this key only.
+                self.core.clipboard = None;
+            }
             Msg::Insert { text, replace } => {
                 if let Some(range) = replace
                     && let Err(err) = self.replace_utf16(range)
@@ -162,6 +173,7 @@ impl Ctx<'_> {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
             }
+            Msg::Clipboard(text) => self.core.clipboard = Some(text),
             Msg::Tick => {}
         }
     }
@@ -205,7 +217,7 @@ impl Ctx<'_> {
             return;
         }
         core.pending.push(key);
-        let command = match core.lookup() {
+        let command = match core.lookup(&core.pending) {
             Some(Binding::Prefix(_)) => {
                 core.hint_timer = Some(core.timers.start(self.now, HINT_DELAY, None, Msg::Hint));
                 return;
@@ -237,6 +249,150 @@ impl Ctx<'_> {
         core.last_command = None;
         let keys: Vec<String> = keys.iter().map(Key::to_string).collect();
         core.message = Some(format!("{} is undefined", keys.join(" ")));
+    }
+
+    /// Pushes clipboard text the editor neither wrote nor took in onto the kill ring, saying
+    /// whether it did.
+    fn take_clipboard(&mut self) -> bool {
+        let core = &mut *self.core;
+        let Some(text) = core.clipboard.take() else {
+            return false;
+        };
+        if text.is_empty() || core.clipboard_seen.as_ref() == Some(&text) {
+            return false;
+        }
+        core.clipboard_seen = Some(text.clone());
+        core.kill_new(text);
+        true
+    }
+
+    /// Saves the text in `range` on the kill ring, deleting it unless `copy`. Right after a
+    /// kill it joins the newest entry, in front of it when `backward`.
+    fn kill(&mut self, range: Range<usize>, backward: bool, copy: bool) -> Result<(), String> {
+        let pushed = self.take_clipboard();
+        let core = &mut *self.core;
+        let text = (core.current().text().get_slice(range.clone()))
+            .ok_or_else(|| format!("Region {range:?} is outside the buffer"))?
+            .to_string();
+        if !copy {
+            core.current_mut()
+                .delete(range)
+                .map_err(|err| err.to_string())?;
+        }
+        match core.kill_ring.front_mut() {
+            Some(head) if !pushed && core.last_command == Some("kill-region") => {
+                if backward {
+                    head.insert_str(0, &text);
+                } else {
+                    head.push_str(&text);
+                }
+                core.yank_index = 0;
+            }
+            _ => core.kill_new(text),
+        }
+        let head = core.kill_ring[0].clone();
+        core.clipboard_seen = Some(head.clone());
+        self.effects.push(Effect::SetClipboard(head));
+        // Every kill counts as `kill-region` so the next one joins it, as in Emacs.
+        if !copy {
+            core.this_command = Some("kill-region");
+        }
+        Ok(())
+    }
+
+    /// Kills between point and `target`.
+    fn kill_to(&mut self, target: usize) -> Result<(), String> {
+        let point = self.core.point();
+        self.kill(point.min(target)..point.max(target), target < point, false)
+    }
+
+    /// Kills, or with `copy` copies, the region; backward when point is before the mark.
+    fn kill_region(&mut self, region: Option<Range<usize>>, copy: bool) -> Result<(), String> {
+        let region = region.expect("the spec asks for the region");
+        let backward = self.core.point() == region.start && !region.is_empty();
+        self.kill(region, backward, copy)?;
+        self.core.window.set_active(false);
+        Ok(())
+    }
+
+    /// Kills to the end of the line, through the newline if only blanks are left; a prefix N
+    /// kills N lines, or back to the start of the line N up when N is 0 or less.
+    fn kill_line(&mut self, prefix: Option<Prefix>) -> Result<(), String> {
+        let buffer = self.core.current();
+        let point = self.core.point();
+        let len = buffer.len_chars();
+        let last = buffer.len_lines() as i64 - 1;
+        let (line, _) = buffer.line_col(point).expect("point is in the buffer");
+        let line_start = |l: i64| match l {
+            l if l > last => len,
+            l => (buffer.char_idx(l.max(0) as usize, 0)).expect("line is in the buffer"),
+        };
+        let target = match prefix {
+            Some(p) => line_start((line as i64).saturating_add(p.value())),
+            None if point == len => return Err("End of buffer".into()),
+            None => {
+                let end = (buffer.char_idx(line, usize::MAX)).expect("line is in the buffer");
+                let blank = (point..end).all(|i| matches!(buffer.text().char(i), ' ' | '\t'));
+                if blank {
+                    line_start(line as i64 + 1)
+                } else {
+                    end
+                }
+            }
+        };
+        self.kill_to(target)
+    }
+
+    /// Inserts the kill `n` on from the yank pointer, with the mark at its start; a plain `C-u`
+    /// leaves point at the start instead.
+    fn yank(&mut self, prefix: Option<Prefix>) -> Result<(), String> {
+        self.take_clipboard();
+        let n = match prefix {
+            None | Some(Prefix::Universal(_)) => 0,
+            Some(Prefix::Minus) => -2,
+            Some(p) => p.value().saturating_sub(1),
+        };
+        let text = self.core.current_kill(n)?;
+        let core = &mut *self.core;
+        let start = core.point();
+        core.window
+            .push_mark(&mut core.buffers, start, false)
+            .map_err(|err| err.to_string())?;
+        self.insert_n(&text, 1, false)?;
+        if matches!(prefix, Some(Prefix::Universal(_))) {
+            self.point_before_yank(start)?;
+        }
+        Ok(())
+    }
+
+    /// Replaces the text just yanked with the kill `n` further round the ring.
+    fn yank_pop(&mut self, n: i64) -> Result<(), String> {
+        if self.core.last_command != Some("yank") {
+            return Err("Previous command was not a yank".into());
+        }
+        let text = self.core.current_kill(n)?;
+        let (mark, point) = (self.mark()?, self.core.point());
+        let start = point.min(mark);
+        self.core
+            .current_mut()
+            .delete(start..point.max(mark))
+            .map_err(|err| err.to_string())?;
+        self.insert_n(&text, 1, false)?;
+        if point < mark {
+            self.point_before_yank(start)?;
+        }
+        self.core.this_command = Some("yank");
+        Ok(())
+    }
+
+    /// Moves the mark to point at the yanked text's end and point to its `start`.
+    fn point_before_yank(&mut self, start: usize) -> Result<(), String> {
+        let core = &mut *self.core;
+        let end = core.point();
+        core.window
+            .set_mark(&mut core.buffers, end)
+            .map_err(|err| err.to_string())?;
+        self.goto(start)
     }
 
     /// Deletes the UTF-16 `range` of the current buffer and puts point at its start.
@@ -626,6 +782,14 @@ pub struct Core {
     goal_column: usize,
     /// Where the last `recenter-top-bottom` put point's line: middle, top or bottom.
     recenter: usize,
+    /// Kills, newest first.
+    kill_ring: VecDeque<String>,
+    /// The kill the next yank inserts.
+    yank_index: usize,
+    /// The clipboard's text for the key being handled, when its command asked for it.
+    clipboard: Option<String>,
+    /// The clipboard text the editor last wrote or took in, so it isn't pushed again.
+    clipboard_seen: Option<String>,
     settings: Settings,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
@@ -637,7 +801,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 31] = [
+        let builtins: [(&'static str, command::Handler); 36] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -659,13 +823,21 @@ impl Default for Core {
             ("delete-backward-char", |ctx, args| {
                 ctx.delete_n(args.count().saturating_neg())
             }),
-            // shortcut: the killed text is dropped, not saved; the kill-ring issue saves it.
             ("kill-word", |ctx, args| {
-                ctx.delete_to(ctx.word_end(args.count()))
+                ctx.kill_to(ctx.word_end(args.count()))
             }),
             ("backward-kill-word", |ctx, args| {
-                ctx.delete_to(ctx.word_end(args.count().saturating_neg()))
+                ctx.kill_to(ctx.word_end(args.count().saturating_neg()))
             }),
+            ("kill-line", |ctx, args| ctx.kill_line(args.prefix)),
+            ("kill-region", |ctx, args| {
+                ctx.kill_region(args.region, false)
+            }),
+            ("kill-ring-save", |ctx, args| {
+                ctx.kill_region(args.region, true)
+            }),
+            ("yank", |ctx, args| ctx.yank(args.prefix)),
+            ("yank-pop", |ctx, args| ctx.yank_pop(args.count())),
             ("forward-char", |ctx, args| ctx.forward_char(args.count())),
             ("backward-char", |ctx, args| {
                 ctx.forward_char(args.count().saturating_neg())
@@ -769,7 +941,7 @@ impl Default for Core {
                 Ok(())
             }),
         ];
-        let commands = builtins
+        let mut commands: HashMap<_, _> = builtins
             .map(|(name, handler)| {
                 let spec = ArgSpec::default();
                 (
@@ -782,6 +954,17 @@ impl Default for Core {
                 )
             })
             .into();
+        let kills = [
+            "kill-word",
+            "backward-kill-word",
+            "kill-line",
+            "kill-region",
+        ];
+        for name in kills.into_iter().chain(["kill-ring-save", "yank"]) {
+            let spec: &mut ArgSpec = &mut commands.get_mut(name).expect("a builtin").spec;
+            spec.clipboard = true;
+            spec.region = matches!(name, "kill-region" | "kill-ring-save");
+        }
         let mut core = Core {
             buffers,
             window,
@@ -799,6 +982,10 @@ impl Default for Core {
             self_inserts: 0,
             goal_column: 0,
             recenter: 0,
+            kill_ring: VecDeque::new(),
+            yank_index: 0,
+            clipboard: None,
+            clipboard_seen: None,
             settings: Settings::default(),
             commands,
             message: None,
@@ -829,10 +1016,35 @@ impl Core {
         });
     }
 
-    /// The pending sequence's binding in the first keymap that binds it: transient, the current
+    /// The binding of `keys` in the first keymap that binds it: transient, the current
     /// buffer's minor modes, its major mode, then global.
-    fn lookup(&self) -> Option<&Binding> {
-        self.layers().find_map(|map| map.lookup(&self.pending))
+    fn lookup(&self, keys: &[Key]) -> Option<&Binding> {
+        self.layers().find_map(|map| map.lookup(keys))
+    }
+
+    /// Whether `key` would run a command that reads the clipboard, so the app sends
+    /// `Msg::Clipboard` before it.
+    pub fn wants_clipboard(&self, key: Key) -> bool {
+        let keys = [&self.pending[..], &[key]].concat();
+        matches!(self.lookup(&keys), Some(Binding::Command(name))
+            if self.commands.get(name).is_some_and(|c| c.spec.clipboard))
+    }
+
+    /// Puts `text` on the kill ring as a new entry, dropping the oldest past the limit.
+    fn kill_new(&mut self, text: String) {
+        self.kill_ring.push_front(text);
+        self.kill_ring.truncate(KILL_RING_MAX);
+        self.yank_index = 0;
+    }
+
+    /// Moves the yank pointer `n` round the kill ring and returns that kill.
+    fn current_kill(&mut self, n: i64) -> Result<String, String> {
+        let len = self.kill_ring.len() as i64;
+        if len == 0 {
+            return Err("Kill ring is empty".into());
+        }
+        self.yank_index = (self.yank_index as i64 + n.rem_euclid(len)).rem_euclid(len) as usize;
+        Ok(self.kill_ring[self.yank_index].clone())
     }
 
     /// The keymaps in lookup order.
