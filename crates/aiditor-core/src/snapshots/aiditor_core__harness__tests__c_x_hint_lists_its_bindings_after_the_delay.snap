@@ -23,6 +23,10 @@ Some(
                 "split-window-right",
             ),
             (
+                "4",
+                "+prefix",
+            ),
+            (
                 "C-r",
                 "reload-settings",
             ),
@@ -33,6 +37,14 @@ Some(
             (
                 "C-x",
                 "exchange-point-and-mark",
+            ),
+            (
+                "b",
+                "switch-to-buffer",
+            ),
+            (
+                "k",
+                "kill-buffer",
             ),
             (
                 "o",

@@ -1012,6 +1012,25 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Kills the buffer `name`, asking first when it is a modified file buffer.
+    fn kill_buffer(&mut self, args: Args) -> Result<(), String> {
+        let name = &args.strings[0];
+        let id = (self.core.buffers.find(name)).ok_or_else(|| format!("No such buffer {name}"))?;
+        let buffer = self.core.buffers.get(id).expect("found");
+        if buffer.file.is_some() && buffer.modified() {
+            match args.strings.get(1).map(String::as_str) {
+                None => {
+                    let command = self.core.commands["kill-buffer"];
+                    return self.read_string(command, args, "Buffer modified; kill anyway? ");
+                }
+                Some("yes") => {}
+                Some(_) => return Ok(()),
+            }
+        }
+        self.core.kill_buffer(id);
+        Ok(())
+    }
+
     fn save(&mut self) {
         let id = self.core.window.buffer();
         let buffer = self.core.current();
@@ -1092,7 +1111,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 49] = [
+        let builtins: [(&'static str, command::Handler); 52] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1233,6 +1252,19 @@ impl Default for Core {
             ("other-window", |ctx, args| ctx.other_window(args.count())),
             ("delete-window", |ctx, _| ctx.delete_window()),
             ("delete-other-windows", |ctx, _| ctx.delete_other_windows()),
+            ("switch-to-buffer", |ctx, args| {
+                ctx.core.switch_to_name(&args.strings[0]);
+                Ok(())
+            }),
+            ("switch-to-buffer-other-window", |ctx, args| {
+                if ctx.core.tree.leaves().len() == 1 {
+                    ctx.split_window(false)?;
+                }
+                ctx.other_window(1)?;
+                ctx.core.switch_to_name(&args.strings[0]);
+                Ok(())
+            }),
+            ("kill-buffer", |ctx, args| ctx.kill_buffer(args)),
             ("exit-minibuffer", |ctx, _| ctx.exit_minibuffer()),
             ("abort-minibuffers", |ctx, _| {
                 ctx.core.close_minibuffer().ok_or("Not in a minibuffer")?;
@@ -1315,6 +1347,26 @@ impl Default for Core {
                         .collect::<Vec<_>>()
                         .join(" "),
                 )
+            }),
+            ..ArgSpec::default()
+        };
+        for name in ["switch-to-buffer", "switch-to-buffer-other-window"] {
+            commands.get_mut(name).expect("a builtin").spec = ArgSpec {
+                prompts: if name == "switch-to-buffer" {
+                    &["Switch to buffer: "]
+                } else {
+                    &["Switch to buffer in other window: "]
+                },
+                completion: Some(|core, _| core.buffer_names(false)),
+                ..ArgSpec::default()
+            };
+        }
+        commands.get_mut("kill-buffer").expect("a builtin").spec = ArgSpec {
+            prompts: &["Kill buffer: "],
+            // The second prompt, opened by the handler, confirms killing a modified buffer.
+            completion: Some(|core, args| match args.strings.is_empty() {
+                true => core.buffer_names(true),
+                false => vec!["no".into(), "yes".into()],
             }),
             ..ArgSpec::default()
         };
@@ -1557,7 +1609,53 @@ impl Core {
     /// Visits `path` in a new current buffer holding `text`, already read from it.
     pub fn open(&mut self, path: &Path, text: &str) {
         let id = self.buffers.create_for_file(path, text);
-        self.window.show(&mut self.buffers, id);
+        self.switch_to(id);
+    }
+
+    /// Shows buffer `id` in the selected window and makes it the most recent.
+    fn switch_to(&mut self, id: BufferId) {
+        self.buffers.raise(id);
+        if self.window.buffer() != id {
+            self.window.show(&mut self.buffers, id);
+        }
+    }
+
+    /// Switches to the buffer `name`, making an empty one if there is none.
+    fn switch_to_name(&mut self, name: &str) {
+        let id = (self.buffers.find(name)).unwrap_or_else(|| self.buffers.create(name));
+        self.switch_to(id);
+    }
+
+    /// The names of the buffers not hidden by a leading space, most recently shown first, with
+    /// the current buffer first or last.
+    fn buffer_names(&self, current_first: bool) -> Vec<String> {
+        let current = self.window.buffer();
+        let listed = self
+            .buffers
+            .recent()
+            .filter(|(_, b)| !b.name.starts_with(' '));
+        let (this, others): (Vec<_>, Vec<_>) = listed.partition(|(id, _)| *id == current);
+        let names = match current_first {
+            true => [this, others].concat(),
+            false => [others, this].concat(),
+        };
+        names.into_iter().map(|(_, b)| b.name.clone()).collect()
+    }
+
+    /// Kills buffer `id`; windows showing it show the most recent listed buffer left, or a new
+    /// `*scratch*`.
+    fn kill_buffer(&mut self, id: BufferId) {
+        let next = (self.buffers.recent())
+            .find(|&(b, buffer)| b != id && !buffer.name.starts_with(' '))
+            .map(|(b, _)| b);
+        // Killed first, so a new `*scratch*` gets its name.
+        _ = self.buffers.kill(id);
+        let next = next.unwrap_or_else(|| self.buffers.create("*scratch*"));
+        for window in std::iter::once(&mut self.window).chain(self.others.values_mut()) {
+            if window.buffer() == id {
+                window.show(&mut self.buffers, next);
+            }
+        }
     }
 
     /// Adds `command`, replacing any command of the same name.

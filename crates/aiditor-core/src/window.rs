@@ -21,16 +21,14 @@ pub struct Window {
 }
 
 impl Window {
-    /// A window on `buffer` with point at its start.
+    /// A window on `buffer` with point where the last window to show it left it.
     pub fn new(buffers: &mut Buffers, buffer: BufferId) -> Self {
+        let b = buffers.get_mut(buffer).expect("window buffer is live");
+        let at = b.marker(b.point).expect("a buffer's point is live");
         Window {
             buffer,
             // Stay, like Emacs's window-point: typing commands move point themselves.
-            point: buffers
-                .get_mut(buffer)
-                .expect("window buffer is live")
-                .add_marker(0, InsertionType::Stay)
-                .expect("0 is in every buffer"),
+            point: (b.add_marker(at, InsertionType::Stay)).expect("the buffer's point is in it"),
             mark: None,
             active: false,
             ring: Vec::new(),
@@ -55,9 +53,13 @@ impl Window {
         w
     }
 
-    /// Removes this window's markers from its buffer, as when it is deleted.
+    /// Removes this window's markers from its buffer, as when it is deleted, leaving the
+    /// buffer's point at this window's.
     pub fn release(&self, buffers: &mut Buffers) {
         if let Some(old) = buffers.get_mut(self.buffer) {
+            let point = old.marker(self.point).expect("window point is live");
+            old.set_marker(old.point, point)
+                .expect("point is in the buffer");
             old.remove_marker(self.point);
             for &m in self.mark.iter().chain(&self.ring) {
                 old.remove_marker(m);
@@ -65,7 +67,8 @@ impl Window {
         }
     }
 
-    /// Shows `buffer` instead, with point at its start; the old buffer keeps no markers of ours.
+    /// Shows `buffer` instead, with point at the buffer's point; the old buffer keeps no markers
+    /// of ours.
     pub fn show(&mut self, buffers: &mut Buffers, buffer: BufferId) {
         self.release(buffers);
         let rows = self.rows;
