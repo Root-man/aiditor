@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::{
-    Core, Ctx, Effect, Effects, Msg,
+    Core, Ctx, Effect, Effects, Msg, Recovered,
     buffer::BufferId,
     command::Args,
     display::{FrameDisplay, FrameWindow, WindowDisplay},
@@ -26,6 +26,8 @@ pub struct Harness {
     pub quit: bool,
     /// The recovery files: each buffer's auto-saved name, path and text.
     pub recovery: HashMap<BufferId, (String, Option<PathBuf>, String)>,
+    /// Earlier sessions' recovery files deleted, in order.
+    pub deleted: Vec<PathBuf>,
 }
 
 impl Harness {
@@ -44,6 +46,7 @@ impl Harness {
             clipboard: None,
             quit: false,
             recovery: HashMap::new(),
+            deleted: Vec::new(),
         }
     }
 
@@ -171,6 +174,7 @@ impl Harness {
                         .remove(&buffer)
                         .expect("deletes a written file");
                 }
+                Effect::DeleteRecovery(file) => self.deleted.push(file),
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
@@ -2712,5 +2716,78 @@ mod tests {
             result: Ok(0),
         });
         assert!(h.core.current().modified() && h.recovery.len() == 1);
+    }
+
+    /// An earlier session's recovery file for `path` in the temp dir (`None`: `*scratch*`),
+    /// auto-saved from a disk version holding `base`.
+    fn left(h: &Harness, path: Option<&str>, base: &str, text: &str) -> Recovered {
+        let path = path.map(|p| h.path(p));
+        let disk = (path.as_ref()).and_then(|p| std::fs::read(p).ok());
+        Recovered {
+            file: format!("/recovery/{text}").into(),
+            name: (path.as_ref()).map_or("*scratch*".into(), |_| "a".into()),
+            hash: path.as_ref().map(|_| hash(base.as_bytes())),
+            path,
+            text: text.into(),
+            disk: disk.map(|b| (b.clone(), hash(&b))),
+        }
+    }
+
+    #[test]
+    fn a_recovered_file_opens_modified_and_saves_over_the_unchanged_file() {
+        let mut h = Harness::new(&[("a", "1\n")]);
+        let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        let prompt = format!("Recover auto-saved {}? ", h.path("a").display());
+        h.send(Msg::Recover(vec![r]));
+        assert_eq!(h.core.minibuffer().map(|mb| mb.prompt), Some(prompt));
+        h.keys("RET");
+        let b = h.core.current();
+        assert_eq!(b.file.as_deref(), Some(h.path("a").as_path()));
+        assert!(b.modified() && h.text() == "1\nx\n");
+        // Written again under this session before the old file goes.
+        assert_eq!(
+            recovered(&h),
+            [("a".into(), Some(h.path("a")), "1\nx\n".into())]
+        );
+        assert_eq!(h.deleted, [PathBuf::from("/recovery/1\nx\n")]);
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a"), "1\nx\n");
+        assert!(h.recovery.is_empty());
+    }
+
+    #[test]
+    fn a_recovered_file_changed_on_disk_since_is_not_saved_over() {
+        let mut h = Harness::new(&[("a", "2\n")]);
+        let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        h.send(Msg::Recover(vec![r])).keys("RET C-x C-s");
+        assert_eq!(h.disk("a"), "2\n");
+        assert!(h.core.message().unwrap().contains("changed on disk"));
+    }
+
+    #[test]
+    fn recovery_offers_each_file_in_turn_and_c_g_keeps_the_rest() {
+        let mut h = Harness::new(&[("a", "1\n")]);
+        h.send(Msg::Recover(Vec::new()));
+        assert!(h.core.minibuffer().is_none() && h.core.message().is_none());
+        let files = vec![
+            left(&h, None, "", "notes"),
+            left(&h, Some("a"), "1\n", "gone"),
+            left(&h, None, "", "later"),
+        ];
+        h.send(Msg::Recover(files)).keys("RET No RET C-g");
+        assert_eq!(h.core.current().name, "*scratch*");
+        assert!(h.core.current().modified() && h.text() == "notes");
+        assert!(h.core.buffers.visiting(&h.path("a")).is_none(), "declined");
+        let deleted = ["/recovery/notes", "/recovery/gone"].map(PathBuf::from);
+        assert_eq!(h.deleted, deleted);
+        // A modified `*scratch*` is kept; the next one gets its own buffer.
+        h.keys("M-x recover-buffers RET RET");
+        assert_eq!(
+            (h.core.current().name.as_str(), h.text()),
+            ("*scratch*<2>", "later".into())
+        );
+        assert_eq!(h.deleted.len(), 3);
+        h.keys("M-x recover-buffers RET");
+        assert_eq!(h.core.message(), Some("No auto-saved buffers to recover"));
     }
 }

@@ -160,7 +160,7 @@ impl Editor {
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
-                Effect::AutoSave { .. } | Effect::DeleteAutoSave(_) => {
+                Effect::AutoSave { .. } | Effect::DeleteAutoSave(_) | Effect::DeleteRecovery(_) => {
                     if let Some((tx, _)) = &self.recovery {
                         _ = tx.send(effect);
                     }
@@ -962,6 +962,10 @@ fn main() {
             std::process::exit(1);
         });
         core.open(&path, file);
+    }
+    // Read before this session writes any, so all are an earlier session's.
+    if let Some(dir) = &args.recovery_dir {
+        core.handle(Instant::now(), Msg::Recover(recovery::list(dir)));
     }
 
     // Services run here, on background threads; GPUI owns the main thread.
