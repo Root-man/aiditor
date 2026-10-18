@@ -18,6 +18,8 @@ pub struct Window {
     top: usize,
     /// The lines shown at the last redisplay, 1 before the first.
     rows: usize,
+    /// The first column shown of point's line; moves only to keep point visible.
+    left: usize,
 }
 
 impl Window {
@@ -34,6 +36,7 @@ impl Window {
             ring: Vec::new(),
             top: 0,
             rows: 1,
+            left: 0,
         }
     }
 
@@ -46,6 +49,7 @@ impl Window {
         let w = Window {
             top: self.top,
             rows: self.rows,
+            left: self.left,
             ..Window::new(buffers, self.buffer)
         };
         let point = self.point(buffers);
@@ -168,6 +172,21 @@ impl Window {
 
     pub fn rows(&self) -> usize {
         self.rows
+    }
+
+    /// Moves the first column shown just far enough that `col` is among the `cols` shown, 0 while
+    /// it fits from column 0, and returns it; a window with no columns does not scroll.
+    pub fn hscroll(&mut self, col: usize, cols: usize) -> usize {
+        self.left = match cols == 0 || col < cols {
+            true => 0,
+            false => self.left.clamp(col + 1 - cols, col),
+        };
+        self.left
+    }
+
+    /// The first column shown of point's line at the last redisplay.
+    pub fn left(&self) -> usize {
+        self.left
     }
 
     fn live<'a>(&self, buffers: &'a mut Buffers) -> Result<&'a mut Buffer, Error> {
@@ -381,6 +400,21 @@ mod tests {
             assert_eq!(w.scroll(&buffers, 3), top, "point on line {line}");
         }
         assert_eq!(w.scroll(&buffers, 0), 1);
+    }
+
+    #[test]
+    fn hscroll_follows_the_column_and_resets_when_it_fits() {
+        let (mut buffers, mut w) = window_on("");
+        let cols = 40;
+        for (col, left) in [(39, 0), (100, 61), (80, 61), (50, 50), (60, 50), (39, 0)] {
+            assert_eq!(w.hscroll(col, cols), left, "column {col}");
+        }
+        w.hscroll(100, cols);
+        assert_eq!(w.split(&mut buffers).left(), 61, "a split keeps it");
+        let other = buffers.create("o");
+        w.show(&mut buffers, other);
+        assert_eq!(w.left(), 0, "showing another buffer resets it");
+        assert_eq!(w.hscroll(100, 0), 0, "no columns, no scroll");
     }
 
     #[test]

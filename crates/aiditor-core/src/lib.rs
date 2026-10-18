@@ -840,6 +840,17 @@ impl Ctx<'_> {
         core.window.set_active(false);
         core.last_command = Some("mouse-set-point");
         let buffer = core.current();
+        // Point's line is drawn scrolled sideways, so its shown columns start at the window's left.
+        let point_line = buffer
+            .line_col(core.window.point(&core.buffers))
+            .ok()
+            .map(|(l, _)| l);
+        let col = col
+            + if point_line == Some(line) {
+                core.window.left()
+            } else {
+                0
+            };
         let p = (buffer.char_idx(line, col)).unwrap_or(buffer.len_chars());
         if let Err(err) = self.goto(p) {
             tracing::debug!(%err, "click outside the buffer");
@@ -2222,8 +2233,10 @@ impl Core {
     }
 
     /// The selected window's display model for a window `height` px high, mode line included.
+    /// It has no width, so point's line never scrolls sideways.
     pub fn display(&mut self, height: f32) -> display::WindowDisplay {
-        window_display(&mut self.window, &self.buffers, &self.settings, height)
+        let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
+        window_display(window, buffers, settings, height, usize::MAX)
     }
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
@@ -2243,7 +2256,9 @@ impl Core {
                     true => &mut self.window,
                     false => self.others.get_mut(&id).expect("tree windows are live"),
                 };
-                let display = window_display(window, &self.buffers, &self.settings, rect.height);
+                let cols = (rect.width / cell_width) as usize;
+                let (buffers, settings) = (&self.buffers, &self.settings);
+                let display = window_display(window, buffers, settings, rect.height, cols);
                 display::FrameWindow {
                     id,
                     rect,
@@ -2275,7 +2290,10 @@ impl Core {
         }
         // The minibuffer is selected while open; one row, as the height leaves out a mode line.
         let height = 2. * self.settings.line_height();
-        let display = window_display(&mut self.window, &self.buffers, &self.settings, height);
+        let (width, _, cell_width) = self.frame_size;
+        let cols = ((width / cell_width) as usize).saturating_sub(prompt.chars().count());
+        let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
+        let display = window_display(window, buffers, settings, height, cols);
         Some(display::Minibuffer {
             prompt,
             display,
@@ -2311,12 +2329,14 @@ impl Core {
     }
 }
 
-/// `window`'s display model for a window `height` px high, mode line included.
+/// `window`'s display model for a window `height` px high and `cols` chars wide, mode line
+/// included, point's line shown from the column that keeps point visible.
 fn window_display(
     window: &mut Window,
     buffers: &Buffers,
     settings: &Settings,
     height: f32,
+    cols: usize,
 ) -> display::WindowDisplay {
     let rows = ((height / settings.line_height()) as usize)
         .saturating_sub(1)
@@ -2326,5 +2346,21 @@ fn window_display(
     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
     let point = window.point(buffers);
     let mark = window.mark(buffers).filter(|_| window.active());
-    display::build(buffer, top, rows, point, mark, settings)
+    let mut d = display::build(buffer, top, rows, point, mark, settings);
+    // shortcut: a tab or wide char counts as one column, so the cursor can sit past the edge on such lines; measure widths when the display does.
+    if let Some((row, col)) = &mut d.cursor {
+        let mut cut = window.hscroll(*col, cols);
+        *col -= cut;
+        d.lines[*row].spans.retain_mut(|span| {
+            let chars = span.text.chars().count();
+            if cut >= chars {
+                cut -= chars;
+                return false;
+            }
+            span.text = span.text.chars().skip(cut).collect();
+            cut = 0;
+            true
+        });
+    }
+    d
 }
