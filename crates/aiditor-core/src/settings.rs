@@ -33,6 +33,8 @@ pub struct Settings {
     /// `None` means the platform's monospace font.
     pub font_family: Option<String>,
     pub font_size: f32,
+    /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
+    pub option_as_meta: bool,
     pub theme: Theme,
 }
 
@@ -82,6 +84,7 @@ mod tests {
         assert_eq!(s.font_family, None);
         assert_eq!(s.font_size, 14.0);
         assert_eq!(s.theme.cursor, 0xffcc00);
+        assert!(s.option_as_meta);
     }
 
     #[test]

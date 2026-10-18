@@ -11,3 +11,6 @@ gpui = "0.2.2"
 tokio = { version = "1.53.2", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }
