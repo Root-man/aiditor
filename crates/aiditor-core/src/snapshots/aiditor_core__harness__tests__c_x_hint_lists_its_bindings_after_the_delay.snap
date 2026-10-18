@@ -7,6 +7,22 @@ Some(
         keys: "C-x",
         entries: [
             (
+                "0",
+                "delete-window",
+            ),
+            (
+                "1",
+                "delete-other-windows",
+            ),
+            (
+                "2",
+                "split-window-below",
+            ),
+            (
+                "3",
+                "split-window-right",
+            ),
+            (
                 "C-r",
                 "reload-settings",
             ),
@@ -17,6 +33,10 @@ Some(
             (
                 "C-x",
                 "exchange-point-and-mark",
+            ),
+            (
+                "o",
+                "other-window",
             ),
             (
                 "u",

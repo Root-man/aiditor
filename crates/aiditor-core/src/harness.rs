@@ -1536,4 +1536,112 @@ mod tests {
             "a pushed clipboard ends the run"
         );
     }
+
+    /// Each window's (id, point), in tree order, and the selected id.
+    fn windows(h: &Harness) -> (Vec<(usize, usize)>, usize) {
+        let core = &h.core;
+        let point = |id| match core.others.get(&id) {
+            Some(w) => w.point(&core.buffers),
+            None => core.point(),
+        };
+        let all = core.tree.leaves().into_iter().map(|id| (id.0, point(id)));
+        (all.collect(), core.selected.0)
+    }
+
+    #[test]
+    fn splitting_keeps_point_and_selects_the_old_window() {
+        let mut h = on("abcdef");
+        h.keys("C-f C-f C-f C-x 2");
+        assert_eq!(windows(&h), (vec![(0, 3), (1, 3)], 0));
+        assert_eq!(h.core.window.mark(&h.core.buffers), None);
+        h.keys("C-SPC C-x 3");
+        assert_eq!(
+            h.core.others[&crate::WindowId(2)].mark(&h.core.buffers),
+            None,
+            "no mark"
+        );
+    }
+
+    #[test]
+    fn two_windows_on_one_buffer_keep_separate_points() {
+        let mut h = on("abcdef");
+        h.keys("C-f C-f C-f C-x 2 M->");
+        assert_eq!(windows(&h), (vec![(0, 6), (1, 3)], 0));
+        h.keys("C-x o");
+        assert_eq!((h.point(), h.core.selected.0), (3, 1));
+        h.keys("C-x o");
+        assert_eq!(h.point(), 6);
+        h.keys("C-b C-b C-b C-b C-b X Y");
+        assert_eq!(
+            windows(&h),
+            (vec![(0, 3), (1, 5)], 0),
+            "the other point follows the edit"
+        );
+    }
+
+    #[test]
+    fn other_window_cycles_both_ways() {
+        let mut h = on("abc");
+        h.keys("C-x 2 C-x 2");
+        let order: Vec<_> = windows(&h).0.iter().map(|w| w.0).collect();
+        assert_eq!(order, [0, 2, 1]);
+        h.keys("C-x o");
+        assert_eq!(h.core.selected.0, 2);
+        h.keys("C-x o C-x o");
+        assert_eq!(h.core.selected.0, 0, "wraps to the first");
+        h.keys("C-u - 1 C-x o");
+        assert_eq!(h.core.selected.0, 1, "backward to the last");
+        h.keys("C-u 4 C-x o");
+        assert_eq!(h.core.selected.0, 0);
+        h.keys("C-x 1 C-x o");
+        assert_eq!(h.core.selected.0, 0, "one window does nothing");
+    }
+
+    #[test]
+    fn deleting_windows() {
+        let mut h = on("abcdef");
+        h.keys("C-x 0");
+        assert_eq!(
+            (windows(&h), h.core.message()),
+            (
+                (vec![(0, 0)], 0),
+                Some("Attempt to delete minibuffer or sole ordinary window")
+            )
+        );
+        h.keys("C-f C-x 2 C-x o C-f C-f");
+        h.keys("C-x 0");
+        assert_eq!(
+            windows(&h),
+            (vec![(0, 1)], 0),
+            "the upper window with its point"
+        );
+        h.keys("C-x 2 C-x 2 C-x o C-x 1");
+        assert_eq!(windows(&h), (vec![(3, 1)], 3), "only the second is left");
+        assert_eq!(h.core.frame(80., 100.).windows[0].rect.height, 100.);
+    }
+
+    #[test]
+    fn visiting_a_file_in_a_split() {
+        let mut h = Harness::new(&[("a.txt", "abc")]);
+        h.keys("x C-x 2");
+        h.open("a.txt");
+        let names: Vec<_> = (h.core.frame(80., 100.).windows.iter())
+            .map(|w| w.display.mode_line.clone())
+            .collect();
+        assert_eq!(names, ["-- a.txt  1:0", "** *scratch*  1:1"]);
+    }
+
+    #[test]
+    fn frame_display_of_a_stacked_split() {
+        let mut h = on("one\ntwo");
+        h.keys("C-n C-x 2");
+        insta::assert_debug_snapshot!(h.core.frame(800., 600.));
+    }
+
+    #[test]
+    fn frame_display_of_a_side_by_side_split() {
+        let mut h = on("one\ntwo");
+        h.keys("C-x 3 C-n");
+        insta::assert_debug_snapshot!(h.core.frame(800., 600.));
+    }
 }

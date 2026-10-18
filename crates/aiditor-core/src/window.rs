@@ -1,6 +1,7 @@
 //! Windows: viewports onto buffers, holding point and mark as markers and the first line shown.
 
 use crate::buffer::{Buffer, BufferId, Buffers, Error, InsertionType, MarkerId};
+use crate::display::Rect;
 
 /// How many marks the ring keeps, Emacs's `mark-ring-max`.
 const MARK_RING_MAX: usize = 16;
@@ -42,14 +43,31 @@ impl Window {
         self.buffer
     }
 
-    /// Shows `buffer` instead, with point at its start; the old buffer keeps no markers of ours.
-    pub fn show(&mut self, buffers: &mut Buffers, buffer: BufferId) {
+    /// A new window on the same buffer with the same point, first line and rows, and no mark.
+    pub fn split(&self, buffers: &mut Buffers) -> Self {
+        let w = Window {
+            top: self.top,
+            rows: self.rows,
+            ..Window::new(buffers, self.buffer)
+        };
+        let point = self.point(buffers);
+        w.set_point(buffers, point).expect("point is in the buffer");
+        w
+    }
+
+    /// Removes this window's markers from its buffer, as when it is deleted.
+    pub fn release(&self, buffers: &mut Buffers) {
         if let Some(old) = buffers.get_mut(self.buffer) {
             old.remove_marker(self.point);
             for &m in self.mark.iter().chain(&self.ring) {
                 old.remove_marker(m);
             }
         }
+    }
+
+    /// Shows `buffer` instead, with point at its start; the old buffer keeps no markers of ours.
+    pub fn show(&mut self, buffers: &mut Buffers, buffer: BufferId) {
+        self.release(buffers);
         let rows = self.rows;
         *self = Window {
             rows,
@@ -156,9 +174,132 @@ impl Window {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct WindowId(pub usize);
+
+/// The frame's windows as a binary split tree.
+#[derive(Debug)]
+pub enum Tree {
+    Leaf(WindowId),
+    Split {
+        /// Side by side when true, one above the other when false.
+        side_by_side: bool,
+        /// The share of the space the first part takes.
+        ratio: f32,
+        first: Box<Tree>,
+        second: Box<Tree>,
+    },
+}
+
+impl Tree {
+    /// Splits the leaf `id` in half, `new` going below or right of it.
+    pub fn split(&mut self, id: WindowId, new: WindowId, side_by_side: bool) {
+        match self {
+            Tree::Leaf(leaf) if *leaf == id => {
+                *self = Tree::Split {
+                    side_by_side,
+                    ratio: 0.5,
+                    first: Box::new(Tree::Leaf(id)),
+                    second: Box::new(Tree::Leaf(new)),
+                }
+            }
+            Tree::Leaf(_) => {}
+            Tree::Split { first, second, .. } => {
+                first.split(id, new, side_by_side);
+                second.split(id, new, side_by_side);
+            }
+        }
+    }
+
+    /// Removes the leaf `id`, its sibling taking its parent's place, and returns the sibling's
+    /// first leaf; `None` if `id` is the root or not in the tree.
+    pub fn remove(&mut self, id: WindowId) -> Option<WindowId> {
+        let Tree::Split { first, second, .. } = self else {
+            return None;
+        };
+        let sibling = match (&**first, &**second) {
+            (Tree::Leaf(l), _) if *l == id => std::mem::replace(&mut **second, Tree::Leaf(id)),
+            (_, Tree::Leaf(l)) if *l == id => std::mem::replace(&mut **first, Tree::Leaf(id)),
+            _ => return first.remove(id).or_else(|| second.remove(id)),
+        };
+        *self = sibling;
+        Some(self.leaves()[0])
+    }
+
+    /// The leaves top to bottom, left to right.
+    pub fn leaves(&self) -> Vec<WindowId> {
+        match self {
+            Tree::Leaf(id) => vec![*id],
+            Tree::Split { first, second, .. } => [first.leaves(), second.leaves()].concat(),
+        }
+    }
+
+    /// Each leaf's part of `rect`, in `leaves` order.
+    // shortcut: parts are not snapped to whole lines or cells; #11 snaps them when it draws.
+    pub fn layout(&self, rect: Rect) -> Vec<(WindowId, Rect)> {
+        match self {
+            Tree::Leaf(id) => vec![(*id, rect)],
+            Tree::Split {
+                side_by_side,
+                ratio,
+                first,
+                second,
+            } => {
+                let (mut a, mut b) = (rect, rect);
+                if *side_by_side {
+                    a.width = rect.width * ratio;
+                    b.x += a.width;
+                    b.width -= a.width;
+                } else {
+                    a.height = rect.height * ratio;
+                    b.y += a.height;
+                    b.height -= a.height;
+                }
+                [first.layout(a), second.layout(b)].concat()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_tree_splits_lays_out_and_removes() {
+        let w = WindowId;
+        let mut tree = Tree::Leaf(w(0));
+        assert_eq!(tree.remove(w(0)), None, "the sole window stays");
+        tree.split(w(0), w(1), false);
+        tree.split(w(0), w(2), false);
+        let frame = Rect {
+            x: 0.,
+            y: 0.,
+            width: 80.,
+            height: 100.,
+        };
+        let heights: Vec<_> = tree
+            .layout(frame)
+            .iter()
+            .map(|(id, r)| (*id, r.y, r.height))
+            .collect();
+        assert_eq!(
+            heights,
+            [(w(0), 0., 25.), (w(2), 25., 25.), (w(1), 50., 50.)]
+        );
+        tree.split(w(1), w(3), true);
+        let lower: Vec<_> = tree.layout(frame)[2..]
+            .iter()
+            .map(|(_, r)| (r.x, r.width))
+            .collect();
+        assert_eq!(lower, [(0., 40.), (40., 40.)]);
+        assert_eq!(tree.remove(w(0)), Some(w(2)));
+        assert_eq!(tree.leaves(), [w(2), w(1), w(3)]);
+        assert_eq!(tree.layout(frame)[0].1.height, 50.);
+        assert_eq!(tree.remove(w(1)), Some(w(3)));
+        assert_eq!(tree.remove(w(2)), Some(w(3)));
+        assert_eq!(tree.leaves(), [w(3)]);
+    }
 
     fn window_on(text: &str) -> (Buffers, Window) {
         let mut buffers = Buffers::default();
@@ -228,6 +369,29 @@ mod tests {
             assert_eq!(w.scroll(&buffers, 3), top, "point on line {line}");
         }
         assert_eq!(w.scroll(&buffers, 0), 1);
+    }
+
+    #[test]
+    fn a_split_copies_point_and_a_released_window_stops_following_edits() {
+        let (mut buffers, mut w) = window_on("abcdef");
+        w.set_point(&mut buffers, 3).unwrap();
+        w.push_mark(&mut buffers, 1, true).unwrap();
+        let new = w.split(&mut buffers);
+        assert_eq!((new.point(&buffers), new.mark(&buffers)), (3, None));
+        let (point, mark) = (w.point, w.mark.unwrap());
+        w.release(&mut buffers);
+        buffers
+            .get_mut(w.buffer())
+            .unwrap()
+            .insert(0, "XY")
+            .unwrap();
+        let buffer = buffers.get(w.buffer()).unwrap();
+        assert_eq!([point, mark].map(|m| buffer.marker(m)), [None; 2]);
+        assert_eq!(
+            new.point(&buffers),
+            5,
+            "the other window still follows edits"
+        );
     }
 
     #[test]

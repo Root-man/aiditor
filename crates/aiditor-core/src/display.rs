@@ -11,6 +11,28 @@ pub struct WindowDisplay {
     pub mode_line: String,
 }
 
+/// A rectangle of the frame in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Every window of the frame, laid out by the split tree.
+#[derive(Debug, PartialEq)]
+pub struct FrameDisplay {
+    pub windows: Vec<FrameWindow>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct FrameWindow {
+    pub rect: Rect,
+    pub selected: bool,
+    pub display: WindowDisplay,
+}
+
 /// The which-key hint shown while a prefix waits: the pending keys and what can follow them.
 #[derive(Debug, PartialEq)]
 pub struct Hint {
