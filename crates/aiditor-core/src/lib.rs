@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
-use ropey::Rope;
 
 use buffer::{Buffer, BufferId, Buffers};
 use command::{ArgSpec, Args, Command, Prefix};
@@ -58,8 +57,12 @@ pub enum Msg {
     },
     /// Wakes the core when a timer is due; due timers fire on every message.
     Tick,
-    /// The app wrote the buffer's text to its file.
-    Saved(BufferId),
+    /// The file service's answer to `Effect::Save`: the file's new hash, or why it wasn't written.
+    Saved {
+        buffer: BufferId,
+        tick: u64,
+        result: Result<u64, String>,
+    },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
     /// The user's keymap file, the same way.
@@ -127,11 +130,14 @@ impl Completion {
 
 /// Work the app carries out for the core.
 pub enum Effect {
-    /// Write `text` to `path`, then send `Msg::Saved(buffer)` if that worked.
+    /// Write `bytes` to `path` if the file still hashes to `hash` (`None`: no file), then send
+    /// `Msg::Saved` with `buffer` and its `tick` at the save.
     Save {
         buffer: BufferId,
+        tick: u64,
         path: PathBuf,
-        text: Rope,
+        bytes: Vec<u8>,
+        hash: Option<u64>,
     },
     /// Read the user's settings and keymap files and send `Msg::SettingsLoaded` and
     /// `Msg::KeymapLoaded`.
@@ -359,9 +365,23 @@ impl Ctx<'_> {
                 height,
                 cell_width,
             } => self.core.frame_size = (width, height, cell_width),
-            Msg::Saved(id) => {
-                if let Some(buffer) = self.core.buffers.get_mut(id) {
-                    buffer.set_saved();
+            Msg::Saved {
+                buffer: id,
+                tick,
+                result,
+            } => {
+                match (self.core.buffers.get_mut(id), result) {
+                    (None, _) => {}
+                    (Some(buffer), Ok(hash)) => {
+                        buffer.disk = Some(hash);
+                        // Edits made while the write ran are still unsaved.
+                        if buffer.tick() == tick {
+                            buffer.set_saved();
+                        }
+                        let path = buffer.file.as_deref().unwrap_or(Path::new(""));
+                        self.core.message = Some(format!("Wrote {}", path.display()));
+                    }
+                    (Some(_), Err(err)) => self.core.message = Some(err),
                 }
             }
             Msg::SettingsLoaded(text) => {
@@ -1031,17 +1051,28 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn save(&mut self) {
+    fn save(&mut self) -> Result<(), String> {
         let id = self.core.window.buffer();
-        let buffer = self.core.current();
-        match &buffer.file {
-            Some(path) => self.effects.push(Effect::Save {
-                buffer: id,
-                path: path.clone(),
-                text: buffer.text().clone(),
-            }),
-            None => tracing::info!(name = buffer.name, "buffer visits no file"),
+        let buffer = self.core.current_mut();
+        let Some(path) = buffer.file.clone() else {
+            tracing::info!(name = buffer.name, "buffer visits no file");
+            return Ok(());
+        };
+        if !buffer.modified() {
+            return Err("(No changes need to be saved)".into());
         }
+        let len = buffer.text().len_chars();
+        if len > 0 && buffer.text().char(len - 1) != '\n' {
+            buffer.insert(len, "\n").map_err(|err| err.to_string())?;
+        }
+        self.effects.push(Effect::Save {
+            buffer: id,
+            tick: buffer.tick(),
+            path,
+            bytes: buffer.encode(),
+            hash: buffer.disk,
+        });
+        Ok(())
     }
 }
 
@@ -1192,10 +1223,7 @@ impl Default for Core {
                 ctx.undo(true);
                 Ok(())
             }),
-            ("save-buffer", |ctx, _| {
-                ctx.save();
-                Ok(())
-            }),
+            ("save-buffer", |ctx, _| ctx.save()),
             ("reload-settings", |ctx, _| {
                 ctx.effects.push(Effect::LoadSettings);
                 Ok(())
@@ -1606,9 +1634,22 @@ impl Core {
         Some(item.data.0.clone())
     }
 
-    /// Visits `path` in a new current buffer holding `text`, already read from it.
-    pub fn open(&mut self, path: &Path, text: &str) {
-        let id = self.buffers.create_for_file(path, text);
+    /// Visits `path` in a new current buffer, given the file's bytes and their hash, or `None`
+    /// when there is no file. A binary or non-UTF-8 file opens empty and read-only.
+    pub fn open(&mut self, path: &Path, file: Option<(Vec<u8>, u64)>) {
+        let disk = file.as_ref().map(|(_, hash)| *hash);
+        let (text, crlf, bom, refused) = match file.map(|(bytes, _)| buffer::decode(&bytes)) {
+            None => (String::new(), false, false, None),
+            Some(Ok((text, crlf, bom))) => (text, crlf, bom, None),
+            Some(Err(reason)) => (String::new(), false, false, Some(reason)),
+        };
+        let id = self.buffers.create_for_file(path, &text);
+        let buffer = self.buffers.get_mut(id).expect("just created");
+        (buffer.crlf, buffer.bom, buffer.disk) = (crlf, bom, disk);
+        if let Some(reason) = refused {
+            buffer.read_only = true;
+            self.message = Some(format!("{}: {reason}, opened read-only", path.display()));
+        }
         self.switch_to(id);
     }
 

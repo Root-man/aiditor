@@ -169,11 +169,16 @@ pub fn build(
         }
     }
     let (l, c) = buffer.line_col(point).unwrap_or_default();
-    let modified = if buffer.modified() { "**" } else { "--" };
+    let state = match (buffer.read_only, buffer.modified()) {
+        (true, _) => "%%",
+        (_, true) => "**",
+        _ => "--",
+    };
+    let dos = if buffer.crlf { " (DOS)" } else { "" };
     WindowDisplay {
         lines,
         cursor,
-        mode_line: format!("{modified} {}  {}:{c}", buffer.name, l + 1),
+        mode_line: format!("{state} {}{dos}  {}:{c}", buffer.name, l + 1),
     }
 }
 

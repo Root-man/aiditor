@@ -97,10 +97,27 @@ impl Harness {
     fn run(&mut self, effects: Effects) {
         for effect in effects {
             match effect {
-                Effect::Save { buffer, path, text } => {
-                    if std::fs::write(path, text.to_string()).is_ok() {
-                        self.core.handle(self.now, Msg::Saved(buffer));
-                    }
+                // As the file service does, minus its atomic write.
+                Effect::Save {
+                    buffer,
+                    tick,
+                    path,
+                    bytes,
+                    hash: expected,
+                } => {
+                    let on_disk = std::fs::read(&path).ok().map(|b| hash(&b));
+                    let result = match on_disk == expected {
+                        false => Err(format!("{} changed on disk; not saved", path.display())),
+                        true => std::fs::write(&path, &bytes)
+                            .map(|()| hash(&bytes))
+                            .map_err(|err| format!("{}: {err}", path.display())),
+                    };
+                    let msg = Msg::Saved {
+                        buffer,
+                        tick,
+                        result,
+                    };
+                    self.core.handle(self.now, msg);
                 }
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::LoadSettings => {
@@ -116,15 +133,25 @@ impl Harness {
     /// Visits `name` in the temp dir, reading it as the app does; a missing file is empty.
     pub fn open(&mut self, name: &str) -> &mut Self {
         let path = self.path(name);
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        self.core.open(&path, &text);
+        let file = std::fs::read(&path).ok().map(|b| (hash(&b), b));
+        self.core.open(&path, file.map(|(h, b)| (b, h)));
         self
     }
 
     pub fn disk(&self, name: &str) -> String {
         std::fs::read_to_string(self.path(name)).unwrap()
     }
+}
 
+/// Stands in for the file service's hash.
+fn hash(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut h = DefaultHasher::new();
+    h.write(bytes);
+    h.finish()
+}
+
+impl Harness {
     /// Moves the fake clock on and wakes the core, as the app does at a deadline.
     pub fn advance(&mut self, d: Duration) -> &mut Self {
         self.now += d;
@@ -392,7 +419,7 @@ mod tests {
         h.call("undo-redo", Args::default());
         assert_eq!(h.text(), "ab");
         h.call("save-buffer", Args::default());
-        assert_eq!(h.disk("a.txt"), "ab");
+        assert_eq!(h.disk("a.txt"), "ab\n");
         h.call("reload-settings", Args::default());
         assert_eq!(h.core.settings().font_size, 18.0);
     }
@@ -409,8 +436,80 @@ mod tests {
         assert!(h.core.current().modified());
         assert_eq!(h.disk("a.txt"), "hello");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "hXello");
+        assert_eq!(h.disk("a.txt"), "hXello\n");
+        assert_eq!(h.text(), "hXello\n");
+        assert_eq!(h.point(), 2);
         assert!(!h.core.current().modified());
+        let wrote = format!("Wrote {}", h.path("a.txt").display());
+        assert_eq!(h.core.message(), Some(wrote.as_str()));
+        h.keys("C-x C-s");
+        assert_eq!(h.core.message(), Some("(No changes need to be saved)"));
+    }
+
+    #[test]
+    fn refuses_to_save_over_a_file_changed_on_disk() {
+        let mut h = Harness::new(&[("a.txt", "old\n")]);
+        h.open("a.txt");
+        std::fs::write(h.path("a.txt"), "theirs\n").unwrap();
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("a.txt"), "theirs\n");
+        assert!(h.core.current().modified());
+        assert!(
+            h.core
+                .message()
+                .unwrap()
+                .ends_with("changed on disk; not saved")
+        );
+        // A file that appeared after it was opened as missing.
+        h.open("new.txt");
+        std::fs::write(h.path("new.txt"), "theirs").unwrap();
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("new.txt"), "theirs");
+    }
+
+    #[test]
+    fn saves_keep_the_bom_and_crlf() {
+        let mut h = Harness::new(&[("a.txt", "\u{feff}a\r\nb\r\n")]);
+        h.open("a.txt");
+        assert_eq!(h.text(), "a\nb\n");
+        assert_eq!(h.display(5).mode_line, "-- a.txt (DOS)  1:0");
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("a.txt"), "\u{feff}xa\r\nb\r\n");
+        // The saved hash is the next save's base.
+        h.keys("y C-x C-s");
+        assert_eq!(h.disk("a.txt"), "\u{feff}xya\r\nb\r\n");
+    }
+
+    #[test]
+    fn edits_during_a_save_stay_unsaved() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        h.open("a.txt");
+        h.keys("x");
+        let mut ctx = h.ctx();
+        ctx.call("save-buffer", Args::default());
+        let effects = ctx.effects;
+        h.keys("y");
+        h.run(effects);
+        assert_eq!(h.disk("a.txt"), "x\n");
+        assert!(h.core.current().modified());
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "xy\n");
+    }
+
+    #[test]
+    fn binary_and_non_utf8_files_open_empty_and_read_only() {
+        for (name, bytes) in [("a.bin", &b"a\0b"[..]), ("l1.txt", b"caf\xe9")] {
+            let mut h = Harness::new(&[]);
+            std::fs::write(h.path(name), bytes).unwrap();
+            h.open(name);
+            assert_eq!(h.text(), "");
+            assert!(h.core.message().unwrap().contains(", opened read-only"));
+            assert_eq!(h.display(5).mode_line, format!("%% {name}  1:0"));
+            h.keys("x");
+            assert_eq!(h.core.message(), Some("Buffer is read-only"));
+            h.keys("C-x C-s");
+            assert_eq!(std::fs::read(h.path(name)).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -420,7 +519,7 @@ mod tests {
         assert_eq!(h.text(), "");
         assert!(!h.path("new.txt").exists());
         h.keys("hi C-x C-s");
-        assert_eq!(h.disk("new.txt"), "hi");
+        assert_eq!(h.disk("new.txt"), "hi\n");
     }
 
     #[test]
@@ -429,7 +528,8 @@ mod tests {
         h.open("no/such/dir/a.txt");
         h.keys("x C-x C-s");
         assert!(h.core.current().modified());
-        assert_eq!(h.text(), "x");
+        assert_eq!(h.text(), "x\n");
+        assert!(h.core.message().unwrap().contains("No such file"));
     }
 
     #[test]
@@ -1107,7 +1207,7 @@ mod tests {
         bind_mode(&mut h, "test-mode", "C-x a", "two");
         buffer(&mut h).minor_modes.push("test-mode");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "x");
+        assert_eq!(h.disk("a.txt"), "x\n");
         h.keys("C-x a");
         assert_eq!(h.core.message(), Some("two"));
     }
