@@ -37,6 +37,8 @@ pub struct Minibuffer {
     pub display: WindowDisplay,
     /// The completion list's shown rows, best match first; empty without completion.
     pub candidates: Vec<String>,
+    /// Each of `candidates`' annotation, empty for none.
+    pub annotations: Vec<String>,
     /// Which of `candidates` is selected.
     pub selected: Option<usize>,
 }

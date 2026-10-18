@@ -447,7 +447,7 @@ impl Render for Editor {
                 ms(d.tick),
             )
         });
-        let (_, cell) = self.font(window);
+        let (font, cell) = self.font(window);
         let minibuffer = self.core.minibuffer();
         let settings = self.core.settings();
         let theme = &settings.theme;
@@ -472,22 +472,28 @@ impl Render for Editor {
         let echo = match minibuffer {
             // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
             Some(mb) => {
-                let spans = mb.display.lines.iter().flat_map(|l| &l.spans);
-                let text: String = spans.map(|s| s.text.as_str()).collect();
-                let col = mb.display.cursor.map_or(usize::MAX, |(_, col)| col);
-                let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
-                let message = match message.is_empty() {
-                    true => message,
-                    false => format!(" [{message}]"),
-                };
-                let cursor = div().w(px(2.)).h(line_height).bg(rgb(theme.cursor));
-                let prompt = line()
-                    .flex()
-                    .child(format!("{}{}", mb.prompt, &text[..byte]))
-                    .child(cursor)
-                    .child(format!("{}{message}", &text[byte..]));
-                let candidates = mb.candidates.into_iter().enumerate().map(|(i, c)| {
-                    let row = line().child(c);
+                let (text, byte) = echo_line(&mb, &message);
+                // Shaped whole, the cursor laid over it, so moving it never shifts the text (#11).
+                let run = text_run(text.len(), Face::default(), false, &font, theme);
+                let shaped = (window.text_system()).shape_line(
+                    text.clone().into(),
+                    px(settings.font_size),
+                    &[run],
+                    None,
+                );
+                let cursor = div()
+                    .absolute()
+                    .top_0()
+                    .left(shaped.x_for_index(byte))
+                    .w(px(2.))
+                    .h(line_height)
+                    .bg(rgb(theme.cursor));
+                let prompt = line().relative().child(text).child(cursor);
+                let rows = mb.candidates.into_iter().zip(mb.annotations).enumerate();
+                let candidates = rows.map(|(i, (c, note))| {
+                    let note =
+                        (!note.is_empty()).then(|| div().ml(cell * 2.).opacity(0.6).child(note));
+                    let row = line().flex().child(c).children(note);
                     match Some(i) == mb.selected {
                         true => row.bg(rgb(theme.region)),
                         false => row,
@@ -735,6 +741,23 @@ fn text_run(len: usize, face: Face, underline: bool, font: &Font, theme: &Theme)
         }),
         strikethrough: None,
     }
+}
+
+/// The echo line at a prompt: the prompt, the minibuffer's line and any `message` in brackets,
+/// with the byte offset of point in it.
+fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -> (String, usize) {
+    let spans = mb.display.lines.iter().flat_map(|l| &l.spans);
+    let text: String = spans.map(|s| s.text.as_str()).collect();
+    let col = mb.display.cursor.map_or(usize::MAX, |(_, col)| col);
+    let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
+    let message = match message.is_empty() {
+        true => String::new(),
+        false => format!(" [{message}]"),
+    };
+    (
+        format!("{}{text}{message}", mb.prompt),
+        mb.prompt.len() + byte,
+    )
 }
 
 /// `line`'s text with `marked` spliced in at char column `at`, one run per span, and the byte
@@ -1053,6 +1076,33 @@ mod tests {
         let message = editor.read_with(cx, |e, _| e.core.message().map(str::to_string));
         assert_eq!(message.as_deref(), Some("got hi"));
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "");
+    }
+
+    #[gpui::test]
+    fn the_echo_line_is_one_string_with_point_in_it(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("abc");
+        cx.simulate_keystrokes("ctrl-b ctrl-b alt-z");
+        let line = editor.update(cx, |e, _| {
+            let message = e.core.message().unwrap_or_default().to_string();
+            echo_line(&e.core.minibuffer().unwrap(), &message)
+        });
+        let text = "M-x abc [M-z is undefined]".to_string();
+        assert_eq!(line, (text, "M-x a".len()));
+    }
+
+    #[gpui::test]
+    fn m_x_runs_a_command_by_name(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "abc");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("forward-char");
+        cx.run_until_parked();
+        let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
+        assert_eq!(prompt.as_deref(), Some("M-x "));
+        cx.simulate_keystrokes("enter");
+        let last = editor.read_with(cx, |e, _| e.core.last_command());
+        assert_eq!(last, Some("forward-char"));
     }
 
     #[gpui::test]
