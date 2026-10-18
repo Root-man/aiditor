@@ -1,15 +1,18 @@
 ---
 source: crates/aiditor-core/src/harness.rs
-expression: "h.core.frame(800., 600.)"
+expression: "h.frame(800., 600.)"
 ---
 FrameDisplay {
     windows: [
         FrameWindow {
+            id: WindowId(
+                0,
+            ),
             rect: Rect {
                 x: 0.0,
                 y: 0.0,
                 width: 800.0,
-                height: 300.0,
+                height: 294.0,
             },
             selected: true,
             display: WindowDisplay {
@@ -55,11 +58,14 @@ FrameDisplay {
             },
         },
         FrameWindow {
+            id: WindowId(
+                1,
+            ),
             rect: Rect {
                 x: 0.0,
-                y: 300.0,
+                y: 294.0,
                 width: 800.0,
-                height: 300.0,
+                height: 306.0,
             },
             selected: false,
             display: WindowDisplay {

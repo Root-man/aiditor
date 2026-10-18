@@ -1,10 +1,13 @@
 ---
 source: crates/aiditor-core/src/harness.rs
-expression: "h.core.frame(800., 600.)"
+expression: "h.frame(800., 600.)"
 ---
 FrameDisplay {
     windows: [
         FrameWindow {
+            id: WindowId(
+                0,
+            ),
             rect: Rect {
                 x: 0.0,
                 y: 0.0,
@@ -55,6 +58,9 @@ FrameDisplay {
             },
         },
         FrameWindow {
+            id: WindowId(
+                1,
+            ),
             rect: Rect {
                 x: 400.0,
                 y: 0.0,

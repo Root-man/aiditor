@@ -5,14 +5,18 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aiditor_core::buffer::Buffer;
+use aiditor_core::buffer::{Decoration, Face};
+use aiditor_core::display::{Line, Rect};
 use aiditor_core::key::{Key, KeyCode};
+use aiditor_core::settings::Theme;
+use aiditor_core::window::WindowId;
 use aiditor_core::{Core, Effect, Msg};
 use gpui::{
-    App, Application, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler,
-    FocusHandle, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
-    ScrollWheelEvent, ShapedLine, Task, TextRun, UTF16Selection, Window, WindowOptions, canvas,
-    div, font, prelude::*, px, rgb,
+    App, Application, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Font, GlobalElementId,
+    InspectorElementId, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, Pixels,
+    Point, ScrollWheelEvent, ShapedLine, Style, Task, TextRun, UTF16Selection, UnderlineStyle,
+    Window, WindowOptions, div, fill, font, point, prelude::*, px, rgb, size,
 };
 use tokio::sync::mpsc;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter};
@@ -37,12 +41,12 @@ struct Editor {
     config_dir: Option<PathBuf>,
     /// Set by `--debug`: the stats line drawn at the top.
     debug: Option<Debug>,
-    /// shortcut: the input method's marked text lives here, drawn at point; #11 moves it into the window's display state.
+    /// The input method's marked text, drawn at point but not in the buffer.
     marked: Option<String>,
-    /// Where the buffer text was last painted, for clicks and the input method.
-    text_bounds: Bounds<Pixels>,
-    /// The first buffer line last drawn.
-    top: usize,
+    /// The windows as last painted, for clicks, the wheel and the input method.
+    painted: Vec<Painted>,
+    /// The windows area's size and cell width last sent to the core.
+    reported: (Pixels, Pixels, Pixels),
     /// Wheel movement not yet scrolled as a whole line, positive down the buffer.
     scroll_px: Pixels,
 }
@@ -55,6 +59,8 @@ struct Debug {
     handle: Duration,
     /// How long building the last frame's elements took.
     render: Duration,
+    /// How long laying out the last frame's lines took.
+    shape: Duration,
     /// How long the last heartbeat took from a Tokio task to the UI thread.
     tick: Duration,
 }
@@ -84,8 +90,8 @@ impl Editor {
             config_dir: args.config_dir,
             debug: args.debug.then(Debug::default),
             marked: None,
-            text_bounds: Bounds::default(),
-            top: 0,
+            painted: Vec::new(),
+            reported: Default::default(),
             scroll_px: px(0.),
         }
     }
@@ -148,58 +154,55 @@ impl Editor {
     }
 
     fn on_scroll(&mut self, ev: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(window) = self.painted_at(ev.position).map(|p| p.id) else {
+            return;
+        };
         let line_height = px(self.core.settings().line_height());
         // GPUI's delta is negative when the content should move up, that is down the buffer.
         self.scroll_px -= ev.delta.pixel_delta(line_height).y;
         let lines = (self.scroll_px / line_height) as i64;
         if lines != 0 {
             self.scroll_px -= line_height * lines as f32;
-            self.handle(Msg::Scroll(lines), cx);
+            self.handle(Msg::Scroll { window, lines }, cx);
         }
     }
 
-    fn on_click(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(p) = self.char_at(ev.position, window) {
-            self.handle(Msg::Click(p), cx);
-        }
-    }
-
-    /// The char offset nearest `pos`, or the end of the line or buffer past them.
-    fn char_at(&self, pos: Point<Pixels>, window: &Window) -> Option<usize> {
-        let bounds = self.text_bounds;
-        if !bounds.contains(&pos) {
-            return None;
-        }
-        let line_height = px(self.core.settings().line_height());
-        let line = self.top + ((pos.y - bounds.top()) / line_height) as usize;
-        let buffer = self.core.current();
-        if line >= buffer.len_lines() {
-            return Some(buffer.len_chars());
-        }
-        let text = line_text(buffer, line);
-        let byte = self
-            .shape(&text, window)
-            .closest_index_for_x(pos.x - bounds.left());
-        buffer.char_idx(line, text[..byte].chars().count()).ok()
-    }
-
-    /// `text` laid out in the buffer font, as the frame draws it.
-    fn shape(&self, text: &str, window: &Window) -> ShapedLine {
-        let settings = self.core.settings();
-        let run = TextRun {
-            len: text.len(),
-            font: font(settings.font_family.clone().unwrap_or(FONT.into())),
-            color: rgb(settings.theme.foreground).into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
+    fn on_click(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.painted_at(ev.position) else {
+            return;
         };
-        window.text_system().shape_line(
-            text.to_string().into(),
-            px(settings.font_size),
-            &[run],
-            None,
-        )
+        let y = ev.position.y - p.bounds.top();
+        if y >= p.bounds.size.height - px(self.core.settings().line_height()) {
+            return; // the mode line
+        }
+        // shortcut: the column in the shown text is taken as the buffer column, wrong after a fold on the line; map through the spans when folds have producers.
+        let (line, col) = match p.rows.iter().find(|row| y < row.top + row.height) {
+            Some(row) => {
+                let byte = row
+                    .text
+                    .closest_index_for_x(ev.position.x - p.bounds.left());
+                (row.number, row.text.text[..byte].chars().count())
+            }
+            // Below the buffer's last line: its end.
+            None => (usize::MAX, 0),
+        };
+        let window = p.id;
+        self.handle(Msg::Click { window, line, col }, cx);
+    }
+
+    /// The window painted under `pos`.
+    fn painted_at(&self, pos: Point<Pixels>) -> Option<&Painted> {
+        self.painted.iter().find(|p| p.bounds.contains(&pos))
+    }
+
+    /// The buffer font and the width of one of its cells.
+    fn font(&self, window: &Window) -> (Font, Pixels) {
+        let settings = self.core.settings();
+        let font = font(settings.font_family.clone().unwrap_or(FONT.into()));
+        let size = px(settings.font_size);
+        let text = window.text_system();
+        let cell = text.ch_advance(text.resolve_font(&font), size);
+        (font, cell.unwrap_or(size * 0.6))
     }
 
     /// Point and the marked text's length, in UTF-16 units of the text the input method sees:
@@ -231,16 +234,6 @@ impl Editor {
             .map(|r| self.to_buffer(r.start)..self.to_buffer(r.end))
             .filter(|r| !r.is_empty())
     }
-}
-
-/// The buffer's line `line` without its newline.
-fn line_text(buffer: &Buffer, line: usize) -> String {
-    buffer
-        .text()
-        .line(line)
-        .to_string()
-        .trim_end_matches('\n')
-        .to_string()
 }
 
 impl EntityInputHandler for Editor {
@@ -339,21 +332,11 @@ impl EntityInputHandler for Editor {
         &mut self,
         _: Range<usize>,
         _: Bounds<Pixels>,
-        window: &mut Window,
+        _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // shortcut: the box at point whatever the range, enough to place an IME's window; use the range once #11 lays out lines.
-        let buffer = self.core.current();
-        let (line, col) = buffer.line_col(self.core.point()).ok()?;
-        let text = line_text(buffer, line);
-        let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
-        let line_height = px(self.core.settings().line_height());
-        let origin = self.text_bounds.origin
-            + Point::new(
-                self.shape(&text, window).x_for_index(byte),
-                line_height * line.saturating_sub(self.top) as f32,
-            );
-        Some(Bounds::new(origin, gpui::size(px(1.), line_height)))
+        // shortcut: the cursor's box whatever the range, enough to place an IME's window; lay out the range if an IME needs it.
+        self.painted.iter().find_map(|p| p.cursor)
     }
 
     fn character_index_for_point(
@@ -455,53 +438,34 @@ impl Render for Editor {
             }
             let span = start - d.frames[0];
             let fps = (d.frames.len() - 1) as f64 / span.as_secs_f64().max(f64::EPSILON);
+            let ms = |d: Duration| d.as_secs_f64() * 1000.;
             format!(
-                "{fps:.0} fps | render {:.2} ms | core {:.2} ms | tokio tick {:.2} ms",
-                d.render.as_secs_f64() * 1000.,
-                d.handle.as_secs_f64() * 1000.,
-                d.tick.as_secs_f64() * 1000.,
+                "{fps:.0} fps | render {:.2} ms | shape {:.2} ms | core {:.2} ms | tokio tick {:.2} ms",
+                ms(d.render),
+                ms(d.shape),
+                ms(d.handle),
+                ms(d.tick),
             )
         });
-        let line_height = px(self.core.settings().line_height());
-        let message = self.core.message().map(str::to_string);
-        // shortcut: the hint on one clipped line; the display-model renderer lays it out in columns.
-        let hint = self.core.hint().map(|hint| {
-            let entries = hint
-                .entries
-                .iter()
-                .map(|(key, what)| format!("{key} {what}"));
-            format!(
-                "{}-  {}",
-                hint.keys,
-                entries.collect::<Vec<_>>().join("   ")
-            )
-        });
-        let bars = message.is_some() as usize + hint.is_some() as usize + stats.is_some() as usize;
-        let height = window.viewport_size().height - line_height * bars as f32;
-        let rows = ((height / line_height) as usize).max(1);
-        let top = self.core.scroll(rows);
-        self.top = top;
-        let marked = self.marked.clone();
+        let (_, cell) = self.font(window);
         let settings = self.core.settings();
         let theme = &settings.theme;
+        let line_height = px(settings.line_height());
         let buffer = self.core.current();
         let modified = if buffer.modified() { " *" } else { "" };
         window.set_window_title(&format!("{}{modified}", buffer.name));
-        let (line, col) = buffer.line_col(self.core.point()).unwrap_or_default();
-        let text = buffer.text();
-        // shortcut: whole lines as div text, no tabs or horizontal scroll; the display-model renderer replaces it.
-        let lines = (top..text.len_lines().min(top + rows)).map(|i| {
-            let s = text.line(i).to_string();
-            let s = s.trim_end_matches('\n');
-            let row = div().h(line_height).flex().whitespace_nowrap();
-            if i != line {
-                return row.child(s.to_string());
-            }
-            let split = s.char_indices().nth(col).map_or(s.len(), |(b, _)| b);
-            row.child(s[..split].to_string())
-                .children(marked.clone().map(|m| div().underline().child(m)))
-                .child(div().w(px(2.)).h_full().bg(rgb(theme.cursor)))
-                .child(s[split..].to_string())
+        let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
+        let hint = self.core.hint().map(|hint| {
+            let entries: Vec<String> = (hint.entries.iter())
+                .map(|(key, what)| format!("{key} {what}"))
+                .collect();
+            let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
+            let column = cell * width as f32;
+            div()
+                .flex()
+                .flex_wrap()
+                .child(line().w_full().child(format!("{}-", hint.keys)))
+                .children(entries.into_iter().map(|e| line().w(column).child(e)))
         });
         let root = div()
             .track_focus(&self.focus)
@@ -514,25 +478,18 @@ impl Render for Editor {
             .text_color(rgb(theme.foreground))
             .font_family(settings.font_family.clone().unwrap_or(FONT.into()))
             .text_size(px(settings.font_size))
-            .children(stats.map(|s| div().h(line_height).whitespace_nowrap().child(s)))
+            .children(stats.map(|s| line().child(s)))
             .child(
                 div()
                     .flex_1()
-                    .relative()
+                    .flex()
                     .overflow_hidden()
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_click))
-                    .children(lines)
-                    .child(
-                        canvas(|_, _, _| {}, input_handler(cx))
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full(),
-                    ),
+                    .child(FrameElement(cx.entity())),
             )
-            .children(hint.map(|h| div().h(line_height).whitespace_nowrap().child(h)))
-            .children(message.map(|m| div().h(line_height).whitespace_nowrap().child(m)));
+            .children(hint)
+            .child(line().child(self.core.message().unwrap_or_default().to_string()));
         if let Some(debug) = &mut self.debug {
             debug.render = start.elapsed();
         }
@@ -540,16 +497,261 @@ impl Render for Editor {
     }
 }
 
-/// Paints nothing: registers the editor as the window's text input and keeps where the text is.
-fn input_handler(
-    cx: &mut Context<Editor>,
-) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) + 'static {
-    let editor = cx.entity();
-    move |bounds, _, window, cx| {
-        let focus = editor.read(cx).focus.clone();
-        window.handle_input(&focus, ElementInputHandler::new(bounds, editor.clone()), cx);
-        editor.update(cx, |editor, _| editor.text_bounds = bounds);
+/// A window as painted: where, its rows and mode line laid out, and the cursor.
+struct Painted {
+    id: WindowId,
+    bounds: Bounds<Pixels>,
+    selected: bool,
+    rows: Vec<Row>,
+    mode_line: ShapedLine,
+    cursor: Option<Bounds<Pixels>>,
+}
+
+struct Row {
+    /// The buffer line it starts on.
+    number: usize,
+    /// Its top, from the window's.
+    top: Pixels,
+    height: Pixels,
+    decorations: Vec<Decoration>,
+    text: ShapedLine,
+}
+
+/// Draws the core's frame display: every window's lines, cursor and mode line.
+struct FrameElement(Entity<Editor>);
+
+impl IntoElement for FrameElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
     }
+}
+
+impl Element for FrameElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Vec<Painted>;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let style = Style {
+            flex_grow: 1.,
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    /// Tells the core the size, then lays out every window's lines.
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<Painted> {
+        self.0.update(cx, |editor, cx| {
+            let (font, cell) = editor.font(window);
+            let size = (bounds.size.width, bounds.size.height, cell);
+            if editor.reported != size {
+                editor.reported = size;
+                let (width, height, cell_width) = (size.0.into(), size.1.into(), cell.into());
+                let msg = Msg::Resize {
+                    width,
+                    height,
+                    cell_width,
+                };
+                editor.handle(msg, cx);
+            }
+            let frame = editor.core.frame();
+            let start = Instant::now();
+            let settings = editor.core.settings();
+            let font_size = px(settings.font_size);
+            let shape = |text: String, runs: &[TextRun]| {
+                (window.text_system()).shape_line(text.into(), font_size, runs, None)
+            };
+            let painted = frame.windows.into_iter().map(|w| {
+                let bounds = to_bounds(w.rect, bounds.origin);
+                let mut top = px(0.);
+                let mut cursor = None;
+                let rows = (w.display.lines.iter().enumerate()).map(|(i, line)| {
+                    let height = px(line.height);
+                    let at = w.display.cursor.filter(|&(l, _)| l == i && w.selected);
+                    let marked = at.and(editor.marked.as_deref()).unwrap_or_default();
+                    let (text, runs, byte) =
+                        line_runs(line, at.map(|(_, col)| col), marked, &font, &settings.theme);
+                    let text = shape(text, &runs);
+                    if at.is_some() {
+                        let x = text.x_for_index(byte);
+                        let origin = bounds.origin + point(x, top);
+                        cursor = Some(Bounds::new(origin, gpui::size(px(2.), height)));
+                    }
+                    let row = Row {
+                        number: line.number,
+                        top,
+                        height,
+                        decorations: line.decorations.clone(),
+                        text,
+                    };
+                    top += height;
+                    row
+                });
+                let rows = rows.collect();
+                let run = text_run(
+                    w.display.mode_line.len(),
+                    Face::default(),
+                    false,
+                    &font,
+                    &settings.theme,
+                );
+                Painted {
+                    id: w.id,
+                    bounds,
+                    selected: w.selected,
+                    rows,
+                    mode_line: shape(w.display.mode_line, &[run]),
+                    cursor,
+                }
+            });
+            let painted = painted.collect();
+            if let Some(debug) = &mut editor.debug {
+                debug.shape = start.elapsed();
+            }
+            painted
+        })
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        painted: &mut Vec<Painted>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let editor = self.0.read(cx);
+        let focus = editor.focus.clone();
+        let theme = editor.core.settings().theme.clone();
+        let line_height = px(editor.core.settings().line_height());
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
+        for p in painted.iter() {
+            let mask = ContentMask { bounds: p.bounds };
+            window.with_content_mask(Some(mask), |window| {
+                let width = p.bounds.size.width;
+                for row in &p.rows {
+                    let origin = p.bounds.origin + point(px(0.), row.top);
+                    for decoration in &row.decorations {
+                        let (width, color) = match *decoration {
+                            Decoration::Background(color) => (width, color),
+                            Decoration::Rule(color) => (px(2.), color),
+                        };
+                        let bounds = Bounds::new(origin, size(width, row.height));
+                        window.paint_quad(fill(bounds, rgb(color)));
+                    }
+                    row.text
+                        .paint_background(origin, row.height, window, cx)
+                        .ok();
+                    row.text.paint(origin, row.height, window, cx).ok();
+                }
+                if let Some(cursor) = p.cursor {
+                    window.paint_quad(fill(cursor, rgb(theme.cursor)));
+                }
+                let origin = point(p.bounds.left(), p.bounds.bottom() - line_height);
+                let color = match p.selected {
+                    true => theme.mode_line,
+                    false => theme.mode_line_inactive,
+                };
+                let bounds = Bounds::new(origin, size(width, line_height));
+                window.paint_quad(fill(bounds, rgb(color)));
+                p.mode_line.paint(origin, line_height, window, cx).ok();
+            });
+        }
+        let painted = std::mem::take(painted);
+        self.0.update(cx, |editor, _| editor.painted = painted);
+    }
+}
+
+/// `rect` from the frame display, placed at `origin`.
+fn to_bounds(rect: Rect, origin: Point<Pixels>) -> Bounds<Pixels> {
+    let at = point(px(rect.x), px(rect.y));
+    Bounds::new(origin + at, size(px(rect.width), px(rect.height)))
+}
+
+fn text_run(len: usize, face: Face, underline: bool, font: &Font, theme: &Theme) -> TextRun {
+    TextRun {
+        len,
+        font: font.clone(),
+        color: rgb(face.fg.unwrap_or(theme.foreground)).into(),
+        background_color: face.bg.map(|bg| rgb(bg).into()),
+        underline: underline.then(|| UnderlineStyle {
+            thickness: px(1.),
+            ..Default::default()
+        }),
+        strikethrough: None,
+    }
+}
+
+/// `line`'s text with `marked` spliced in at char column `at`, one run per span, and the byte
+/// offset the cursor goes at: after the marked text.
+fn line_runs(
+    line: &Line,
+    at: Option<usize>,
+    marked: &str,
+    font: &Font,
+    theme: &Theme,
+) -> (String, Vec<TextRun>, usize) {
+    let mut pieces: Vec<(&str, Face, bool)> = Vec::new();
+    let mut col = at;
+    for span in &line.spans {
+        let chars = span.text.chars().count();
+        match col {
+            Some(c) if c <= chars => {
+                let byte = span
+                    .text
+                    .char_indices()
+                    .nth(c)
+                    .map_or(span.text.len(), |(b, _)| b);
+                pieces.push((&span.text[..byte], span.face, false));
+                pieces.push((marked, Face::default(), true));
+                pieces.push((&span.text[byte..], span.face, false));
+                col = None;
+            }
+            _ => {
+                col = col.map(|c| c - chars);
+                pieces.push((&span.text, span.face, false));
+            }
+        }
+    }
+    if col.is_some() {
+        pieces.push((marked, Face::default(), true));
+    }
+    let (mut text, mut runs, mut cursor) = (String::new(), Vec::new(), 0);
+    for (piece, face, is_marked) in pieces.into_iter().filter(|p| !p.0.is_empty() || p.2) {
+        text += piece;
+        if is_marked {
+            cursor = text.len();
+        }
+        if !piece.is_empty() {
+            runs.push(text_run(piece.len(), face, is_marked, font, theme));
+        }
+    }
+    (text, runs, cursor)
 }
 
 const USAGE: &str = "usage: aiditor [--config-dir DIR] [--debug] [FILE]";
@@ -840,22 +1042,40 @@ mod tests {
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "abxyz");
     }
 
+    /// Window `i`'s bounds and its rows' line numbers and laid-out text, as last painted.
+    fn painted(
+        editor: &gpui::Entity<Editor>,
+        cx: &mut VisualTestContext,
+        i: usize,
+    ) -> (Bounds<Pixels>, Vec<(usize, ShapedLine)>) {
+        editor.read_with(cx, |e, _| {
+            let p = &e.painted[i];
+            let rows = p.rows.iter().map(|r| (r.number, r.text.clone()));
+            (p.bounds, rows.collect())
+        })
+    }
+
     #[gpui::test]
     fn the_mouse_scrolls_and_moves_point(cx: &mut TestAppContext) {
         let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
         let (editor, cx) = editor(cx, &text);
-        let (bounds, line_height) = editor.read_with(cx, |e, _| {
-            (e.text_bounds, px(e.core.settings().line_height()))
-        });
+        let line_height = editor.read_with(cx, |e, _| px(e.core.settings().line_height()));
+        let (bounds, _) = painted(&editor, cx, 0);
         let inside = bounds.origin + point(px(1.), px(1.));
         cx.simulate_event(ScrollWheelEvent {
             position: inside,
             delta: ScrollDelta::Lines(point(0., -5.)),
             ..Default::default()
         });
-        let point_at =
-            |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| (e.top, e.core.point()));
-        assert_eq!(point_at(cx), (5, 35), "point moves to the first line shown");
+        let top_and_point = |cx: &mut VisualTestContext| {
+            let top = painted(&editor, cx, 0).1[0].0;
+            (top, editor.read_with(cx, |e, _| e.core.point()))
+        };
+        assert_eq!(
+            top_and_point(cx),
+            (5, 35),
+            "point moves to the first line shown"
+        );
         // Half a line twice scrolls one line.
         for _ in 0..2 {
             cx.simulate_event(ScrollWheelEvent {
@@ -864,11 +1084,59 @@ mod tests {
                 ..Default::default()
             });
         }
-        assert_eq!(point_at(cx).0, 6);
+        assert_eq!(top_and_point(cx).0, 6);
         // Click over the `n` of the second line shown, `line 7`.
-        let x = editor.update_in(cx, |e, window, _| e.shape("line 7", window).x_for_index(2));
+        let x = painted(&editor, cx, 0).1[1].1.x_for_index(2);
         let click = bounds.origin + point(x + px(1.), line_height * 1.5);
         cx.simulate_click(click, Modifiers::none());
-        assert_eq!(point_at(cx).1, 7 * 7 + 2);
+        assert_eq!(top_and_point(cx).1, 7 * 7 + 2);
+    }
+
+    #[gpui::test]
+    fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "hello world");
+        let cursor = |cx: &mut VisualTestContext| {
+            let (bounds, rows) = painted(&editor, cx, 0);
+            let x = editor.read_with(cx, |e, _| e.painted[0].cursor.unwrap().left());
+            (rows[0].1.clone(), x - bounds.left())
+        };
+        for col in [0, 3, 7] {
+            cx.simulate_keystrokes(&format!("ctrl-a ctrl-u {col} ctrl-f"));
+            let (line, x) = cursor(cx);
+            assert_eq!(line.text.as_ref(), "hello world", "shaped whole at {col}");
+            assert_eq!(x, line.x_for_index(col));
+        }
+        assert!(cursor(cx).1 > px(0.), "the test platform lays text out");
+        // Marked text goes in the line, the cursor after it.
+        cx.simulate_keystrokes("ctrl-a ctrl-f ctrl-f ctrl-f");
+        editor.update_in(cx, |e, window, cx| {
+            e.replace_and_mark_text_in_range(None, "´", None, window, cx)
+        });
+        cx.run_until_parked();
+        let (line, x) = cursor(cx);
+        assert_eq!(line.text.as_ref(), "hel´lo world");
+        assert_eq!(x, line.x_for_index("hel´".len()));
+    }
+
+    #[gpui::test]
+    fn clicking_another_window_selects_it(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "abc\ndef");
+        cx.simulate_keystrokes("ctrl-x 3");
+        let ((left, _), (right, rows)) = (painted(&editor, cx, 0), painted(&editor, cx, 1));
+        assert_eq!(left.right(), right.left(), "side by side");
+        let line_height = editor.read_with(cx, |e, _| px(e.core.settings().line_height()));
+        let x = rows[1].1.x_for_index(1);
+        cx.simulate_click(
+            right.origin + point(x + px(1.), line_height * 1.5),
+            Modifiers::none(),
+        );
+        let (point, selected) = editor.update(cx, |e, _| {
+            let frame = e.core.frame();
+            (
+                e.core.point(),
+                frame.windows.iter().map(|w| w.selected).collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!((point, selected), (5, vec![false, true]));
     }
 }

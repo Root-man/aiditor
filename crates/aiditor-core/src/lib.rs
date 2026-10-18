@@ -35,10 +35,24 @@ pub enum Msg {
         text: String,
         replace: Option<Range<usize>>,
     },
-    /// The wheel scrolled this many lines down the buffer, up when negative.
-    Scroll(i64),
-    /// A left click on the char at this offset.
-    Click(usize),
+    /// The wheel scrolled `window` this many lines down its buffer, up when negative.
+    Scroll {
+        window: WindowId,
+        lines: i64,
+    },
+    /// A left click in `window` on the char at this buffer line and column.
+    Click {
+        window: WindowId,
+        line: usize,
+        col: usize,
+    },
+    /// The frame's windows area is `width` by `height` px and the font's cells are
+    /// `cell_width` px wide.
+    Resize {
+        width: f32,
+        height: f32,
+        cell_width: f32,
+    },
     /// Wakes the core when a timer is due; due timers fire on every message.
     Tick,
     /// The app wrote the buffer's text to its file.
@@ -144,9 +158,25 @@ impl Ctx<'_> {
                     self.key(Key::plain(KeyCode::Char(c)));
                 }
             }
+            // A window deleted since the frontend last drew is gone; drop its mouse events.
+            Msg::Scroll { window, .. } | Msg::Click { window, .. }
+                if !self.core.tree.leaves().contains(&window) => {}
             // At an end the wheel just stops, without C-v's message.
-            Msg::Scroll(lines) => _ = self.scroll_lines(lines),
-            Msg::Click(p) => self.click(p),
+            Msg::Scroll { window, lines } => {
+                let selected = self.core.selected;
+                self.core.select(window);
+                _ = self.scroll_lines(lines);
+                self.core.select(selected);
+            }
+            Msg::Click { window, line, col } => {
+                self.core.select(window);
+                self.click(line, col);
+            }
+            Msg::Resize {
+                width,
+                height,
+                cell_width,
+            } => self.core.frame_size = (width, height, cell_width),
             Msg::Saved(id) => {
                 if let Some(buffer) = self.core.buffers.get_mut(id) {
                     buffer.set_saved();
@@ -412,7 +442,7 @@ impl Ctx<'_> {
     }
 
     /// Moves point to `p` like Emacs's `mouse-set-point`, dropping any pending prefix.
-    fn click(&mut self, p: usize) {
+    fn click(&mut self, line: usize, col: usize) {
         let core = &mut *self.core;
         core.pending.clear();
         core.transient = None;
@@ -426,8 +456,9 @@ impl Ctx<'_> {
         core.self_inserts = 0;
         core.window.set_active(false);
         core.last_command = Some("mouse-set-point");
-        let len = core.current().len_chars();
-        if let Err(err) = self.goto(p.min(len)) {
+        let buffer = core.current();
+        let p = (buffer.char_idx(line, col)).unwrap_or(buffer.len_chars());
+        if let Err(err) = self.goto(p) {
             tracing::debug!(%err, "click outside the buffer");
         }
     }
@@ -802,6 +833,8 @@ pub struct Core {
     /// Every window but the selected one.
     others: HashMap<WindowId, Window>,
     tree: Tree,
+    /// The windows area's width and height and the cell width in px, as the frontend reported.
+    frame_size: (f32, f32, f32),
     /// The id the next new window gets.
     next_window: usize,
     timers: Timers,
@@ -1037,6 +1070,7 @@ impl Default for Core {
             selected: WindowId(0),
             others: HashMap::new(),
             tree: Tree::Leaf(WindowId(0)),
+            frame_size: (0., 0., 0.),
             next_window: 1,
             timers: Timers::default(),
             keymaps: HashMap::new(),
@@ -1245,15 +1279,17 @@ impl Core {
         window_display(&mut self.window, &self.buffers, &self.settings, height)
     }
 
-    /// Every window's display model, laid out in a frame `width` by `height` px.
-    pub fn frame(&mut self, width: f32, height: f32) -> display::FrameDisplay {
+    /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
+    pub fn frame(&mut self) -> display::FrameDisplay {
+        let (width, height, cell_width) = self.frame_size;
+        let cell = (cell_width, self.settings.line_height());
         let frame = display::Rect {
             x: 0.,
             y: 0.,
             width,
             height,
         };
-        let windows = (self.tree.layout(frame).into_iter())
+        let windows = (self.tree.layout(frame, cell).into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.selected;
                 let window = match selected {
@@ -1262,6 +1298,7 @@ impl Core {
                 };
                 let display = window_display(window, &self.buffers, &self.settings, rect.height);
                 display::FrameWindow {
+                    id,
                     rect,
                     selected,
                     display,

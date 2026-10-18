@@ -10,3 +10,6 @@ background = 0x1e1e1e
 foreground = 0xd4d4d4
 cursor = 0xffcc00
 region = 0x264f78
+# The selected window's mode line, and the other windows'.
+mode_line = 0x3c3c3c
+mode_line_inactive = 0x282828
