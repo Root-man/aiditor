@@ -69,3 +69,9 @@
 "s-x" = "kill-region"
 "s-c" = "kill-ring-save"
 "s-v" = "yank"
+
+[minibuffer-mode]
+"RET" = "exit-minibuffer"
+"C-g" = "abort-minibuffers"
+"M-p" = "previous-history-element"
+"M-n" = "next-history-element"
