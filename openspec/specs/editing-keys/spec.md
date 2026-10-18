@@ -69,7 +69,7 @@ A printable key without Ctrl or Meta that no keymap binds SHALL run `self-insert
 - **THEN** the text is `abc` and the message is `End of buffer`
 
 ### Requirement: M-d and M-DEL delete words
-`M-d` SHALL run `kill-word`, which deletes from point to where `forward-word` with the same prefix argument would move. `M-DEL` SHALL run `backward-kill-word`, which does the same as `backward-word` would move. The deleted text SHALL NOT be saved anywhere until the kill ring exists.
+`M-d` SHALL run `kill-word`, which kills from point to where `forward-word` with the same prefix argument would move. `M-DEL` SHALL run `backward-kill-word`, which does the same as `backward-word` would move. The killed text SHALL be saved on the kill ring like any other kill.
 
 #### Scenario: Kill a word forward
 - **WHEN** in `foo bar baz` with point at 0, `M-d` is pressed
@@ -82,3 +82,7 @@ A printable key without Ctrl or Meta that no keymap binds SHALL run `self-insert
 #### Scenario: Kill a word backward
 - **WHEN** in `foo bar` with point at 7, `M-DEL` is pressed
 - **THEN** the text is `foo ` and point is 4
+
+#### Scenario: The killed word yanks back
+- **WHEN** in `foo bar` with point at 7, `M-DEL C-y` is pressed
+- **THEN** the text is `foo bar`
