@@ -895,6 +895,21 @@ milestones:
               - "A Latin-1 file opens, edits and saves back as Latin-1"
               - "A UTF-16 file with a BOM round-trips unchanged"
             blocked_by: [m0-file-io]
+      - key: m5-minibuffer
+        title: "Minibuffer polish"
+        labels: [minibuffer]
+        design: "#commands-and-keymaps"
+        body: |
+          Minibuffer and completion behaviour that M0 left out. Break down when M5 starts.
+        tasks:
+          - key: m5-minibuffer-height
+            title: "Completion list keeps its height while the minibuffer is open"
+            body: |
+              The completion list shrinks and grows with the number of matches, so the windows above it jump while you type or move between directories in `find-file`. Make it grow only while one minibuffer is open (Emacs's `resize-mini-windows` = `grow-only`, Vertico's default): it keeps the most rows it has shown, padding with empty rows, and resets when the minibuffer closes.
+            acceptance:
+              - "In `find-file`, going from a directory with 10 entries to one with 5 keeps 10 rows (5 empty) and the windows above don't move"
+              - "The next minibuffer starts at the height its own candidates need"
+            blocked_by: [m0-find-file]
       - key: m5-format
         title: "Formatter commands"
         labels: [text]
