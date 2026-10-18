@@ -124,6 +124,14 @@ impl Buffers {
             .map(|(&id, _)| id)
     }
 
+    /// The buffer visiting `path`.
+    pub fn visiting(&self, path: &Path) -> Option<BufferId> {
+        self.map
+            .iter()
+            .find(|(_, b)| b.file.as_deref() == Some(path))
+            .map(|(&id, _)| id)
+    }
+
     pub fn get(&self, id: BufferId) -> Option<&Buffer> {
         self.map.get(&id)
     }

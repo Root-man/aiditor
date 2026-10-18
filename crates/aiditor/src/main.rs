@@ -124,6 +124,22 @@ impl Editor {
                         });
                     });
                 }
+                Effect::ListDir(dir) => {
+                    let tx = self.tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result =
+                            files::list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
+                        _ = tx.blocking_send(Msg::Listed { dir, result });
+                    });
+                }
+                Effect::Open(path) => {
+                    let tx = self.tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result =
+                            files::read(&path).map_err(|err| format!("{}: {err}", path.display()));
+                        _ = tx.blocking_send(Msg::Opened { path, result });
+                    });
+                }
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
@@ -951,6 +967,7 @@ mod tests {
             ("ctrl-space", Some("C-SPC")),
             ("alt-backspace", Some("M-DEL")),
             ("enter", Some("RET")),
+            ("alt-enter", Some("M-RET")),
             ("left", Some("<left>")),
             ("f1", None),
             ("fn-a", None),

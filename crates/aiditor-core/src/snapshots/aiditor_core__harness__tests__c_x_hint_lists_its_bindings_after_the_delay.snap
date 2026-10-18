@@ -27,6 +27,10 @@ Some(
                 "+prefix",
             ),
             (
+                "C-f",
+                "find-file",
+            ),
+            (
                 "C-r",
                 "reload-settings",
             ),

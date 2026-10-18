@@ -26,6 +26,23 @@ pub fn read(path: &Path) -> io::Result<Option<(Vec<u8>, u64)>> {
     }
 }
 
+/// The names in directory `dir`, sorted, each subdirectory's followed by `/`.
+pub fn list(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        // shortcut: non-UTF-8 names show lossily and can't be visited; keep OsStrings if one turns up.
+        let mut name = entry.file_name().to_string_lossy().into_owned();
+        // fs::metadata follows symlinks, so a link to a directory lists as one.
+        if fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()) {
+            name.push('/');
+        }
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
+}
+
 /// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file), and
 /// returns the new hash.
 pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, String> {
@@ -78,6 +95,16 @@ mod tests {
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
+    }
+
+    #[test]
+    fn lists_sorted_with_directories_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("b"), "").unwrap();
+        fs::create_dir(dir.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("a"), dir.path().join("c")).unwrap();
+        assert_eq!(list(dir.path()).unwrap(), ["a/", "b", "c/"]);
+        assert!(list(&dir.path().join("b")).is_err());
     }
 
     #[test]
