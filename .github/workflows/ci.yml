@@ -31,6 +31,9 @@ jobs:
         if: runner.os == 'macOS'
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - uses: Swatinem/rust-cache@v2
+        # rust-cache's own key ignores [profile] edits, so an exact hit kept restoring stale deps and never re-saved.
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
       - run: cargo fmt --all --check
       - name: aiditor-core has no GPUI or Tokio dependency
         run: "cargo tree -p aiditor-core > tree.txt && ! grep -E '\\b(gpui|tokio) v' tree.txt"
