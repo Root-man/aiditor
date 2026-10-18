@@ -431,6 +431,25 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_command_is_logged_and_the_editor_keeps_running() {
+        let mut h = on("");
+        h.core.register(Command {
+            name: "explode",
+            spec: ArgSpec::default(),
+            handler: |_, _| panic!("boom"),
+        });
+        h.keys("M-x explode RET");
+        let msg = "explode panicked; its state may be inconsistent (see *Messages*)";
+        assert_eq!(h.core.message(), Some(msg));
+        let log = messages(&h).unwrap();
+        assert!(log.contains(msg) && log.contains("boom"), "{log}");
+        assert!(log.contains("harness.rs:"), "no location: {log}");
+        assert!(log.contains("try_call"), "no backtrace: {log}");
+        h.keys("a");
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
     fn command_errors_show_in_the_frame_until_the_next_key() {
         let mut h = on("");
         h.core.register(Command {

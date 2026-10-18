@@ -37,5 +37,8 @@ jobs:
       - run: cargo fmt --all --check
       - name: aiditor-core has no GPUI or Tokio dependency
         run: "cargo tree -p aiditor-core > tree.txt && ! grep -E '\\b(gpui|tokio) v' tree.txt"
+      # The core's compile_error! only fires in the profiles CI builds; this covers release too.
+      - name: No build profile aborts on panic
+        run: "! grep -rnE 'panic *=? *\"?abort' Cargo.toml crates/*/Cargo.toml .cargo 2>/dev/null"
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

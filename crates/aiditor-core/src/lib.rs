@@ -1,5 +1,9 @@
 //! Editor state. A plain state machine with no GPUI or Tokio dependency.
 
+// Commands are contained with `catch_unwind`, which aborting would silently disable.
+#[cfg(panic = "abort")]
+compile_error!("aiditor needs panic = \"unwind\": commands are contained with catch_unwind");
+
 pub mod buffer;
 pub mod command;
 pub mod display;
@@ -11,8 +15,11 @@ pub mod settings;
 pub mod timer;
 pub mod window;
 
+use std::backtrace::Backtrace;
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -126,6 +133,13 @@ const COMPLETION_ROWS: usize = 10;
 
 /// How long the core waits for the matcher before trying again on a timer.
 const REPOLL: Duration = Duration::from_millis(16);
+
+/// Chains a panic hook, once, that keeps each panic's report and backtrace for `Ctx::try_call`.
+static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+
+thread_local! {
+    static PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// The minibuffer's window, kept outside the split tree.
 const MINIBUFFER: WindowId = WindowId(usize::MAX);
@@ -258,7 +272,25 @@ impl Ctx<'_> {
         if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
             return self.read_string(command, args, prompt.into());
         }
-        (command.handler)(self, args)
+        PANIC_HOOK.call_once(|| {
+            let previous = panic::take_hook();
+            panic::set_hook(Box::new(move |info| {
+                let report = format!("{info}\n{}", Backtrace::force_capture());
+                PANIC.with(|p| *p.borrow_mut() = Some(report));
+                previous(info);
+            }));
+        });
+        let result = panic::catch_unwind(AssertUnwindSafe(|| (command.handler)(self, args)));
+        result.unwrap_or_else(|_| {
+            let report = (PANIC.with(|p| p.borrow_mut().take()))
+                .unwrap_or_else(|| "No report: another panic hook replaced the core's".into());
+            let core = &mut *self.core;
+            core.echo(format!(
+                "{name} panicked; its state may be inconsistent (see *Messages*)"
+            ));
+            core.log(&report);
+            Ok(())
+        })
     }
 
     /// Opens the minibuffer at `prompt`; its answer then calls `command` again.
