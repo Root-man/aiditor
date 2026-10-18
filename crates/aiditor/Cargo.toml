@@ -14,3 +14,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 gpui = { version = "0.2.2", features = ["test-support"] }
+tempfile = "3.27.0"

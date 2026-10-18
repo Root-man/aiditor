@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
+use ropey::Rope;
 
 use buffer::{Buffer, BufferId, Buffers};
 use command::{ArgSpec, Args, Command, Prefix};
@@ -87,7 +88,13 @@ pub enum Msg {
     Log(String),
     /// The window was asked to close; quits as `C-x C-c` does.
     Quit,
+    /// An auto-save timer fired: write recovery files for buffers edited since the last one.
+    AutoSave,
 }
+
+/// How long after the last edit buffers are auto-saved, and the most edits wait while typing goes on.
+const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
+const AUTOSAVE_MAX: Duration = Duration::from_secs(30);
 
 /// How long a prefix waits before the hint shows, Emacs's `echo-keystrokes`.
 const HINT_DELAY: Duration = Duration::from_secs(1);
@@ -172,6 +179,16 @@ pub enum Effect {
     SetClipboard(String),
     /// Quit the app.
     Quit,
+    /// Write `buffer`'s recovery file: its `name`, visited `path`, base disk `hash` and `text`.
+    AutoSave {
+        buffer: BufferId,
+        name: String,
+        path: Option<PathBuf>,
+        hash: Option<u64>,
+        text: Rope,
+    },
+    /// Delete `buffer`'s recovery file.
+    DeleteAutoSave(BufferId),
 }
 
 pub type Effects = Vec<Effect>;
@@ -494,6 +511,27 @@ impl Ctx<'_> {
             Msg::Clipboard(text) => self.core.clipboard = Some(text),
             Msg::Log(line) => self.core.log(&line),
             Msg::Quit => self.call("save-buffers-kill-terminal", Args::default()),
+            Msg::AutoSave => {
+                let core = &mut *self.core;
+                for id in [core.autosave_idle.take(), core.autosave_max.take()]
+                    .into_iter()
+                    .flatten()
+                {
+                    core.timers.cancel(id);
+                }
+                for (id, b) in core.buffers.recent() {
+                    if autosaves(b) && core.autosaved.get(&id) != Some(&b.tick()) {
+                        core.autosaved.insert(id, b.tick());
+                        self.effects.push(Effect::AutoSave {
+                            buffer: id,
+                            name: b.name.clone(),
+                            path: b.file.clone(),
+                            hash: b.disk,
+                            text: b.text().clone(),
+                        });
+                    }
+                }
+            }
             Msg::Tick => {}
         }
     }
@@ -1286,6 +1324,16 @@ pub struct Core {
     message: Option<String>,
     /// The buffers whose saves a quit waits for; empty when not quitting.
     quitting: Vec<BufferId>,
+    /// Buffers with a recovery file, by the tick written to it.
+    autosaved: HashMap<BufferId, u64>,
+    /// The auto-save timers: restarted by each edit, and started by the first edit after a write.
+    autosave_idle: Option<TimerId>,
+    autosave_max: Option<TimerId>,
+}
+
+/// Whether `buffer` has edits a crash would lose: modified, and not read-only or hidden.
+fn autosaves(buffer: &Buffer) -> bool {
+    buffer.modified() && !buffer.read_only && !buffer.name.starts_with(' ')
 }
 
 impl Default for Core {
@@ -1612,6 +1660,9 @@ impl Default for Core {
             commands,
             message: None,
             quitting: Vec::new(),
+            autosaved: HashMap::new(),
+            autosave_idle: None,
+            autosave_max: None,
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
@@ -1767,6 +1818,7 @@ impl Core {
 
     /// Handles `msg` at `now`, then fires the timers due by then.
     pub fn handle(&mut self, now: Instant, msg: Msg) -> Effects {
+        let input = matches!(msg, Msg::Key(_) | Msg::Insert { .. });
         let mut ctx = Ctx {
             core: self,
             now,
@@ -1779,8 +1831,35 @@ impl Core {
             }
         }
         let mut effects = ctx.effects;
+        self.autosave(now, input, &mut effects);
         self.poll_completion(now, &mut effects);
         effects
+    }
+
+    /// After input, (re)starts the auto-save timers if a buffer has unwritten edits; deletes the
+    /// recovery files of buffers gone or saved, and all of them before a quit.
+    fn autosave(&mut self, now: Instant, input: bool, effects: &mut Effects) {
+        let quit = effects.iter().position(|e| matches!(e, Effect::Quit));
+        let buffers = &self.buffers;
+        let stale: Vec<BufferId> = (self.autosaved.keys().copied())
+            .filter(|&id| quit.is_some() || !buffers.get(id).is_some_and(autosaves))
+            .collect();
+        let at = quit.unwrap_or(effects.len());
+        for &id in &stale {
+            self.autosaved.remove(&id);
+        }
+        effects.splice(at..at, stale.into_iter().map(Effect::DeleteAutoSave));
+        let unwritten = (self.buffers.recent())
+            .any(|(id, b)| autosaves(b) && self.autosaved.get(&id) != Some(&b.tick()));
+        if input && unwritten {
+            if let Some(id) = self.autosave_idle.take() {
+                self.timers.cancel(id);
+            }
+            self.autosave_idle = Some(self.timers.start(now, AUTOSAVE_IDLE, None, Msg::AutoSave));
+            if self.autosave_max.is_none() {
+                self.autosave_max = Some(self.timers.start(now, AUTOSAVE_MAX, None, Msg::AutoSave));
+            }
+        }
     }
 
     /// Matches the completing minibuffer's text against its candidates, waiting up to 10 ms,

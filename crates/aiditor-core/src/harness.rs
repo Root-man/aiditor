@@ -1,5 +1,6 @@
 //! Headless core driven by key scripts and a fake clock, for tests.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -7,6 +8,7 @@ use tempfile::TempDir;
 
 use crate::{
     Core, Ctx, Effect, Effects, Msg,
+    buffer::BufferId,
     command::Args,
     display::{FrameDisplay, FrameWindow, WindowDisplay},
     key::{Key, KeyCode, parse_keys},
@@ -22,6 +24,8 @@ pub struct Harness {
     pub clipboard: Option<String>,
     /// Whether the core asked the app to quit.
     pub quit: bool,
+    /// The recovery files: each buffer's auto-saved name, path and text.
+    pub recovery: HashMap<BufferId, (String, Option<PathBuf>, String)>,
 }
 
 impl Harness {
@@ -39,6 +43,7 @@ impl Harness {
             now: Instant::now(),
             clipboard: None,
             quit: false,
+            recovery: HashMap::new(),
         }
     }
 
@@ -153,6 +158,19 @@ impl Harness {
                 }
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::Quit => self.quit = true,
+                Effect::AutoSave {
+                    buffer,
+                    name,
+                    path,
+                    text,
+                    ..
+                } => _ = (self.recovery).insert(buffer, (name, path, text.to_string())),
+                Effect::DeleteAutoSave(buffer) => {
+                    assert!(!self.quit, "deleted after the quit");
+                    self.recovery
+                        .remove(&buffer)
+                        .expect("deletes a written file");
+                }
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
@@ -188,7 +206,8 @@ impl Harness {
     /// Moves the fake clock on and wakes the core, as the app does at a deadline.
     pub fn advance(&mut self, d: Duration) -> &mut Self {
         self.now += d;
-        self.core.handle(self.now, Msg::Tick);
+        let effects = self.core.handle(self.now, Msg::Tick);
+        self.run(effects);
         self
     }
 
@@ -1310,7 +1329,7 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.keys("C-x").advance(1000 * MS);
         assert!(h.core.hint().is_some());
-        h.keys("C-g a").advance(1000 * MS);
+        h.keys("C-g C-f").advance(1000 * MS);
         assert_eq!(h.core.hint(), None, "C-g hides it and no timer is left");
         h.keys("C-x")
             .advance(600 * MS)
@@ -2605,5 +2624,93 @@ mod tests {
         ask_completing(&mut h, fruit);
         h.keys("C-c p ab/ DEL");
         assert_eq!(h.text(), "ab");
+    }
+
+    const SEC: Duration = Duration::from_secs(1);
+
+    /// The recovery texts, by buffer name.
+    fn recovered(h: &Harness) -> Vec<(String, Option<PathBuf>, String)> {
+        let mut files: Vec<_> = h.recovery.values().cloned().collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn an_edit_is_auto_saved_after_two_idle_seconds_and_removed_on_save() {
+        let mut h = Harness::new(&[("a", "1\n")]);
+        h.open("a").keys("x").advance(SEC);
+        assert!(h.recovery.is_empty());
+        h.keys("y").advance(SEC);
+        assert!(h.recovery.is_empty(), "the second key restarted the delay");
+        h.advance(SEC);
+        let file = ("a".to_string(), Some(h.path("a")), "xy1\n".to_string());
+        assert_eq!(recovered(&h), [file]);
+        // Nothing new beside the file.
+        assert_eq!(std::fs::read_dir(h.dir.path()).unwrap().count(), 1);
+        h.keys("C-x C-s");
+        assert!(h.recovery.is_empty());
+        // Quiet once nothing is unwritten.
+        h.advance(60 * SEC);
+        assert!(h.recovery.is_empty() && h.core.next_deadline().is_none());
+    }
+
+    #[test]
+    fn typing_without_pause_is_auto_saved_every_thirty_seconds() {
+        let mut h = Harness::new(&[]);
+        for _ in 0..29 {
+            h.keys("x").advance(SEC);
+        }
+        assert!(h.recovery.is_empty());
+        h.keys("y").advance(SEC);
+        let text = format!("{}y", "x".repeat(29));
+        assert_eq!(recovered(&h), [("*scratch*".into(), None, text)]);
+    }
+
+    #[test]
+    fn messages_and_the_minibuffer_are_not_auto_saved() {
+        let mut h = Harness::new(&[]);
+        h.send(Msg::Log("hi".into()))
+            .keys("M-x abc")
+            .advance(3 * SEC);
+        assert!(h.recovery.is_empty());
+    }
+
+    #[test]
+    fn killing_or_quitting_removes_recovery_files() {
+        let mut h = Harness::new(&[("a", "1\n")]);
+        h.open("a").keys("x").advance(2 * SEC);
+        assert_eq!(h.recovery.len(), 1);
+        h.keys("C-x k RET yes RET");
+        assert!(h.recovery.is_empty());
+        h.keys("x")
+            .advance(2 * SEC)
+            .keys("C-x b z RET y")
+            .advance(2 * SEC);
+        assert_eq!(h.recovery.len(), 2);
+        // The quit's own save runs while a recovery file is still there.
+        h.open("a")
+            .keys("w")
+            .advance(2 * SEC)
+            .keys("C-x C-c no RET yes RET");
+        assert!(h.quit && h.recovery.is_empty());
+    }
+
+    #[test]
+    fn edits_during_a_save_keep_the_recovery_file() {
+        let mut h = Harness::new(&[("a", "1\n")]);
+        h.open("a").keys("x").advance(2 * SEC);
+        let (now, mut save) = (h.now, Vec::new());
+        for key in parse_keys("C-x C-s").unwrap() {
+            save.extend(h.core.handle(now, Msg::Key(key)));
+        }
+        let Some(Effect::Save { buffer, tick, .. }) = save.pop() else {
+            panic!("no save");
+        };
+        h.keys("z").send(Msg::Saved {
+            buffer,
+            tick,
+            result: Ok(0),
+        });
+        assert!(h.core.current().modified() && h.recovery.len() == 1);
     }
 }

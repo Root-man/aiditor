@@ -1,17 +1,16 @@
 //! Reading and writing visited files. Blocking calls; the app runs saves on Tokio's blocking pool.
 
 use std::fs::{self, OpenOptions, Permissions};
-use std::hash::{DefaultHasher, Hasher};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-/// The hash a buffer keeps of its file's bytes, to notice changes on disk.
-// shortcut: std's hasher may change between Rust releases; use a fixed hash once one is persisted (#50).
+/// The hash a buffer keeps of its file's bytes, to notice changes on disk. FNV-1a 64, fixed
+/// because recovery files store it.
 fn hash(bytes: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    h.write(bytes);
-    h.finish()
+    (bytes.iter()).fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The file's bytes and their hash, or `None` when there is no file.
@@ -95,6 +94,12 @@ mod tests {
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
+    }
+
+    #[test]
+    fn hash_is_fnv1a() {
+        assert_eq!(hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(hash(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 
     #[test]
