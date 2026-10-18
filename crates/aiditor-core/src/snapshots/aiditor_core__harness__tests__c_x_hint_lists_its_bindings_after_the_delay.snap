@@ -27,6 +27,10 @@ Some(
                 "+prefix",
             ),
             (
+                "C-c",
+                "save-buffers-kill-terminal",
+            ),
+            (
                 "C-f",
                 "find-file",
             ),

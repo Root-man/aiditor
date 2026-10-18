@@ -20,6 +20,8 @@ pub struct Harness {
     pub now: Instant,
     /// The fake system clipboard.
     pub clipboard: Option<String>,
+    /// Whether the core asked the app to quit.
+    pub quit: bool,
 }
 
 impl Harness {
@@ -36,6 +38,7 @@ impl Harness {
             dir,
             now: Instant::now(),
             clipboard: None,
+            quit: false,
         }
     }
 
@@ -119,7 +122,7 @@ impl Harness {
                         tick,
                         result,
                     };
-                    self.core.handle(self.now, msg);
+                    self.send(msg);
                 }
                 // As `files::list` does; the core can't depend on the services crate.
                 Effect::ListDir(dir) => {
@@ -149,6 +152,7 @@ impl Harness {
                     self.send(Msg::Opened { path, result });
                 }
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
+                Effect::Quit => self.quit = true,
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
@@ -2358,6 +2362,89 @@ mod tests {
         h.keys("C-x k RET yes RET");
         assert_eq!(name(&h), "*scratch*");
         assert_eq!(h.core.buffers.find("a"), None);
+    }
+
+    #[test]
+    fn quitting_with_nothing_modified_quits_at_once() {
+        for keys in ["C-x C-c", "s-q"] {
+            let mut h = Harness::new(&[]);
+            h.keys(keys);
+            assert!(h.quit, "{keys}");
+        }
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        // `*scratch*` visits no file, so it is not asked about.
+        h.keys("C-x b RET x C-x C-c");
+        assert!(h.core.minibuffer().is_none());
+        assert!(h.quit);
+    }
+
+    #[test]
+    fn quitting_offers_to_save_each_modified_file() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").keys("x").open("b").keys("y C-x C-c");
+        let prompt = |h: &mut Harness, name: &str| {
+            let path = h.path(name);
+            assert_eq!(
+                h.core.minibuffer().unwrap().prompt,
+                format!("Save file {}? ", path.display())
+            );
+        };
+        prompt(&mut h, "b");
+        assert_eq!(listed(&mut h).0, ["Yes", "No"]);
+        h.keys("RET");
+        prompt(&mut h, "a");
+        // Lowercase text still picks a candidate.
+        h.keys("y RET");
+        assert_eq!(
+            (h.disk("a").as_str(), h.disk("b").as_str()),
+            ("x1\n", "y2\n")
+        );
+        assert!(h.quit);
+    }
+
+    #[test]
+    fn declining_keeps_the_editor_open_unless_confirmed() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").keys("x").open("b").keys("y C-x C-c no RET RET");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "Modified buffers exist; exit anyway? "
+        );
+        assert_eq!(listed(&mut h).0, ["No", "Yes"]);
+        h.keys("RET");
+        // The answered `Yes` is still saved; the declined buffer is left alone.
+        assert!(!h.quit && h.core.minibuffer().is_none());
+        assert_eq!((h.disk("a").as_str(), h.disk("b").as_str()), ("x1\n", "2"));
+        assert!(h.core.current().modified());
+        h.keys("C-x C-c no RET yes RET");
+        assert!(h.quit);
+        assert_eq!(h.disk("b"), "2");
+    }
+
+    #[test]
+    fn a_failed_save_cancels_the_quit() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a").keys("x");
+        std::fs::write(h.path("a"), "theirs").unwrap();
+        h.keys("C-x C-c RET");
+        let msg = format!("{} changed on disk; not saved", h.path("a").display());
+        assert_eq!(h.core.message(), Some(msg.as_str()));
+        assert!(!h.quit);
+        // A later save that succeeds does not quit.
+        std::fs::write(h.path("a"), "1").unwrap();
+        h.keys("C-x C-s");
+        assert!(!h.quit);
+    }
+
+    #[test]
+    fn a_close_request_quits_the_same_way() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a").keys("x");
+        h.send(Msg::Quit);
+        assert!(h.core.minibuffer().is_some() && !h.quit);
+        h.keys("RET");
+        assert!(h.quit);
     }
 
     /// A harness visiting `d/a.txt`, with `d` holding `a.txt`, `b.txt` and `sub/c.txt`.

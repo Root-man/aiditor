@@ -11,6 +11,7 @@
 "C-S-?" = "undo-redo"
 "C-x C-s" = "save-buffer"
 "C-x C-f" = "find-file"
+"C-x C-c" = "save-buffers-kill-terminal"
 "C-x C-r" = "reload-settings"
 "C-g" = "keyboard-quit"
 "M-x" = "execute-extended-command"
@@ -68,7 +69,8 @@
 "M-w" = "kill-ring-save"
 "C-y" = "yank"
 "M-y" = "yank-pop"
-# Cmd keys; s-q, s-w and s-h come with quitting.
+# Cmd keys; s-w and s-h wait for frames.
+"s-q" = "save-buffers-kill-terminal"
 "s-z" = "undo"
 "s-s" = "save-buffer"
 "s-x" = "kill-region"
