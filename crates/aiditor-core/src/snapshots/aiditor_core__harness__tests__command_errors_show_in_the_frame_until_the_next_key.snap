@@ -1,0 +1,40 @@
+---
+source: crates/aiditor-core/src/harness.rs
+expression: "h.frame(800., 600.)"
+---
+FrameDisplay {
+    windows: [
+        FrameWindow {
+            id: WindowId(
+                0,
+            ),
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            selected: true,
+            display: WindowDisplay {
+                lines: [
+                    Line {
+                        number: 0,
+                        height: 19.6,
+                        spans: [],
+                        decorations: [],
+                    },
+                ],
+                cursor: Some(
+                    (
+                        0,
+                        0,
+                    ),
+                ),
+                mode_line: "-- a.txt  1:0",
+            },
+        },
+    ],
+    message: Some(
+        "boom",
+    ),
+}

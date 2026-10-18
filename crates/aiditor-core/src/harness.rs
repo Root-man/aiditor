@@ -330,6 +330,41 @@ mod tests {
     }
 
     #[test]
+    fn command_errors_show_in_the_frame_until_the_next_key() {
+        let mut h = on("");
+        h.core.register(Command {
+            name: "fail",
+            spec: ArgSpec::default(),
+            handler: |_, _| Err("boom".into()),
+        });
+        h.call("fail", Args::default());
+        insta::assert_debug_snapshot!(h.frame(800., 600.));
+        h.keys("a");
+        assert_eq!(h.frame(800., 600.).message, None);
+    }
+
+    #[test]
+    fn echo_area_clears_on_click_not_on_scroll_or_timers() {
+        let mut h = twenty_lines();
+        h.keys("C-g");
+        h.send(Msg::Scroll {
+            window: WindowId(0),
+            lines: 2,
+        });
+        h.start_timer(MS, None, Msg::Tick);
+        h.advance(2 * MS);
+        assert_eq!(h.core.message(), Some("Quit"));
+        h.keys("M-z");
+        assert_eq!(h.core.message(), Some("M-z is undefined"));
+        h.send(Msg::Click {
+            window: WindowId(0),
+            line: 0,
+            col: 0,
+        });
+        assert_eq!(h.core.message(), None);
+    }
+
+    #[test]
     fn builtins_are_callable_by_name() {
         let mut h = Harness::new(&[("a.txt", ""), ("settings.toml", "font_size = 18")]);
         h.open("a.txt");
