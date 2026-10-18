@@ -71,8 +71,15 @@ impl Editor {
         core: Core,
         args: Args,
         (tx, mut rx): (mpsc::Sender<Msg>, mpsc::Receiver<Msg>),
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Closing the window quits as `C-x C-c` does, so unsaved buffers are offered first.
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            _ = this.update(cx, |editor, cx| editor.handle(Msg::Quit, cx));
+            false
+        });
         cx.spawn(async move |this, cx| {
             while let Some(msg) = rx.recv().await {
                 if this
@@ -150,6 +157,7 @@ impl Editor {
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
+                Effect::Quit => cx.quit(),
                 Effect::LoadSettings => {
                     let dir = self.config_dir.clone();
                     let read = |name| read_config(dir.as_deref(), name);
@@ -945,8 +953,8 @@ fn main() {
 
     Application::new().run(|cx: &mut App| {
         let window = cx
-            .open_window(WindowOptions::default(), |_, cx| {
-                cx.new(|cx| Editor::new(core, args, channel, cx))
+            .open_window(WindowOptions::default(), |window, cx| {
+                cx.new(|cx| Editor::new(core, args, channel, window, cx))
             })
             .expect("failed to open a window");
         window
@@ -1053,10 +1061,16 @@ mod tests {
         cx: &'a mut TestAppContext,
         text: &str,
     ) -> (gpui::Entity<Editor>, &'a mut VisualTestContext) {
-        let (editor, cx) = cx.add_window_view(|_, cx| {
+        let (editor, cx) = cx.add_window_view(|window, cx| {
             let mut core = Core::default();
             core.open(Path::new("/nonexistent/t.txt"), Some((text.into(), 0)));
-            Editor::new(core, Args::default(), aiditor_services::channel(), cx)
+            Editor::new(
+                core,
+                Args::default(),
+                aiditor_services::channel(),
+                window,
+                cx,
+            )
         });
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));
         cx.run_until_parked();
@@ -1130,6 +1144,15 @@ mod tests {
         assert_eq!(text, "aB", "C-u 3 x typed xxx and C-x u undid it");
         cx.simulate_keystrokes("ctrl-u 3 x");
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "aBxxx");
+    }
+
+    #[gpui::test]
+    fn closing_the_window_offers_to_save(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_input("x");
+        assert!(!cx.simulate_close(), "the window stays open");
+        let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
+        assert_eq!(prompt.as_deref(), Some("Save file /nonexistent/t.txt? "));
     }
 
     #[gpui::test]

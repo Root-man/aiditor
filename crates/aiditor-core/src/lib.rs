@@ -85,6 +85,8 @@ pub enum Msg {
     Clipboard(String),
     /// A line the app logged, for `*Messages*`.
     Log(String),
+    /// The window was asked to close; quits as `C-x C-c` does.
+    Quit,
 }
 
 /// How long a prefix waits before the hint shows, Emacs's `echo-keystrokes`.
@@ -110,7 +112,7 @@ struct Minibuffer {
     command: &'static str,
     /// The args so far; the answer becomes the next string.
     args: Args,
-    prompt: &'static str,
+    prompt: String,
     /// The window to select again on closing.
     from: WindowId,
     /// The history entry shown, 1 the newest; 0 is the text typed before moving.
@@ -168,6 +170,8 @@ pub enum Effect {
     LoadSettings,
     /// Put this text on the system clipboard.
     SetClipboard(String),
+    /// Quit the app.
+    Quit,
 }
 
 pub type Effects = Vec<Effect>;
@@ -217,18 +221,13 @@ impl Ctx<'_> {
             args.region = Some(point.min(mark)..point.max(mark));
         }
         if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
-            return self.read_string(command, args, prompt);
+            return self.read_string(command, args, prompt.into());
         }
         (command.handler)(self, args)
     }
 
     /// Opens the minibuffer at `prompt`; its answer then calls `command` again.
-    fn read_string(
-        &mut self,
-        command: Command,
-        args: Args,
-        prompt: &'static str,
-    ) -> Result<(), String> {
+    fn read_string(&mut self, command: Command, args: Args, prompt: String) -> Result<(), String> {
         let core = &mut *self.core;
         if core.minibuffer.is_some() {
             return Err("Command attempted to use minibuffer while in minibuffer".into());
@@ -321,7 +320,7 @@ impl Ctx<'_> {
         let text = self.core.text();
         let core = &mut *self.core;
         let mb = core.minibuffer.as_mut().ok_or("Not in a minibuffer")?;
-        let items = core.history.get(mb.prompt).map_or(&[][..], Vec::as_slice);
+        let items = core.history.get(&mb.prompt).map_or(&[][..], Vec::as_slice);
         let target = (mb.index as i64).saturating_add(n);
         if target > items.len() as i64 {
             return Err("Beginning of history; no preceding item".into());
@@ -415,6 +414,7 @@ impl Ctx<'_> {
                 tick,
                 result,
             } => {
+                let ok = result.is_ok();
                 match (self.core.buffers.get_mut(id), result) {
                     (None, _) => {}
                     (Some(buffer), Ok(hash)) => {
@@ -428,6 +428,18 @@ impl Ctx<'_> {
                         self.core.echo(msg);
                     }
                     (Some(_), Err(err)) => self.core.echo(err),
+                }
+                let core = &mut *self.core;
+                if let Some(at) = core.quitting.iter().position(|&b| b == id) {
+                    // A failed save, or edits made while it ran, cancel the quit.
+                    if ok && !core.buffers.get(id).is_some_and(Buffer::modified) {
+                        core.quitting.swap_remove(at);
+                        if core.quitting.is_empty() {
+                            self.effects.push(Effect::Quit);
+                        }
+                    } else {
+                        core.quitting.clear();
+                    }
                 }
             }
             Msg::Listed { dir, result } => {
@@ -481,6 +493,7 @@ impl Ctx<'_> {
             }
             Msg::Clipboard(text) => self.core.clipboard = Some(text),
             Msg::Log(line) => self.core.log(&line),
+            Msg::Quit => self.call("save-buffers-kill-terminal", Args::default()),
             Msg::Tick => {}
         }
     }
@@ -1116,7 +1129,11 @@ impl Ctx<'_> {
             match args.strings.get(1).map(String::as_str) {
                 None => {
                     let command = self.core.commands["kill-buffer"];
-                    return self.read_string(command, args, "Buffer modified; kill anyway? ");
+                    return self.read_string(
+                        command,
+                        args,
+                        "Buffer modified; kill anyway? ".into(),
+                    );
                 }
                 Some("yes") => {}
                 Some(_) => return Ok(()),
@@ -1137,9 +1154,55 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn save(&mut self) -> Result<(), String> {
-        let id = self.core.window.buffer();
-        let buffer = self.core.current_mut();
+    /// Offers to save each modified file buffer, then quits once those saves succeed. The
+    /// strings are name/answer pairs for the buffers asked about, then the `exit anyway` answer.
+    fn save_buffers_kill_terminal(&mut self, mut args: Args) -> Result<(), String> {
+        let command = self.core.commands["save-buffers-kill-terminal"];
+        let asked = |name: &str| args.strings.as_chunks::<2>().0.iter().any(|p| p[0] == name);
+        let next = (self.core.buffers.recent())
+            .find(|(_, b)| b.file.is_some() && b.modified() && !asked(&b.name))
+            .map(|(_, b)| (b.name.clone(), b.file.clone().expect("a file buffer")));
+        if args.strings.len().is_multiple_of(2)
+            && let Some((name, path)) = next
+        {
+            args.strings.push(name);
+            return self.read_string(command, args, format!("Save file {}? ", path.display()));
+        }
+        let yes: Vec<String> = (args.strings.as_chunks::<2>().0.iter())
+            .filter(|p| p[1].eq_ignore_ascii_case("yes"))
+            .map(|p| p[0].clone())
+            .collect();
+        let declined = yes.len() < args.strings.len() / 2;
+        if declined && args.strings.len().is_multiple_of(2) {
+            let prompt = "Modified buffers exist; exit anyway? ".into();
+            return self.read_string(command, args, prompt);
+        }
+        let core = &mut *self.core;
+        let saving: Vec<BufferId> = (yes.iter())
+            .filter_map(|name| core.buffers.find(name))
+            .filter(|&id| core.buffers.get(id).is_some_and(Buffer::modified))
+            .collect();
+        for &id in &saving {
+            self.save(id)?;
+        }
+        // Declining to exit still saves the buffers answered `Yes`.
+        if declined
+            && args
+                .strings
+                .last()
+                .is_none_or(|a| !a.eq_ignore_ascii_case("yes"))
+        {
+            return Ok(());
+        }
+        match saving.is_empty() {
+            true => self.effects.push(Effect::Quit),
+            false => self.core.quitting = saving,
+        }
+        Ok(())
+    }
+
+    fn save(&mut self, id: BufferId) -> Result<(), String> {
+        let buffer = self.core.buffers.get_mut(id).expect("saved buffer is live");
         let Some(path) = buffer.file.clone() else {
             tracing::info!(name = buffer.name, "buffer visits no file");
             return Ok(());
@@ -1200,7 +1263,7 @@ pub struct Core {
     /// The prompt being answered, while the minibuffer is open.
     minibuffer: Option<Minibuffer>,
     /// Each prompt's answers, newest first.
-    history: HashMap<&'static str, Vec<String>>,
+    history: HashMap<String, Vec<String>>,
     /// The fuzzy matcher for completion, made on first use.
     matcher: Option<Nucleo<(String, String)>>,
     /// The timer that polls the matcher again while it is still matching.
@@ -1221,6 +1284,8 @@ pub struct Core {
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
+    /// The buffers whose saves a quit waits for; empty when not quitting.
+    quitting: Vec<BufferId>,
 }
 
 impl Default for Core {
@@ -1228,7 +1293,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 55] = [
+        let builtins: [(&'static str, command::Handler); 56] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1317,7 +1382,10 @@ impl Default for Core {
                 ctx.undo(true);
                 Ok(())
             }),
-            ("save-buffer", |ctx, _| ctx.save()),
+            ("save-buffer", |ctx, _| ctx.save(ctx.core.window.buffer())),
+            ("save-buffers-kill-terminal", |ctx, args| {
+                ctx.save_buffers_kill_terminal(args)
+            }),
             ("find-file", |ctx, args| ctx.find_file(&args.strings[0])),
             ("reload-settings", |ctx, _| {
                 ctx.effects.push(Effect::LoadSettings);
@@ -1490,6 +1558,17 @@ impl Default for Core {
             files: true,
             ..ArgSpec::default()
         };
+        commands
+            .get_mut("save-buffers-kill-terminal")
+            .expect("a builtin")
+            .spec = ArgSpec {
+            // Both prompts are opened by the handler; an odd count is mid-pair, a `Save file` one.
+            completion: Some(|_, args| match args.strings.len() % 2 {
+                1 => vec!["Yes".into(), "No".into()],
+                _ => vec!["No".into(), "Yes".into()],
+            }),
+            ..ArgSpec::default()
+        };
         commands.get_mut("kill-buffer").expect("a builtin").spec = ArgSpec {
             prompts: &["Kill buffer: "],
             // The second prompt, opened by the handler, confirms killing a modified buffer.
@@ -1532,6 +1611,7 @@ impl Default for Core {
             settings: Settings::default(),
             commands,
             message: None,
+            quitting: Vec::new(),
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
