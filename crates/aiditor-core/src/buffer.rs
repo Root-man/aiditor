@@ -10,6 +10,13 @@ use ropey::Rope;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferId(u64);
 
+impl BufferId {
+    /// The id's number, unique within one process.
+    pub fn number(self) -> u64 {
+        self.0
+    }
+}
+
 /// A position in one buffer that follows edits; ids are not reused within a buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarkerId(u64);

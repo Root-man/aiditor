@@ -11,7 +11,7 @@ use aiditor_core::key::{Key, KeyCode};
 use aiditor_core::settings::Theme;
 use aiditor_core::window::WindowId;
 use aiditor_core::{Core, Effect, Msg};
-use aiditor_services::files;
+use aiditor_services::{files, recovery};
 use gpui::{
     App, Application, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Font, GlobalElementId,
@@ -39,6 +39,8 @@ struct Editor {
     timer: Option<Task<()>>,
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
+    /// The recovery service, when there is a data dir.
+    recovery: Option<(std::sync::mpsc::Sender<Effect>, std::thread::JoinHandle<()>)>,
     /// Set by `--debug`: the stats line drawn at the top.
     debug: Option<Debug>,
     /// The input method's marked text, drawn at point but not in the buffer.
@@ -100,6 +102,7 @@ impl Editor {
             tx,
             timer: None,
             config_dir: args.config_dir,
+            recovery: args.recovery_dir.map(recovery::spawn),
             debug: args.debug.then(Debug::default),
             marked: None,
             painted: Vec::new(),
@@ -157,7 +160,19 @@ impl Editor {
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
-                Effect::Quit => cx.quit(),
+                Effect::AutoSave { .. } | Effect::DeleteAutoSave(_) => {
+                    if let Some((tx, _)) = &self.recovery {
+                        _ = tx.send(effect);
+                    }
+                }
+                Effect::Quit => {
+                    // Lets queued recovery deletes finish before the process exits.
+                    if let Some((tx, thread)) = self.recovery.take() {
+                        drop(tx);
+                        _ = thread.join();
+                    }
+                    cx.quit()
+                }
                 Effect::LoadSettings => {
                     let dir = self.config_dir.clone();
                     let read = |name| read_config(dir.as_deref(), name);
@@ -854,6 +869,8 @@ struct Args {
     file: Option<PathBuf>,
     /// `--config-dir`, or the platform config dir.
     config_dir: Option<PathBuf>,
+    /// `recovery` in the platform data dir, for auto-save files.
+    recovery_dir: Option<PathBuf>,
     debug: bool,
 }
 
@@ -873,9 +890,10 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
             _ => return Err("more than one FILE".into()),
         }
     }
-    parsed.config_dir = parsed.config_dir.or_else(|| {
-        directories::ProjectDirs::from("", "", "aiditor").map(|d| d.config_dir().to_owned())
-    });
+    let dirs = directories::ProjectDirs::from("", "", "aiditor");
+    parsed.config_dir =
+        (parsed.config_dir).or_else(|| dirs.as_ref().map(|d| d.config_dir().to_owned()));
+    parsed.recovery_dir = dirs.map(|d| d.data_dir().join("recovery"));
     Ok(parsed)
 }
 
@@ -1153,6 +1171,33 @@ mod tests {
         assert!(!cx.simulate_close(), "the window stays open");
         let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
         assert_eq!(prompt.as_deref(), Some("Save file /nonexistent/t.txt? "));
+    }
+
+    #[gpui::test]
+    fn recovery_files_are_written_and_removed_on_quit(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let args = Args {
+            recovery_dir: Some(dir.path().to_owned()),
+            ..Args::default()
+        };
+        let channel = aiditor_services::channel();
+        let (editor, cx) = cx
+            .add_window_view(|window, cx| Editor::new(Core::default(), args, channel, window, cx));
+        cx.update(|window, cx| window.focus(&editor.read(cx).focus));
+        cx.simulate_input("x");
+        // The timer runs on real time; fire it now.
+        editor.update(cx, |e, cx| e.handle(Msg::AutoSave, cx));
+        let count = || std::fs::read_dir(dir.path()).unwrap().count();
+        for _ in 0..500 {
+            if count() > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(count(), 1);
+        // Only `*scratch*` is modified, so this quits at once.
+        editor.update(cx, |e, cx| e.handle(Msg::Quit, cx));
+        assert_eq!(count(), 0);
     }
 
     #[gpui::test]
