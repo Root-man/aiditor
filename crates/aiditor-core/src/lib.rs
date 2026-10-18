@@ -63,6 +63,18 @@ pub enum Msg {
         tick: u64,
         result: Result<u64, String>,
     },
+    /// The file service's answer to `Effect::ListDir`: the directory's entries, or why it
+    /// couldn't be listed.
+    Listed {
+        dir: PathBuf,
+        result: Result<Vec<String>, String>,
+    },
+    /// The file service's answer to `Effect::Open`: the file's bytes and hash, `None` when there
+    /// is no file, or why it couldn't be read.
+    Opened {
+        path: PathBuf,
+        result: Result<Option<(Vec<u8>, u64)>, String>,
+    },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
     /// The user's keymap file, the same way.
@@ -115,6 +127,12 @@ struct Completion {
     selected: usize,
     /// The first match shown, so the shown rows hold the selection.
     top: usize,
+    /// For file names, the text through its last `/`: the directory listed or awaited.
+    dir: Option<String>,
+    /// Whether `dir`'s listing arrived, so a second answer is dropped.
+    listed: bool,
+    /// The directory a relative `dir` is listed from, as `find-file` visits from it.
+    base: PathBuf,
 }
 
 impl Completion {
@@ -139,6 +157,10 @@ pub enum Effect {
         bytes: Vec<u8>,
         hash: Option<u64>,
     },
+    /// List the directory and send `Msg::Listed`.
+    ListDir(PathBuf),
+    /// Read the file and send `Msg::Opened`.
+    Open(PathBuf),
     /// Read the user's settings and keymap files and send `Msg::SettingsLoaded` and
     /// `Msg::KeymapLoaded`.
     LoadSettings,
@@ -209,8 +231,13 @@ impl Ctx<'_> {
         if core.minibuffer.is_some() {
             return Err("Command attempted to use minibuffer while in minibuffer".into());
         }
-        let completion = command.spec.completion.map(|candidates| {
-            let candidates = candidates(core, &args);
+        let base = core.directory();
+        let start = (command.spec.files).then(|| base.join("").to_string_lossy().into_owned());
+        let candidates = command
+            .spec
+            .completion
+            .map(|candidates| candidates(core, &args));
+        let completion = (candidates.is_some() || start.is_some()).then(|| {
             // One matcher for the core, as each one starts a thread pool.
             let matcher = core.matcher.get_or_insert_with(|| {
                 Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1)
@@ -218,7 +245,7 @@ impl Ctx<'_> {
             matcher.restart(true);
             (matcher.pattern).reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
             let injector = matcher.injector();
-            for c in candidates {
+            for c in candidates.into_iter().flatten() {
                 let note = command.spec.annotation.and_then(|f| f(core, &c));
                 injector.push((c, note.unwrap_or_default()), |(c, _), cols| {
                     cols[0] = c.as_str().into()
@@ -228,6 +255,10 @@ impl Ctx<'_> {
                 pattern: String::new(),
                 selected: 0,
                 top: 0,
+                // Nothing listed yet; `poll_completion` asks for the start directory.
+                dir: command.spec.files.then(String::new),
+                listed: false,
+                base,
             }
         });
         // A fresh buffer per prompt, so undo and markers never carry over.
@@ -249,15 +280,27 @@ impl Ctx<'_> {
             completion,
         });
         core.select(MINIBUFFER);
-        Ok(())
+        match start {
+            Some(text) => self.set_text(&text),
+            None => Ok(()),
+        }
     }
 
-    /// Closes the minibuffer and calls its command with the text as the next string.
-    fn exit_minibuffer(&mut self) -> Result<(), String> {
-        let text = self
+    /// Closes the minibuffer and calls its command with the selected candidate, or with `input`
+    /// or no match the text, as the next string. A selected directory is entered instead.
+    fn exit_minibuffer(&mut self, input: bool) -> Result<(), String> {
+        let selected = (!input).then(|| self.core.selected_candidate()).flatten();
+        let completion = self
             .core
-            .selected_candidate()
-            .unwrap_or_else(|| self.core.text());
+            .minibuffer
+            .as_ref()
+            .and_then(|mb| mb.completion.as_ref());
+        if completion.is_some_and(|c| c.dir.is_some())
+            && let Some(dir) = selected.as_ref().filter(|s| s.ends_with('/'))
+        {
+            return self.set_text(dir);
+        }
+        let text = selected.unwrap_or_else(|| self.core.text());
         let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
         let history = self.core.history.entry(mb.prompt).or_default();
         if !text.is_empty() && history.first() != Some(&text) {
@@ -384,6 +427,34 @@ impl Ctx<'_> {
                     (Some(_), Err(err)) => self.core.message = Some(err),
                 }
             }
+            Msg::Listed { dir, result } => {
+                let core = &mut *self.core;
+                let awaited = (core.minibuffer.as_mut())
+                    .and_then(|mb| mb.completion.as_mut())
+                    .filter(|c| {
+                        !c.listed && c.dir.as_ref().map(|d| c.base.join(d)) == Some(dir.clone())
+                    });
+                let Some(completion) = awaited else {
+                    return;
+                };
+                completion.listed = true;
+                match result {
+                    Ok(names) => {
+                        let matcher = core.matcher.as_ref().expect("completing has a matcher");
+                        let injector = matcher.injector();
+                        for name in names {
+                            injector.push((name, String::new()), |(c, _), cols| {
+                                cols[0] = c.as_str().into()
+                            });
+                        }
+                    }
+                    Err(err) => core.message = Some(err),
+                }
+            }
+            Msg::Opened { path, result } => match result {
+                Ok(file) => self.core.visit(&path, file, true),
+                Err(err) => self.core.message = Some(err),
+            },
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
                     Ok(settings) => self.core.settings = settings,
@@ -1051,6 +1122,17 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Visits `name`, taken from the current buffer's directory: switches to a buffer visiting
+    /// it, or asks the app to read it.
+    fn find_file(&mut self, name: &str) -> Result<(), String> {
+        let path = self.core.directory().join(name);
+        match self.core.buffers.visiting(&path) {
+            Some(id) => self.core.switch_to(id),
+            None => self.effects.push(Effect::Open(path)),
+        }
+        Ok(())
+    }
+
     fn save(&mut self) -> Result<(), String> {
         let id = self.core.window.buffer();
         let buffer = self.core.current_mut();
@@ -1142,7 +1224,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 52] = [
+        let builtins: [(&'static str, command::Handler); 55] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1165,6 +1247,14 @@ impl Default for Core {
             }),
             ("delete-backward-char", |ctx, args| {
                 ctx.delete_char(args.prefix.is_none(), args.count().saturating_neg())
+            }),
+            ("minibuffer-directory-delete-char", |ctx, args| {
+                match ctx.core.component_start() {
+                    Some(start) if args.prefix.is_none() && !ctx.core.window.active() => {
+                        ctx.delete_to(start)
+                    }
+                    _ => ctx.delete_char(args.prefix.is_none(), args.count().saturating_neg()),
+                }
             }),
             ("kill-word", |ctx, args| {
                 ctx.kill_to(ctx.word_end(args.count()))
@@ -1224,6 +1314,7 @@ impl Default for Core {
                 Ok(())
             }),
             ("save-buffer", |ctx, _| ctx.save()),
+            ("find-file", |ctx, args| ctx.find_file(&args.strings[0])),
             ("reload-settings", |ctx, _| {
                 ctx.effects.push(Effect::LoadSettings);
                 Ok(())
@@ -1293,7 +1384,8 @@ impl Default for Core {
                 Ok(())
             }),
             ("kill-buffer", |ctx, args| ctx.kill_buffer(args)),
-            ("exit-minibuffer", |ctx, _| ctx.exit_minibuffer()),
+            ("exit-minibuffer", |ctx, _| ctx.exit_minibuffer(false)),
+            ("minibuffer-exit-input", |ctx, _| ctx.exit_minibuffer(true)),
             ("abort-minibuffers", |ctx, _| {
                 ctx.core.close_minibuffer().ok_or("Not in a minibuffer")?;
                 ctx.core.message = Some("Quit".into());
@@ -1389,6 +1481,11 @@ impl Default for Core {
                 ..ArgSpec::default()
             };
         }
+        commands.get_mut("find-file").expect("a builtin").spec = ArgSpec {
+            prompts: &["Find file: "],
+            files: true,
+            ..ArgSpec::default()
+        };
         commands.get_mut("kill-buffer").expect("a builtin").spec = ArgSpec {
             prompts: &["Kill buffer: "],
             // The second prompt, opened by the handler, confirms killing a modified buffer.
@@ -1579,14 +1676,15 @@ impl Core {
                 ctx.dispatch(msg);
             }
         }
-        let effects = ctx.effects;
-        self.poll_completion(now);
+        let mut effects = ctx.effects;
+        self.poll_completion(now, &mut effects);
         effects
     }
 
     /// Matches the completing minibuffer's text against its candidates, waiting up to 10 ms,
-    /// and polls again on a timer while the matcher is still running.
-    fn poll_completion(&mut self, now: Instant) {
+    /// and polls again on a timer while the matcher is still running. A file prompt matches the
+    /// text after the last `/`, asking for a listing when the part before it changes.
+    fn poll_completion(&mut self, now: Instant, effects: &mut Effects) {
         let text = self.text();
         let Some(completion) = (self.minibuffer.as_mut()).and_then(|mb| mb.completion.as_mut())
         else {
@@ -1596,11 +1694,31 @@ impl Core {
             .matcher
             .as_mut()
             .expect("a completing minibuffer has a matcher");
-        if completion.pattern != text {
+        let (mut pattern, mut fresh) = (text.as_str(), false);
+        if let Some(dir) = &mut completion.dir {
+            let (head, tail) = text.split_at(text.rfind('/').map_or(0, |i| i + 1));
+            pattern = tail;
+            if head != dir {
+                *dir = head.to_string();
+                completion.listed = false;
+                fresh = true;
+                matcher.restart(true);
+                if !head.is_empty() {
+                    effects.push(Effect::ListDir(completion.base.join(head)));
+                }
+            }
+        }
+        if fresh || completion.pattern != pattern {
             // Text that extends the old pattern lets nucleo narrow the last matches.
-            let append = text.starts_with(&completion.pattern);
-            (matcher.pattern).reparse(0, &text, CaseMatching::Smart, Normalization::Smart, append);
-            completion.pattern = text;
+            let append = !fresh && pattern.starts_with(&completion.pattern);
+            (matcher.pattern).reparse(
+                0,
+                pattern,
+                CaseMatching::Smart,
+                Normalization::Smart,
+                append,
+            );
+            completion.pattern = pattern.to_string();
             completion.select(0);
         }
         if let Some(id) = self.repoll.take() {
@@ -1631,25 +1749,75 @@ impl Core {
         let snapshot = self.matcher.as_ref()?.snapshot();
         let last = snapshot.matched_item_count().checked_sub(1)?;
         let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
-        Some(item.data.0.clone())
+        let name = &item.data.0;
+        Some(match &completion.dir {
+            Some(dir) => format!("{dir}{name}"),
+            None => name.clone(),
+        })
+    }
+
+    /// In a file prompt with point at the end of a text that ends in `/` or names a listed
+    /// directory, the start of that last component: where `DEL` deletes back to.
+    fn component_start(&self) -> Option<usize> {
+        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
+        let (dir, matcher) = (completion.dir.as_ref()?, self.matcher.as_ref()?);
+        let text = self.text();
+        if self.point() != text.chars().count() {
+            return None;
+        }
+        let component = match text.strip_suffix('/') {
+            Some(component) => component,
+            None => {
+                // The listing already loaded says whether the last component is a directory.
+                let name = format!("{}/", text.strip_prefix(dir.as_str())?);
+                let injector = matcher.injector();
+                let listed = (0..injector.injected_items())
+                    .any(|i| injector.get(i).is_some_and(|item| item.data.0 == name));
+                listed.then_some(text.as_str())?
+            }
+        };
+        let start = component.rfind('/')? + 1;
+        Some(text[..start].chars().count())
+    }
+
+    /// The current buffer's directory: its file's, else the working directory.
+    fn directory(&self) -> PathBuf {
+        match self.current().file.as_deref().and_then(Path::parent) {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir().unwrap_or_default(),
+        }
     }
 
     /// Visits `path` in a new current buffer, given the file's bytes and their hash, or `None`
     /// when there is no file. A binary or non-UTF-8 file opens empty and read-only.
     pub fn open(&mut self, path: &Path, file: Option<(Vec<u8>, u64)>) {
+        self.visit(path, file, false)
+    }
+
+    /// `open`, but a buffer already visiting `path` is switched to, and with `refuse` a binary
+    /// or non-UTF-8 file is not opened; either way the echo area says why.
+    fn visit(&mut self, path: &Path, file: Option<(Vec<u8>, u64)>, refuse: bool) {
+        // Two finds of one file can race; the later one switches to the first's buffer.
+        if let Some(id) = self.buffers.visiting(path) {
+            return self.switch_to(id);
+        }
         let disk = file.as_ref().map(|(_, hash)| *hash);
         let (text, crlf, bom, refused) = match file.map(|(bytes, _)| buffer::decode(&bytes)) {
             None => (String::new(), false, false, None),
             Some(Ok((text, crlf, bom))) => (text, crlf, bom, None),
             Some(Err(reason)) => (String::new(), false, false, Some(reason)),
         };
+        if let Some(reason) = refused {
+            let opened = if refuse { "" } else { ", opened read-only" };
+            self.message = Some(format!("{}: {reason}{opened}", path.display()));
+            if refuse {
+                return;
+            }
+        }
         let id = self.buffers.create_for_file(path, &text);
         let buffer = self.buffers.get_mut(id).expect("just created");
         (buffer.crlf, buffer.bom, buffer.disk) = (crlf, bom, disk);
-        if let Some(reason) = refused {
-            buffer.read_only = true;
-            self.message = Some(format!("{}: {reason}, opened read-only", path.display()));
-        }
+        buffer.read_only = refused.is_some();
         self.switch_to(id);
     }
 

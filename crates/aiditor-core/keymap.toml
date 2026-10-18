@@ -10,6 +10,7 @@
 "C-?" = "undo-redo"
 "C-S-?" = "undo-redo"
 "C-x C-s" = "save-buffer"
+"C-x C-f" = "find-file"
 "C-x C-r" = "reload-settings"
 "C-g" = "keyboard-quit"
 "M-x" = "execute-extended-command"
@@ -87,3 +88,6 @@
 "C-p" = "minibuffer-previous-completion"
 "<up>" = "minibuffer-previous-completion"
 "TAB" = "minibuffer-complete"
+"M-RET" = "minibuffer-exit-input"
+# Deletes a whole directory in file prompts, a char elsewhere.
+"DEL" = "minibuffer-directory-delete-char"

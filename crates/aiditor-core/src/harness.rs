@@ -77,7 +77,9 @@ impl Harness {
 
     /// Waits for the completion matcher's threads, so tests see settled matches.
     fn settle(&mut self) {
-        self.core.poll_completion(self.now);
+        let mut effects = Vec::new();
+        self.core.poll_completion(self.now, &mut effects);
+        self.run(effects);
         let core = &mut self.core;
         while let (Some(_), Some(matcher)) = (&core.minibuffer, &mut core.matcher)
             && matcher.tick(50).running
@@ -118,6 +120,33 @@ impl Harness {
                         result,
                     };
                     self.core.handle(self.now, msg);
+                }
+                // As `files::list` does; the core can't depend on the services crate.
+                Effect::ListDir(dir) => {
+                    let result = std::fs::read_dir(&dir)
+                        .map(|entries| {
+                            let mut names: Vec<String> = (entries.flatten())
+                                .map(|e| {
+                                    let slash = if e.path().is_dir() { "/" } else { "" };
+                                    format!("{}{slash}", e.file_name().to_string_lossy())
+                                })
+                                .collect();
+                            names.sort();
+                            names
+                        })
+                        .map_err(|err| format!("{}: {err}", dir.display()));
+                    self.send(Msg::Listed { dir, result });
+                }
+                Effect::Open(path) => {
+                    let result = match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let h = hash(&bytes);
+                            Ok(Some((bytes, h)))
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                        Err(err) => Err(format!("{}: {err}", path.display())),
+                    };
+                    self.send(Msg::Opened { path, result });
                 }
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::LoadSettings => {
@@ -991,8 +1020,9 @@ mod tests {
         assert_eq!(h.core.scroll(3), 2);
         h.keys("<up>");
         assert_eq!(h.core.scroll(3), 1);
+        // Visiting it again shows the same buffer where it was.
         h.open("a.txt");
-        assert_eq!((h.point(), h.core.scroll(3)), (0, 0));
+        assert_eq!((h.point(), h.core.scroll(3)), (2, 1));
     }
 
     #[test]
@@ -2289,5 +2319,164 @@ mod tests {
         h.keys("C-x k RET yes RET");
         assert_eq!(name(&h), "*scratch*");
         assert_eq!(h.core.buffers.find("a"), None);
+    }
+
+    /// A harness visiting `d/a.txt`, with `d` holding `a.txt`, `b.txt` and `sub/c.txt`.
+    fn in_dir() -> Harness {
+        let mut h = Harness::new(&[("d/a.txt", "a"), ("d/b.txt", "hi"), ("d/sub/c.txt", "")]);
+        h.open("d/a.txt");
+        h
+    }
+
+    /// Types the temp dir's path for `name` as the platform's text input would.
+    fn type_path(h: &mut Harness, name: &str) {
+        let text = typed(h, name);
+        h.send(Msg::Insert {
+            text,
+            replace: None,
+        });
+    }
+
+    /// The temp dir's path for `name`, as typed at a prompt.
+    fn typed(h: &Harness, name: &str) -> String {
+        h.path(name).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn find_file_starts_at_the_buffer_directory_and_lists_it() {
+        let mut h = in_dir();
+        h.keys("C-x C-f");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Find file: ");
+        assert_eq!(h.text(), typed(&h, "d/"));
+        assert_eq!(listed(&mut h).0, ["a.txt", "b.txt", "sub/"]);
+        h.keys("b");
+        assert_eq!(listed(&mut h).0, ["b.txt", "sub/"]);
+        h.keys("DEL sub/");
+        assert_eq!(listed(&mut h).0, ["c.txt"]);
+        h.keys("C-g");
+        // A buffer without a file starts at the working directory.
+        h.keys("C-x b *scratch* RET C-x C-f");
+        let cwd = std::env::current_dir().unwrap().join("");
+        assert_eq!(h.text(), cwd.to_string_lossy());
+    }
+
+    #[test]
+    fn find_file_visits_an_existing_or_a_new_file() {
+        let mut h = in_dir();
+        h.keys("C-x C-f b.txt RET");
+        assert_eq!((name(&h), h.text().as_str()), ("b.txt", "hi"));
+        assert_eq!(h.core.current().file, Some(h.path("d/b.txt")));
+        assert!(!h.core.current().modified());
+        // M-RET keeps a new name that fuzzy-matches b.txt.
+        h.keys("C-x C-f bt M-RET");
+        assert_eq!((name(&h), h.text().as_str()), ("bt", ""));
+        assert!(!h.path("d/bt").exists());
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("d/bt"), "x\n");
+    }
+
+    #[test]
+    fn tab_completes_and_ret_enters_a_directory() {
+        let mut h = in_dir();
+        h.keys("C-x C-f b TAB");
+        assert_eq!(h.text(), typed(&h, "d/b.txt"));
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/s");
+        h.keys("RET");
+        assert_eq!(h.text(), typed(&h, "d/sub/"));
+        assert_eq!(listed(&mut h).0, ["c.txt"]);
+        h.keys("RET");
+        assert_eq!(name(&h), "c.txt");
+    }
+
+    #[test]
+    fn find_file_switches_to_a_visited_file() {
+        let mut h = in_dir();
+        h.keys("x C-x b *scratch* RET C-x C-f C-a C-k");
+        type_path(&mut h, "d/a.txt");
+        h.keys("RET");
+        assert_eq!((name(&h), h.text().as_str()), ("a.txt", "xa"));
+        assert_eq!(h.core.buffers.recent().count(), 2);
+        // A read that raced another find of the same file switches too.
+        h.send(Msg::Opened {
+            path: h.path("d/a.txt"),
+            result: Ok(None),
+        });
+        assert_eq!(
+            (h.core.buffers.recent().count(), h.text().as_str()),
+            (2, "xa")
+        );
+    }
+
+    #[test]
+    fn find_file_refuses_binary_files_and_directories() {
+        let mut h = in_dir();
+        std::fs::write(h.path("d/bin"), b"a\0b").unwrap();
+        h.keys("C-x C-f bin M-RET");
+        assert_eq!(name(&h), "a.txt");
+        let msg = format!("{}: binary file", h.path("d/bin").display());
+        assert_eq!(h.core.message(), Some(msg.as_str()));
+        h.keys("C-x C-f M-RET");
+        assert_eq!(name(&h), "a.txt");
+        assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/")));
+        assert_eq!(h.core.buffers.recent().count(), 2);
+    }
+
+    #[test]
+    fn a_listing_error_shows_and_a_late_listing_is_dropped() {
+        let mut h = in_dir();
+        h.keys("C-x C-f nope/");
+        assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/nope/")));
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+        h.send(Msg::Listed {
+            dir: h.path("d"),
+            result: Ok(vec!["stale".into()]),
+        });
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_relative_name_lists_and_visits_from_the_buffer_directory() {
+        let mut h = in_dir();
+        h.keys("C-x C-f C-a C-k sub/");
+        assert_eq!(listed(&mut h).0, ["c.txt"]);
+        h.keys("RET");
+        assert_eq!(h.core.current().file, Some(h.path("d/sub/c.txt")));
+    }
+
+    #[test]
+    fn m_ret_returns_the_text_as_typed() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p ch M-RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["ch"])));
+    }
+
+    #[test]
+    fn del_deletes_a_whole_directory_in_a_file_prompt() {
+        let mut h = in_dir();
+        h.keys("C-x C-f sub/");
+        h.keys("DEL");
+        assert_eq!(h.text(), typed(&h, "d/"));
+        h.keys("sub");
+        h.keys("DEL");
+        assert_eq!(h.text(), typed(&h, "d/"));
+        // A file, a name nothing lists, or point before the end: one char.
+        h.keys("b.txt DEL");
+        assert_eq!(h.text(), typed(&h, "d/b.tx"));
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/sub/");
+        h.keys("<left> DEL");
+        assert_eq!(h.text(), typed(&h, "d/su/"));
+        // A prefix argument or an active region keeps plain DEL.
+        h.keys("C-e b/ C-u 1 DEL");
+        assert_eq!(h.text(), typed(&h, "d/su/b"));
+        h.keys("/ C-SPC DEL");
+        assert_eq!(h.text(), typed(&h, "d/su/b"));
+        // Other completing prompts delete a char.
+        h.keys("C-g");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p ab/ DEL");
+        assert_eq!(h.text(), "ab");
     }
 }
