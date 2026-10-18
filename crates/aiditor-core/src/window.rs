@@ -234,9 +234,16 @@ impl Tree {
         }
     }
 
-    /// Each leaf's part of `rect`, in `leaves` order.
-    // shortcut: parts are not snapped to whole lines or cells; #11 snaps them when it draws.
-    pub fn layout(&self, rect: Rect) -> Vec<(WindowId, Rect)> {
+    /// Each leaf's part of `rect`, in `leaves` order, split edges snapped to whole `cell`s
+    /// (width, height); a zero cell side is not snapped.
+    pub fn layout(&self, rect: Rect, cell: (f32, f32)) -> Vec<(WindowId, Rect)> {
+        let snap = |v: f32, cell: f32| {
+            if cell > 0. {
+                (v / cell).round() * cell
+            } else {
+                v
+            }
+        };
         match self {
             Tree::Leaf(id) => vec![(*id, rect)],
             Tree::Split {
@@ -247,15 +254,15 @@ impl Tree {
             } => {
                 let (mut a, mut b) = (rect, rect);
                 if *side_by_side {
-                    a.width = rect.width * ratio;
+                    a.width = snap(rect.width * ratio, cell.0);
                     b.x += a.width;
                     b.width -= a.width;
                 } else {
-                    a.height = rect.height * ratio;
+                    a.height = snap(rect.height * ratio, cell.1);
                     b.y += a.height;
                     b.height -= a.height;
                 }
-                [first.layout(a), second.layout(b)].concat()
+                [first.layout(a, cell), second.layout(b, cell)].concat()
             }
         }
     }
@@ -278,24 +285,26 @@ mod tests {
             width: 80.,
             height: 100.,
         };
+        // A frame 10 cells high: halves round to whole cells.
+        let cell = (10., 10.);
         let heights: Vec<_> = tree
-            .layout(frame)
+            .layout(frame, cell)
             .iter()
             .map(|(id, r)| (*id, r.y, r.height))
             .collect();
         assert_eq!(
             heights,
-            [(w(0), 0., 25.), (w(2), 25., 25.), (w(1), 50., 50.)]
+            [(w(0), 0., 30.), (w(2), 30., 20.), (w(1), 50., 50.)]
         );
         tree.split(w(1), w(3), true);
-        let lower: Vec<_> = tree.layout(frame)[2..]
+        let lower: Vec<_> = tree.layout(frame, cell)[2..]
             .iter()
             .map(|(_, r)| (r.x, r.width))
             .collect();
         assert_eq!(lower, [(0., 40.), (40., 40.)]);
         assert_eq!(tree.remove(w(0)), Some(w(2)));
         assert_eq!(tree.leaves(), [w(2), w(1), w(3)]);
-        assert_eq!(tree.layout(frame)[0].1.height, 50.);
+        assert_eq!(tree.layout(frame, cell)[0].1.height, 50.);
         assert_eq!(tree.remove(w(1)), Some(w(3)));
         assert_eq!(tree.remove(w(2)), Some(w(3)));
         assert_eq!(tree.leaves(), [w(3)]);

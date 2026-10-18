@@ -47,6 +47,10 @@ pub struct Theme {
     pub cursor: u32,
     /// The region's background.
     pub region: u32,
+    /// The selected window's mode line background.
+    pub mode_line: u32,
+    /// Every other window's mode line background.
+    pub mode_line_inactive: u32,
 }
 
 impl Settings {
@@ -90,12 +94,15 @@ mod tests {
     #[test]
     fn user_keys_override_and_the_rest_stay_default() {
         let s = Settings::parse(Some(
-            "font_size = 18\n[theme]\ncursor = 0x00ff00\nregion = 0x123456",
+            "font_size = 18\n[theme]\ncursor = 0x00ff00\nregion = 0x123456\nmode_line = 0x111111",
         ))
         .unwrap();
         assert_eq!(s.font_size, 18.0);
         assert_eq!(s.theme.cursor, 0x00ff00);
         assert_eq!(s.theme.region, 0x123456);
+        assert_eq!(s.theme.mode_line, 0x111111);
+        let inactive = Settings::default().theme.mode_line_inactive;
+        assert_eq!(s.theme.mode_line_inactive, inactive);
         assert_eq!(s.theme.background, Settings::default().theme.background);
     }
 

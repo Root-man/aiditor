@@ -28,6 +28,7 @@ pub struct FrameDisplay {
 
 #[derive(Debug, PartialEq)]
 pub struct FrameWindow {
+    pub id: crate::window::WindowId,
     pub rect: Rect,
     pub selected: bool,
     pub display: WindowDisplay,

@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use crate::{
     Core, Ctx, Effect, Effects, Msg,
     command::Args,
-    display::WindowDisplay,
+    display::{FrameDisplay, FrameWindow, WindowDisplay},
     key::{Key, KeyCode, parse_keys},
     timer::TimerId,
 };
@@ -150,6 +150,18 @@ impl Harness {
         let height = (rows + 1) as f32 * self.core.settings().line_height();
         self.core.display(height)
     }
+
+    /// The frame display after the frontend reports a windows area `width` by `height` px
+    /// with 8 px cells.
+    pub fn frame(&mut self, width: f32, height: f32) -> FrameDisplay {
+        let cell_width = 8.;
+        self.send(Msg::Resize {
+            width,
+            height,
+            cell_width,
+        });
+        self.core.frame()
+    }
 }
 
 mod tests {
@@ -158,6 +170,7 @@ mod tests {
     use super::*;
     use crate::command::{ArgSpec, Command, Prefix};
     use crate::settings::Settings;
+    use crate::window::WindowId;
 
     const MS: Duration = Duration::from_millis(1);
 
@@ -1321,13 +1334,17 @@ mod tests {
     fn wheel_scrolls_keeping_point_visible() {
         let mut h = twenty_lines();
         h.core.scroll(3);
-        h.send(Msg::Scroll(5));
+        let scroll = |lines| Msg::Scroll {
+            window: WindowId(0),
+            lines,
+        };
+        h.send(scroll(5));
         assert_eq!((h.core.scroll(3), h.point()), (5, line_start(&h, 5)));
-        h.send(Msg::Scroll(-2));
+        h.send(scroll(-2));
         assert_eq!((h.core.scroll(3), h.point()), (3, line_start(&h, 5)));
-        h.send(Msg::Scroll(99)).send(Msg::Scroll(1));
+        h.send(scroll(99)).send(scroll(1));
         assert_eq!((h.core.scroll(3), h.core.message()), (19, None));
-        h.send(Msg::Scroll(-99));
+        h.send(scroll(-99));
         assert_eq!((h.core.scroll(3), h.core.message()), (0, None));
     }
 
@@ -1335,13 +1352,20 @@ mod tests {
     fn click_moves_point_and_drops_mark_and_prefix() {
         let mut h = on("abc\ndef");
         h.keys("C-SPC C-f");
-        h.send(Msg::Click(5));
+        let click = |line, col| Msg::Click {
+            window: WindowId(0),
+            line,
+            col,
+        };
+        h.send(click(1, 1));
         assert_eq!((h.point(), mark(&h).1), (5, false));
-        h.send(Msg::Click(99));
-        assert_eq!(h.point(), 7, "clamped to the end");
-        h.keys("C-x").send(Msg::Click(0)).keys("u");
+        h.send(click(0, 9));
+        assert_eq!(h.point(), 3, "past the line's end");
+        h.send(click(5, 0));
+        assert_eq!(h.point(), 7, "past the buffer's end");
+        h.keys("C-x").send(click(0, 0)).keys("u");
         assert_eq!(h.text(), "uabc\ndef", "no prefix pending");
-        h.keys("C-u").send(Msg::Click(5)).keys("x");
+        h.keys("C-u").send(click(1, 0)).keys("x");
         assert_eq!(h.text(), "uabc\nxdef", "no prefix argument");
         h.keys("C-/");
         assert_eq!(
@@ -1617,7 +1641,7 @@ mod tests {
         );
         h.keys("C-x 2 C-x 2 C-x o C-x 1");
         assert_eq!(windows(&h), (vec![(3, 1)], 3), "only the second is left");
-        assert_eq!(h.core.frame(80., 100.).windows[0].rect.height, 100.);
+        assert_eq!(h.frame(80., 100.).windows[0].rect.height, 100.);
     }
 
     #[test]
@@ -1625,7 +1649,7 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "abc")]);
         h.keys("x C-x 2");
         h.open("a.txt");
-        let names: Vec<_> = (h.core.frame(80., 100.).windows.iter())
+        let names: Vec<_> = (h.frame(80., 100.).windows.iter())
             .map(|w| w.display.mode_line.clone())
             .collect();
         assert_eq!(names, ["-- a.txt  1:0", "** *scratch*  1:1"]);
@@ -1635,13 +1659,56 @@ mod tests {
     fn frame_display_of_a_stacked_split() {
         let mut h = on("one\ntwo");
         h.keys("C-n C-x 2");
-        insta::assert_debug_snapshot!(h.core.frame(800., 600.));
+        insta::assert_debug_snapshot!(h.frame(800., 600.));
     }
 
     #[test]
     fn frame_display_of_a_side_by_side_split() {
         let mut h = on("one\ntwo");
         h.keys("C-x 3 C-n");
-        insta::assert_debug_snapshot!(h.core.frame(800., 600.));
+        insta::assert_debug_snapshot!(h.frame(800., 600.));
+    }
+
+    #[test]
+    fn clicks_select_and_scrolls_keep_the_selected_window() {
+        let mut h = twenty_lines();
+        h.keys("C-x 3");
+        let right = h.frame(800., 600.).windows[1].id;
+        h.send(Msg::Scroll {
+            window: right,
+            lines: 5,
+        });
+        assert_eq!(windows(&h), (vec![(0, 0), (1, line_start(&h, 5))], 0));
+        h.send(Msg::Click {
+            window: right,
+            line: 7,
+            col: 1,
+        });
+        assert_eq!(windows(&h), (vec![(0, 0), (1, line_start(&h, 7) + 1)], 1));
+        h.keys("C-x 0").send(Msg::Click {
+            window: right,
+            line: 0,
+            col: 0,
+        });
+        assert_eq!(
+            windows(&h),
+            (vec![(0, 0)], 0),
+            "a deleted window's click is dropped"
+        );
+    }
+
+    #[test]
+    fn resizing_re_lays_out_snapped_to_lines() {
+        let mut h = on("one");
+        h.keys("C-x 2");
+        let line = h.core.settings().line_height();
+        // Heights in lines, to two places.
+        let heights = |h: &mut Harness, lines: f32| -> Vec<f32> {
+            let frame = h.frame(800., line * lines);
+            let lines = |w: &FrameWindow| (w.rect.height / line * 100.).round() / 100.;
+            frame.windows.iter().map(lines).collect()
+        };
+        assert_eq!(heights(&mut h, 10.), [5., 5.]);
+        assert_eq!(heights(&mut h, 7.2), [4., 3.2]);
     }
 }
