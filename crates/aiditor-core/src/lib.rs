@@ -213,7 +213,10 @@ impl Ctx<'_> {
             (matcher.pattern).reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
             let injector = matcher.injector();
             for c in candidates {
-                injector.push(c, |c, cols| cols[0] = c.as_str().into());
+                let note = command.spec.annotation.and_then(|f| f(core, &c));
+                injector.push((c, note.unwrap_or_default()), |(c, _), cols| {
+                    cols[0] = c.as_str().into()
+                });
             }
             Completion {
                 pattern: String::new(),
@@ -1063,7 +1066,7 @@ pub struct Core {
     /// Each prompt's answers, newest first.
     history: HashMap<&'static str, Vec<String>>,
     /// The fuzzy matcher for completion, made on first use.
-    matcher: Option<Nucleo<String>>,
+    matcher: Option<Nucleo<(String, String)>>,
     /// The timer that polls the matcher again while it is still matching.
     repoll: Option<TimerId>,
     /// The column a run of line motions aims for.
@@ -1089,7 +1092,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 48] = [
+        let builtins: [(&'static str, command::Handler); 49] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1252,6 +1255,18 @@ impl Default for Core {
             ("next-history-element", |ctx, args| {
                 ctx.history_element(args.count().saturating_neg())
             }),
+            ("execute-extended-command", |ctx, args| {
+                let name = (ctx.core.commands.get_key_value(args.strings[0].as_str()))
+                    .map(|(name, _)| *name)
+                    .ok_or_else(|| format!("No command named {}", args.strings[0]))?;
+                ctx.core.this_command = Some(name);
+                let args = Args {
+                    prefix: args.prefix,
+                    ..Args::default()
+                };
+                ctx.call(name, args);
+                Ok(())
+            }),
             ("keyboard-quit", |ctx, _| {
                 ctx.core.window.set_active(false);
                 ctx.core.message = Some("Quit".into());
@@ -1282,6 +1297,27 @@ impl Default for Core {
             spec.clipboard = true;
             spec.region = matches!(name, "kill-region" | "kill-ring-save");
         }
+        commands
+            .get_mut("execute-extended-command")
+            .expect("a builtin")
+            .spec = ArgSpec {
+            prompts: &["M-x "],
+            completion: Some(|core, _| {
+                let mut names: Vec<String> = core.commands.keys().map(|n| n.to_string()).collect();
+                names.sort();
+                names
+            }),
+            annotation: Some(|core, name| {
+                let keys = core.where_is(name)?;
+                Some(
+                    keys.iter()
+                        .map(Key::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            }),
+            ..ArgSpec::default()
+        };
         let mut core = Core {
             buffers,
             window,
@@ -1385,6 +1421,39 @@ impl Core {
             .chain(modes.filter_map(|mode| self.keymaps.get(*mode)))
     }
 
+    /// The shortest key sequence that runs `command` under keymap layering, the first in
+    /// `kbd` text order among equally short ones.
+    fn where_is(&self, command: &str) -> Option<Vec<Key>> {
+        fn walk(map: &Keymap, keys: &mut Vec<Key>, command: &str, found: &mut Vec<Vec<Key>>) {
+            for (key, binding) in map.bindings() {
+                keys.push(*key);
+                match binding {
+                    Binding::Command(name) if *name == command => found.push(keys.clone()),
+                    Binding::Command(_) => {}
+                    Binding::Prefix(map) => walk(map, keys, command, found),
+                }
+                keys.pop();
+            }
+        }
+        let mut found = Vec::new();
+        for map in self.layers() {
+            walk(map, &mut Vec::new(), command, &mut found);
+        }
+        // A key a higher layer binds to something else does not run it.
+        found.retain(
+            |keys| matches!(self.lookup(keys), Some(Binding::Command(name)) if *name == command),
+        );
+        let text = |keys: &Vec<Key>| {
+            keys.iter()
+                .map(Key::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        found
+            .into_iter()
+            .min_by_key(|keys| (keys.len(), text(keys)))
+    }
+
     /// The hint for the pending prefix, once its delay has passed. Each next key shows the
     /// binding of the first layer that binds it, as `lookup` would find.
     pub fn hint(&self) -> Option<display::Hint> {
@@ -1482,7 +1551,7 @@ impl Core {
         let snapshot = self.matcher.as_ref()?.snapshot();
         let last = snapshot.matched_item_count().checked_sub(1)?;
         let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
-        Some(item.data.clone())
+        Some(item.data.0.clone())
     }
 
     /// Visits `path` in a new current buffer holding `text`, already read from it.
@@ -1590,14 +1659,14 @@ impl Core {
     pub fn minibuffer(&mut self) -> Option<display::Minibuffer> {
         let mb = self.minibuffer.as_ref()?;
         let prompt = mb.prompt.to_string();
-        let (mut candidates, mut selected) = (Vec::new(), None);
+        let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
         if let (Some(completion), Some(matcher)) = (&mb.completion, &mut self.matcher) {
             matcher.tick(0);
             let snapshot = matcher.snapshot();
             let count = snapshot.matched_item_count() as usize;
             let rows = completion.top.min(count)..(completion.top + COMPLETION_ROWS).min(count);
             let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
-            candidates = items.map(|item| item.data.clone()).collect();
+            (candidates, annotations) = items.map(|item| item.data.clone()).unzip();
             selected = (count > 0).then(|| completion.selected.min(count - 1) - rows.start);
         }
         // The minibuffer is selected while open; one row, as the height leaves out a mode line.
@@ -1607,6 +1676,7 @@ impl Core {
             prompt,
             display,
             candidates,
+            annotations,
             selected,
         })
     }

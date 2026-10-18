@@ -24,6 +24,8 @@ pub struct ArgSpec {
     pub prompts: &'static [&'static str],
     /// The candidates each prompt completes over, given the args so far.
     pub completion: Option<fn(&Core, &Args) -> Vec<String>>,
+    /// Text shown after a candidate in the list and not matched, worked out as the prompt opens.
+    pub annotation: Option<fn(&Core, &str) -> Option<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

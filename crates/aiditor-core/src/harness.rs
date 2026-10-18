@@ -2037,4 +2037,63 @@ mod tests {
         );
         assert_eq!(listed(&mut h).0[0], "item 4");
     }
+
+    #[test]
+    fn annotations_are_listed_and_not_matched() {
+        let mut h = on("");
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(fruit),
+                annotation: Some(|_, c| (c != "cherry").then(|| format!("{c}-note"))),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        h.keys("C-c p");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.annotations, ["apple-note", "banana-note", ""]);
+        h.keys("note");
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn m_x_runs_a_command_by_name() {
+        let mut h = on("abc");
+        h.keys("C-u 2 M-x forward-char RET");
+        assert_eq!(h.point(), 2);
+        assert_eq!(h.core.last_command(), Some("forward-char"));
+        h.keys("M-x split-below");
+        assert_eq!(
+            h.core.selected_candidate().as_deref(),
+            Some("split-window-below")
+        );
+        h.keys("C-g M-x zzz-nothing RET");
+        assert!(h.core.message().unwrap().contains("zzz-nothing"));
+    }
+
+    #[test]
+    fn m_x_shows_each_commands_key() {
+        let mut h = on("");
+        let note = |h: &mut Harness, name: &str| {
+            h.keys(&format!("M-x {name}"));
+            let mb = h.core.minibuffer().unwrap();
+            let i = mb.candidates.iter().position(|c| c == name).unwrap();
+            let note = mb.annotations[i].clone();
+            h.keys("C-g");
+            note
+        };
+        assert_eq!(note(&mut h, "split-window-below"), "C-x 2");
+        assert_eq!(
+            note(&mut h, "undo"),
+            "C-/",
+            "shortest, then first in kbd order"
+        );
+        assert_eq!(note(&mut h, "exit-minibuffer"), "", "no key runs it here");
+        // A key a minor mode binds to something else no longer runs the command.
+        bind_mode(&mut h, "m", "C-x 2", "undo");
+        buffer(&mut h).minor_modes.push("m");
+        assert_eq!(note(&mut h, "split-window-below"), "");
+    }
 }
