@@ -168,6 +168,7 @@ mod tests {
     use std::ops::Range;
 
     use super::*;
+    use crate::HISTORY_MAX;
     use crate::command::{ArgSpec, Command, Prefix};
     use crate::settings::Settings;
     use crate::window::WindowId;
@@ -281,7 +282,13 @@ mod tests {
         assert_eq!(h.core.message(), Some(format!("{args:?}").as_str()));
         h.core.message = None;
         h.call("test-cmd", Args::default());
-        assert_eq!(h.core.message(), Some("test-cmd: no answer for \"Text: \""));
+        assert_eq!(
+            h.core.message(),
+            None,
+            "the handler waits for the minibuffer"
+        );
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Text: ");
+        h.keys("C-g");
         h.call("no-such-command", Args::default());
         assert_eq!(h.core.message(), Some("No command named no-such-command"));
     }
@@ -1761,5 +1768,171 @@ mod tests {
         };
         assert_eq!(heights(&mut h, 10.), [5., 5.]);
         assert_eq!(heights(&mut h, 7.2), [4., 3.2]);
+    }
+
+    /// Registers `ask`, prompting for `prompts` and showing its args, bound to `C-c p`.
+    fn ask(h: &mut Harness, prompts: &'static [&'static str]) {
+        test_cmd(
+            h,
+            ArgSpec {
+                prompts,
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(h, "global", "C-c p", "test-cmd");
+    }
+
+    fn strings(strings: &[&str]) -> String {
+        let strings: Vec<String> = strings.iter().map(|s| s.to_string()).collect();
+        format!("{strings:?}")
+    }
+
+    #[test]
+    fn a_key_script_answers_a_prompt() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p hello");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Text: ");
+        assert_eq!(h.text(), "hello");
+        h.keys("RET");
+        let got = h.core.message().unwrap().to_string();
+        assert!(
+            got.ends_with(&format!("strings: {} }}", strings(&["hello"]))),
+            "{got}"
+        );
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(
+            (h.text().as_str(), h.core.current().modified()),
+            ("text", false)
+        );
+        assert_eq!(h.core.last_command(), Some("test-cmd"));
+    }
+
+    #[test]
+    fn prompts_chain_and_keep_the_prefix_argument() {
+        let mut h = on("");
+        ask(&mut h, &["A: ", "B: "]);
+        h.keys("C-u 3 C-c p a RET");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "B: ");
+        h.keys("b RET");
+        assert_eq!(
+            h.core.message(),
+            Some(
+                format!(
+                    "Args {{ prefix: Some(Number(3)), region: None, strings: {} }}",
+                    strings(&["a", "b"])
+                )
+                .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn c_g_aborts_the_minibuffer() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p abc C-g");
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(
+            (h.text().as_str(), h.core.message()),
+            ("text", Some("Quit"))
+        );
+    }
+
+    #[test]
+    fn editing_keys_work_in_the_minibuffer() {
+        let mut h = on("");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p helo <left> l C-a x DEL C-e");
+        assert_eq!(h.text(), "hello");
+        h.keys("RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["hello"])));
+    }
+
+    #[test]
+    fn each_prompt_keeps_a_history() {
+        let mut h = on("");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p one RET C-c p two RET C-c p RET C-c p two RET C-c p x");
+        h.keys("M-p");
+        assert_eq!((h.text().as_str(), h.point()), ("two", 3));
+        h.keys("M-p");
+        assert_eq!(h.text(), "one", "empty and repeated answers are not kept");
+        h.keys("M-p");
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
+        assert_eq!(h.text(), "one");
+        h.keys("C-u 2 M-n");
+        assert_eq!(h.text(), "x", "back to what was typed");
+        h.keys("M-n");
+        assert_eq!(
+            h.core.message(),
+            Some("End of history; no default available")
+        );
+        assert_eq!(h.text(), "x");
+        h.keys("C-g");
+        ask(&mut h, &["Other: "]);
+        h.keys("C-c p M-p");
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
+    }
+
+    #[test]
+    fn history_keeps_a_hundred() {
+        let mut h = on("");
+        ask(&mut h, &["Text: "]);
+        for i in 0..=HISTORY_MAX {
+            h.keys(&format!("C-c p {i} RET"));
+        }
+        h.keys("C-c p C-u 100 M-p");
+        assert_eq!(h.text(), "1");
+        h.keys("M-p");
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
+    }
+
+    #[test]
+    fn the_minibuffer_stays_put_while_open() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-x 2 C-c p");
+        for keys in ["C-x 2", "C-x 3", "C-x o", "C-x 0", "C-x 1"] {
+            h.keys(keys);
+            assert!(h.core.message().is_some(), "{keys}");
+            assert_eq!(h.frame(800., 600.).windows.len(), 2, "{keys}");
+            assert!(h.core.minibuffer().is_some(), "{keys}");
+        }
+        // A prompt from the minibuffer is refused.
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            Some("Command attempted to use minibuffer while in minibuffer")
+        );
+        h.keys("ab").send(Msg::Click {
+            window: WindowId(0),
+            line: 0,
+            col: 2,
+        });
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!((h.text().as_str(), h.point()), ("text", 2));
+        assert_eq!(h.core.message(), None, "the command did not run");
+    }
+
+    #[test]
+    fn the_frame_shows_the_minibuffer() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p hi");
+        let frame = h.frame(800., 600.);
+        assert!(frame.windows.iter().all(|w| !w.selected));
+        insta::assert_debug_snapshot!(frame.minibuffer);
+        h.keys("C-g");
+        assert_eq!(h.frame(800., 600.).minibuffer, None);
     }
 }

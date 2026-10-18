@@ -448,6 +448,7 @@ impl Render for Editor {
             )
         });
         let (_, cell) = self.font(window);
+        let minibuffer = self.core.minibuffer();
         let settings = self.core.settings();
         let theme = &settings.theme;
         let line_height = px(settings.line_height());
@@ -467,6 +468,27 @@ impl Render for Editor {
                 .child(line().w_full().child(format!("{}-", hint.keys)))
                 .children(entries.into_iter().map(|e| line().w(column).child(e)))
         });
+        let message = self.core.message().unwrap_or_default().to_string();
+        let echo = match minibuffer {
+            // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
+            Some(mb) => {
+                let spans = mb.display.lines.iter().flat_map(|l| &l.spans);
+                let text: String = spans.map(|s| s.text.as_str()).collect();
+                let col = mb.display.cursor.map_or(usize::MAX, |(_, col)| col);
+                let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
+                let message = match message.is_empty() {
+                    true => message,
+                    false => format!(" [{message}]"),
+                };
+                let cursor = div().w(px(2.)).h(line_height).bg(rgb(theme.cursor));
+                line()
+                    .flex()
+                    .child(format!("{}{}", mb.prompt, &text[..byte]))
+                    .child(cursor)
+                    .child(format!("{}{message}", &text[byte..]))
+            }
+            None => line().child(message),
+        };
         let root = div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -489,7 +511,7 @@ impl Render for Editor {
                     .child(FrameElement(cx.entity())),
             )
             .children(hint)
-            .child(line().child(self.core.message().unwrap_or_default().to_string()));
+            .child(echo);
         if let Some(debug) = &mut self.debug {
             debug.render = start.elapsed();
         }
@@ -875,6 +897,7 @@ mod tests {
         }
     }
 
+    use aiditor_core::command::{ArgSpec, Command};
     use aiditor_core::key::parse_keys;
     use aiditor_core::keymap::{self, Binding, Keymap};
     use gpui::{Modifiers, ScrollDelta, TestAppContext, VisualTestContext, point};
@@ -995,6 +1018,33 @@ mod tests {
         assert_eq!(text, "aB", "C-u 3 x typed xxx and C-x u undid it");
         cx.simulate_keystrokes("ctrl-u 3 x");
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "aBxxx");
+    }
+
+    #[gpui::test]
+    fn a_prompt_reads_typed_text(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.register(Command {
+                name: "ask",
+                spec: ArgSpec {
+                    prompts: &["Text: "],
+                    ..ArgSpec::default()
+                },
+                handler: |_, args| Err(format!("got {}", args.strings[0])),
+            });
+            let keymap = r#"global = { "C-c p" = "ask" }"#;
+            e.handle(Msg::KeymapLoaded(Ok(Some(keymap.into()))), cx);
+        });
+        cx.simulate_keystrokes("ctrl-c p");
+        cx.simulate_input("hi");
+        cx.run_until_parked();
+        let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
+        assert_eq!(prompt.as_deref(), Some("Text: "));
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "hi");
+        cx.simulate_keystrokes("enter");
+        let message = editor.read_with(cx, |e, _| e.core.message().map(str::to_string));
+        assert_eq!(message.as_deref(), Some("got hi"));
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "");
     }
 
     #[gpui::test]

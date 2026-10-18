@@ -73,6 +73,26 @@ const HINT_DELAY: Duration = Duration::from_secs(1);
 /// How many entries the kill ring keeps, Emacs's `kill-ring-max`.
 const KILL_RING_MAX: usize = 60;
 
+/// How many answers each prompt's history keeps, Emacs's `history-length`.
+const HISTORY_MAX: usize = 100;
+
+/// The minibuffer's window, kept outside the split tree.
+const MINIBUFFER: WindowId = WindowId(usize::MAX);
+
+/// A prompt waiting in the minibuffer for the command that asked.
+struct Minibuffer {
+    command: &'static str,
+    /// The args so far; the answer becomes the next string.
+    args: Args,
+    prompt: &'static str,
+    /// The window to select again on closing.
+    from: WindowId,
+    /// The history entry shown, 1 the newest; 0 is the text typed before moving.
+    index: usize,
+    /// What was typed before the first history move.
+    input: String,
+}
+
 /// Work the app carries out for the core.
 pub enum Effect {
     /// Write `text` to `path`, then send `Msg::Saved(buffer)` if that worked.
@@ -134,10 +154,90 @@ impl Ctx<'_> {
                 .ok_or("The mark is not set now, so there is no region")?;
             args.region = Some(point.min(mark)..point.max(mark));
         }
-        if let Some(prompt) = command.spec.prompts.get(args.strings.len()) {
-            return Err(format!("{name}: no answer for {prompt:?}"));
+        if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
+            return self.read_string(command.name, args, prompt);
         }
         (command.handler)(self, args)
+    }
+
+    /// Opens the minibuffer at `prompt`; its answer then calls `command` again.
+    fn read_string(
+        &mut self,
+        command: &'static str,
+        args: Args,
+        prompt: &'static str,
+    ) -> Result<(), String> {
+        let core = &mut *self.core;
+        if core.minibuffer.is_some() {
+            return Err("Command attempted to use minibuffer while in minibuffer".into());
+        }
+        // A fresh buffer per prompt, so undo and markers never carry over.
+        let id = core.buffers.create(" *Minibuf-1*");
+        core.buffers.get_mut(id).expect("just created").major_mode = "minibuffer-mode";
+        let window = Window::new(&mut core.buffers, id);
+        core.others.insert(MINIBUFFER, window);
+        core.minibuffer = Some(Minibuffer {
+            command,
+            args,
+            prompt,
+            from: core.selected,
+            index: 0,
+            input: String::new(),
+        });
+        core.select(MINIBUFFER);
+        Ok(())
+    }
+
+    /// Closes the minibuffer and calls its command with the text as the next string.
+    fn exit_minibuffer(&mut self) -> Result<(), String> {
+        let text = self.core.text();
+        let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
+        let history = self.core.history.entry(mb.prompt).or_default();
+        if !text.is_empty() && history.first() != Some(&text) {
+            history.insert(0, text.clone());
+            history.truncate(HISTORY_MAX);
+        }
+        let mut args = mb.args;
+        args.strings.push(text);
+        self.core.this_command = Some(mb.command);
+        self.call(mb.command, args);
+        Ok(())
+    }
+
+    /// Replaces the minibuffer's text with the history entry `n` older, newer when negative.
+    fn history_element(&mut self, n: i64) -> Result<(), String> {
+        let text = self.core.text();
+        let core = &mut *self.core;
+        let mb = core.minibuffer.as_mut().ok_or("Not in a minibuffer")?;
+        let items = core.history.get(mb.prompt).map_or(&[][..], Vec::as_slice);
+        let target = (mb.index as i64).saturating_add(n);
+        if target > items.len() as i64 {
+            return Err("Beginning of history; no preceding item".into());
+        }
+        if target < 0 {
+            return Err("End of history; no default available".into());
+        }
+        if mb.index == 0 {
+            mb.input = text;
+        }
+        mb.index = target as usize;
+        let new = match mb.index {
+            0 => mb.input.clone(),
+            i => items[i - 1].clone(),
+        };
+        let buffer = core.current_mut();
+        let len = buffer.len_chars();
+        buffer.delete(0..len).map_err(|err| err.to_string())?;
+        buffer.insert(0, &new).map_err(|err| err.to_string())?;
+        self.goto(new.chars().count())
+    }
+
+    /// Fails with `err` while the minibuffer is selected.
+    fn outside_minibuffer(&self, err: &str) -> Result<(), String> {
+        match self.core.selected == MINIBUFFER {
+            true => Err(err.into()),
+            false => Ok(()),
+        }
     }
 
     fn dispatch(&mut self, msg: Msg) {
@@ -169,6 +269,8 @@ impl Ctx<'_> {
                 self.core.select(selected);
             }
             Msg::Click { window, line, col } => {
+                // shortcut: a click aborts the minibuffer, losing its text; keep it active once commands can leave it.
+                self.core.close_minibuffer();
                 self.core.select(window);
                 self.click(line, col);
             }
@@ -781,23 +883,28 @@ impl Ctx<'_> {
     }
 
     /// Splits the selected window in two, the new one below or right of it.
-    fn split_window(&mut self, side_by_side: bool) {
+    fn split_window(&mut self, side_by_side: bool) -> Result<(), String> {
+        self.outside_minibuffer("Attempt to split minibuffer window")?;
         let core = &mut *self.core;
         let id = WindowId(core.next_window);
         core.next_window += 1;
         let new = core.window.split(&mut core.buffers);
         core.others.insert(id, new);
         core.tree.split(core.selected, id, side_by_side);
+        Ok(())
     }
 
     /// Selects the window `n` on from the selected one in tree order, wrapping round.
-    fn other_window(&mut self, n: i64) {
+    fn other_window(&mut self, n: i64) -> Result<(), String> {
+        // shortcut: Emacs leaves the minibuffer active in another window; allow it once commands can come back to it.
+        self.outside_minibuffer("Can't leave the minibuffer")?;
         let core = &mut *self.core;
         let leaves = core.tree.leaves();
         let at = leaves.iter().position(|&id| id == core.selected);
         let at = at.expect("the selected window is in the tree") as i64;
         let next = (at + n.rem_euclid(leaves.len() as i64)) as usize % leaves.len();
         core.select(leaves[next]);
+        Ok(())
     }
 
     /// Deletes the selected window, selecting the sibling that takes its space.
@@ -815,12 +922,14 @@ impl Ctx<'_> {
     }
 
     /// Deletes every window but the selected one.
-    fn delete_other_windows(&mut self) {
+    fn delete_other_windows(&mut self) -> Result<(), String> {
+        self.outside_minibuffer("Can't expand minibuffer to full frame")?;
         let core = &mut *self.core;
         for (_, window) in core.others.drain() {
             window.release(&mut core.buffers);
         }
         core.tree = Tree::Leaf(core.selected);
+        Ok(())
     }
 
     fn save(&mut self) {
@@ -872,6 +981,10 @@ pub struct Core {
     recording: Option<Vec<Key>>,
     /// Typed chars in the current undo group, for amalgamation.
     self_inserts: usize,
+    /// The prompt being answered, while the minibuffer is open.
+    minibuffer: Option<Minibuffer>,
+    /// Each prompt's answers, newest first.
+    history: HashMap<&'static str, Vec<String>>,
     /// The column a run of line motions aims for.
     goal_column: usize,
     /// Where the last `recenter-top-bottom` put point's line: middle, top or bottom.
@@ -895,7 +1008,7 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let builtins: [(&'static str, command::Handler); 41] = [
+        let builtins: [(&'static str, command::Handler); 45] = [
             ("self-insert-command", |ctx, args| {
                 let c = match ctx.core.this_keys.last().map(|key| key.code) {
                     Some(KeyCode::Char(c)) => c,
@@ -1031,22 +1144,22 @@ impl Default for Core {
             ("exchange-point-and-mark", |ctx, _| {
                 ctx.exchange_point_and_mark()
             }),
-            ("split-window-below", |ctx, _| {
-                ctx.split_window(false);
-                Ok(())
-            }),
-            ("split-window-right", |ctx, _| {
-                ctx.split_window(true);
-                Ok(())
-            }),
-            ("other-window", |ctx, args| {
-                ctx.other_window(args.count());
-                Ok(())
-            }),
+            ("split-window-below", |ctx, _| ctx.split_window(false)),
+            ("split-window-right", |ctx, _| ctx.split_window(true)),
+            ("other-window", |ctx, args| ctx.other_window(args.count())),
             ("delete-window", |ctx, _| ctx.delete_window()),
-            ("delete-other-windows", |ctx, _| {
-                ctx.delete_other_windows();
+            ("delete-other-windows", |ctx, _| ctx.delete_other_windows()),
+            ("exit-minibuffer", |ctx, _| ctx.exit_minibuffer()),
+            ("abort-minibuffers", |ctx, _| {
+                ctx.core.close_minibuffer().ok_or("Not in a minibuffer")?;
+                ctx.core.message = Some("Quit".into());
                 Ok(())
+            }),
+            ("previous-history-element", |ctx, args| {
+                ctx.history_element(args.count())
+            }),
+            ("next-history-element", |ctx, args| {
+                ctx.history_element(args.count().saturating_neg())
             }),
             ("keyboard-quit", |ctx, _| {
                 ctx.core.window.set_active(false);
@@ -1098,6 +1211,8 @@ impl Default for Core {
             this_keys: Vec::new(),
             recording: None,
             self_inserts: 0,
+            minibuffer: None,
+            history: HashMap::new(),
             goal_column: 0,
             recenter: 0,
             kill_ring: VecDeque::new(),
@@ -1322,7 +1437,26 @@ impl Core {
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
+            minibuffer: self.minibuffer(),
         }
+    }
+
+    /// The open minibuffer's prompt and the line holding its point.
+    pub fn minibuffer(&mut self) -> Option<display::Minibuffer> {
+        let prompt = self.minibuffer.as_ref()?.prompt.to_string();
+        // The minibuffer is selected while open; one row, as the height leaves out a mode line.
+        let height = 2. * self.settings.line_height();
+        let display = window_display(&mut self.window, &self.buffers, &self.settings, height);
+        Some(display::Minibuffer { prompt, display })
+    }
+
+    /// Closes the minibuffer, selecting the window it was opened from again.
+    fn close_minibuffer(&mut self) -> Option<Minibuffer> {
+        let mb = self.minibuffer.take()?;
+        self.select(mb.from);
+        let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
+        _ = self.buffers.kill(window.buffer());
+        Some(mb)
     }
 
     /// Makes window `id` the selected one.

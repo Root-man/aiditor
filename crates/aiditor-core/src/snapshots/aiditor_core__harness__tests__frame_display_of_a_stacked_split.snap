@@ -112,4 +112,5 @@ FrameDisplay {
         },
     ],
     message: None,
+    minibuffer: None,
 }

@@ -37,4 +37,5 @@ FrameDisplay {
     message: Some(
         "boom",
     ),
+    minibuffer: None,
 }

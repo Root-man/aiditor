@@ -26,6 +26,15 @@ pub struct FrameDisplay {
     pub windows: Vec<FrameWindow>,
     /// The echo area's text, if a message is shown.
     pub message: Option<String>,
+    /// The open minibuffer, if any.
+    pub minibuffer: Option<Minibuffer>,
+}
+
+/// The open minibuffer: its prompt and one line, the one holding point.
+#[derive(Debug, PartialEq)]
+pub struct Minibuffer {
+    pub prompt: String,
+    pub display: WindowDisplay,
 }
 
 #[derive(Debug, PartialEq)]

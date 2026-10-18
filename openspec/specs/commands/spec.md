@@ -44,11 +44,11 @@ A command whose argument spec asks for the region SHALL receive a char range. Wh
 - **THEN** the handler does not run and the message line says the mark is not set
 
 ### Requirement: Prompted strings must be supplied
-A command whose argument spec lists prompts SHALL receive one string per prompt. A call with fewer strings than prompts SHALL fail without running the handler.
+A command whose argument spec lists prompts SHALL receive one string per prompt. A call with fewer strings than prompts SHALL NOT run the handler; it SHALL read the next string in the minibuffer and call the command again with it.
 
 #### Scenario: Missing string
 - **WHEN** a command with one prompt is called with no strings
-- **THEN** the handler does not run and the message line shows an error naming the prompt
+- **THEN** the handler does not run and the minibuffer opens with that prompt
 
 ### Requirement: Command errors go to the message line
 An error a handler returns SHALL be shown on the message line, and the editor SHALL keep running.
