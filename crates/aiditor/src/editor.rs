@@ -272,8 +272,11 @@ impl Render for Editor {
         window.set_window_title(&frame.title);
         let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
         let hint = frame.hint.map(|hint| {
+            // Keys right-aligned so the colons line up, as Emacs's which-key.
+            let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
+            let keys = keys.max().unwrap_or(0);
             let entries: Vec<String> = (hint.entries.iter())
-                .map(|(key, what)| format!("{key} : {what}"))
+                .map(|(key, what)| format!("{key:>keys$} : {what}"))
                 .collect();
             let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
             let column = cell * width as f32;

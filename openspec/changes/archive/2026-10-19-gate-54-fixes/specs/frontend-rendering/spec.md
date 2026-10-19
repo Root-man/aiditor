@@ -14,7 +14,7 @@ The selected window SHALL draw the cursor as a block in the theme's cursor color
 - **THEN** the cursor is as wide as that char
 
 ### Requirement: The key hint is laid out in columns
-While the key hint shows, it SHALL be drawn above the echo area as the pending keys then each entry, `key : command`, in columns of equal width, as many per row as fit the frame's width and as many rows as needed. The windows SHALL shrink to make room.
+While the key hint shows, it SHALL be drawn above the echo area as the pending keys then each entry, `key : command` with the keys right-aligned so the colons line up, in columns of equal width, as many per row as fit the frame's width and as many rows as needed. The windows SHALL shrink to make room.
 
 #### Scenario: C-x hint
 - **WHEN** `C-x` waits past the hint delay in a wide frame

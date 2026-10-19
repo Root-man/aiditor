@@ -8,7 +8,7 @@ The M0 gate's manual run on macOS ([#54](https://github.com/Root-man/aiditor/iss
 
 - The frame gets an 8 px gap on the left and right (Emacs's fringe width) and 2 px at the bottom.
 - The cursor is a block one char wide in the cursor color, the char under it drawn in the background color; at the end of a line it is one cell wide.
-- Key hint entries read `key : command`.
+- Key hint entries read `key : command`, the keys right-aligned so the colons line up, as which-key.
 - A completing minibuffer shows the selected match's number and the match count before its prompt, as vertico does: `1/100 M-x `, `0/0 ` with no match.
 - Logging to `*Messages*` no longer counts as a change to it, so a command's own echo (`Mark set`) does not deactivate the mark there.
 - Only buffers visiting a file are auto-saved, as Emacs's `auto-save-default`. A no-file recovery file left by an earlier session can still be recovered, and is deleted once it is.
