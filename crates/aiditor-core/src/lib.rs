@@ -76,19 +76,19 @@ pub enum Msg {
     },
     /// Wakes the core when a timer is due; due timers fire on every message.
     Tick,
-    /// The file service's answer to `Effect::Save`: the file's new hash, or why it wasn't written.
+    /// The file service's answer to `FileOp::Save`: the file's new hash, or why it wasn't written.
     Saved {
         buffer: BufferId,
         tick: u64,
         result: Result<u64, String>,
     },
-    /// The file service's answer to `Effect::ListDir`: the directory's entries, or why it
+    /// The file service's answer to `FileOp::ListDir`: the directory's entries, or why it
     /// couldn't be listed.
     Listed {
         dir: PathBuf,
         result: Result<Vec<String>, String>,
     },
-    /// The file service's answer to `Effect::Open`: the file's bytes and hash, `None` when there
+    /// The file service's answer to `FileOp::Open`: the file's bytes and hash, `None` when there
     /// is no file, or why it couldn't be read.
     Opened {
         path: PathBuf,
@@ -112,7 +112,7 @@ pub enum Msg {
     Recover(Vec<Recovered>),
 }
 
-/// A recovery file read back: what `Effect::AutoSave` wrote, plus the visited file as it is now.
+/// A recovery file read back: what `RecoveryOp::AutoSave` wrote, plus the visited file as it is now.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recovered {
     /// The recovery file itself.
@@ -135,19 +135,10 @@ thread_local! {
 
 /// Work the app carries out for the core.
 pub enum Effect {
-    /// Write `bytes` to `path` if the file still hashes to `hash` (`None`: no file), then send
-    /// `Msg::Saved` with `buffer` and its `tick` at the save.
-    Save {
-        buffer: BufferId,
-        tick: u64,
-        path: PathBuf,
-        bytes: Vec<u8>,
-        hash: Option<u64>,
-    },
-    /// List the directory and send `Msg::Listed`.
-    ListDir(PathBuf),
-    /// Read the file and send `Msg::Opened`.
-    Open(PathBuf),
+    /// A visited file's read, write or listing, answered with a message.
+    File(FileOp),
+    /// A recovery file's write or delete, carried out off the UI thread with no answer.
+    Recovery(RecoveryOp),
     /// Read the user's settings and keymap files and send `Msg::SettingsLoaded` and
     /// `Msg::KeymapLoaded`.
     LoadSettings,
@@ -155,6 +146,29 @@ pub enum Effect {
     SetClipboard(String),
     /// Quit the app.
     Quit,
+}
+
+/// File work for the file service; each sends one reply message.
+pub enum FileOp {
+    /// Write `text`, encoded with `crlf` and `bom`, to `path` if the file still hashes to `hash`
+    /// (`None`: no file), then send `Msg::Saved` with `buffer` and its `tick` at the save.
+    Save {
+        buffer: BufferId,
+        tick: u64,
+        path: PathBuf,
+        text: Rope,
+        crlf: bool,
+        bom: bool,
+        hash: Option<u64>,
+    },
+    /// List the directory and send `Msg::Listed`.
+    ListDir(PathBuf),
+    /// Read the file and send `Msg::Opened`.
+    Open(PathBuf),
+}
+
+/// Recovery file work for the recovery thread.
+pub enum RecoveryOp {
     /// Write `buffer`'s recovery file: its `name`, visited `path`, base disk `hash` and `text`.
     AutoSave {
         buffer: BufferId,

@@ -11,11 +11,11 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use aiditor_core::key::{Key, KeyCode, parse_keys};
-use aiditor_core::{Core, Effect, Msg};
+use aiditor_core::{Core, Effect, Msg, RecoveryOp};
 use aiditor_services::{files, recovery};
 
 /// The recovery service, until the core quits.
-type Service = Option<(Sender<Effect>, JoinHandle<()>)>;
+type Service = Option<(Sender<RecoveryOp>, JoinHandle<()>)>;
 
 fn main() {
     let [dir, file, script]: [String; 3] = (std::env::args().skip(1).collect::<Vec<_>>())
@@ -52,27 +52,9 @@ fn main() {
 fn send(core: &mut Core, service: &mut Service, msg: Msg) {
     for effect in core.handle(Instant::now(), msg) {
         let reply = match effect {
-            Effect::Save {
-                buffer,
-                tick,
-                path,
-                bytes,
-                hash,
-            } => Msg::Saved {
-                buffer,
-                tick,
-                result: files::write(&path, &bytes, hash),
-            },
-            Effect::Open(path) => {
-                let result = files::read(&path).map_err(|e| e.to_string());
-                Msg::Opened { path, result }
-            }
-            Effect::ListDir(dir) => {
-                let result = files::list(&dir).map_err(|e| e.to_string());
-                Msg::Listed { dir, result }
-            }
-            Effect::AutoSave { .. } | Effect::DeleteAutoSave(_) | Effect::DeleteRecovery(_) => {
-                _ = service.as_ref().unwrap().0.send(effect);
+            Effect::File(op) => files::run(op),
+            Effect::Recovery(op) => {
+                _ = service.as_ref().unwrap().0.send(op);
                 continue;
             }
             Effect::Quit => {

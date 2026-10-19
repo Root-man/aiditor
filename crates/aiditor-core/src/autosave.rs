@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::{Buffer, BufferId};
 use crate::command::Args;
-use crate::{Core, Ctx, Effect, Effects, Msg};
+use crate::{Core, Ctx, Effect, Effects, Msg, RecoveryOp};
 
 /// How long after the last edit buffers are auto-saved, and the most edits wait while typing goes on.
 const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
@@ -23,13 +23,13 @@ impl Ctx<'_> {
         for (id, b) in core.buffers.recent() {
             if autosaves(b) && core.autosaved.get(&id) != Some(&b.tick()) {
                 core.autosaved.insert(id, b.tick());
-                self.effects.push(Effect::AutoSave {
+                self.effects.push(Effect::Recovery(RecoveryOp::AutoSave {
                     buffer: id,
                     name: b.name.clone(),
                     path: b.file.clone(),
                     hash: b.disk,
                     text: b.text().clone(),
-                });
+                }));
             }
         }
     }
@@ -68,7 +68,8 @@ impl Ctx<'_> {
                 self.write_autosaves();
             }
             if !keep {
-                self.effects.push(Effect::DeleteRecovery(r.file));
+                self.effects
+                    .push(Effect::Recovery(RecoveryOp::DeleteRecovery(r.file)));
             }
         }
         let Some(next) = self.core.recovered.first() else {
@@ -100,7 +101,10 @@ impl Core {
         for &id in &stale {
             self.autosaved.remove(&id);
         }
-        effects.splice(at..at, stale.into_iter().map(Effect::DeleteAutoSave));
+        effects.splice(
+            at..at,
+            (stale.into_iter()).map(|id| Effect::Recovery(RecoveryOp::DeleteAutoSave(id))),
+        );
         let unwritten = (self.buffers.recent())
             .any(|(id, b)| autosaves(b) && self.autosaved.get(&id) != Some(&b.tick()));
         if input && unwritten {
@@ -122,12 +126,12 @@ fn autosaves(buffer: &Buffer) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::Effect;
     use crate::Msg;
     use crate::Recovered;
+    use crate::buffer::hash;
     use crate::harness::Harness;
-    use crate::harness::hash;
     use crate::key::parse_keys;
+    use crate::{Effect, FileOp};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -208,7 +212,7 @@ mod tests {
         for key in parse_keys("C-x C-s").unwrap() {
             save.extend(h.core.handle(now, Msg::Key(key)));
         }
-        let Some(Effect::Save { buffer, tick, .. }) = save.pop() else {
+        let Some(Effect::File(FileOp::Save { buffer, tick, .. })) = save.pop() else {
             panic!("no save");
         };
         h.keys("z").send(Msg::Saved {

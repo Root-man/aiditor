@@ -10,7 +10,7 @@ use aiditor_core::display::{Line, Rect};
 use aiditor_core::key::{Key, KeyCode};
 use aiditor_core::settings::Theme;
 use aiditor_core::window::WindowId;
-use aiditor_core::{Core, Effect, Msg};
+use aiditor_core::{Core, Effect, Msg, RecoveryOp};
 use aiditor_services::{files, recovery};
 use gpui::{
     App, Application, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId,
@@ -40,7 +40,10 @@ struct Editor {
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
     /// The recovery service, when there is a data dir.
-    recovery: Option<(std::sync::mpsc::Sender<Effect>, std::thread::JoinHandle<()>)>,
+    recovery: Option<(
+        std::sync::mpsc::Sender<RecoveryOp>,
+        std::thread::JoinHandle<()>,
+    )>,
     /// Set by `--debug`: the stats line drawn at the top.
     debug: Option<Stats>,
     /// The input method's marked text, drawn at point but not in the buffer.
@@ -120,49 +123,16 @@ impl Editor {
         }
         for effect in effects {
             match effect {
-                Effect::Save {
-                    buffer,
-                    tick,
-                    path,
-                    bytes,
-                    hash,
-                } => {
+                Effect::File(op) => {
                     let tx = self.tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = files::write(&path, &bytes, hash);
-                        match &result {
-                            Ok(_) => tracing::info!(path = %path.display(), "saved"),
-                            Err(err) => tracing::info!(%err, "save failed"),
-                        }
-                        _ = tx.blocking_send(Msg::Saved {
-                            buffer,
-                            tick,
-                            result,
-                        });
-                    });
-                }
-                Effect::ListDir(dir) => {
-                    let tx = self.tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result =
-                            files::list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
-                        _ = tx.blocking_send(Msg::Listed { dir, result });
-                    });
-                }
-                Effect::Open(path) => {
-                    let tx = self.tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result =
-                            files::read(&path).map_err(|err| format!("{}: {err}", path.display()));
-                        _ = tx.blocking_send(Msg::Opened { path, result });
-                    });
+                    tokio::task::spawn_blocking(move || _ = tx.blocking_send(files::run(op)));
                 }
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
-                Effect::AutoSave { .. } | Effect::DeleteAutoSave(_) | Effect::DeleteRecovery(_) => {
+                Effect::Recovery(op) => {
                     if let Some((tx, _)) = &self.recovery {
-                        _ = tx.send(effect);
+                        _ = tx.send(op);
                     }
                 }
                 Effect::Quit => {

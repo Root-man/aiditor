@@ -464,21 +464,29 @@ impl Buffer {
     pub fn set_saved(&mut self) {
         self.modified = false;
     }
+}
 
-    /// The text as the file's bytes: its BOM and line ending, as loaded.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = String::with_capacity(self.text().len_bytes() + 3);
-        if self.bom {
-            out.push('\u{feff}');
-        }
-        for chunk in self.text().chunks() {
-            match self.crlf {
-                true => out.push_str(&chunk.replace('\n', "\r\n")),
-                false => out.push_str(chunk),
-            }
-        }
-        out.into_bytes()
+/// The text as the file's bytes: its BOM and line ending, as loaded.
+pub fn encode(text: &Rope, crlf: bool, bom: bool) -> Vec<u8> {
+    let mut out = String::with_capacity(text.len_bytes() + 3);
+    if bom {
+        out.push('\u{feff}');
     }
+    for chunk in text.chunks() {
+        match crlf {
+            true => out.push_str(&chunk.replace('\n', "\r\n")),
+            false => out.push_str(chunk),
+        }
+    }
+    out.into_bytes()
+}
+
+/// The hash a buffer keeps of its file's bytes, to notice changes on disk. FNV-1a 64, fixed
+/// because recovery files store it.
+pub fn hash(bytes: &[u8]) -> u64 {
+    (bytes.iter()).fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// A file's bytes as buffer text, and whether it used CRLF and a BOM; or why it is refused.
@@ -583,6 +591,12 @@ mod tests {
     }
 
     #[test]
+    fn hash_is_fnv1a() {
+        assert_eq!(hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    #[test]
     fn decodes_and_encodes_bom_and_line_endings() {
         assert_eq!(decode(b"a\nb\r\n"), Ok(("a\nb\r\n".into(), false, false)));
         assert_eq!(decode(b"a\r\nb\r\n"), Ok(("a\nb\n".into(), true, false)));
@@ -597,7 +611,7 @@ mod tests {
         let (mut buffers, id) = with_text("a\nb\n");
         let b = buffers.get_mut(id).unwrap();
         (b.crlf, b.bom) = (true, true);
-        assert_eq!(b.encode(), b"\xEF\xBB\xBFa\r\nb\r\n");
+        assert_eq!(encode(b.text(), true, true), b"\xEF\xBB\xBFa\r\nb\r\n");
     }
 
     #[test]

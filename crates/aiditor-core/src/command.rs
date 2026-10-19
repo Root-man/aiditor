@@ -25,7 +25,7 @@ pub struct ArgSpec {
     /// The candidates each prompt completes over, given the args so far.
     pub completion: Option<fn(&Core, &Args) -> Vec<String>>,
     /// The prompts complete file names, starting at the current buffer's directory, from
-    /// listings the app reads with `Effect::ListDir`.
+    /// listings the app reads with `FileOp::ListDir`.
     pub files: bool,
     /// Text shown after a candidate in the list and not matched, worked out as the prompt opens.
     pub annotation: Option<fn(&Core, &str) -> Option<String>>,

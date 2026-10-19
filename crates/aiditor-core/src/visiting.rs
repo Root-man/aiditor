@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::buffer::{self, Buffer, BufferId};
 use crate::command::Args;
-use crate::{Core, Ctx, Effect};
+use crate::{Core, Ctx, Effect, FileOp};
 
 impl Ctx<'_> {
     /// Handles the file service's answer to a save of buffer `id` at `tick`, and the quit
@@ -68,7 +68,7 @@ impl Ctx<'_> {
         let path = self.core.directory().join(name);
         match self.core.buffers.visiting(&path) {
             Some(id) => self.core.switch_to(id),
-            None => self.effects.push(Effect::Open(path)),
+            None => self.effects.push(Effect::File(FileOp::Open(path))),
         }
         Ok(())
     }
@@ -133,13 +133,15 @@ impl Ctx<'_> {
         if len > 0 && buffer.text().char(len - 1) != '\n' {
             buffer.insert(len, "\n")?;
         }
-        self.effects.push(Effect::Save {
+        self.effects.push(Effect::File(FileOp::Save {
             buffer: id,
             tick: buffer.tick(),
             path,
-            bytes: buffer.encode(),
+            text: buffer.text().clone(),
+            crlf: buffer.crlf,
+            bom: buffer.bom,
             hash: buffer.disk,
-        });
+        }));
         Ok(())
     }
 }
