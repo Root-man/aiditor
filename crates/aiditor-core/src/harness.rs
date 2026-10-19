@@ -262,8 +262,8 @@ mod tests {
     use std::ops::Range;
 
     use super::*;
-    use crate::HISTORY_MAX;
     use crate::command::{ArgSpec, Command, Prefix};
+    use crate::minibuffer::HISTORY_MAX;
     use crate::settings::Settings;
     use crate::window::WindowId;
 
