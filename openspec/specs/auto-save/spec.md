@@ -1,12 +1,12 @@
 # auto-save Specification
 
 ## Purpose
-TBD - created by archiving change auto-save-recovery. Update Purpose after archive.
+Keep edits to visited files safe from a crash: write them to recovery files outside the project and offer them back on the next launch.
 
 ## Requirements
 
 ### Requirement: Modified buffers are auto-saved outside the project
-About 2 s after the last edit, and at least every 30 s while edits keep coming, the editor SHALL write the text of each modified file or scratch buffer that changed since its last auto-save to a recovery file in `recovery/` under the platform data dir. It SHALL never write anything next to the visited file or inside a project directory. Each recovery file SHALL record the original path, the buffer's name, the hash of the disk version the buffer was based on and the time, followed by the buffer's text. It SHALL be written to a temp name and renamed into place. Read-only buffers such as `*Messages*` and hidden buffers such as the minibuffer SHALL NOT be auto-saved.
+About 2 s after the last edit, and at least every 30 s while edits keep coming, the editor SHALL write the text of each modified buffer visiting a file that changed since its last auto-save to a recovery file in `recovery/` under the platform data dir. It SHALL never write anything next to the visited file or inside a project directory. Each recovery file SHALL record the original path, the buffer's name, the hash of the disk version the buffer was based on and the time, followed by the buffer's text. It SHALL be written to a temp name and renamed into place. Buffers visiting no file, such as `*scratch*`, `*Messages*` and the minibuffer, SHALL NOT be auto-saved, as in Emacs.
 
 #### Scenario: Idle after an edit
 - **WHEN** a buffer visiting a file is edited and 2 s pass with no further input
@@ -22,7 +22,7 @@ About 2 s after the last edit, and at least every 30 s while edits keep coming, 
 
 #### Scenario: Scratch buffer
 - **WHEN** `*scratch*` is edited and 2 s pass
-- **THEN** a recovery file holding its text exists, with no path
+- **THEN** no recovery file exists for it
 
 #### Scenario: Messages and minibuffer
 - **WHEN** lines are logged to `*Messages*` and text is typed into the minibuffer, and 2 s pass
@@ -44,7 +44,7 @@ A buffer's recovery file SHALL be deleted when the buffer is saved, is killed, o
 - **THEN** its recovery file is gone before the app exits
 
 ### Requirement: Recovery files are offered on launch
-At launch the editor SHALL offer each recovery file left by an earlier session, oldest first, asking whether to recover it. Recovering SHALL open the recovered text as a modified buffer: for a file buffer, one visiting the original file, whose save refuses to overwrite a file changed on disk since the text was auto-saved; for a buffer with no file, one with the recorded name. The recovered text SHALL be auto-saved by the current session before the old recovery file is deleted. Declining SHALL delete the recovery file. Quitting the prompt SHALL keep the remaining files, and the `recover-buffers` command SHALL offer them again.
+At launch the editor SHALL offer each recovery file left by an earlier session, oldest first, asking whether to recover it. Recovering SHALL open the recovered text as a modified buffer: for a file buffer, one visiting the original file, whose save refuses to overwrite a file changed on disk since the text was auto-saved; for a buffer with no file, one with the recorded name. A recovered file buffer's text SHALL be auto-saved by the current session before the old recovery file is deleted; a buffer with no file is not auto-saved, so its old recovery file is deleted once recovered. Declining SHALL delete the recovery file. Quitting the prompt SHALL keep the remaining files, and the `recover-buffers` command SHALL offer them again.
 
 #### Scenario: Recover a file buffer
 - **WHEN** a recovery file for a visited file exists at launch and the user answers `Yes`

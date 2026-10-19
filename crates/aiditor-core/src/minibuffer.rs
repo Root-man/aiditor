@@ -392,22 +392,27 @@ impl Core {
         let mb = self.prompts.minibuffer.as_ref()?;
         let prompt = mb.prompt.to_string();
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
+        let mut count = String::new();
         if let (Some(completion), Some(matcher)) = (&mb.completion, &mut self.prompts.matcher) {
             matcher.tick(0);
             let snapshot = matcher.snapshot();
-            let count = snapshot.matched_item_count() as usize;
-            let rows = completion.top.min(count)..(completion.top + COMPLETION_ROWS).min(count);
+            let matched = snapshot.matched_item_count() as usize;
+            let rows = completion.top.min(matched)..(completion.top + COMPLETION_ROWS).min(matched);
             let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
             (candidates, annotations) = items.map(|item| item.data.clone()).unzip();
-            selected = (count > 0).then(|| completion.selected.min(count - 1) - rows.start);
+            let number = (matched > 0).then(|| completion.selected.min(matched - 1));
+            selected = number.map(|n| n - rows.start);
+            count = format!("{}/{matched} ", number.map_or(0, |n| n + 1));
         }
         // The minibuffer is selected while open; one row, as the height leaves out a mode line.
         let height = 2. * self.settings.line_height();
         let (width, _, cell_width) = self.frame_size;
-        let cols = ((width / cell_width) as usize).saturating_sub(prompt.chars().count());
+        let cols =
+            ((width / cell_width) as usize).saturating_sub(count.len() + prompt.chars().count());
         let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
         let display = window_display(window, buffers, settings, height, cols);
         Some(display::Minibuffer {
+            count,
             prompt,
             display,
             candidates,
@@ -689,6 +694,7 @@ mod tests {
         h.keys("C-c p C-u 12 C-n");
         let mb = h.frame(800., 600.).minibuffer.unwrap();
         assert_eq!((mb.candidates.len(), mb.selected), (10, Some(9)));
+        assert_eq!(mb.count, "13/15 ");
         insta::assert_debug_snapshot!((mb.candidates, mb.selected));
         h.keys("C-u 9 C-p");
         assert_eq!(

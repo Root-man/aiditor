@@ -38,6 +38,8 @@ pub struct FrameDisplay {
 /// The open minibuffer: its prompt and one line, the one holding point.
 #[derive(Debug, PartialEq)]
 pub struct Minibuffer {
+    /// The selected match's number and how many match, as vertico's `1/100 `; empty without completion.
+    pub count: String,
     pub prompt: String,
     pub display: WindowDisplay,
     /// The completion list's shown rows, best match first; empty without completion.
