@@ -113,4 +113,6 @@ FrameDisplay {
     ],
     message: None,
     minibuffer: None,
+    hint: None,
+    title: "a.txt",
 }

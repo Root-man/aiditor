@@ -29,6 +29,10 @@ pub struct FrameDisplay {
     pub message: Option<String>,
     /// The open minibuffer, if any.
     pub minibuffer: Option<Minibuffer>,
+    /// The which-key hint, once a pending prefix's delay has passed.
+    pub hint: Option<Hint>,
+    /// The frame's title: the current buffer's name, with ` *` when it is modified.
+    pub title: String,
 }
 
 /// The open minibuffer: its prompt and one line, the one holding point.

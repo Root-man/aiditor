@@ -381,7 +381,7 @@ impl Core {
     }
 
     /// The open minibuffer's prompt and the line holding its point.
-    pub fn minibuffer(&mut self) -> Option<display::Minibuffer> {
+    pub(crate) fn minibuffer(&mut self) -> Option<display::Minibuffer> {
         let mb = self.prompts.minibuffer.as_ref()?;
         let prompt = mb.prompt.to_string();
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);

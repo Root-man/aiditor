@@ -265,15 +265,13 @@ impl Render for Editor {
             )
         });
         let (font, cell) = self.font(window);
-        let minibuffer = self.core.minibuffer();
+        let frame = self.core.frame();
         let settings = self.core.settings();
         let theme = &settings.theme;
         let line_height = px(settings.line_height());
-        let buffer = self.core.current();
-        let modified = if buffer.modified() { " *" } else { "" };
-        window.set_window_title(&format!("{}{modified}", buffer.name));
+        window.set_window_title(&frame.title);
         let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
-        let hint = self.core.hint().map(|hint| {
+        let hint = frame.hint.map(|hint| {
             let entries: Vec<String> = (hint.entries.iter())
                 .map(|(key, what)| format!("{key} {what}"))
                 .collect();
@@ -285,8 +283,8 @@ impl Render for Editor {
                 .child(line().w_full().child(format!("{}-", hint.keys)))
                 .children(entries.into_iter().map(|e| line().w(column).child(e)))
         });
-        let message = self.core.message().unwrap_or_default().to_string();
-        let echo = match minibuffer {
+        let message = frame.message.unwrap_or_default();
+        let echo = match frame.minibuffer {
             // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
             Some(mb) => {
                 let (text, byte) = echo_line(&mb, &message);
@@ -339,7 +337,10 @@ impl Render for Editor {
                     .overflow_hidden()
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_click))
-                    .child(FrameElement(cx.entity())),
+                    .child(FrameElement {
+                        editor: cx.entity(),
+                        windows: frame.windows,
+                    }),
             )
             .children(hint)
             .child(echo);
@@ -455,7 +456,7 @@ mod tests {
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
         assert!(!cx.simulate_close(), "the window stays open");
-        let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
+        let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
         assert_eq!(prompt.as_deref(), Some("Save file /nonexistent/t.txt? "));
     }
 
@@ -504,7 +505,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-c p");
         cx.simulate_input("hi");
         cx.run_until_parked();
-        let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
+        let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
         assert_eq!(prompt.as_deref(), Some("Text: "));
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "hi");
         cx.simulate_keystrokes("enter");
@@ -520,8 +521,11 @@ mod tests {
         cx.simulate_input("abc");
         cx.simulate_keystrokes("ctrl-b ctrl-b alt-z");
         let line = editor.update(cx, |e, _| {
-            let message = e.core.message().unwrap_or_default().to_string();
-            echo_line(&e.core.minibuffer().unwrap(), &message)
+            let frame = e.core.frame();
+            echo_line(
+                &frame.minibuffer.unwrap(),
+                &frame.message.unwrap_or_default(),
+            )
         });
         let text = "M-x abc [M-z is undefined]".to_string();
         assert_eq!(line, (text, "M-x a".len()));
@@ -533,7 +537,7 @@ mod tests {
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("forward-char");
         cx.run_until_parked();
-        let prompt = editor.update(cx, |e, _| e.core.minibuffer().map(|mb| mb.prompt));
+        let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
         assert_eq!(prompt.as_deref(), Some("M-x "));
         cx.simulate_keystrokes("enter");
         let last = editor.read_with(cx, |e, _| e.core.last_command());
@@ -561,7 +565,7 @@ mod tests {
         cx.run_until_parked();
         // The matcher's threads may still be running; the core's repoll timer catches up.
         let listed = |cx: &mut VisualTestContext| {
-            editor.update(cx, |e, _| e.core.minibuffer().unwrap().candidates)
+            editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().candidates)
         };
         for _ in 0..100 {
             if listed(cx).len() == 1 {

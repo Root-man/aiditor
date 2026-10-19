@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
-use aiditor_core::display::{Line, Rect};
+use aiditor_core::display::{FrameWindow, Line, Rect};
 use aiditor_core::settings::Theme;
 use aiditor_core::window::WindowId;
 use gpui::{
@@ -34,7 +34,11 @@ pub(crate) struct Row {
 }
 
 /// Draws the core's frame display: every window's lines, cursor and mode line.
-pub(crate) struct FrameElement(pub(crate) Entity<Editor>);
+pub(crate) struct FrameElement {
+    pub(crate) editor: Entity<Editor>,
+    /// The windows from the frame display `render` built, until prepaint shapes them.
+    pub(crate) windows: Vec<FrameWindow>,
+}
 
 impl IntoElement for FrameElement {
     type Element = Self;
@@ -70,7 +74,7 @@ impl Element for FrameElement {
         (window.request_layout(style, [], cx), ())
     }
 
-    /// Tells the core the size, then lays out every window's lines.
+    /// Tells the core the size, rebuilding the windows if it changed, then lays out their lines.
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -80,7 +84,7 @@ impl Element for FrameElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<Painted> {
-        self.0.update(cx, |editor, cx| {
+        self.editor.update(cx, |editor, cx| {
             let (font, cell) = editor.font(window);
             let size = (bounds.size.width, bounds.size.height, cell);
             if editor.reported != size {
@@ -92,15 +96,15 @@ impl Element for FrameElement {
                     cell_width,
                 };
                 editor.handle(msg, cx);
+                self.windows = editor.core.frame().windows;
             }
-            let frame = editor.core.frame();
             let start = Instant::now();
             let settings = editor.core.settings();
             let font_size = px(settings.font_size);
             let shape = |text: String, runs: &[TextRun]| {
                 (window.text_system()).shape_line(text.into(), font_size, runs, None)
             };
-            let painted = frame.windows.into_iter().map(|w| {
+            let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
                 let bounds = to_bounds(w.rect, bounds.origin);
                 let mut top = px(0.);
                 let mut cursor = None;
@@ -161,11 +165,15 @@ impl Element for FrameElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let editor = self.0.read(cx);
+        let editor = self.editor.read(cx);
         let focus = editor.focus.clone();
         let theme = editor.core.settings().theme.clone();
         let line_height = px(editor.core.settings().line_height());
-        window.handle_input(&focus, ElementInputHandler::new(bounds, self.0.clone()), cx);
+        window.handle_input(
+            &focus,
+            ElementInputHandler::new(bounds, self.editor.clone()),
+            cx,
+        );
         for p in painted.iter() {
             let mask = ContentMask { bounds: p.bounds };
             window.with_content_mask(Some(mask), |window| {
@@ -199,7 +207,7 @@ impl Element for FrameElement {
             });
         }
         let painted = std::mem::take(painted);
-        self.0.update(cx, |editor, _| editor.painted = painted);
+        self.editor.update(cx, |editor, _| editor.painted = painted);
     }
 }
 

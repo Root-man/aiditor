@@ -82,7 +82,7 @@ impl Core {
 
     /// The hint for the pending prefix, once its delay has passed. Each next key shows the
     /// binding of the first layer that binds it, as `lookup` would find.
-    pub fn hint(&self) -> Option<display::Hint> {
+    pub(crate) fn hint(&self) -> Option<display::Hint> {
         if !self.hint_shown {
             return None;
         }
@@ -321,6 +321,15 @@ mod tests {
         assert_eq!(h.core.hint(), None, "before the delay");
         h.advance(MS);
         insta::assert_debug_snapshot!(h.core.hint());
+    }
+
+    #[test]
+    fn the_frame_display_carries_the_hint() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x").advance(1000 * MS);
+        let hint = h.core.hint();
+        assert!(hint.is_some());
+        assert_eq!(h.core.frame().hint, hint);
     }
 
     #[test]
