@@ -5,12 +5,42 @@ use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-/// The hash a buffer keeps of its file's bytes, to notice changes on disk. FNV-1a 64, fixed
-/// because recovery files store it.
-fn hash(bytes: &[u8]) -> u64 {
-    (bytes.iter()).fold(0xcbf2_9ce4_8422_2325, |h, &b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    })
+use aiditor_core::buffer::{encode, hash};
+use aiditor_core::{FileOp, Msg};
+
+/// Carries out `op` and returns its reply for the core; the one place the app and headless share.
+pub fn run(op: FileOp) -> Msg {
+    match op {
+        FileOp::Save {
+            buffer,
+            tick,
+            path,
+            text,
+            crlf,
+            bom,
+            hash,
+        } => {
+            let result = write(&path, &encode(&text, crlf, bom), hash);
+            // Not `error!`: the core echoes the failure, and an error log would show it twice.
+            match &result {
+                Ok(_) => tracing::info!(path = %path.display(), "saved"),
+                Err(err) => tracing::info!(%err, "save failed"),
+            }
+            Msg::Saved {
+                buffer,
+                tick,
+                result,
+            }
+        }
+        FileOp::ListDir(dir) => {
+            let result = list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
+            Msg::Listed { dir, result }
+        }
+        FileOp::Open(path) => {
+            let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
+            Msg::Opened { path, result }
+        }
+    }
 }
 
 /// The file's bytes and their hash, or `None` when there is no file.
@@ -32,8 +62,11 @@ pub fn list(dir: &Path) -> io::Result<Vec<String>> {
         let entry = entry?;
         // shortcut: non-UTF-8 names show lossily and can't be visited; keep OsStrings if one turns up.
         let mut name = entry.file_name().to_string_lossy().into_owned();
-        // fs::metadata follows symlinks, so a link to a directory lists as one.
-        if fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()) {
+        // Stats only symlinks, following them so a link to a directory lists as one.
+        let dir = entry.file_type().is_ok_and(|ft| {
+            ft.is_dir() || ft.is_symlink() && fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
+        });
+        if dir {
             name.push('/');
         }
         names.push(name);
@@ -97,9 +130,23 @@ mod tests {
     }
 
     #[test]
-    fn hash_is_fnv1a() {
-        assert_eq!(hash(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+    fn run_replies_with_path_prefixed_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let Msg::Opened { result, .. } = run(FileOp::Open(missing)) else {
+            panic!("not opened");
+        };
+        assert_eq!(result, Ok(None));
+        let file = dir.path().join("f");
+        fs::write(&file, "").unwrap();
+        let Msg::Listed { result, .. } = run(FileOp::ListDir(file.clone())) else {
+            panic!("not listed");
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .starts_with(&format!("{}: ", file.display()))
+        );
     }
 
     #[test]

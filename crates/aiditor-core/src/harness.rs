@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use crate::{
-    Core, Ctx, Effect, Effects, Msg,
-    buffer::BufferId,
+    Core, Ctx, Effect, Effects, FileOp, Msg, RecoveryOp,
+    buffer::{BufferId, encode, hash},
     command::{ArgSpec, Args, Command},
     display::{FrameDisplay, WindowDisplay},
     key::{Key, KeyCode, parse_keys},
@@ -111,13 +111,16 @@ impl Harness {
         for effect in effects {
             match effect {
                 // As the file service does, minus its atomic write.
-                Effect::Save {
+                Effect::File(FileOp::Save {
                     buffer,
                     tick,
                     path,
-                    bytes,
+                    text,
+                    crlf,
+                    bom,
                     hash: expected,
-                } => {
+                }) => {
+                    let bytes = encode(&text, crlf, bom);
                     let on_disk = std::fs::read(&path).ok().map(|b| hash(&b));
                     let result = match on_disk == expected {
                         false => Err(format!("{} changed on disk; not saved", path.display())),
@@ -133,7 +136,7 @@ impl Harness {
                     self.send(msg);
                 }
                 // As `files::list` does; the core can't depend on the services crate.
-                Effect::ListDir(dir) => {
+                Effect::File(FileOp::ListDir(dir)) => {
                     let result = std::fs::read_dir(&dir)
                         .map(|entries| {
                             let mut names: Vec<String> = (entries.flatten())
@@ -148,7 +151,7 @@ impl Harness {
                         .map_err(|err| format!("{}: {err}", dir.display()));
                     self.send(Msg::Listed { dir, result });
                 }
-                Effect::Open(path) => {
+                Effect::File(FileOp::Open(path)) => {
                     let result = match std::fs::read(&path) {
                         Ok(bytes) => {
                             let h = hash(&bytes);
@@ -161,20 +164,20 @@ impl Harness {
                 }
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::Quit => self.quit = true,
-                Effect::AutoSave {
+                Effect::Recovery(RecoveryOp::AutoSave {
                     buffer,
                     name,
                     path,
                     text,
                     ..
-                } => _ = (self.recovery).insert(buffer, (name, path, text.to_string())),
-                Effect::DeleteAutoSave(buffer) => {
+                }) => _ = (self.recovery).insert(buffer, (name, path, text.to_string())),
+                Effect::Recovery(RecoveryOp::DeleteAutoSave(buffer)) => {
                     assert!(!self.quit, "deleted after the quit");
                     self.recovery
                         .remove(&buffer)
                         .expect("deletes a written file");
                 }
-                Effect::DeleteRecovery(file) => self.deleted.push(file),
+                Effect::Recovery(RecoveryOp::DeleteRecovery(file)) => self.deleted.push(file),
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
@@ -196,14 +199,6 @@ impl Harness {
     pub fn disk(&self, name: &str) -> String {
         std::fs::read_to_string(self.path(name)).unwrap()
     }
-}
-
-/// Stands in for the file service's hash.
-pub(crate) fn hash(bytes: &[u8]) -> u64 {
-    use std::hash::{DefaultHasher, Hasher};
-    let mut h = DefaultHasher::new();
-    h.write(bytes);
-    h.finish()
 }
 
 impl Harness {

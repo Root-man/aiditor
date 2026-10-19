@@ -8,18 +8,18 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
-use aiditor_core::{Effect, Recovered};
+use aiditor_core::{Recovered, RecoveryOp};
 
 use crate::files;
 
-/// Starts the thread that carries out `Effect::AutoSave` and `Effect::DeleteAutoSave` in `dir`,
+/// Starts the thread that carries out `RecoveryOp`s in `dir`,
 /// in the order sent, so a delete never overtakes the write before it. It ends when the sender
 /// is dropped.
-pub fn spawn(dir: PathBuf) -> (mpsc::Sender<Effect>, JoinHandle<()>) {
+pub fn spawn(dir: PathBuf) -> (mpsc::Sender<RecoveryOp>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        for effect in rx {
-            if let Err(err) = run(&dir, effect) {
+        for op in rx {
+            if let Err(err) = run(&dir, op) {
                 tracing::warn!(%err, dir = %dir.display(), "auto-save failed");
             }
         }
@@ -27,9 +27,9 @@ pub fn spawn(dir: PathBuf) -> (mpsc::Sender<Effect>, JoinHandle<()>) {
     (tx, handle)
 }
 
-fn run(dir: &Path, effect: Effect) -> io::Result<()> {
-    match effect {
-        Effect::AutoSave {
+fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
+    match op {
+        RecoveryOp::AutoSave {
             buffer,
             name,
             path,
@@ -54,13 +54,13 @@ fn run(dir: &Path, effect: Effect) -> io::Result<()> {
             out.sync_all()?;
             fs::rename(&tmp, &file)
         }
-        Effect::DeleteAutoSave(buffer) => {
+        RecoveryOp::DeleteAutoSave(buffer) => {
             match fs::remove_file(dir.join(format!("{}-{}", std::process::id(), buffer.number()))) {
                 Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
                 _ => Ok(()),
             }
         }
-        Effect::DeleteRecovery(file) => {
+        RecoveryOp::DeleteRecovery(file) => {
             // A pid reused from the crashed session names this session's own files too.
             let own = format!("{}-", std::process::id());
             match file
@@ -71,7 +71,6 @@ fn run(dir: &Path, effect: Effect) -> io::Result<()> {
                 false => fs::remove_file(file),
             }
         }
-        _ => Ok(()),
     }
 }
 
@@ -129,14 +128,18 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
-    use aiditor_core::{Core, Msg};
+    use aiditor_core::{Core, Effect, Msg};
 
     use super::*;
 
-    /// Sends `effects` and waits for the thread to carry them out.
+    /// Sends the recovery ops among `effects` and waits for the thread to carry them out.
     fn run_all(dir: &Path, effects: Vec<Effect>) {
         let (tx, handle) = spawn(dir.to_path_buf());
-        effects.into_iter().for_each(|e| tx.send(e).unwrap());
+        for effect in effects {
+            if let Effect::Recovery(op) = effect {
+                tx.send(op).unwrap();
+            }
+        }
         drop(tx);
         handle.join().unwrap();
     }
@@ -154,7 +157,7 @@ mod tests {
         run_all(&dir, core.handle(t0 + Duration::from_secs(2), Msg::Tick));
         core.handle(t0, insert("!"));
         let effects = core.handle(t0 + Duration::from_secs(4), Msg::Tick);
-        let Some(Effect::AutoSave { buffer, .. }) = effects.first() else {
+        let Some(Effect::Recovery(RecoveryOp::AutoSave { buffer, .. })) = effects.first() else {
             panic!("no auto-save: {}", effects.len());
         };
         let buffer = *buffer;
@@ -173,8 +176,14 @@ mod tests {
         let mode = fs::metadata(&dir).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
         // A second delete of a gone file is not an error.
-        run_all(&dir, vec![Effect::DeleteAutoSave(buffer)]);
-        run_all(&dir, vec![Effect::DeleteAutoSave(buffer)]);
+        run_all(
+            &dir,
+            vec![Effect::Recovery(RecoveryOp::DeleteAutoSave(buffer))],
+        );
+        run_all(
+            &dir,
+            vec![Effect::Recovery(RecoveryOp::DeleteAutoSave(buffer))],
+        );
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
     }
 
@@ -203,7 +212,7 @@ mod tests {
         assert_eq!(r.disk, files::read(&visited).unwrap());
         let own = dir.join(format!("{}-1", std::process::id()));
         fs::write(&own, "mine").unwrap();
-        let delete = |p: &Path| Effect::DeleteRecovery(p.to_owned());
+        let delete = |p: &Path| Effect::Recovery(RecoveryOp::DeleteRecovery(p.to_owned()));
         run_all(&dir, vec![delete(&r.file), delete(&own)]);
         assert!(
             !r.file.exists() && own.exists(),

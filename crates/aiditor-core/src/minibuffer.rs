@@ -12,7 +12,7 @@ use crate::command::{Args, Command};
 use crate::frame::window_display;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
-use crate::{Core, Ctx, Effect, Effects, Msg, display};
+use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, display};
 
 /// How many answers each prompt's history keeps, Emacs's `history-length`.
 const HISTORY_MAX: usize = 100;
@@ -331,7 +331,7 @@ impl Core {
                 fresh = true;
                 matcher.restart(true);
                 if !head.is_empty() {
-                    effects.push(Effect::ListDir(completion.base.join(head)));
+                    effects.push(Effect::File(FileOp::ListDir(completion.base.join(head))));
                 }
             }
         }
