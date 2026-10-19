@@ -31,12 +31,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
-use autosave::autosaves;
 use bindings::HINT_DELAY;
 use buffer::{Buffer, BufferId, Buffers};
 use command::{Args, Command, Prefix};
@@ -280,66 +279,11 @@ impl Ctx<'_> {
                 cell_width,
             } => self.core.frame_size = (width, height, cell_width),
             Msg::Saved {
-                buffer: id,
+                buffer,
                 tick,
                 result,
-            } => {
-                let ok = result.is_ok();
-                match (self.core.buffers.get_mut(id), result) {
-                    (None, _) => {}
-                    (Some(buffer), Ok(hash)) => {
-                        buffer.disk = Some(hash);
-                        // Edits made while the write ran are still unsaved.
-                        if buffer.tick() == tick {
-                            buffer.set_saved();
-                        }
-                        let path = buffer.file.as_deref().unwrap_or(Path::new(""));
-                        let msg = format!("Wrote {}", path.display());
-                        self.core.echo(msg);
-                    }
-                    (Some(_), Err(err)) => self.core.echo(err),
-                }
-                let core = &mut *self.core;
-                if let Some(at) = core.quitting.iter().position(|&b| b == id) {
-                    // A failed save, or edits made while it ran, cancel the quit.
-                    if ok && !core.buffers.get(id).is_some_and(Buffer::modified) {
-                        core.quitting.swap_remove(at);
-                        if core.quitting.is_empty() {
-                            self.effects.push(Effect::Quit);
-                        }
-                    } else {
-                        core.quitting.clear();
-                    }
-                }
-            }
-            Msg::Listed { dir, result } => {
-                let core = &mut *self.core;
-                let awaited = (core.prompts.minibuffer.as_mut())
-                    .and_then(|mb| mb.completion.as_mut())
-                    .filter(|c| {
-                        !c.listed && c.dir.as_ref().map(|d| c.base.join(d)) == Some(dir.clone())
-                    });
-                let Some(completion) = awaited else {
-                    return;
-                };
-                completion.listed = true;
-                match result {
-                    Ok(names) => {
-                        let matcher = core
-                            .prompts
-                            .matcher
-                            .as_ref()
-                            .expect("completing has a matcher");
-                        let injector = matcher.injector();
-                        for name in names {
-                            injector.push((name, String::new()), |(c, _), cols| {
-                                cols[0] = c.as_str().into()
-                            });
-                        }
-                    }
-                    Err(err) => core.echo(err),
-                }
-            }
+            } => self.on_saved(buffer, tick, result),
+            Msg::Listed { dir, result } => self.on_listed(dir, result),
             Msg::Opened { path, result } => match result {
                 Ok(file) => self.core.visit(&path, file, true),
                 Err(err) => self.core.echo(err),
@@ -368,27 +312,7 @@ impl Ctx<'_> {
             Msg::Clipboard(text) => self.core.kills.clipboard = Some(text),
             Msg::Log(line) => self.core.log(&line),
             Msg::Quit => self.call("save-buffers-kill-terminal", Args::default()),
-            Msg::AutoSave => {
-                let core = &mut *self.core;
-                for id in [core.autosave_idle.take(), core.autosave_max.take()]
-                    .into_iter()
-                    .flatten()
-                {
-                    core.timers.cancel(id);
-                }
-                for (id, b) in core.buffers.recent() {
-                    if autosaves(b) && core.autosaved.get(&id) != Some(&b.tick()) {
-                        core.autosaved.insert(id, b.tick());
-                        self.effects.push(Effect::AutoSave {
-                            buffer: id,
-                            name: b.name.clone(),
-                            path: b.file.clone(),
-                            hash: b.disk,
-                            text: b.text().clone(),
-                        });
-                    }
-                }
-            }
+            Msg::AutoSave => self.write_autosaves(),
             Msg::Recover(files) if !files.is_empty() => {
                 self.core.recovered.extend(files);
                 self.call("recover-buffers", Args::default());

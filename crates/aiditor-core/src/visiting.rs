@@ -7,6 +7,38 @@ use crate::command::Args;
 use crate::{Core, Ctx, Effect};
 
 impl Ctx<'_> {
+    /// Handles the file service's answer to a save of buffer `id` at `tick`, and the quit
+    /// waiting on it.
+    pub(crate) fn on_saved(&mut self, id: BufferId, tick: u64, result: Result<u64, String>) {
+        let ok = result.is_ok();
+        match (self.core.buffers.get_mut(id), result) {
+            (None, _) => {}
+            (Some(buffer), Ok(hash)) => {
+                buffer.disk = Some(hash);
+                // Edits made while the write ran are still unsaved.
+                if buffer.tick() == tick {
+                    buffer.set_saved();
+                }
+                let path = buffer.file.as_deref().unwrap_or(Path::new(""));
+                let msg = format!("Wrote {}", path.display());
+                self.core.echo(msg);
+            }
+            (Some(_), Err(err)) => self.core.echo(err),
+        }
+        let core = &mut *self.core;
+        if let Some(at) = core.quitting.iter().position(|&b| b == id) {
+            // A failed save, or edits made while it ran, cancel the quit.
+            if ok && !core.buffers.get(id).is_some_and(Buffer::modified) {
+                core.quitting.swap_remove(at);
+                if core.quitting.is_empty() {
+                    self.effects.push(Effect::Quit);
+                }
+            } else {
+                core.quitting.clear();
+            }
+        }
+    }
+
     /// Kills the buffer `name`, asking first when it is a modified file buffer.
     pub(crate) fn kill_buffer(&mut self, args: Args) -> Result<(), String> {
         let name = &args.strings[0];

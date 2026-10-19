@@ -15,7 +15,7 @@ use crate::window::{Window, WindowId};
 use crate::{Core, Ctx, Effect, Effects, Msg, display};
 
 /// How many answers each prompt's history keeps, Emacs's `history-length`.
-pub(crate) const HISTORY_MAX: usize = 100;
+const HISTORY_MAX: usize = 100;
 
 /// How many candidates the completion list shows, Vertico's `vertico-count`.
 const COMPLETION_ROWS: usize = 10;
@@ -39,11 +39,11 @@ pub(crate) struct Minibuffer {
     /// What was typed before the first history move.
     input: String,
     /// The completion list, when the command completes over candidates.
-    pub(crate) completion: Option<Completion>,
+    completion: Option<Completion>,
 }
 
 /// The selection in a completing minibuffer's list of matches.
-pub(crate) struct Completion {
+struct Completion {
     /// The text the matcher's pattern was last set from.
     pattern: String,
     /// The selected match, best first.
@@ -51,11 +51,11 @@ pub(crate) struct Completion {
     /// The first match shown, so the shown rows hold the selection.
     top: usize,
     /// For file names, the text through its last `/`: the directory listed or awaited.
-    pub(crate) dir: Option<String>,
+    dir: Option<String>,
     /// Whether `dir`'s listing arrived, so a second answer is dropped.
-    pub(crate) listed: bool,
+    listed: bool,
     /// The directory a relative `dir` is listed from, as `find-file` visits from it.
-    pub(crate) base: PathBuf,
+    base: PathBuf,
 }
 
 /// The open prompt, each prompt's history and the completion matcher.
@@ -112,6 +112,34 @@ impl Completion {
 }
 
 impl Ctx<'_> {
+    /// Adds `dir`'s listing to the completion that awaits it, or shows why it failed.
+    pub(crate) fn on_listed(&mut self, dir: PathBuf, result: Result<Vec<String>, String>) {
+        let core = &mut *self.core;
+        let awaited = (core.prompts.minibuffer.as_mut())
+            .and_then(|mb| mb.completion.as_mut())
+            .filter(|c| !c.listed && c.dir.as_ref().map(|d| c.base.join(d)) == Some(dir.clone()));
+        let Some(completion) = awaited else {
+            return;
+        };
+        completion.listed = true;
+        match result {
+            Ok(names) => {
+                let matcher = core
+                    .prompts
+                    .matcher
+                    .as_ref()
+                    .expect("completing has a matcher");
+                let injector = matcher.injector();
+                for name in names {
+                    injector.push((name, String::new()), |(c, _), cols| {
+                        cols[0] = c.as_str().into()
+                    });
+                }
+            }
+            Err(err) => core.echo(err),
+        }
+    }
+
     /// Opens the minibuffer at `prompt`; its answer then calls `command` again.
     pub(crate) fn read_string(
         &mut self,

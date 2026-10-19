@@ -11,6 +11,29 @@ const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
 const AUTOSAVE_MAX: Duration = Duration::from_secs(30);
 
 impl Ctx<'_> {
+    /// Writes recovery files for buffers edited since their last one, cancelling both timers.
+    pub(crate) fn write_autosaves(&mut self) {
+        let core = &mut *self.core;
+        for id in [core.autosave_idle.take(), core.autosave_max.take()]
+            .into_iter()
+            .flatten()
+        {
+            core.timers.cancel(id);
+        }
+        for (id, b) in core.buffers.recent() {
+            if autosaves(b) && core.autosaved.get(&id) != Some(&b.tick()) {
+                core.autosaved.insert(id, b.tick());
+                self.effects.push(Effect::AutoSave {
+                    buffer: id,
+                    name: b.name.clone(),
+                    path: b.file.clone(),
+                    hash: b.disk,
+                    text: b.text().clone(),
+                });
+            }
+        }
+    }
+
     /// Asks about the first recovered file, then handles its answer (the only string) and asks
     /// about the next: `Yes` opens it as a modified buffer, anything else deletes it.
     pub(crate) fn recover_buffers(&mut self, args: Args) -> Result<(), String> {
@@ -42,7 +65,7 @@ impl Ctx<'_> {
                 }
                 // Written under this session first, so the old file goes only once a copy exists.
                 keep = !autosaves(buffer);
-                self.dispatch(Msg::AutoSave);
+                self.write_autosaves();
             }
             if !keep {
                 self.effects.push(Effect::DeleteRecovery(r.file));
@@ -93,7 +116,7 @@ impl Core {
 }
 
 /// Whether `buffer` has edits a crash would lose: modified, and not read-only or hidden.
-pub(crate) fn autosaves(buffer: &Buffer) -> bool {
+fn autosaves(buffer: &Buffer) -> bool {
     buffer.modified() && !buffer.read_only && !buffer.name.starts_with(' ')
 }
 
