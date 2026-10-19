@@ -533,7 +533,14 @@ impl Default for Core {
         let mut buffers = Buffers::default();
         let scratch = buffers.create("*scratch*");
         let window = Window::new(&mut buffers, scratch);
-        let commands = builtins::builtins();
+        let mut commands = HashMap::new();
+        for c in builtins::builtins() {
+            assert!(
+                commands.insert(c.name, c).is_none(),
+                "duplicate builtin {}",
+                c.name
+            );
+        }
         let mut core = Core {
             buffers,
             window,
