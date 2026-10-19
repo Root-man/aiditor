@@ -20,7 +20,7 @@
 - [x] 3.1 Change `FrameElement` to `{ editor: Entity<Editor>, windows: Vec<FrameWindow> }`; in `render` call `self.core.frame()` once, draw the echo area, minibuffer, hint and `window.set_window_title(&frame.title)` from it, and pass `frame.windows` to the element; verify `render` no longer calls `core.minibuffer()`, `core.hint()`, `core.message()` or `core.current()`
 - [x] 3.2 In `prepaint`, when the size differs from `reported`, send `Msg::Resize` and replace `self.windows` with `core.frame().windows`; shape `mem::take(&mut self.windows)`; keep `debug.shape` timing shaping only; verify by review that `core.frame()` is called only in `render` and in the resize branch
 - [x] 3.3 Switch the `aiditor` tests from `e.core.minibuffer()` to `e.core.frame().minibuffer` (`closing_the_window_offers_to_save`, `a_prompt_reads_typed_text`, `the_echo_line_is_one_string_with_point_in_it`, `m_x_runs_a_command_by_name`, `a_completing_prompt_filters_and_picks`); verify all gpui tests in the crate pass
-- [ ] 3.4 Verify `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass on Linux, and CI passes on macOS
+- [x] 3.4 Verify `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass on Linux, and CI passes on macOS
 
 ## 4. Manual check on macOS
 
