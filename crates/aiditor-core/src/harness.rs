@@ -92,7 +92,7 @@ impl Harness {
         self.core.poll_completion(self.now, &mut effects);
         self.run(effects);
         let core = &mut self.core;
-        while let (Some(_), Some(matcher)) = (&core.minibuffer, &mut core.matcher)
+        while let (Some(_), Some(matcher)) = (&core.prompts.minibuffer, &mut core.prompts.matcher)
             && matcher.tick(50).running
         {}
     }

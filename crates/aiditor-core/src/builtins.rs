@@ -185,7 +185,7 @@ pub(crate) fn builtins() -> HashMap<&'static str, Command> {
             ctx.next_completion(args.count().saturating_neg())
         }),
         ("minibuffer-complete", |ctx, _| {
-            let text = ctx.core.selected_candidate().ok_or("No match")?;
+            let text = ctx.core.prompts.selected_candidate().ok_or("No match")?;
             ctx.set_text(&text)
         }),
         ("previous-history-element", |ctx, args| {

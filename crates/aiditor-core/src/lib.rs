@@ -28,13 +28,12 @@ pub mod window;
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use nucleo::Nucleo;
 use ropey::Rope;
 
 use autosave::autosaves;
@@ -43,7 +42,8 @@ use buffer::{Buffer, BufferId, Buffers};
 use command::{Args, Command, Prefix};
 use key::{Key, KeyCode};
 use keymap::{Binding, Keymap};
-use minibuffer::Minibuffer;
+use kill_ring::KillRing;
+use minibuffer::Prompts;
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
@@ -245,7 +245,7 @@ impl Ctx<'_> {
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.
-                self.core.clipboard = None;
+                self.core.kills.clipboard = None;
             }
             Msg::Insert { text, replace } => {
                 if let Some(range) = replace
@@ -314,7 +314,7 @@ impl Ctx<'_> {
             }
             Msg::Listed { dir, result } => {
                 let core = &mut *self.core;
-                let awaited = (core.minibuffer.as_mut())
+                let awaited = (core.prompts.minibuffer.as_mut())
                     .and_then(|mb| mb.completion.as_mut())
                     .filter(|c| {
                         !c.listed && c.dir.as_ref().map(|d| c.base.join(d)) == Some(dir.clone())
@@ -325,7 +325,11 @@ impl Ctx<'_> {
                 completion.listed = true;
                 match result {
                     Ok(names) => {
-                        let matcher = core.matcher.as_ref().expect("completing has a matcher");
+                        let matcher = core
+                            .prompts
+                            .matcher
+                            .as_ref()
+                            .expect("completing has a matcher");
                         let injector = matcher.injector();
                         for name in names {
                             injector.push((name, String::new()), |(c, _), cols| {
@@ -361,7 +365,7 @@ impl Ctx<'_> {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
             }
-            Msg::Clipboard(text) => self.core.clipboard = Some(text),
+            Msg::Clipboard(text) => self.core.kills.clipboard = Some(text),
             Msg::Log(line) => self.core.log(&line),
             Msg::Quit => self.call("save-buffers-kill-terminal", Args::default()),
             Msg::AutoSave => {
@@ -503,26 +507,12 @@ pub struct Core {
     recording: Option<Vec<Key>>,
     /// Typed chars in the current undo group, for amalgamation.
     self_inserts: usize,
-    /// The prompt being answered, while the minibuffer is open.
-    minibuffer: Option<Minibuffer>,
-    /// Each prompt's answers, newest first.
-    history: HashMap<String, Vec<String>>,
-    /// The fuzzy matcher for completion, made on first use.
-    matcher: Option<Nucleo<(String, String)>>,
-    /// The timer that polls the matcher again while it is still matching.
-    repoll: Option<TimerId>,
+    prompts: Prompts,
     /// The column a run of line motions aims for.
     goal_column: usize,
     /// Where the last `recenter-top-bottom` put point's line: middle, top or bottom.
     recenter: usize,
-    /// Kills, newest first.
-    kill_ring: VecDeque<String>,
-    /// The kill the next yank inserts.
-    yank_index: usize,
-    /// The clipboard's text for the key being handled, when its command asked for it.
-    clipboard: Option<String>,
-    /// The clipboard text the editor last wrote or took in, so it isn't pushed again.
-    clipboard_seen: Option<String>,
+    kills: KillRing,
     settings: Settings,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
@@ -564,16 +554,10 @@ impl Default for Core {
             this_keys: Vec::new(),
             recording: None,
             self_inserts: 0,
-            minibuffer: None,
-            history: HashMap::new(),
-            matcher: None,
-            repoll: None,
+            prompts: Prompts::default(),
             goal_column: 0,
             recenter: 0,
-            kill_ring: VecDeque::new(),
-            yank_index: 0,
-            clipboard: None,
-            clipboard_seen: None,
+            kills: KillRing::default(),
             settings: Settings::default(),
             commands,
             message: None,

@@ -1,5 +1,6 @@
 //! Prompts read in the minibuffer, with history and completion.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,6 +10,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 
 use crate::command::{Args, Command};
 use crate::frame::window_display;
+use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
 use crate::{Core, Ctx, Effect, Effects, Msg, display};
 
@@ -56,6 +58,48 @@ pub(crate) struct Completion {
     pub(crate) base: PathBuf,
 }
 
+/// The open prompt, each prompt's history and the completion matcher.
+#[derive(Default)]
+pub(crate) struct Prompts {
+    /// The prompt being answered, while the minibuffer is open.
+    pub(crate) minibuffer: Option<Minibuffer>,
+    /// Each prompt's answers, newest first.
+    history: HashMap<String, Vec<String>>,
+    /// The fuzzy matcher for completion, made on first use.
+    pub(crate) matcher: Option<Nucleo<(String, String)>>,
+    /// The timer that polls the matcher again while it is still matching.
+    repoll: Option<TimerId>,
+}
+
+impl Prompts {
+    /// How many candidates match, 0 when not completing.
+    fn matches(&self) -> usize {
+        match (&self.minibuffer, &self.matcher) {
+            (
+                Some(Minibuffer {
+                    completion: Some(_),
+                    ..
+                }),
+                Some(m),
+            ) => m.snapshot().matched_item_count() as usize,
+            _ => 0,
+        }
+    }
+
+    /// The selected candidate, if the minibuffer is completing and anything matches.
+    pub(crate) fn selected_candidate(&self) -> Option<String> {
+        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
+        let snapshot = self.matcher.as_ref()?.snapshot();
+        let last = snapshot.matched_item_count().checked_sub(1)?;
+        let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
+        let name = &item.data.0;
+        Some(match &completion.dir {
+            Some(dir) => format!("{dir}{name}"),
+            None => name.clone(),
+        })
+    }
+}
+
 impl Completion {
     /// Selects match `selected`, scrolling the shown rows only as far as needed.
     fn select(&mut self, selected: usize) {
@@ -76,7 +120,7 @@ impl Ctx<'_> {
         prompt: String,
     ) -> Result<(), String> {
         let core = &mut *self.core;
-        if core.minibuffer.is_some() {
+        if core.prompts.minibuffer.is_some() {
             return Err("Command attempted to use minibuffer while in minibuffer".into());
         }
         let base = core.directory();
@@ -87,7 +131,7 @@ impl Ctx<'_> {
             .map(|candidates| candidates(core, &args));
         let completion = (candidates.is_some() || start.is_some()).then(|| {
             // One matcher for the core, as each one starts a thread pool.
-            let matcher = core.matcher.get_or_insert_with(|| {
+            let matcher = core.prompts.matcher.get_or_insert_with(|| {
                 Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1)
             });
             matcher.restart(true);
@@ -118,7 +162,7 @@ impl Ctx<'_> {
         }
         let window = Window::new(&mut core.buffers, id);
         core.others.insert(MINIBUFFER, window);
-        core.minibuffer = Some(Minibuffer {
+        core.prompts.minibuffer = Some(Minibuffer {
             command: command.name,
             args,
             prompt,
@@ -137,9 +181,12 @@ impl Ctx<'_> {
     /// Closes the minibuffer and calls its command with the selected candidate, or with `input`
     /// or no match the text, as the next string. A selected directory is entered instead.
     pub(crate) fn exit_minibuffer(&mut self, input: bool) -> Result<(), String> {
-        let selected = (!input).then(|| self.core.selected_candidate()).flatten();
+        let selected = (!input)
+            .then(|| self.core.prompts.selected_candidate())
+            .flatten();
         let completion = self
             .core
+            .prompts
             .minibuffer
             .as_ref()
             .and_then(|mb| mb.completion.as_ref());
@@ -150,7 +197,7 @@ impl Ctx<'_> {
         }
         let text = selected.unwrap_or_else(|| self.core.text());
         let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
-        let history = self.core.history.entry(mb.prompt).or_default();
+        let history = self.core.prompts.history.entry(mb.prompt).or_default();
         if !text.is_empty() && history.first() != Some(&text) {
             history.insert(0, text.clone());
             history.truncate(HISTORY_MAX);
@@ -165,9 +212,12 @@ impl Ctx<'_> {
     /// Replaces the minibuffer's text with the history entry `n` older, newer when negative.
     pub(crate) fn history_element(&mut self, n: i64) -> Result<(), String> {
         let text = self.core.text();
-        let core = &mut *self.core;
-        let mb = core.minibuffer.as_mut().ok_or("Not in a minibuffer")?;
-        let items = core.history.get(&mb.prompt).map_or(&[][..], Vec::as_slice);
+        let prompts = &mut self.core.prompts;
+        let mb = prompts.minibuffer.as_mut().ok_or("Not in a minibuffer")?;
+        let items = prompts
+            .history
+            .get(&mb.prompt)
+            .map_or(&[][..], Vec::as_slice);
         let target = (mb.index as i64).saturating_add(n);
         if target > items.len() as i64 {
             return Err("Beginning of history; no preceding item".into());
@@ -197,8 +247,8 @@ impl Ctx<'_> {
 
     /// Moves the completion selection `n` matches down, up when negative, stopping at the ends.
     pub(crate) fn next_completion(&mut self, n: i64) -> Result<(), String> {
-        let count = self.core.matches();
-        let completion = (self.core.minibuffer.as_mut())
+        let count = self.core.prompts.matches();
+        let completion = (self.core.prompts.minibuffer.as_mut())
             .and_then(|mb| mb.completion.as_mut())
             .ok_or("Not completing")?;
         if count == 0 {
@@ -225,6 +275,7 @@ impl Core {
     pub(crate) fn poll_completion(&mut self, now: Instant, effects: &mut Effects) {
         // Checked before copying the text: this runs after every message.
         if !self
+            .prompts
             .minibuffer
             .as_ref()
             .is_some_and(|mb| mb.completion.is_some())
@@ -232,11 +283,13 @@ impl Core {
             return;
         }
         let text = self.text();
-        let Some(completion) = (self.minibuffer.as_mut()).and_then(|mb| mb.completion.as_mut())
+        let Some(completion) =
+            (self.prompts.minibuffer.as_mut()).and_then(|mb| mb.completion.as_mut())
         else {
             return;
         };
         let matcher = self
+            .prompts
             .matcher
             .as_mut()
             .expect("a completing minibuffer has a matcher");
@@ -267,46 +320,19 @@ impl Core {
             completion.pattern = pattern.to_string();
             completion.select(0);
         }
-        if let Some(id) = self.repoll.take() {
+        if let Some(id) = self.prompts.repoll.take() {
             self.timers.cancel(id);
         }
         if matcher.tick(10).running {
-            self.repoll = Some(self.timers.start(now, REPOLL, None, Msg::Tick));
+            self.prompts.repoll = Some(self.timers.start(now, REPOLL, None, Msg::Tick));
         }
-    }
-
-    /// How many candidates match, 0 when not completing.
-    fn matches(&self) -> usize {
-        match (&self.minibuffer, &self.matcher) {
-            (
-                Some(Minibuffer {
-                    completion: Some(_),
-                    ..
-                }),
-                Some(m),
-            ) => m.snapshot().matched_item_count() as usize,
-            _ => 0,
-        }
-    }
-
-    /// The selected candidate, if the minibuffer is completing and anything matches.
-    pub(crate) fn selected_candidate(&self) -> Option<String> {
-        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
-        let snapshot = self.matcher.as_ref()?.snapshot();
-        let last = snapshot.matched_item_count().checked_sub(1)?;
-        let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
-        let name = &item.data.0;
-        Some(match &completion.dir {
-            Some(dir) => format!("{dir}{name}"),
-            None => name.clone(),
-        })
     }
 
     /// In a file prompt with point at the end of a text that ends in `/` or names a listed
     /// directory, the start of that last component: where `DEL` deletes back to.
     pub(crate) fn component_start(&self) -> Option<usize> {
-        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
-        let (dir, matcher) = (completion.dir.as_ref()?, self.matcher.as_ref()?);
+        let completion = self.prompts.minibuffer.as_ref()?.completion.as_ref()?;
+        let (dir, matcher) = (completion.dir.as_ref()?, self.prompts.matcher.as_ref()?);
         let text = self.text();
         if self.point() != text.chars().count() {
             return None;
@@ -328,10 +354,10 @@ impl Core {
 
     /// The open minibuffer's prompt and the line holding its point.
     pub fn minibuffer(&mut self) -> Option<display::Minibuffer> {
-        let mb = self.minibuffer.as_ref()?;
+        let mb = self.prompts.minibuffer.as_ref()?;
         let prompt = mb.prompt.to_string();
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
-        if let (Some(completion), Some(matcher)) = (&mb.completion, &mut self.matcher) {
+        if let (Some(completion), Some(matcher)) = (&mb.completion, &mut self.prompts.matcher) {
             matcher.tick(0);
             let snapshot = matcher.snapshot();
             let count = snapshot.matched_item_count() as usize;
@@ -357,7 +383,7 @@ impl Core {
 
     /// Closes the minibuffer, selecting the window it was opened from again.
     pub(crate) fn close_minibuffer(&mut self) -> Option<Minibuffer> {
-        let mb = self.minibuffer.take()?;
+        let mb = self.prompts.minibuffer.take()?;
         self.select(mb.from);
         let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
         _ = self.buffers.kill(window.buffer());
@@ -629,7 +655,7 @@ mod tests {
         assert_eq!(h.core.last_command(), Some("forward-char"));
         h.keys("M-x split-below");
         assert_eq!(
-            h.core.selected_candidate().as_deref(),
+            h.core.prompts.selected_candidate().as_deref(),
             Some("split-window-below")
         );
         h.keys("C-g M-x zzz-nothing RET");

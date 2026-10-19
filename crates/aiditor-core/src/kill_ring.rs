@@ -1,33 +1,32 @@
 //! Killing and yanking text.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use crate::command::Prefix;
-use crate::{Core, Ctx, Effect};
+use crate::{Ctx, Effect};
 
 /// How many entries the kill ring keeps, Emacs's `kill-ring-max`.
 const KILL_RING_MAX: usize = 60;
 
-impl Ctx<'_> {
-    /// Pushes clipboard text the editor neither wrote nor took in onto the kill ring, saying
-    /// whether it did.
-    fn take_clipboard(&mut self) -> bool {
-        let core = &mut *self.core;
-        let Some(text) = core.clipboard.take() else {
-            return false;
-        };
-        if text.is_empty() || core.clipboard_seen.as_ref() == Some(&text) {
-            return false;
-        }
-        core.clipboard_seen = Some(text.clone());
-        core.kill_new(text);
-        true
-    }
+/// The kill ring and the system clipboard text it shares entries with.
+#[derive(Default)]
+pub(crate) struct KillRing {
+    /// Kills, newest first.
+    ring: VecDeque<String>,
+    /// The kill the next yank inserts.
+    yank_index: usize,
+    /// The clipboard's text for the key being handled, when its command asked for it.
+    pub(crate) clipboard: Option<String>,
+    /// The clipboard text the editor last wrote or took in, so it isn't pushed again.
+    clipboard_seen: Option<String>,
+}
 
+impl Ctx<'_> {
     /// Saves the text in `range` on the kill ring, deleting it unless `copy`. Right after a
     /// kill it joins the newest entry, in front of it when `backward`.
     fn kill(&mut self, range: Range<usize>, backward: bool, copy: bool) -> Result<(), String> {
-        let pushed = self.take_clipboard();
+        let pushed = self.core.kills.take_clipboard();
         let core = &mut *self.core;
         let text = (core.current().text().get_slice(range.clone()))
             .ok_or_else(|| format!("Region {range:?} is outside the buffer"))?
@@ -35,19 +34,19 @@ impl Ctx<'_> {
         if !copy {
             core.current_mut().delete(range)?;
         }
-        match core.kill_ring.front_mut() {
+        match core.kills.ring.front_mut() {
             Some(head) if !pushed && core.last_command == Some("kill-region") => {
                 if backward {
                     head.insert_str(0, &text);
                 } else {
                     head.push_str(&text);
                 }
-                core.yank_index = 0;
+                core.kills.yank_index = 0;
             }
-            _ => core.kill_new(text),
+            _ => core.kills.kill_new(text),
         }
-        let head = core.kill_ring[0].clone();
-        core.clipboard_seen = Some(head.clone());
+        let head = core.kills.ring[0].clone();
+        core.kills.clipboard_seen = Some(head.clone());
         self.effects.push(Effect::SetClipboard(head));
         // Every kill counts as `kill-region` so the next one joins it, as in Emacs.
         if !copy {
@@ -106,13 +105,13 @@ impl Ctx<'_> {
     /// Inserts the kill `n` on from the yank pointer, with the mark at its start; a plain `C-u`
     /// leaves point at the start instead.
     pub(crate) fn yank(&mut self, prefix: Option<Prefix>) -> Result<(), String> {
-        self.take_clipboard();
+        self.core.kills.take_clipboard();
         let n = match prefix {
             None | Some(Prefix::Universal(_)) => 0,
             Some(Prefix::Minus) => -2,
             Some(p) => p.value().saturating_sub(1),
         };
-        let text = self.core.current_kill(n)?;
+        let text = self.core.kills.current_kill(n)?;
         let core = &mut *self.core;
         let start = core.point();
         core.window.push_mark(&mut core.buffers, start, false)?;
@@ -128,7 +127,7 @@ impl Ctx<'_> {
         if self.core.last_command != Some("yank") {
             return Err("Previous command was not a yank".into());
         }
-        let text = self.core.current_kill(n)?;
+        let text = self.core.kills.current_kill(n)?;
         let (mark, point) = (self.mark()?, self.core.point());
         let start = point.min(mark);
         self.core.current_mut().delete(start..point.max(mark))?;
@@ -149,22 +148,36 @@ impl Ctx<'_> {
     }
 }
 
-impl Core {
+impl KillRing {
+    /// Pushes clipboard text the editor neither wrote nor took in onto the kill ring, saying
+    /// whether it did.
+    fn take_clipboard(&mut self) -> bool {
+        let Some(text) = self.clipboard.take() else {
+            return false;
+        };
+        if text.is_empty() || self.clipboard_seen.as_ref() == Some(&text) {
+            return false;
+        }
+        self.clipboard_seen = Some(text.clone());
+        self.kill_new(text);
+        true
+    }
+
     /// Puts `text` on the kill ring as a new entry, dropping the oldest past the limit.
     fn kill_new(&mut self, text: String) {
-        self.kill_ring.push_front(text);
-        self.kill_ring.truncate(KILL_RING_MAX);
+        self.ring.push_front(text);
+        self.ring.truncate(KILL_RING_MAX);
         self.yank_index = 0;
     }
 
     /// Moves the yank pointer `n` round the kill ring and returns that kill.
     fn current_kill(&mut self, n: i64) -> Result<String, String> {
-        let len = self.kill_ring.len() as i64;
+        let len = self.ring.len() as i64;
         if len == 0 {
             return Err("Kill ring is empty".into());
         }
         self.yank_index = (self.yank_index as i64 + n.rem_euclid(len)).rem_euclid(len) as usize;
-        Ok(self.kill_ring[self.yank_index].clone())
+        Ok(self.ring[self.yank_index].clone())
     }
 }
 
@@ -184,7 +197,7 @@ mod tests {
     }
 
     fn ring(h: &Harness) -> Vec<&str> {
-        h.core.kill_ring.iter().map(String::as_str).collect()
+        h.core.kills.ring.iter().map(String::as_str).collect()
     }
 
     #[test]
@@ -213,7 +226,7 @@ mod tests {
         for _ in 0..61 {
             h.keys("x C-SPC C-b C-w C-f");
         }
-        assert_eq!(h.core.kill_ring.len(), 60);
+        assert_eq!(h.core.kills.ring.len(), 60);
     }
 
     #[test]
