@@ -410,8 +410,8 @@ impl Ctx<'_> {
     fn set_text(&mut self, new: &str) -> Result<(), String> {
         let buffer = self.core.current_mut();
         let len = buffer.len_chars();
-        buffer.delete(0..len).map_err(|err| err.to_string())?;
-        buffer.insert(0, new).map_err(|err| err.to_string())?;
+        buffer.delete(0..len)?;
+        buffer.insert(0, new)?;
         self.goto(new.chars().count())
     }
 
@@ -688,9 +688,7 @@ impl Ctx<'_> {
             .ok_or_else(|| format!("Region {range:?} is outside the buffer"))?
             .to_string();
         if !copy {
-            core.current_mut()
-                .delete(range)
-                .map_err(|err| err.to_string())?;
+            core.current_mut().delete(range)?;
         }
         match core.kill_ring.front_mut() {
             Some(head) if !pushed && core.last_command == Some("kill-region") => {
@@ -768,9 +766,7 @@ impl Ctx<'_> {
         let text = self.core.current_kill(n)?;
         let core = &mut *self.core;
         let start = core.point();
-        core.window
-            .push_mark(&mut core.buffers, start, false)
-            .map_err(|err| err.to_string())?;
+        core.window.push_mark(&mut core.buffers, start, false)?;
         self.insert_n(&text, 1, false)?;
         if matches!(prefix, Some(Prefix::Universal(_))) {
             self.point_before_yank(start)?;
@@ -786,10 +782,7 @@ impl Ctx<'_> {
         let text = self.core.current_kill(n)?;
         let (mark, point) = (self.mark()?, self.core.point());
         let start = point.min(mark);
-        self.core
-            .current_mut()
-            .delete(start..point.max(mark))
-            .map_err(|err| err.to_string())?;
+        self.core.current_mut().delete(start..point.max(mark))?;
         self.insert_n(&text, 1, false)?;
         if point < mark {
             self.point_before_yank(start)?;
@@ -802,9 +795,7 @@ impl Ctx<'_> {
     fn point_before_yank(&mut self, start: usize) -> Result<(), String> {
         let core = &mut *self.core;
         let end = core.point();
-        core.window
-            .set_mark(&mut core.buffers, end)
-            .map_err(|err| err.to_string())?;
+        core.window.set_mark(&mut core.buffers, end)?;
         self.goto(start)
     }
 
@@ -915,9 +906,7 @@ impl Ctx<'_> {
     fn push_mark(&mut self, activate: bool) -> Result<(), String> {
         let core = &mut *self.core;
         let point = core.point();
-        core.window
-            .push_mark(&mut core.buffers, point, activate)
-            .map_err(|err| err.to_string())?;
+        core.window.push_mark(&mut core.buffers, point, activate)?;
         core.echo("Mark set".into());
         Ok(())
     }
@@ -936,9 +925,7 @@ impl Ctx<'_> {
         let mark = self.mark()?;
         let core = &mut *self.core;
         let point = core.point();
-        core.window
-            .set_mark(&mut core.buffers, point)
-            .map_err(|err| err.to_string())?;
+        core.window.set_mark(&mut core.buffers, point)?;
         core.window.set_active(true);
         self.goto(mark)
     }
@@ -951,9 +938,7 @@ impl Ctx<'_> {
     /// Moves point to `p`, which must be in the buffer.
     fn goto(&mut self, p: usize) -> Result<(), String> {
         let core = &mut *self.core;
-        core.window
-            .set_point(&mut core.buffers, p)
-            .map_err(|err| err.to_string())
+        Ok(core.window.set_point(&mut core.buffers, p)?)
     }
 
     /// Moves point to `target` clamped to the buffer, reporting an end it ran into.
@@ -1000,10 +985,7 @@ impl Ctx<'_> {
         let point = self.core.point();
         // shortcut: a huge count allocates without limit, as in Emacs; cap it if that bites.
         let text = text.repeat(n);
-        self.core
-            .current_mut()
-            .insert(point, &text)
-            .map_err(|err| err.to_string())?;
+        self.core.current_mut().insert(point, &text)?;
         if stay {
             return Ok(());
         }
@@ -1037,10 +1019,10 @@ impl Ctx<'_> {
     /// Deletes between point and `target`; point's marker moves to the range's start.
     fn delete_to(&mut self, target: usize) -> Result<(), String> {
         let point = self.core.point();
-        self.core
+        Ok(self
+            .core
             .current_mut()
-            .delete(point.min(target)..point.max(target))
-            .map_err(|err| err.to_string())
+            .delete(point.min(target)..point.max(target))?)
     }
 
     fn forward_word(&mut self, n: i64) -> Result<(), String> {
@@ -1368,7 +1350,7 @@ impl Ctx<'_> {
         }
         let len = buffer.text().len_chars();
         if len > 0 && buffer.text().char(len - 1) != '\n' {
-            buffer.insert(len, "\n").map_err(|err| err.to_string())?;
+            buffer.insert(len, "\n")?;
         }
         self.effects.push(Effect::Save {
             buffer: id,
@@ -1993,6 +1975,14 @@ impl Core {
     /// and polls again on a timer while the matcher is still running. A file prompt matches the
     /// text after the last `/`, asking for a listing when the part before it changes.
     fn poll_completion(&mut self, now: Instant, effects: &mut Effects) {
+        // Checked before copying the text: this runs after every message.
+        if !self
+            .minibuffer
+            .as_ref()
+            .is_some_and(|mb| mb.completion.is_some())
+        {
+            return;
+        }
         let text = self.text();
         let Some(completion) = (self.minibuffer.as_mut()).and_then(|mb| mb.completion.as_mut())
         else {
@@ -2234,6 +2224,7 @@ impl Core {
 
     /// The selected window's display model for a window `height` px high, mode line included.
     /// It has no width, so point's line never scrolls sideways.
+    #[cfg(test)]
     pub fn display(&mut self, height: f32) -> display::WindowDisplay {
         let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
         window_display(window, buffers, settings, height, usize::MAX)
@@ -2324,6 +2315,7 @@ impl Core {
     }
 
     /// The window's first line once point's line is among the `rows` it shows.
+    #[cfg(test)]
     pub fn scroll(&mut self, rows: usize) -> usize {
         self.window.scroll(&self.buffers, rows)
     }

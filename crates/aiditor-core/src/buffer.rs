@@ -49,6 +49,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<Error> for String {
+    fn from(err: Error) -> Self {
+        err.to_string()
+    }
+}
+
 impl From<ropey::Error> for Error {
     fn from(_: ropey::Error) -> Self {
         Error::OutOfRange

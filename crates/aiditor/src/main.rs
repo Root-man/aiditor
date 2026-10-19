@@ -42,7 +42,7 @@ struct Editor {
     /// The recovery service, when there is a data dir.
     recovery: Option<(std::sync::mpsc::Sender<Effect>, std::thread::JoinHandle<()>)>,
     /// Set by `--debug`: the stats line drawn at the top.
-    debug: Option<Debug>,
+    debug: Option<Stats>,
     /// The input method's marked text, drawn at point but not in the buffer.
     marked: Option<String>,
     /// The windows as last painted, for clicks, the wheel and the input method.
@@ -54,7 +54,7 @@ struct Editor {
 }
 
 #[derive(Default)]
-struct Debug {
+struct Stats {
     /// When the last frames were rendered, for the frame rate.
     frames: VecDeque<Instant>,
     /// How long the core took to handle the last message.
@@ -103,7 +103,7 @@ impl Editor {
             timer: None,
             config_dir: args.config_dir,
             recovery: args.recovery_dir.map(recovery::spawn),
-            debug: args.debug.then(Debug::default),
+            debug: args.debug.then(Stats::default),
             marked: None,
             painted: Vec::new(),
             reported: Default::default(),
@@ -132,7 +132,7 @@ impl Editor {
                         let result = files::write(&path, &bytes, hash);
                         match &result {
                             Ok(_) => tracing::info!(path = %path.display(), "saved"),
-                            Err(err) => tracing::error!(%err, "save failed"),
+                            Err(err) => tracing::info!(%err, "save failed"),
                         }
                         _ = tx.blocking_send(Msg::Saved {
                             buffer,
@@ -567,7 +567,7 @@ impl Render for Editor {
             .flex_col()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.foreground))
-            .font_family(settings.font_family.clone().unwrap_or(FONT.into()))
+            .font_family(font.family.clone())
             .text_size(px(settings.font_size))
             .children(stats.map(|s| line().child(s)))
             .child(
