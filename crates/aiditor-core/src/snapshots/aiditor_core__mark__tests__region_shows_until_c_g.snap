@@ -1,5 +1,5 @@
 ---
-source: crates/aiditor-core/src/harness.rs
+source: crates/aiditor-core/src/mark.rs
 expression: h.display(1).lines
 ---
 [
@@ -8,7 +8,17 @@ expression: h.display(1).lines
         height: 19.6,
         spans: [
             Span {
-                text: "hello",
+                text: "he",
+                face: Face {
+                    fg: None,
+                    bg: Some(
+                        2510712,
+                    ),
+                },
+                fold: false,
+            },
+            Span {
+                text: "llo",
                 face: Face {
                     fg: None,
                     bg: None,

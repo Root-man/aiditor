@@ -694,3 +694,300 @@ impl Core {
         self.window.point(&self.buffers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Msg;
+    use crate::command::ArgSpec;
+    use crate::command::Args;
+    use crate::command::Command;
+    use crate::command::Prefix;
+    use crate::harness::Harness;
+    use crate::harness::MS;
+    use crate::harness::bind_mode;
+    use crate::harness::insert_cmd;
+    use crate::harness::msg;
+    use crate::harness::name;
+    use crate::harness::on;
+    use crate::harness::test_cmd;
+    use crate::harness::twenty_lines;
+    use crate::key::parse_keys;
+    use crate::window::WindowId;
+
+    #[test]
+    fn calls_a_command_by_name_with_its_args() {
+        let mut h = Harness::new(&[]);
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                region: false,
+                prompts: &["Text: "],
+                ..ArgSpec::default()
+            },
+        );
+        let args = Args {
+            prefix: Some(Prefix::Number(3)),
+            strings: vec!["hello".into()],
+            ..Args::default()
+        };
+        h.call("test-cmd", args.clone());
+        assert_eq!(h.core.message(), Some(format!("{args:?}").as_str()));
+        h.core.message = None;
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            None,
+            "the handler waits for the minibuffer"
+        );
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Text: ");
+        h.keys("C-g");
+        h.call("no-such-command", Args::default());
+        assert_eq!(h.core.message(), Some("No command named no-such-command"));
+    }
+
+    #[test]
+    fn region_comes_from_the_caller_or_point_and_mark() {
+        let mut h = Harness::new(&[]);
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                region: true,
+                prompts: &[],
+                ..ArgSpec::default()
+            },
+        );
+        h.keys("abcde <left>");
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            Some("The mark is not set now, so there is no region")
+        );
+        let given = Args {
+            region: Some(0..2),
+            ..Args::default()
+        };
+        h.call("test-cmd", given.clone());
+        assert_eq!(h.core.message(), Some(format!("{given:?}").as_str()));
+        h.core.window.set_mark(&mut h.core.buffers, 1).unwrap();
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            Some("Args { prefix: None, region: Some(1..4), strings: [] }")
+        );
+    }
+
+    #[test]
+    fn handler_errors_go_to_the_message_line() {
+        let mut h = Harness::new(&[]);
+        h.core.register(Command {
+            name: "fail",
+            spec: ArgSpec::default(),
+            handler: |_, _| Err("boom".into()),
+        });
+        h.call("fail", Args::default());
+        assert_eq!(h.core.message(), Some("boom"));
+    }
+
+    #[test]
+    fn a_panicking_command_is_logged_and_the_editor_keeps_running() {
+        let mut h = on("");
+        h.core.register(Command {
+            name: "explode",
+            spec: ArgSpec::default(),
+            handler: |_, _| panic!("boom"),
+        });
+        h.keys("M-x explode RET");
+        let msg = "explode panicked; its state may be inconsistent (see *Messages*)";
+        assert_eq!(h.core.message(), Some(msg));
+        let log = messages(&h).unwrap();
+        assert!(log.contains(msg) && log.contains("boom"), "{log}");
+        assert!(log.contains("harness.rs:"), "no location: {log}");
+        assert!(log.contains("try_call"), "no backtrace: {log}");
+        h.keys("a");
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
+    fn command_errors_show_in_the_frame_until_the_next_key() {
+        let mut h = on("");
+        h.core.register(Command {
+            name: "fail",
+            spec: ArgSpec::default(),
+            handler: |_, _| Err("boom".into()),
+        });
+        h.call("fail", Args::default());
+        insta::assert_debug_snapshot!(h.frame(800., 600.));
+        h.keys("a");
+        assert_eq!(h.frame(800., 600.).message, None);
+    }
+
+    #[test]
+    fn echo_area_clears_on_click_not_on_scroll_or_timers() {
+        let mut h = twenty_lines();
+        h.keys("C-g");
+        h.send(Msg::Scroll {
+            window: WindowId(0),
+            lines: 2,
+        });
+        h.start_timer(MS, None, Msg::Tick);
+        h.advance(2 * MS);
+        assert_eq!(h.core.message(), Some("Quit"));
+        h.keys("M-z");
+        assert_eq!(h.core.message(), Some("M-z is undefined"));
+        h.send(Msg::Click {
+            window: WindowId(0),
+            line: 0,
+            col: 0,
+        });
+        assert_eq!(h.core.message(), None);
+    }
+
+    #[test]
+    fn one_shot_fires_once_at_its_deadline() {
+        let mut h = Harness::new(&[]);
+        h.start_timer(100 * MS, None, msg('a'));
+        h.advance(99 * MS);
+        assert_eq!(h.text(), "");
+        h.advance(MS).advance(100 * MS);
+        assert_eq!(h.text(), "a");
+        assert_eq!(h.core.next_deadline(), None);
+    }
+
+    #[test]
+    fn repeat_fires_each_interval_until_cancelled() {
+        let mut h = Harness::new(&[]);
+        let id = h.start_timer(100 * MS, Some(100 * MS), msg('a'));
+        h.advance(100 * MS).advance(100 * MS).advance(100 * MS);
+        assert_eq!(h.text(), "aaa");
+        h.cancel_timer(id);
+        h.advance(100 * MS);
+        assert_eq!(h.text(), "aaa");
+    }
+
+    #[test]
+    fn late_wake_up_does_not_catch_up() {
+        let mut h = Harness::new(&[]);
+        h.start_timer(100 * MS, Some(100 * MS), msg('a'));
+        h.advance(350 * MS);
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
+    fn cancelled_before_deadline_never_fires() {
+        let mut h = Harness::new(&[]);
+        let id = h.start_timer(100 * MS, None, msg('a'));
+        h.cancel_timer(id);
+        h.advance(200 * MS);
+        assert_eq!(h.text(), "");
+    }
+
+    #[test]
+    fn due_timers_fire_on_any_message() {
+        let mut h = Harness::new(&[]);
+        h.start_timer(100 * MS, None, msg('a'));
+        h.now += 100 * MS;
+        h.keys("b");
+        assert_eq!(h.text(), "ba");
+    }
+
+    #[test]
+    fn next_deadline_is_the_earliest_timer() {
+        let mut h = Harness::new(&[]);
+        let t0 = h.now;
+        h.start_timer(300 * MS, None, msg('a'));
+        h.start_timer(100 * MS, None, msg('b'));
+        assert_eq!(h.core.next_deadline(), Some(t0 + 100 * MS));
+    }
+
+    #[test]
+    fn key_sequences_run_commands_and_track_the_last_one() {
+        let mut h = Harness::new(&[]);
+        insert_cmd(&mut h);
+        h.keys("C-c t");
+        assert_eq!(h.text(), "hi");
+        assert_eq!(h.core.message(), Some("Some(\"test-insert\") None"));
+        h.keys("C-c t");
+        assert_eq!(h.text(), "hihi");
+        assert_eq!(
+            h.core.message(),
+            Some("Some(\"test-insert\") Some(\"test-insert\")")
+        );
+        assert_eq!(h.core.this_command(), None);
+        h.keys("C-x");
+        assert_eq!(h.core.last_command(), Some("test-insert"));
+        h.keys("C-g");
+        assert_eq!(h.core.last_command(), Some("keyboard-quit"));
+        h.keys("C-c t a");
+        assert_eq!(h.core.last_command(), Some("self-insert-command"));
+        h.keys("C-c t C-x C-q");
+        assert_eq!(h.core.last_command(), None);
+    }
+
+    #[test]
+    fn nested_calls_leave_command_tracking_alone() {
+        let mut h = Harness::new(&[]);
+        h.core.register(Command {
+            name: "test-nested",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                ctx.call("undo", Args::default());
+                Ok(())
+            },
+        });
+        bind_mode(&mut h, "global", "C-c n", "test-nested");
+        h.keys("a C-c n");
+        assert_eq!(h.text(), "");
+        assert_eq!(h.core.last_command(), Some("test-nested"));
+    }
+
+    #[test]
+    fn records_the_key_stream_until_taken() {
+        let mut h = Harness::new(&[]);
+        h.keys("x");
+        assert_eq!(h.core.take_recording(), None);
+        h.core.start_recording();
+        h.keys("a C-x C-g b");
+        assert_eq!(
+            h.core.take_recording(),
+            Some(parse_keys("a C-x C-g b").unwrap())
+        );
+        h.keys("c");
+        assert_eq!(h.core.take_recording(), None);
+    }
+
+    fn messages(h: &Harness) -> Option<String> {
+        let id = h.core.buffers.find("*Messages*")?;
+        Some(h.core.buffers.get(id).unwrap().text().to_string())
+    }
+
+    #[test]
+    fn echo_messages_and_log_lines_go_to_messages() {
+        let mut h = Harness::new(&[]);
+        assert_eq!(messages(&h), None);
+        h.keys("C-g C-g M-z");
+        h.send(Msg::Log("WARN aiditor: careful".into()));
+        assert_eq!(
+            messages(&h).unwrap(),
+            "Quit\nQuit\nM-z is undefined\nWARN aiditor: careful\n"
+        );
+        // Each part of a joined message gets its own line.
+        h.send(Msg::SettingsLoaded(Err("e1".into())));
+        h.send(Msg::KeymapLoaded(Err("e2".into())));
+        assert!(
+            messages(&h)
+                .unwrap()
+                .ends_with("careful\nsettings: e1\nkeymap: e2\n")
+        );
+    }
+
+    #[test]
+    fn messages_is_read_only_and_made_again_after_a_kill() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-g C-x b *Messages* RET a");
+        assert_eq!(name(&h), "*Messages*");
+        assert_eq!(h.core.message(), Some("Buffer is read-only"));
+        assert_eq!(h.text(), "Quit\nBuffer is read-only\n");
+        h.keys("C-x k RET C-g");
+        assert_eq!(messages(&h).unwrap(), "Quit\n");
+    }
+}

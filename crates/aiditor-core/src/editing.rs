@@ -88,3 +88,251 @@ impl Ctx<'_> {
             .delete(point.min(target)..point.max(target))?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Msg;
+    use crate::harness::Harness;
+    use crate::harness::mark;
+    use crate::harness::on;
+    use crate::key::Key;
+    use crate::key::KeyCode;
+    use std::ops::Range;
+
+    #[test]
+    fn types_into_a_buffer() {
+        let mut h = Harness::new(&[("src/a.txt", "on disk")]);
+        assert_eq!(
+            std::fs::read_to_string(h.path("src/a.txt")).unwrap(),
+            "on disk"
+        );
+        h.keys("hello RET wörld C-x C-s");
+        assert_eq!(h.text(), "hello\nwörld");
+        assert_eq!(h.point(), 11);
+        assert!(h.core.current().modified());
+        assert_eq!(h.core.current().name, "*scratch*");
+        assert!(h.core.current().file.is_none());
+    }
+
+    #[test]
+    fn undo_restores_text_and_point() {
+        let mut h = Harness::new(&[]);
+        h.keys("abc <left> DEL C-/");
+        assert_eq!((h.text().as_str(), h.point()), ("abc", 2));
+        let mut h = Harness::new(&[]);
+        h.keys("ab RET c C-/ C-_ C-x u");
+        assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        h.keys("C-? C-? C-?");
+        assert_eq!((h.text().as_str(), h.point()), ("ab\nc", 4));
+        assert_eq!(h.core.message(), None);
+        h.keys("C-?");
+        assert_eq!(h.core.message(), Some("No further redo information"));
+    }
+
+    #[test]
+    fn a_new_edit_clears_redo() {
+        let mut h = Harness::new(&[]);
+        h.keys("ab C-/ x C-?");
+        assert_eq!(h.text(), "x");
+        assert_eq!(h.core.message(), Some("No further redo information"));
+    }
+
+    #[test]
+    fn typing_amalgamates_up_to_twenty_chars() {
+        let mut h = Harness::new(&[]);
+        h.keys("hello C-/");
+        assert_eq!(h.text(), "");
+        h.keys("abcdefghijklmnopqrstuvwxy C-/");
+        assert_eq!(h.text(), "abcdefghijklmnopqrst");
+        let mut h = Harness::new(&[]);
+        h.keys("ab <left> <right> cd C-/");
+        assert_eq!(h.text(), "ab");
+    }
+
+    #[test]
+    fn nothing_to_undo() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-/");
+        assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        assert_eq!(h.core.message(), Some("No further undo information"));
+    }
+
+    #[test]
+    fn redo_ignores_shift() {
+        let mut h = Harness::new(&[]);
+        h.keys("a C-/");
+        let key = Key {
+            ctrl: true,
+            shift: true,
+            ..Key::plain(KeyCode::Char('?'))
+        };
+        h.core.handle(h.now, Msg::Key(key));
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
+    fn del_deletes_back_and_stops_at_the_start() {
+        let mut h = Harness::new(&[]);
+        h.keys("abc DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("ab", 2));
+        h.keys("DEL DEL DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("", 0));
+        assert_eq!(h.core.message(), Some("Beginning of buffer"));
+        assert!(h.core.current().modified());
+        h.keys("abcd C-u 2 DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("ab", 2));
+    }
+
+    #[test]
+    fn editing_keys_run_editing_commands() {
+        let mut h = on("ab cd");
+        for (keys, name) in [
+            ("x", "self-insert-command"),
+            ("RET", "newline"),
+            ("C-j", "electric-newline-and-maybe-indent"),
+            ("C-o", "open-line"),
+            ("C-d", "delete-char"),
+            ("DEL", "delete-backward-char"),
+            // Kills record themselves as kill-region, so the next kill joins them.
+            ("M-d", "kill-region"),
+            ("M-DEL", "kill-region"),
+        ] {
+            h.keys(keys);
+            assert_eq!(h.core.last_command(), Some(name), "{keys}");
+        }
+    }
+
+    #[test]
+    fn typing_repeats_by_the_prefix_argument() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-u 3 a");
+        assert_eq!((h.text().as_str(), h.point()), ("aaa", 3));
+        assert_eq!(h.core.last_command(), Some("self-insert-command"));
+        h.keys("C-/");
+        assert_eq!(h.text(), "", "one undo group");
+        h.keys("C-u RET");
+        assert_eq!((h.text().as_str(), h.point()), ("\n\n\n\n", 4));
+        h.keys("C-u 0 b");
+        assert_eq!(h.text(), "\n\n\n\n");
+        h.keys("C-- a");
+        assert_eq!(h.text(), "\n\n\n\n");
+        assert_eq!(h.core.message(), Some("Negative repetition argument -1"));
+    }
+
+    #[test]
+    fn newline_keys() {
+        let mut h = Harness::new(&[]);
+        h.keys("a C-u 2 C-j");
+        assert_eq!((h.text().as_str(), h.point()), ("a\n\n", 3));
+        let mut h = on("ab");
+        h.keys("C-f C-u 2 C-o");
+        assert_eq!((h.text().as_str(), h.point()), ("a\n\nb", 1));
+        h.keys("C-- C-o");
+        assert_eq!(h.core.message(), Some("Negative repetition argument -1"));
+    }
+
+    #[test]
+    fn delete_char_and_its_ends() {
+        let mut h = on("abc");
+        h.keys("C-d");
+        assert_eq!((h.text().as_str(), h.point()), ("bc", 0));
+        let mut h = on("abc");
+        h.keys("M-> C-- 2 C-d");
+        assert_eq!((h.text().as_str(), h.point()), ("a", 1));
+        let mut h = on("abc");
+        h.keys("C-u 2 C-f C-u 2 C-d");
+        assert_eq!(h.text(), "abc");
+        assert_eq!(h.core.message(), Some("End of buffer"));
+        h.keys("C-- 3 DEL");
+        assert_eq!(
+            h.text(),
+            "abc",
+            "negative DEL deletes forward, past the end"
+        );
+        assert_eq!(h.core.message(), Some("End of buffer"));
+    }
+
+    #[test]
+    fn kill_word_keys() {
+        let mut h = on("foo bar baz");
+        h.keys("M-d");
+        assert_eq!((h.text().as_str(), h.point()), (" bar baz", 0));
+        let mut h = on("foo bar baz");
+        h.keys("C-u 2 M-d");
+        assert_eq!(h.text(), " baz");
+        let mut h = on("foo bar");
+        h.keys("M-> M-DEL");
+        assert_eq!((h.text().as_str(), h.point()), ("foo ", 4));
+        h.keys("C-- M-d");
+        assert_eq!(
+            (h.text().as_str(), h.point()),
+            ("", 0),
+            "negative goes back"
+        );
+        let mut h = on("foo bar");
+        h.keys("M-> M-DEL C-y");
+        assert_eq!(h.text(), "foo bar", "the killed word yanks back");
+    }
+
+    #[test]
+    fn deletes_remove_an_active_region() {
+        for keys in ["C-e C-SPC C-a DEL", "C-a C-SPC C-e DEL", "C-SPC C-e C-d"] {
+            let mut h = on("hello\nx");
+            h.keys(keys);
+            assert_eq!((h.text().as_str(), h.point()), ("\nx", 0), "{keys}");
+            assert!(!mark(&h).1, "{keys}");
+        }
+        let mut h = on("hello");
+        h.keys("C-SPC C-f C-f C-g DEL");
+        assert_eq!(h.text(), "hllo", "an inactive mark deletes one char");
+        let mut h = on("hello");
+        h.keys("C-SPC C-f C-f C-f C-u 1 DEL");
+        assert_eq!(h.text(), "helo", "a prefix deletes chars, not the region");
+    }
+
+    fn insert(text: &str, replace: Option<Range<usize>>) -> Msg {
+        Msg::Insert {
+            text: text.into(),
+            replace,
+        }
+    }
+
+    #[test]
+    fn cmd_z_undoes_and_z_types() {
+        let mut h = Harness::new(&[]);
+        h.keys("a z");
+        assert_eq!(h.text(), "az");
+        h.keys("s-z");
+        assert_eq!(h.text(), "");
+    }
+
+    #[test]
+    fn input_methods_replace_typed_text() {
+        let mut h = Harness::new(&[]);
+        h.keys("e").send(insert("é", Some(0..1)));
+        assert_eq!((h.text().as_str(), h.point()), ("é", 1));
+        h.keys("C-/");
+        assert_eq!(h.text(), "", "one undo removes it");
+        h.send(insert("😀e", None)).send(insert("é", Some(2..3)));
+        assert_eq!(h.text(), "😀é");
+        #[allow(
+            clippy::reversed_empty_ranges,
+            reason = "a reversed range is one of the bad inputs"
+        )]
+        for bad in [(2..9), (3..2)] {
+            h.send(insert("x", Some(bad.clone())));
+            assert_eq!(h.text(), "😀é", "{bad:?}");
+            assert!(h.core.message().unwrap().contains("outside"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn inserted_text_acts_as_typed_keys() {
+        let mut h = Harness::new(&[]);
+        h.send(insert("ab", None));
+        h.keys("C-x").send(insert("u", None));
+        assert_eq!(h.text(), "", "C-x u undoes");
+        h.keys("C-u").send(insert("3a", None));
+        assert_eq!(h.text(), "aaa");
+    }
+}

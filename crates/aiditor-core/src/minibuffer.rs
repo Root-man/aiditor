@@ -364,3 +364,299 @@ impl Core {
         Some(mb)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Msg;
+    use crate::command::ArgSpec;
+    use crate::command::Args;
+    use crate::harness::Harness;
+    use crate::harness::ask;
+    use crate::harness::ask_completing;
+    use crate::harness::bind_mode;
+    use crate::harness::buffer;
+    use crate::harness::fruit;
+    use crate::harness::listed;
+    use crate::harness::on;
+    use crate::harness::strings;
+    use crate::harness::test_cmd;
+    use crate::minibuffer::HISTORY_MAX;
+    use crate::window::WindowId;
+
+    #[test]
+    fn a_key_script_answers_a_prompt() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p hello");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Text: ");
+        assert_eq!(h.text(), "hello");
+        h.keys("RET");
+        let got = h.core.message().unwrap().to_string();
+        assert!(
+            got.ends_with(&format!("strings: {} }}", strings(&["hello"]))),
+            "{got}"
+        );
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(
+            (h.text().as_str(), h.core.current().modified()),
+            ("text", false)
+        );
+        assert_eq!(h.core.last_command(), Some("test-cmd"));
+    }
+
+    #[test]
+    fn prompts_chain_and_keep_the_prefix_argument() {
+        let mut h = on("");
+        ask(&mut h, &["A: ", "B: "]);
+        h.keys("C-u 3 C-c p a RET");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "B: ");
+        h.keys("b RET");
+        assert_eq!(
+            h.core.message(),
+            Some(
+                format!(
+                    "Args {{ prefix: Some(Number(3)), region: None, strings: {} }}",
+                    strings(&["a", "b"])
+                )
+                .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn c_g_aborts_the_minibuffer() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p abc C-g");
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(
+            (h.text().as_str(), h.core.message()),
+            ("text", Some("Quit"))
+        );
+    }
+
+    #[test]
+    fn editing_keys_work_in_the_minibuffer() {
+        let mut h = on("");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p helo <left> l C-a x DEL C-e");
+        assert_eq!(h.text(), "hello");
+        h.keys("RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["hello"])));
+    }
+
+    #[test]
+    fn each_prompt_keeps_a_history() {
+        let mut h = on("");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p one RET C-c p two RET C-c p RET C-c p two RET C-c p x");
+        h.keys("M-p");
+        assert_eq!((h.text().as_str(), h.point()), ("two", 3));
+        h.keys("M-p");
+        assert_eq!(h.text(), "one", "empty and repeated answers are not kept");
+        h.keys("M-p");
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
+        assert_eq!(h.text(), "one");
+        h.keys("C-u 2 M-n");
+        assert_eq!(h.text(), "x", "back to what was typed");
+        h.keys("M-n");
+        assert_eq!(
+            h.core.message(),
+            Some("End of history; no default available")
+        );
+        assert_eq!(h.text(), "x");
+        h.keys("C-g");
+        ask(&mut h, &["Other: "]);
+        h.keys("C-c p M-p");
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
+    }
+
+    #[test]
+    fn history_keeps_a_hundred() {
+        let mut h = on("");
+        ask(&mut h, &["Text: "]);
+        for i in 0..=HISTORY_MAX {
+            h.keys(&format!("C-c p {i} RET"));
+        }
+        h.keys("C-c p C-u 100 M-p");
+        assert_eq!(h.text(), "1");
+        h.keys("M-p");
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
+    }
+
+    #[test]
+    fn the_minibuffer_stays_put_while_open() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-x 2 C-c p");
+        for keys in ["C-x 2", "C-x 3", "C-x o", "C-x 0", "C-x 1"] {
+            h.keys(keys);
+            assert!(h.core.message().is_some(), "{keys}");
+            assert_eq!(h.frame(800., 600.).windows.len(), 2, "{keys}");
+            assert!(h.core.minibuffer().is_some(), "{keys}");
+        }
+        // A prompt from the minibuffer is refused.
+        h.call("test-cmd", Args::default());
+        assert_eq!(
+            h.core.message(),
+            Some("Command attempted to use minibuffer while in minibuffer")
+        );
+        h.keys("ab").send(Msg::Click {
+            window: WindowId(0),
+            line: 0,
+            col: 2,
+        });
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!((h.text().as_str(), h.point()), ("text", 2));
+        assert_eq!(h.core.message(), None, "the command did not run");
+    }
+
+    #[test]
+    fn the_frame_shows_the_minibuffer() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p hi");
+        let frame = h.frame(800., 600.);
+        assert!(frame.windows.iter().all(|w| !w.selected));
+        insta::assert_debug_snapshot!(frame.minibuffer);
+        h.keys("C-g");
+        assert_eq!(h.frame(800., 600.).minibuffer, None);
+    }
+
+    #[test]
+    fn typing_filters_candidates() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p");
+        assert_eq!(listed(&mut h), (fruit(&h.core, &Args::default()), Some(0)));
+        h.keys("an");
+        assert_eq!(listed(&mut h), (vec!["banana".into()], Some(0)));
+        h.keys("DEL DEL ch");
+        assert_eq!(listed(&mut h).0, ["cherry"]);
+        h.keys("C-g");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p");
+        assert_eq!(listed(&mut h), (vec![], None), "a plain prompt has no list");
+    }
+
+    #[test]
+    fn c_n_and_c_p_move_the_selection() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p C-n C-n C-n");
+        assert_eq!(listed(&mut h).1, Some(2), "stops at the last");
+        h.keys("C-p");
+        assert_eq!(listed(&mut h).1, Some(1));
+        h.keys("C-u 5 C-p");
+        assert_eq!(listed(&mut h).1, Some(0), "stops at the first");
+        h.keys("C-n a");
+        assert_eq!(listed(&mut h).1, Some(0), "typing selects the first match");
+        h.keys("zzz C-n");
+        assert_eq!(h.core.message(), Some("No match"));
+        h.keys("C-g");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p ab C-p C-n");
+        assert_eq!(h.text(), "ab", "C-n and C-p keep their global bindings");
+    }
+
+    #[test]
+    fn tab_completes_and_ret_picks_the_selection() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p C-n TAB");
+        assert_eq!((h.text().as_str(), h.point()), ("banana", 6));
+        h.keys("C-g C-c p ch RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["cherry"])));
+        h.keys("C-c p zzz TAB");
+        assert_eq!(h.core.message(), Some("No match"));
+        h.keys("RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["zzz"])));
+    }
+
+    #[test]
+    fn the_frame_shows_the_completion_list() {
+        let mut h = on("");
+        ask_completing(&mut h, |_, _| {
+            (1..=15).map(|i| format!("item {i}")).collect()
+        });
+        h.keys("C-c p C-u 12 C-n");
+        let mb = h.frame(800., 600.).minibuffer.unwrap();
+        assert_eq!((mb.candidates.len(), mb.selected), (10, Some(9)));
+        insta::assert_debug_snapshot!((mb.candidates, mb.selected));
+        h.keys("C-u 9 C-p");
+        assert_eq!(
+            listed(&mut h).1,
+            Some(0),
+            "scrolls up only as far as needed"
+        );
+        assert_eq!(listed(&mut h).0[0], "item 4");
+    }
+
+    #[test]
+    fn annotations_are_listed_and_not_matched() {
+        let mut h = on("");
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(fruit),
+                annotation: Some(|_, c| (c != "cherry").then(|| format!("{c}-note"))),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        h.keys("C-c p");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.annotations, ["apple-note", "banana-note", ""]);
+        h.keys("note");
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn m_x_runs_a_command_by_name() {
+        let mut h = on("abc");
+        h.keys("C-u 2 M-x forward-char RET");
+        assert_eq!(h.point(), 2);
+        assert_eq!(h.core.last_command(), Some("forward-char"));
+        h.keys("M-x split-below");
+        assert_eq!(
+            h.core.selected_candidate().as_deref(),
+            Some("split-window-below")
+        );
+        h.keys("C-g M-x zzz-nothing RET");
+        assert!(h.core.message().unwrap().contains("zzz-nothing"));
+    }
+
+    #[test]
+    fn m_x_shows_each_commands_key() {
+        let mut h = on("");
+        let note = |h: &mut Harness, name: &str| {
+            h.keys(&format!("M-x {name}"));
+            let mb = h.core.minibuffer().unwrap();
+            let i = mb.candidates.iter().position(|c| c == name).unwrap();
+            let note = mb.annotations[i].clone();
+            h.keys("C-g");
+            note
+        };
+        assert_eq!(note(&mut h, "split-window-below"), "C-x 2");
+        assert_eq!(
+            note(&mut h, "undo"),
+            "C-/",
+            "shortest, then first in kbd order"
+        );
+        assert_eq!(note(&mut h, "exit-minibuffer"), "", "no key runs it here");
+        // A key a minor mode binds to something else no longer runs the command.
+        bind_mode(&mut h, "m", "C-x 2", "undo");
+        buffer(&mut h).minor_modes.push("m");
+        assert_eq!(note(&mut h, "split-window-below"), "");
+    }
+}

@@ -300,3 +300,24 @@ pub(crate) fn builtins() -> HashMap<&'static str, Command> {
     };
     commands
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::command::Args;
+    use crate::harness::Harness;
+
+    #[test]
+    fn builtins_are_callable_by_name() {
+        let mut h = Harness::new(&[("a.txt", ""), ("settings.toml", "font_size = 18")]);
+        h.open("a.txt");
+        h.keys("ab");
+        h.call("undo", Args::default());
+        assert_eq!(h.text(), "");
+        h.call("undo-redo", Args::default());
+        assert_eq!(h.text(), "ab");
+        h.call("save-buffer", Args::default());
+        assert_eq!(h.disk("a.txt"), "ab\n");
+        h.call("reload-settings", Args::default());
+        assert_eq!(h.core.settings().font_size, 18.0);
+    }
+}

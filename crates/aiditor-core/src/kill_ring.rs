@@ -167,3 +167,198 @@ impl Core {
         Ok(self.kill_ring[self.yank_index].clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::harness::Harness;
+    use crate::harness::bind_mode;
+    use crate::harness::mark;
+    use crate::harness::on;
+    use crate::key::parse_keys;
+
+    /// A buffer holding `text` with point at `p`.
+    fn at(text: &str, p: usize) -> Harness {
+        let mut h = on(text);
+        h.core.window.set_point(&mut h.core.buffers, p).unwrap();
+        h
+    }
+
+    fn ring(h: &Harness) -> Vec<&str> {
+        h.core.kill_ring.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn only_kill_and_yank_keys_want_the_clipboard() {
+        let mut h = on("");
+        let key = |s: &str| parse_keys(s).unwrap()[0];
+        assert!(h.core.wants_clipboard(key("C-y")));
+        assert!(h.core.wants_clipboard(key("s-c")));
+        assert!(!h.core.wants_clipboard(key("C-f")));
+        assert!(!h.core.wants_clipboard(key("M-y")));
+        bind_mode(&mut h, "global", "C-x y", "yank");
+        h.keys("C-x");
+        assert!(
+            h.core.wants_clipboard(key("y")),
+            "a prefix that ends in yank"
+        );
+        assert!(!h.core.wants_clipboard(key("C-y")));
+    }
+
+    #[test]
+    fn kills_yank_back_and_the_ring_keeps_sixty() {
+        let mut h = at("foo bar", 0);
+        h.keys("M-d M-> C-y");
+        assert_eq!(h.text(), " barfoo");
+        let mut h = on("");
+        for _ in 0..61 {
+            h.keys("x C-SPC C-b C-w C-f");
+        }
+        assert_eq!(h.core.kill_ring.len(), 60);
+    }
+
+    #[test]
+    fn kill_line() {
+        let mut h = at("ab\ncd", 1);
+        h.keys("C-k");
+        assert_eq!(h.text(), "a\ncd");
+        let mut h = at("ab\ncd", 2);
+        h.keys("C-k");
+        assert_eq!(h.text(), "abcd", "at the end of a line the newline goes");
+        let mut h = at("ab \ncd", 2);
+        h.keys("C-k");
+        assert_eq!(
+            h.text(),
+            "abcd",
+            "only blanks left, so the newline goes too"
+        );
+        let mut h = at("a\nb\nc", 0);
+        h.keys("C-u 2 C-k");
+        assert_eq!(h.text(), "c");
+        let mut h = at("ab\ncd", 4);
+        h.keys("C-u 0 C-k");
+        assert_eq!((h.text().as_str(), h.point()), ("ab\nd", 3));
+        let mut h = at("ab", 2);
+        h.keys("C-k");
+        assert_eq!(
+            (h.text().as_str(), h.core.message()),
+            ("ab", Some("End of buffer"))
+        );
+        let mut h = at("ab\ncd", 3);
+        h.keys("C-u 5 C-k");
+        assert_eq!(h.text(), "ab\n", "past the last line kills to the end");
+    }
+
+    #[test]
+    fn kill_region_and_copy() {
+        let mut h = at("abcd", 1);
+        h.keys("C-SPC C-f C-f C-w");
+        assert_eq!(
+            (h.text().as_str(), h.point(), h.core.window.active()),
+            ("ad", 1, false)
+        );
+        let mut h = at("ab", 0);
+        h.keys("C-SPC C-e M-w");
+        assert_eq!(
+            (h.core.window.active(), h.clipboard.as_deref()),
+            (false, Some("ab"))
+        );
+        h.keys("C-y");
+        assert_eq!(h.text(), "abab");
+        let mut h = on("ab");
+        h.keys("C-w");
+        assert_eq!(
+            h.core.message(),
+            Some("The mark is not set now, so there is no region")
+        );
+    }
+
+    #[test]
+    fn consecutive_kills_join() {
+        let mut h = at("ab\ncd", 0);
+        h.keys("C-k C-k");
+        assert_eq!(
+            (ring(&h), h.clipboard.as_deref()),
+            (vec!["ab\n"], Some("ab\n"))
+        );
+        h.keys("M-> C-y");
+        assert_eq!(h.text(), "cdab\n");
+        let mut h = at("foo bar", 4);
+        h.keys("M-d M-DEL C-y");
+        assert_eq!(h.text(), "foo bar", "killing backward prepends");
+        let mut h = at("ab\ncd", 0);
+        h.keys("C-k C-f C-k");
+        assert_eq!(ring(&h), ["cd", "ab"]);
+        let mut h = at("ab\ncd\nef", 0);
+        h.keys("C-SPC M-> C-p C-a C-k M-w C-k");
+        assert_eq!(
+            ring(&h),
+            ["\n", "cdab\n"],
+            "M-w joins a kill but a kill after it doesn't"
+        );
+    }
+
+    #[test]
+    fn yank_and_its_prefixes() {
+        let mut h = at("ab", 0);
+        h.keys("C-k C-y C-y");
+        assert_eq!((h.text().as_str(), h.point()), ("abab", 4));
+        let mut h = at("a\nb", 0);
+        h.keys("C-k C-d C-k C-u 2 C-y");
+        assert_eq!(h.text(), "a");
+        let mut h = at("ab", 0);
+        h.keys("C-k C-u C-y");
+        assert_eq!(
+            (h.text().as_str(), h.point(), mark(&h)),
+            ("ab", 0, (Some(2), false))
+        );
+        let mut h = on("");
+        h.keys("C-y");
+        assert_eq!(h.core.message(), Some("Kill ring is empty"));
+    }
+
+    #[test]
+    fn m_y_cycles_after_a_yank() {
+        let mut h = at("a\nb", 0);
+        h.keys("C-k C-d C-k C-y M-y");
+        assert_eq!(h.text(), "a");
+        h.keys("M-y");
+        assert_eq!((h.text().as_str(), h.point()), ("b", 1), "wraps round");
+        h.keys("C-f M-y");
+        assert_eq!(
+            (h.text().as_str(), h.core.message()),
+            ("b", Some("Previous command was not a yank"))
+        );
+        let mut h = at("a\nb", 0);
+        h.keys("C-k C-d C-k C-u C-y M-y");
+        assert_eq!(
+            (h.text().as_str(), h.point(), mark(&h).0),
+            ("a", 0, Some(1))
+        );
+    }
+
+    #[test]
+    fn clipboard_text_from_elsewhere_joins_the_ring() {
+        let mut h = on("");
+        h.clipboard = Some("xyz".into());
+        h.keys("C-y");
+        assert_eq!(h.text(), "xyz");
+        let mut h = at("ab", 0);
+        h.clipboard = Some("xyz".into());
+        h.keys("C-k");
+        assert_eq!(h.clipboard.as_deref(), Some("ab"));
+        h.keys("C-y M-y");
+        assert_eq!(h.text(), "xyz");
+        let mut h = at("ab", 0);
+        h.keys("C-k C-y");
+        assert_eq!(ring(&h), ["ab"], "the editor's own text isn't pushed again");
+        let mut h = at("ab\ncd", 0);
+        h.keys("C-k");
+        h.clipboard = Some("xyz".into());
+        h.keys("C-k");
+        assert_eq!(
+            ring(&h),
+            ["\n", "xyz", "ab"],
+            "a pushed clipboard ends the run"
+        );
+    }
+}

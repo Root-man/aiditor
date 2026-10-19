@@ -200,3 +200,460 @@ impl Core {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Msg;
+    use crate::command::Args;
+    use crate::harness::Harness;
+    use crate::harness::ask_completing;
+    use crate::harness::fruit;
+    use crate::harness::listed;
+    use crate::harness::name;
+    use crate::harness::on;
+    use crate::harness::strings;
+    use crate::window::WindowId;
+
+    #[test]
+    fn opens_edits_and_saves_a_file() {
+        let mut h = Harness::new(&[("a.txt", "hello")]);
+        h.open("a.txt");
+        assert_eq!(h.core.current().name, "a.txt");
+        assert_eq!(h.core.current().file, Some(h.path("a.txt")));
+        assert!(!h.core.current().modified());
+        assert_eq!(h.point(), 0);
+        h.keys("<right> X");
+        assert!(h.core.current().modified());
+        assert_eq!(h.disk("a.txt"), "hello");
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "hXello\n");
+        assert_eq!(h.text(), "hXello\n");
+        assert_eq!(h.point(), 2);
+        assert!(!h.core.current().modified());
+        let wrote = format!("Wrote {}", h.path("a.txt").display());
+        assert_eq!(h.core.message(), Some(wrote.as_str()));
+        h.keys("C-x C-s");
+        assert_eq!(h.core.message(), Some("(No changes need to be saved)"));
+    }
+
+    #[test]
+    fn refuses_to_save_over_a_file_changed_on_disk() {
+        let mut h = Harness::new(&[("a.txt", "old\n")]);
+        h.open("a.txt");
+        std::fs::write(h.path("a.txt"), "theirs\n").unwrap();
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("a.txt"), "theirs\n");
+        assert!(h.core.current().modified());
+        assert!(
+            h.core
+                .message()
+                .unwrap()
+                .ends_with("changed on disk; not saved")
+        );
+        // A file that appeared after it was opened as missing.
+        h.open("new.txt");
+        std::fs::write(h.path("new.txt"), "theirs").unwrap();
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("new.txt"), "theirs");
+    }
+
+    #[test]
+    fn saves_keep_the_bom_and_crlf() {
+        let mut h = Harness::new(&[("a.txt", "\u{feff}a\r\nb\r\n")]);
+        h.open("a.txt");
+        assert_eq!(h.text(), "a\nb\n");
+        assert_eq!(h.display(5).mode_line, "-- a.txt (DOS)  1:0");
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("a.txt"), "\u{feff}xa\r\nb\r\n");
+        // The saved hash is the next save's base.
+        h.keys("y C-x C-s");
+        assert_eq!(h.disk("a.txt"), "\u{feff}xya\r\nb\r\n");
+    }
+
+    #[test]
+    fn edits_during_a_save_stay_unsaved() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        h.open("a.txt");
+        h.keys("x");
+        let mut ctx = h.ctx();
+        ctx.call("save-buffer", Args::default());
+        let effects = ctx.effects;
+        h.keys("y");
+        h.run(effects);
+        assert_eq!(h.disk("a.txt"), "x\n");
+        assert!(h.core.current().modified());
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "xy\n");
+    }
+
+    #[test]
+    fn binary_and_non_utf8_files_open_empty_and_read_only() {
+        for (name, bytes) in [("a.bin", &b"a\0b"[..]), ("l1.txt", b"caf\xe9")] {
+            let mut h = Harness::new(&[]);
+            std::fs::write(h.path(name), bytes).unwrap();
+            h.open(name);
+            assert_eq!(h.text(), "");
+            assert!(h.core.message().unwrap().contains(", opened read-only"));
+            assert_eq!(h.display(5).mode_line, format!("%% {name}  1:0"));
+            h.keys("x");
+            assert_eq!(h.core.message(), Some("Buffer is read-only"));
+            h.keys("C-x C-s");
+            assert_eq!(std::fs::read(h.path(name)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn missing_file_opens_empty_and_is_written_on_save() {
+        let mut h = Harness::new(&[]);
+        h.open("new.txt");
+        assert_eq!(h.text(), "");
+        assert!(!h.path("new.txt").exists());
+        h.keys("hi C-x C-s");
+        assert_eq!(h.disk("new.txt"), "hi\n");
+    }
+
+    #[test]
+    fn failed_save_keeps_the_buffer_modified() {
+        let mut h = Harness::new(&[]);
+        h.open("no/such/dir/a.txt");
+        h.keys("x C-x C-s");
+        assert!(h.core.current().modified());
+        assert_eq!(h.text(), "x\n");
+        assert!(h.core.message().unwrap().contains("No such file"));
+    }
+
+    #[test]
+    fn c_x_b_lists_buffers_most_recent_first_and_goes_back() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").open("b");
+        h.core.buffers.create(" hidden");
+        h.keys("C-x b");
+        assert_eq!(
+            listed(&mut h),
+            (vec!["a".into(), "*scratch*".into(), "b".into()], Some(0))
+        );
+        h.keys("RET");
+        assert_eq!(name(&h), "a");
+        h.keys("C-x b RET");
+        assert_eq!(name(&h), "b");
+        h.keys("C-x b notes RET");
+        assert_eq!((name(&h), h.text().as_str()), ("notes", ""));
+    }
+
+    #[test]
+    fn two_files_with_one_name_get_unique_buffer_names() {
+        let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
+        h.open("a/x").open("b/x");
+        assert_eq!(h.core.buffer_names(true), ["x<2>", "x", "*scratch*"]);
+    }
+
+    #[test]
+    fn switching_back_restores_point() {
+        let mut h = Harness::new(&[("a", "hello")]);
+        h.open("a");
+        h.keys("C-f C-f C-f C-x b RET");
+        assert_eq!((name(&h), h.point()), ("*scratch*", 0));
+        h.keys("C-x b a RET");
+        assert_eq!((name(&h), h.point()), ("a", 3));
+    }
+
+    #[test]
+    fn c_x_4_b_switches_the_next_window() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        h.keys("C-x 4 b RET");
+        let leaves = h.core.tree.leaves();
+        assert_eq!((leaves.len(), h.core.selected), (2, leaves[1]));
+        assert_eq!(name(&h), "*scratch*");
+        let upper = h.core.others[&leaves[0]].buffer();
+        assert_eq!(h.core.buffers.get(upper).unwrap().name, "a");
+        // With two windows it uses the next one rather than splitting again.
+        h.keys("C-x 4 b RET");
+        assert_eq!(
+            (h.core.tree.leaves().len(), h.core.selected),
+            (2, leaves[0])
+        );
+    }
+
+    #[test]
+    fn c_x_k_kills_the_current_buffer_in_every_window() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        h.keys("C-x 2 C-x k");
+        assert_eq!(listed(&mut h).0, ["a", "*scratch*"]);
+        h.keys("RET");
+        assert_eq!((name(&h), h.core.buffers.find("a")), ("*scratch*", None));
+        let other = h.core.others[&WindowId(1)].buffer();
+        assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*");
+        h.keys("C-x k nope RET");
+        assert_eq!(h.core.message(), Some("No such buffer nope"));
+        // That message made *Messages*.
+        assert_eq!(h.core.buffers.recent().count(), 2);
+        h.keys("C-x k *Messages* RET");
+        assert_eq!(h.core.buffers.recent().count(), 1);
+        // Killing the last buffer leaves a new, empty *scratch*.
+        h.keys("x C-x k RET");
+        assert_eq!((name(&h), h.text().as_str()), ("*scratch*", ""));
+        assert_eq!(h.core.buffers.recent().count(), 1);
+    }
+
+    #[test]
+    fn killing_a_modified_file_buffer_asks() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        h.keys("x C-x k RET");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "Buffer modified; kill anyway? "
+        );
+        assert_eq!(listed(&mut h).0, ["no", "yes"]);
+        h.keys("RET");
+        assert_eq!((name(&h), h.text().as_str()), ("a", "x1"));
+        h.keys("C-x k RET yes RET");
+        assert_eq!(name(&h), "*scratch*");
+        assert_eq!(h.core.buffers.find("a"), None);
+    }
+
+    #[test]
+    fn quitting_with_nothing_modified_quits_at_once() {
+        for keys in ["C-x C-c", "s-q"] {
+            let mut h = Harness::new(&[]);
+            h.keys(keys);
+            assert!(h.quit, "{keys}");
+        }
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a");
+        // `*scratch*` visits no file, so it is not asked about.
+        h.keys("C-x b RET x C-x C-c");
+        assert!(h.core.minibuffer().is_none());
+        assert!(h.quit);
+    }
+
+    #[test]
+    fn quitting_offers_to_save_each_modified_file() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").keys("x").open("b").keys("y C-x C-c");
+        let prompt = |h: &mut Harness, name: &str| {
+            let path = h.path(name);
+            assert_eq!(
+                h.core.minibuffer().unwrap().prompt,
+                format!("Save file {}? ", path.display())
+            );
+        };
+        prompt(&mut h, "b");
+        assert_eq!(listed(&mut h).0, ["Yes", "No"]);
+        h.keys("RET");
+        prompt(&mut h, "a");
+        // Lowercase text still picks a candidate.
+        h.keys("y RET");
+        assert_eq!(
+            (h.disk("a").as_str(), h.disk("b").as_str()),
+            ("x1\n", "y2\n")
+        );
+        assert!(h.quit);
+    }
+
+    #[test]
+    fn declining_keeps_the_editor_open_unless_confirmed() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").keys("x").open("b").keys("y C-x C-c no RET RET");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "Modified buffers exist; exit anyway? "
+        );
+        assert_eq!(listed(&mut h).0, ["No", "Yes"]);
+        h.keys("RET");
+        // The answered `Yes` is still saved; the declined buffer is left alone.
+        assert!(!h.quit && h.core.minibuffer().is_none());
+        assert_eq!((h.disk("a").as_str(), h.disk("b").as_str()), ("x1\n", "2"));
+        assert!(h.core.current().modified());
+        h.keys("C-x C-c no RET yes RET");
+        assert!(h.quit);
+        assert_eq!(h.disk("b"), "2");
+    }
+
+    #[test]
+    fn a_failed_save_cancels_the_quit() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a").keys("x");
+        std::fs::write(h.path("a"), "theirs").unwrap();
+        h.keys("C-x C-c RET");
+        let msg = format!("{} changed on disk; not saved", h.path("a").display());
+        assert_eq!(h.core.message(), Some(msg.as_str()));
+        assert!(!h.quit);
+        // A later save that succeeds does not quit.
+        std::fs::write(h.path("a"), "1").unwrap();
+        h.keys("C-x C-s");
+        assert!(!h.quit);
+    }
+
+    #[test]
+    fn a_close_request_quits_the_same_way() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a").keys("x");
+        h.send(Msg::Quit);
+        assert!(h.core.minibuffer().is_some() && !h.quit);
+        h.keys("RET");
+        assert!(h.quit);
+    }
+
+    /// A harness visiting `d/a.txt`, with `d` holding `a.txt`, `b.txt` and `sub/c.txt`.
+    fn in_dir() -> Harness {
+        let mut h = Harness::new(&[("d/a.txt", "a"), ("d/b.txt", "hi"), ("d/sub/c.txt", "")]);
+        h.open("d/a.txt");
+        h
+    }
+
+    /// Types the temp dir's path for `name` as the platform's text input would.
+    fn type_path(h: &mut Harness, name: &str) {
+        let text = typed(h, name);
+        h.send(Msg::Insert {
+            text,
+            replace: None,
+        });
+    }
+
+    /// The temp dir's path for `name`, as typed at a prompt.
+    fn typed(h: &Harness, name: &str) -> String {
+        h.path(name).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn find_file_starts_at_the_buffer_directory_and_lists_it() {
+        let mut h = in_dir();
+        h.keys("C-x C-f");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Find file: ");
+        assert_eq!(h.text(), typed(&h, "d/"));
+        assert_eq!(listed(&mut h).0, ["a.txt", "b.txt", "sub/"]);
+        h.keys("b");
+        assert_eq!(listed(&mut h).0, ["b.txt", "sub/"]);
+        h.keys("DEL sub/");
+        assert_eq!(listed(&mut h).0, ["c.txt"]);
+        h.keys("C-g");
+        // A buffer without a file starts at the working directory.
+        h.keys("C-x b *scratch* RET C-x C-f");
+        let cwd = std::env::current_dir().unwrap().join("");
+        assert_eq!(h.text(), cwd.to_string_lossy());
+    }
+
+    #[test]
+    fn find_file_visits_an_existing_or_a_new_file() {
+        let mut h = in_dir();
+        h.keys("C-x C-f b.txt RET");
+        assert_eq!((name(&h), h.text().as_str()), ("b.txt", "hi"));
+        assert_eq!(h.core.current().file, Some(h.path("d/b.txt")));
+        assert!(!h.core.current().modified());
+        // M-RET keeps a new name that fuzzy-matches b.txt.
+        h.keys("C-x C-f bt M-RET");
+        assert_eq!((name(&h), h.text().as_str()), ("bt", ""));
+        assert!(!h.path("d/bt").exists());
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("d/bt"), "x\n");
+    }
+
+    #[test]
+    fn tab_completes_and_ret_enters_a_directory() {
+        let mut h = in_dir();
+        h.keys("C-x C-f b TAB");
+        assert_eq!(h.text(), typed(&h, "d/b.txt"));
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/s");
+        h.keys("RET");
+        assert_eq!(h.text(), typed(&h, "d/sub/"));
+        assert_eq!(listed(&mut h).0, ["c.txt"]);
+        h.keys("RET");
+        assert_eq!(name(&h), "c.txt");
+    }
+
+    #[test]
+    fn find_file_switches_to_a_visited_file() {
+        let mut h = in_dir();
+        h.keys("x C-x b *scratch* RET C-x C-f C-a C-k");
+        type_path(&mut h, "d/a.txt");
+        h.keys("RET");
+        assert_eq!((name(&h), h.text().as_str()), ("a.txt", "xa"));
+        assert_eq!(h.core.buffers.recent().count(), 2);
+        // A read that raced another find of the same file switches too.
+        h.send(Msg::Opened {
+            path: h.path("d/a.txt"),
+            result: Ok(None),
+        });
+        assert_eq!(
+            (h.core.buffers.recent().count(), h.text().as_str()),
+            (2, "xa")
+        );
+    }
+
+    #[test]
+    fn find_file_refuses_binary_files_and_directories() {
+        let mut h = in_dir();
+        std::fs::write(h.path("d/bin"), b"a\0b").unwrap();
+        h.keys("C-x C-f bin M-RET");
+        assert_eq!(name(&h), "a.txt");
+        let msg = format!("{}: binary file", h.path("d/bin").display());
+        assert_eq!(h.core.message(), Some(msg.as_str()));
+        h.keys("C-x C-f M-RET");
+        assert_eq!(name(&h), "a.txt");
+        assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/")));
+        // a.txt, *scratch* and *Messages*.
+        assert_eq!(h.core.buffers.recent().count(), 3);
+    }
+
+    #[test]
+    fn a_listing_error_shows_and_a_late_listing_is_dropped() {
+        let mut h = in_dir();
+        h.keys("C-x C-f nope/");
+        assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/nope/")));
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+        h.send(Msg::Listed {
+            dir: h.path("d"),
+            result: Ok(vec!["stale".into()]),
+        });
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_relative_name_lists_and_visits_from_the_buffer_directory() {
+        let mut h = in_dir();
+        h.keys("C-x C-f C-a C-k sub/");
+        assert_eq!(listed(&mut h).0, ["c.txt"]);
+        h.keys("RET");
+        assert_eq!(h.core.current().file, Some(h.path("d/sub/c.txt")));
+    }
+
+    #[test]
+    fn m_ret_returns_the_text_as_typed() {
+        let mut h = on("");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p ch M-RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["ch"])));
+    }
+
+    #[test]
+    fn del_deletes_a_whole_directory_in_a_file_prompt() {
+        let mut h = in_dir();
+        h.keys("C-x C-f sub/");
+        h.keys("DEL");
+        assert_eq!(h.text(), typed(&h, "d/"));
+        h.keys("sub");
+        h.keys("DEL");
+        assert_eq!(h.text(), typed(&h, "d/"));
+        // A file, a name nothing lists, or point before the end: one char.
+        h.keys("b.txt DEL");
+        assert_eq!(h.text(), typed(&h, "d/b.tx"));
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/sub/");
+        h.keys("<left> DEL");
+        assert_eq!(h.text(), typed(&h, "d/su/"));
+        // A prefix argument or an active region keeps plain DEL.
+        h.keys("C-e b/ C-u 1 DEL");
+        assert_eq!(h.text(), typed(&h, "d/su/b"));
+        h.keys("/ C-SPC DEL");
+        assert_eq!(h.text(), typed(&h, "d/su/b"));
+        // Other completing prompts delete a char.
+        h.keys("C-g");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p ab/ DEL");
+        assert_eq!(h.text(), "ab");
+    }
+}

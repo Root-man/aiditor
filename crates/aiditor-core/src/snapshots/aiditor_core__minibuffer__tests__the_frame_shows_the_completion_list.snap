@@ -1,5 +1,5 @@
 ---
-source: crates/aiditor-core/src/harness.rs
+source: crates/aiditor-core/src/minibuffer.rs
 expression: "(mb.candidates, mb.selected)"
 ---
 (
