@@ -1,6 +1,7 @@
 //! Async I/O services. They run on the Tokio runtime and message the core.
 
 pub mod files;
+pub mod projects;
 pub mod recovery;
 
 use aiditor_core::Msg;

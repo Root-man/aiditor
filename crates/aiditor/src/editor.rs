@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::element::{FrameElement, Painted, block, echo_line, text_run};
 use crate::input::to_key;
-use crate::{Args, FONT, read_config};
+use crate::{Args, FONT, read_config, read_projects};
 
 pub(crate) struct Editor {
     pub(crate) core: Core,
@@ -133,6 +133,8 @@ impl Editor {
                     let read = |name| read_config(dir.as_deref(), name);
                     self.handle(Msg::SettingsLoaded(read("settings.toml")), cx);
                     self.handle(Msg::KeymapLoaded(read("keymap.toml")), cx);
+                    let projects = read_projects(dir.as_deref());
+                    self.handle(Msg::ProjectsLoaded(projects), cx);
                 }
             }
         }
@@ -467,6 +469,41 @@ mod tests {
         assert!(!cx.simulate_close(), "the window stays open");
         let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
         assert_eq!(prompt.as_deref(), Some("Save file /nonexistent/t.txt? "));
+    }
+
+    #[gpui::test]
+    fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let args = Args {
+            config_dir: Some(dir.path().to_owned()),
+            ..Args::default()
+        };
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            Editor::new(
+                Core::default(),
+                args,
+                aiditor_services::channel(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.focus(&editor.read(cx).focus));
+        let projects = dir.path().join("projects");
+        std::fs::create_dir(&projects).unwrap();
+        let text = format!(
+            "name = \"p\"\n[primary]\npath = \"{}\"",
+            dir.path().display()
+        );
+        std::fs::write(projects.join("p.toml"), text).unwrap();
+        cx.simulate_keystrokes("ctrl-x ctrl-r");
+        let names = editor.read_with(cx, |e, _| {
+            e.core
+                .projects()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(names, ["p"]);
     }
 
     #[gpui::test]

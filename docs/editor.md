@@ -140,6 +140,22 @@ How a revert keeps point, mark and markers, and several file-watcher edge cases,
 A project is a TOML file in the editor's config dir that lists a primary repo and additional roots, each with a one-line role.
 
 - **Commands.** Create a project, add or remove a root, edit a root's role line, set the default agent, open the project file for editing. All available as keys and through `M-x`.
+- **File format** (built in [#56](https://github.com/Root-man/aiditor/issues/56)). Each project is a `*.toml` file in `projects/` under the config dir:
+
+  ```toml
+  name = "aiditor"
+  default_agent = "claude"        # optional
+
+  [primary]
+  path = "/Users/me/Repos/aiditor"
+  role = "The editor itself"
+
+  [[roots]]                       # zero or more
+  path = "/Users/me/Repos/zed"
+  role = "GPUI source, read only" # optional, empty by default
+  ```
+
+  Every file is read at launch and again on `C-x C-r`, which replaces the projects loaded before. A file is rejected when it is not valid TOML, has an unknown key or a wrong type, an empty name, a path that is not absolute or not a directory, or a role on more than one line; the echo area and `*Messages*` show `project <file>: <reason>`, and the other files still load. The core parses and checks the text through the settings module; `aiditor-services` lists the files and checks the paths exist. Not yet: `default_agent` is not checked against the agent registry, duplicate names are not caught, and a project's `env` overrides are not read.
 - Nested or overlapping roots, opening a folder without a project, and what "switch project" means are open questions.
 
 ## Workspaces
