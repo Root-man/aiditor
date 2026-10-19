@@ -202,14 +202,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         },
         Command {
             name: "save-buffers-kill-terminal",
-            spec: ArgSpec {
-                // Both prompts are opened by the handler; an odd count is mid-pair, a `Save file` one.
-                completion: Some(|_, args| match args.strings.len() % 2 {
-                    1 => vec!["Yes".into(), "No".into()],
-                    _ => vec!["No".into(), "Yes".into()],
-                }),
-                ..ArgSpec::default()
-            },
+            spec: ArgSpec::default(),
             handler: |ctx, args| ctx.save_buffers_kill_terminal(args),
         },
         Command {
@@ -349,22 +342,14 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "kill-buffer",
             spec: ArgSpec {
                 prompts: &["Kill buffer: "],
-                // The second prompt, opened by the handler, confirms killing a modified buffer.
-                completion: Some(|core, args| match args.strings.is_empty() {
-                    true => core.buffer_names(true),
-                    false => vec!["no".into(), "yes".into()],
-                }),
+                completion: Some(|core, _| core.buffer_names(true)),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.kill_buffer(args),
         },
         Command {
             name: "recover-buffers",
-            spec: ArgSpec {
-                // The prompt is opened by the handler.
-                completion: Some(|_, _| vec!["Yes".into(), "No".into()]),
-                ..ArgSpec::default()
-            },
+            spec: ArgSpec::default(),
             handler: |ctx, args| ctx.recover_buffers(args),
         },
         Command {

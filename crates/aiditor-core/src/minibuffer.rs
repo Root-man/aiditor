@@ -40,6 +40,8 @@ pub(crate) struct Minibuffer {
     input: String,
     /// The completion list, when the command completes over candidates.
     completion: Option<Completion>,
+    /// Whether the answer joins the prompt's history; a handler's own question keeps none.
+    history: bool,
 }
 
 /// The selection in a completing minibuffer's list of matches.
@@ -140,12 +142,14 @@ impl Ctx<'_> {
         }
     }
 
-    /// Opens the minibuffer at `prompt`; its answer then calls `command` again.
+    /// Opens the minibuffer at `prompt`; its answer then calls `command` again. `choices`, for
+    /// a handler's own question, replace the spec's completion and keep the answer out of history.
     pub(crate) fn read_string(
         &mut self,
         command: Command,
         args: Args,
         prompt: String,
+        choices: Option<&[&str]>,
     ) -> Result<(), String> {
         let core = &mut *self.core;
         if core.prompts.minibuffer.is_some() {
@@ -153,10 +157,10 @@ impl Ctx<'_> {
         }
         let base = core.directory();
         let start = (command.spec.files).then(|| base.join("").to_string_lossy().into_owned());
-        let candidates = command
-            .spec
-            .completion
-            .map(|candidates| candidates(core, &args));
+        let candidates = match choices {
+            Some(choices) => Some(choices.iter().map(|c| c.to_string()).collect()),
+            None => (command.spec.completion).map(|candidates| candidates(core, &args)),
+        };
         let completion = (candidates.is_some() || start.is_some()).then(|| {
             // One matcher for the core, as each one starts a thread pool.
             let matcher = core.prompts.matcher.get_or_insert_with(|| {
@@ -198,6 +202,7 @@ impl Ctx<'_> {
             index: 0,
             input: String::new(),
             completion,
+            history: choices.is_none(),
         });
         core.select(MINIBUFFER);
         match start {
@@ -225,10 +230,12 @@ impl Ctx<'_> {
         }
         let text = selected.unwrap_or_else(|| self.core.text());
         let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
-        let history = self.core.prompts.history.entry(mb.prompt).or_default();
-        if !text.is_empty() && history.first() != Some(&text) {
-            history.insert(0, text.clone());
-            history.truncate(HISTORY_MAX);
+        if mb.history {
+            let history = self.core.prompts.history.entry(mb.prompt).or_default();
+            if !text.is_empty() && history.first() != Some(&text) {
+                history.insert(0, text.clone());
+                history.truncate(HISTORY_MAX);
+            }
         }
         let mut args = mb.args;
         args.strings.push(text);
@@ -528,6 +535,43 @@ mod tests {
         assert_eq!(
             h.core.message(),
             Some("Beginning of history; no preceding item")
+        );
+    }
+
+    #[test]
+    fn a_command_asks_with_its_own_candidates() {
+        let mut h = on("");
+        h.core.register(crate::command::Command {
+            name: "test-cmd",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| {
+                let command = ctx.core.commands["test-cmd"];
+                let (prompt, choices): (&str, &[&str]) = match args.strings.len() {
+                    0 => ("First? ", &["a", "b"]),
+                    1 => ("Second? ", &["x", "y", "z"]),
+                    2 => ("Third? ", &["no", "yes"]),
+                    _ => {
+                        ctx.core.message = Some(format!("{args:?}"));
+                        return Ok(());
+                    }
+                };
+                ctx.read_string(command, args, prompt.into(), Some(choices))
+            },
+        });
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        h.keys("C-c p");
+        assert_eq!(listed(&mut h).0, ["a", "b"]);
+        h.keys("b RET");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Second? ");
+        assert_eq!(listed(&mut h).0, ["x", "y", "z"]);
+        h.keys("RET");
+        assert_eq!(listed(&mut h).0, ["no", "yes"]);
+        h.keys("RET");
+        assert!(
+            h.core
+                .message()
+                .unwrap()
+                .contains(&strings(&["b", "x", "no"]))
         );
     }
 

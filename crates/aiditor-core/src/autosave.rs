@@ -84,6 +84,7 @@ impl Ctx<'_> {
             command,
             Args::default(),
             format!("Recover auto-saved {what}? "),
+            Some(&["Yes", "No"]),
         )
     }
 }

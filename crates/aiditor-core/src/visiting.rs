@@ -52,6 +52,7 @@ impl Ctx<'_> {
                         command,
                         args,
                         "Buffer modified; kill anyway? ".into(),
+                        Some(&["no", "yes"]),
                     );
                 }
                 Some("yes") => {}
@@ -85,7 +86,8 @@ impl Ctx<'_> {
             && let Some((name, path)) = next
         {
             args.strings.push(name);
-            return self.read_string(command, args, format!("Save file {}? ", path.display()));
+            let prompt = format!("Save file {}? ", path.display());
+            return self.read_string(command, args, prompt, Some(&["Yes", "No"]));
         }
         let yes: Vec<String> = (args.strings.as_chunks::<2>().0.iter())
             .filter(|p| p[1].eq_ignore_ascii_case("yes"))
@@ -94,7 +96,7 @@ impl Ctx<'_> {
         let declined = yes.len() < args.strings.len() / 2;
         if declined && args.strings.len().is_multiple_of(2) {
             let prompt = "Modified buffers exist; exit anyway? ".into();
-            return self.read_string(command, args, prompt);
+            return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
         }
         let core = &mut *self.core;
         let saving: Vec<BufferId> = (yes.iter())
@@ -485,6 +487,23 @@ mod tests {
             ("x1\n", "y2\n")
         );
         assert!(h.quit);
+    }
+
+    #[test]
+    fn confirmations_keep_no_history() {
+        let mut h = Harness::new(&[("a", "1")]);
+        h.open("a").keys("x C-x C-c no RET no RET C-x C-c M-p");
+        assert!(
+            h.core
+                .minibuffer()
+                .unwrap()
+                .prompt
+                .starts_with("Save file ")
+        );
+        assert_eq!(
+            h.core.message(),
+            Some("Beginning of history; no preceding item")
+        );
     }
 
     #[test]
