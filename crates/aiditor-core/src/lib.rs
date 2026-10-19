@@ -230,7 +230,7 @@ impl Ctx<'_> {
             args.region = Some(point.min(mark)..point.max(mark));
         }
         if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
-            return self.read_string(command, args, prompt.into());
+            return self.read_string(command, args, prompt.into(), None);
         }
         PANIC_HOOK.call_once(|| {
             let previous = panic::take_hook();
