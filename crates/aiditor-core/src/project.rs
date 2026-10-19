@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,10 +25,25 @@ pub struct Root {
     pub role: String,
 }
 
+/// A project and the file it lives in, with the text last read from or written to it; no file
+/// while it is ad-hoc.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loaded {
+    pub project: Project,
+    pub file: Option<(PathBuf, String)>,
+}
+
 impl Project {
     /// Parses a project file's text and checks what can be checked without the filesystem.
     pub fn parse(text: &str) -> Result<Self, String> {
         let project: Project = crate::settings::load("", Some(text))?;
+        project.check()?;
+        Ok(project)
+    }
+
+    /// The checks `parse` runs after reading the text.
+    pub fn check(&self) -> Result<(), String> {
+        let project = self;
         if project.name.trim().is_empty() {
             return Err("name is empty".into());
         }
@@ -52,12 +68,67 @@ impl Project {
                 }
             }
         }
-        Ok(project)
+        Ok(())
     }
 
     /// The primary root, then the additional ones.
     pub fn all_roots(&self) -> impl Iterator<Item = &Root> {
         std::iter::once(&self.primary).chain(&self.roots)
+    }
+}
+
+/// Changes `doc`, a project file, to hold `project`, setting only what differs so the file's
+/// comments and layout stay.
+pub fn sync(doc: &mut DocumentMut, project: &Project) {
+    set(doc.as_table_mut(), "name", &project.name);
+    let agent = project.default_agent.as_deref().unwrap_or_default();
+    set(doc.as_table_mut(), "default_agent", agent);
+    let primary = (doc.entry("primary").or_insert(toml_edit::table()))
+        .as_table_like_mut()
+        .expect("a loaded project's primary is a table");
+    set(primary, "path", &project.primary.path.to_string_lossy());
+    set(primary, "role", &project.primary.role);
+    let mut old: Vec<Table> = match doc.remove("roots") {
+        Some(Item::ArrayOfTables(roots)) => roots.into_iter().collect(),
+        Some(Item::Value(Value::Array(roots))) => (roots.into_iter())
+            .filter_map(|root| match root {
+                Value::InlineTable(root) => Some(root.into_table()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Tables print sorted by position, stably, so one shared position keeps the roots' order.
+    let start = old.iter().filter_map(Table::position).min();
+    let mut roots = ArrayOfTables::new();
+    for root in &project.roots {
+        let path = root.path.to_string_lossy();
+        let same = |t: &Table| t.get("path").and_then(Item::as_str) == Some(&*path);
+        let mut table = old
+            .iter()
+            .position(same)
+            .map_or_else(Table::new, |i| old.remove(i));
+        set(&mut table, "path", &path);
+        set(&mut table, "role", &root.role);
+        table.set_position(start);
+        roots.push(table);
+    }
+    if !roots.is_empty() {
+        doc.insert("roots", Item::ArrayOfTables(roots));
+    }
+}
+
+/// Sets `key` to `value`, keeping the old value's comments, or removes it when `value` is empty.
+fn set(table: &mut dyn TableLike, key: &str, value: &str) {
+    match table.get_mut(key) {
+        _ if value.is_empty() => _ = table.remove(key),
+        Some(Item::Value(old)) if old.as_str() == Some(value) => {}
+        Some(Item::Value(old)) => {
+            let decor = old.decor().clone();
+            *old = value.into();
+            *old.decor_mut() = decor;
+        }
+        _ => _ = table.insert(key, toml_edit::value(value)),
     }
 }
 
@@ -148,6 +219,61 @@ path = "/r/notes"
             let err = Project::parse(text).unwrap_err();
             assert!(err.contains(needle), "{text:?}: {err}");
         }
+    }
+
+    #[test]
+    fn sync_changes_only_what_differs() {
+        let text = r#"# My project
+name = "aiditor"
+default_agent = "claude" # for now
+
+[primary]
+path = "/r/aiditor"
+role = "The editor itself"
+
+# GPUI
+[[roots]]
+path = "/r/zed"
+role = "GPUI source"
+
+[[roots]]
+path = "/r/notes"
+"#;
+        let mut p = Project::parse(text).unwrap();
+        let mut doc: DocumentMut = text.parse().unwrap();
+        sync(&mut doc, &p);
+        assert_eq!(
+            doc.to_string(),
+            text,
+            "an unchanged project leaves the text alone"
+        );
+        p.default_agent = None;
+        p.primary.role = "Editor".into();
+        p.roots.swap(0, 1);
+        p.roots[0].role = "Notes".into();
+        p.roots[1].role.clear();
+        p.roots.push(Root {
+            path: "/r/new".into(),
+            role: "New".into(),
+        });
+        sync(&mut doc, &p);
+        let got = doc.to_string();
+        assert_eq!(Project::parse(&got).unwrap(), p, "{got}");
+        for kept in ["# My project", "# GPUI\n[[roots]]\npath = \"/r/zed\""] {
+            assert!(got.contains(kept), "{kept:?} in {got}");
+        }
+        p.roots.clear();
+        sync(&mut doc, &p);
+        let got = doc.to_string();
+        assert_eq!(Project::parse(&got).unwrap(), p, "{got}");
+        // An inline primary and roots array are edited too.
+        let inline = "name = \"x\"\nprimary = { path = \"/r/x\" }\nroots = [{ path = \"/r/y\" }]\n";
+        let mut p = Project::parse(inline).unwrap();
+        let mut doc: DocumentMut = inline.parse().unwrap();
+        p.primary.role = "X".into();
+        p.roots[0].role = "Y".into();
+        sync(&mut doc, &p);
+        assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
     }
 
     #[test]

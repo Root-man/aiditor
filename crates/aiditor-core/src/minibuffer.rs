@@ -156,10 +156,14 @@ impl Ctx<'_> {
             return Err("Command attempted to use minibuffer while in minibuffer".into());
         }
         let base = core.directory();
-        let start = (command.spec.files).then(|| base.join("").to_string_lossy().into_owned());
+        let files = command.spec.files == Some(args.strings.len());
+        let start = files.then(|| base.join("").to_string_lossy().into_owned());
         let candidates = match choices {
             Some(choices) => Some(choices.iter().map(|c| c.to_string()).collect()),
-            None => (command.spec.completion).map(|candidates| candidates(core, &args)),
+            // No candidates is a plain prompt, so one command can mix completing and free text.
+            None => (command.spec.completion)
+                .map(|candidates| candidates(core, &args))
+                .filter(|c: &Vec<String>| !c.is_empty()),
         };
         let completion = (candidates.is_some() || start.is_some()).then(|| {
             // One matcher for the core, as each one starts a thread pool.
@@ -180,7 +184,7 @@ impl Ctx<'_> {
                 selected: 0,
                 top: 0,
                 // Nothing listed yet; `poll_completion` asks for the start directory.
-                dir: command.spec.files.then(String::new),
+                dir: files.then(String::new),
                 listed: false,
                 base,
             }

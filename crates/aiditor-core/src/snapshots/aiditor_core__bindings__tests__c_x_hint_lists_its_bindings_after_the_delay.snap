@@ -59,6 +59,10 @@ Some(
                 "other-window",
             ),
             (
+                "p",
+                "+prefix",
+            ),
+            (
                 "u",
                 "undo",
             ),
