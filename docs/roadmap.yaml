@@ -496,9 +496,10 @@ milestones:
           - key: m1-project-commands
             title: "Project commands"
             body: |
-              Create a project, add or remove a root, edit a root's role line, set the default agent, open the project file for editing. All as keys and `M-x`.
+              Create a project, add or remove a root, edit a root's role line, set the default agent, open the project file for editing. Save an ad-hoc project (one made by opening a folder) to `projects/`. All as keys and `M-x`.
             acceptance:
               - "A project can be created and edited entirely from the editor"
+              - "Saving an ad-hoc project writes a project file that loads back as the same project"
             blocked_by: [m1-project-file, m1-decide-roots]
           - key: m1-decide-switch
             title: "Decide: what \"switch project\" does"
@@ -541,9 +542,10 @@ milestones:
           - key: m1-ws-commands
             title: "Workspace commands"
             body: |
-              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`.
+              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`. Open folder: a folder named on the command line or picked with an open-folder command gets an ad-hoc in-memory project (folder as primary, its name as the project name) and a workspace for it; nothing is written to disk.
             acceptance:
               - "Key-script tests for each command"
+              - "Opening a folder without a project gives a workspace on an ad-hoc project and writes no file"
             blocked_by: [m1-ws-model, m1-decide-switch]
           - key: m1-ws-strip
             title: "Workspace strip in the frontend"

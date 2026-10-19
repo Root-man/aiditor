@@ -932,12 +932,18 @@ mod tests {
     fn projects_load_and_their_errors_share_the_echo_line() {
         let mut h = Harness::new(&[]);
         let ok = crate::Project::parse("name = \"a\"\n[primary]\npath = \"/r/a\"").unwrap();
+        // Projects may share a root.
+        let shared = crate::Project::parse(
+            "name = \"d\"\n[primary]\npath = \"/r/d\"\n[[roots]]\npath = \"/r/a\"",
+        )
+        .unwrap();
         h.send(Msg::ProjectsLoaded(vec![
             Err("b.toml: /r/b does not exist".into()),
             Ok(ok.clone()),
             Err("c.toml: name is empty".into()),
+            Ok(shared.clone()),
         ]));
-        assert_eq!(h.core.projects(), [ok]);
+        assert_eq!(h.core.projects(), [ok, shared]);
         assert_eq!(
             h.core.message(),
             Some("project b.toml: /r/b does not exist; project c.toml: name is empty")
