@@ -2,12 +2,12 @@
 
 ## 1. Split main.rs (commit 1: pure move)
 
-- [ ] 1.1 Move `Editor`, `Debug`, `impl Editor` (effects, mouse handlers, `font`, `painted_at`), `spawn_heartbeat` and `impl Render for Editor` to `crates/aiditor/src/editor.rs`; verify the moved code is byte-identical apart from `use`s and `pub(crate)` (`git diff --stat -M` shows moves, `git diff --color-moved` shows no edited lines)
-- [ ] 1.2 Move `to_key`, `impl EntityInputHandler for Editor` and the IME helpers `ime_point`, `to_buffer`, `buffer_range` (as a second `impl Editor` block) to `crates/aiditor/src/input.rs`, with the same check
-- [ ] 1.3 Move `Painted`, `Row`, `FrameElement`, `to_bounds`, `text_run`, `echo_line`, `line_runs` to `crates/aiditor/src/element.rs`, with the same check
-- [ ] 1.4 Leave `USAGE`, `Args`, `parse_args`, `LogPipe`, `messages_layer`, `read_config`, `FONT` and `main` in `main.rs` with `mod editor; mod element; mod input;`; verify `main.rs` holds only startup code
-- [ ] 1.5 Move tests with their code: arg and logging tests stay in `main.rs`, `sorts_command_keys_from_typing` and `key` to `input.rs`, the gpui tests, their helpers and `the_echo_line_is_one_string_with_point_in_it` to `editor.rs`; verify `cargo test -p aiditor` runs the same test count as before
-- [ ] 1.6 Verify `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, then commit the move alone
+- [x] 1.1 Move `Editor`, `Debug`, `impl Editor` (effects, mouse handlers, `font`, `painted_at`), `spawn_heartbeat` and `impl Render for Editor` to `crates/aiditor/src/editor.rs`; verify the moved code is byte-identical apart from `use`s and `pub(crate)` (`git diff --stat -M` shows moves, `git diff --color-moved` shows no edited lines)
+- [x] 1.2 Move `to_key`, `impl EntityInputHandler for Editor` and the IME helpers `ime_point`, `to_buffer`, `buffer_range` (as a second `impl Editor` block) to `crates/aiditor/src/input.rs`, with the same check
+- [x] 1.3 Move `Painted`, `Row`, `FrameElement`, `to_bounds`, `text_run`, `echo_line`, `line_runs` to `crates/aiditor/src/element.rs`, with the same check
+- [x] 1.4 Leave `USAGE`, `Args`, `parse_args`, `LogPipe`, `messages_layer`, `read_config`, `FONT` and `main` in `main.rs` with `mod editor; mod element; mod input;`; verify `main.rs` holds only startup code
+- [x] 1.5 Move tests with their code: arg and logging tests stay in `main.rs`, `sorts_command_keys_from_typing` and `key` to `input.rs`, the gpui tests, their helpers and `the_echo_line_is_one_string_with_point_in_it` to `editor.rs`; verify `cargo test -p aiditor` runs the same test count as before
+- [x] 1.6 Verify `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, then commit the move alone
 
 ## 2. Frame display carries hint and title (commit 2)
 
