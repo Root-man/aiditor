@@ -3,8 +3,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use aiditor_core::project::Project;
 use aiditor_core::{Core, Msg};
-use aiditor_services::{files, recovery};
+use aiditor_services::{files, projects, recovery};
 use gpui::{App, Application, WindowOptions, prelude::*};
 use tokio::sync::mpsc;
 use tracing_subscriber::prelude::*;
@@ -33,6 +34,10 @@ fn read_config(dir: Option<&Path>, name: &str) -> Result<Option<String>, String>
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(format!("{}: {err}", path.display())),
     }
+}
+
+fn read_projects(dir: Option<&Path>) -> Vec<Result<Project, String>> {
+    dir.map_or_else(Vec::new, |dir| projects::read(&dir.join("projects")))
 }
 
 const USAGE: &str = "usage: aiditor [--config-dir DIR] [--debug] [FILE]";
@@ -128,6 +133,7 @@ fn main() {
         Instant::now(),
         Msg::KeymapLoaded(read_config(dir, "keymap.toml")),
     );
+    core.handle(Instant::now(), Msg::ProjectsLoaded(read_projects(dir)));
     if let Some(arg) = args.file.take() {
         let path = std::path::absolute(&arg).unwrap_or(arg);
         let file = files::read(&path).unwrap_or_else(|err| {
