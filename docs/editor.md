@@ -160,7 +160,7 @@ A project is a TOML file in the editor's config dir that lists a primary repo an
   - **Within one project**, roots never overlap: a root that is the same as or inside another, the primary included, rejects the file with `project <file>: <inner> is inside <outer>`. Find-file, grep and the watchers then see each file once, under one role line. Paths are compared as written, so symlinks and `..` are not resolved.
   - **Across projects**, roots may be shared or overlap (`~/Repos/zed` in several projects): every workspace is bound to one project, so a shared root is never ambiguous, and nothing is checked across files.
   - **A folder without a project** (named on the command line or opened with an open-folder command, [#64](https://github.com/Root-man/aiditor/issues/64)) gets an ad-hoc project held in memory, with the folder as primary and its name as the project name, and a workspace for it. Nothing is written until a save-project command ([#58](https://github.com/Root-man/aiditor/issues/58)) writes it to `projects/`.
-- What "switch project" means is an open question.
+- **Switch project** (decided in [#59](https://github.com/Root-man/aiditor/issues/59), built with the workspace commands in [#64](https://github.com/Root-man/aiditor/issues/64)) prompts for a project with completion, then shows that project's most recently shown workspace, or creates a workspace for it and shows that when it has none. It never asks a second question: another workspace on the same project comes from New workspace.
 
 ## Workspaces
 
@@ -333,7 +333,6 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Projects and workspaces**
 
-- What "switch project" does now that workspaces are bound to projects: jump to an existing workspace of that project, or create one.
 - Where the Messages buffer lives, given that every buffer belongs to one workspace.
 - Settings per language and per project (indent width, `.editorconfig`), themes and fonts.
 
