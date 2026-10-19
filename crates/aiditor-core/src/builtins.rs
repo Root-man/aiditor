@@ -1,8 +1,16 @@
 //! The built-in commands.
 
-use crate::Effect;
 use crate::command::{ArgSpec, Args, Command, Prefix};
 use crate::key::{Key, KeyCode};
+use crate::{Core, Effect};
+
+/// Completes the first prompt over the projects' names and leaves the others free.
+fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
+    match args.strings.len() {
+        0 => core.project_names(false),
+        _ => Vec::new(),
+    }
+}
 
 /// The built-in commands, each with its spec.
 pub(crate) fn builtins() -> Vec<Command> {
@@ -209,10 +217,81 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "find-file",
             spec: ArgSpec {
                 prompts: &["Find file: "],
-                files: true,
+                files: Some(0),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.find_file(&args.strings[0]),
+        },
+        Command {
+            name: "project-create",
+            spec: ArgSpec {
+                prompts: &["Project name: ", "Primary root: "],
+                files: Some(1),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.create_project(&args.strings[0], &args.strings[1]),
+        },
+        Command {
+            name: "project-save",
+            spec: ArgSpec {
+                prompts: &["Save project: "],
+                completion: Some(|core, _| core.project_names(true)),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.save_project(&args.strings[0]),
+        },
+        Command {
+            name: "project-add-root",
+            spec: ArgSpec {
+                prompts: &["Project: ", "Add root: ", "Role: "],
+                completion: Some(projects_then_free),
+                files: Some(1),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.add_root(&args),
+        },
+        Command {
+            name: "project-remove-root",
+            spec: ArgSpec {
+                prompts: &["Project: ", "Remove root: "],
+                completion: Some(|core, args| match args.strings.len() {
+                    0 => core.project_names(false),
+                    _ => core.root_paths(args, false),
+                }),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.remove_root(&args),
+        },
+        Command {
+            name: "project-set-role",
+            spec: ArgSpec {
+                prompts: &["Project: ", "Root: ", "Role: "],
+                completion: Some(|core, args| match args.strings.len() {
+                    0 => core.project_names(false),
+                    1 => core.root_paths(args, true),
+                    _ => Vec::new(),
+                }),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.set_role(&args),
+        },
+        Command {
+            name: "project-set-default-agent",
+            spec: ArgSpec {
+                prompts: &["Project: ", "Default agent: "],
+                completion: Some(projects_then_free),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.set_default_agent(&args),
+        },
+        Command {
+            name: "project-open-file",
+            spec: ArgSpec {
+                prompts: &["Project: "],
+                completion: Some(projects_then_free),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.open_project_file(&args.strings[0]),
         },
         Command {
             name: "reload-settings",

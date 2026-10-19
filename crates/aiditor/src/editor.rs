@@ -133,8 +133,7 @@ impl Editor {
                     let read = |name| read_config(dir.as_deref(), name);
                     self.handle(Msg::SettingsLoaded(read("settings.toml")), cx);
                     self.handle(Msg::KeymapLoaded(read("keymap.toml")), cx);
-                    let projects = read_projects(dir.as_deref());
-                    self.handle(Msg::ProjectsLoaded(projects), cx);
+                    self.handle(read_projects(dir.as_deref()), cx);
                 }
             }
         }

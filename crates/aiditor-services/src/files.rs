@@ -40,6 +40,9 @@ pub fn run(op: FileOp) -> Msg {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
             Msg::Opened { path, result }
         }
+        FileOp::WriteProject { path, old, text } => {
+            Msg::ProjectWritten(crate::projects::write(&path, old.as_deref(), text))
+        }
     }
 }
 
@@ -81,6 +84,7 @@ pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, St
     let err = |e: io::Error| format!("{}: {e}", path.display());
     let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
     if on_disk != expected {
+        // `projects::write` rewrites "not saved" in this message.
         return Err(format!("{} changed on disk; not saved", path.display()));
     }
     // A missing file or a dangling symlink: nothing to keep, and fs::write creates it through the link.

@@ -22,6 +22,7 @@ mod minibuffer;
 mod motion;
 mod prefix;
 pub mod project;
+mod project_commands;
 pub mod settings;
 pub mod timer;
 mod visiting;
@@ -44,7 +45,7 @@ use key::{Key, KeyCode};
 use keymap::{Binding, Keymap};
 use kill_ring::KillRing;
 use minibuffer::Prompts;
-use project::Project;
+use project::{Loaded, Project};
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
@@ -100,8 +101,15 @@ pub enum Msg {
     SettingsLoaded(Result<Option<String>, String>),
     /// The user's keymap file, the same way.
     KeymapLoaded(Result<Option<String>, String>),
-    /// Every project file, parsed and checked, or why it was rejected.
-    ProjectsLoaded(Vec<Result<Project, String>>),
+    /// Every project file in the projects directory `dir`, parsed and checked, or why it was
+    /// rejected; `dir` is `None` without a config dir.
+    ProjectsLoaded {
+        dir: Option<PathBuf>,
+        projects: Vec<Result<Loaded, String>>,
+    },
+    /// The file service's answer to `FileOp::WriteProject`: the project as written, or why it
+    /// wasn't, the error starting with the file's name.
+    ProjectWritten(Result<Loaded, String>),
     /// The prefix hint's delay passed with the prefix still pending.
     Hint,
     /// The system clipboard's text, sent before a key `Core::wants_clipboard` accepts.
@@ -169,6 +177,13 @@ pub enum FileOp {
     ListDir(PathBuf),
     /// Read the file and send `Msg::Opened`.
     Open(PathBuf),
+    /// Write the project file `text` to `path` if it is a valid project and the file is still
+    /// `old` (`None`: no file, making the directory), then send `Msg::ProjectWritten`.
+    WriteProject {
+        path: PathBuf,
+        old: Option<String>,
+        text: String,
+    },
 }
 
 /// Recovery file work for the recovery thread.
@@ -323,7 +338,8 @@ impl Ctx<'_> {
                     Err(err) => self.core.report(format!("keymap: {err}")),
                 }
             }
-            Msg::ProjectsLoaded(projects) => {
+            Msg::ProjectsLoaded { dir, projects } => {
+                self.core.projects_dir = dir;
                 self.core.projects.clear();
                 for project in projects {
                     match project {
@@ -332,6 +348,7 @@ impl Ctx<'_> {
                     }
                 }
             }
+            Msg::ProjectWritten(result) => self.core.project_written(result),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
@@ -465,7 +482,9 @@ pub struct Core {
     recenter: usize,
     kills: KillRing,
     settings: Settings,
-    projects: Vec<Project>,
+    projects: Vec<Loaded>,
+    /// Where new project files go; `None` without a config dir.
+    projects_dir: Option<PathBuf>,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -519,6 +538,7 @@ impl Default for Core {
             kills: KillRing::default(),
             settings: Settings::default(),
             projects: Vec::new(),
+            projects_dir: None,
             commands,
             message: None,
             quitting: Vec::new(),
@@ -611,8 +631,8 @@ impl Core {
         &self.settings
     }
 
-    pub fn projects(&self) -> &[Project] {
-        &self.projects
+    pub fn projects(&self) -> Vec<&Project> {
+        self.projects.iter().map(|p| &p.project).collect()
     }
 
     pub fn this_command(&self) -> Option<&'static str> {
@@ -937,19 +957,30 @@ mod tests {
             "name = \"d\"\n[primary]\npath = \"/r/d\"\n[[roots]]\npath = \"/r/a\"",
         )
         .unwrap();
-        h.send(Msg::ProjectsLoaded(vec![
-            Err("b.toml: /r/b does not exist".into()),
-            Ok(ok.clone()),
-            Err("c.toml: name is empty".into()),
-            Ok(shared.clone()),
-        ]));
-        assert_eq!(h.core.projects(), [ok, shared]);
+        use crate::project::{Loaded, Project};
+        let loaded = |project: &Project| Loaded {
+            project: project.clone(),
+            file: None,
+        };
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![
+                Err("b.toml: /r/b does not exist".into()),
+                Ok(loaded(&ok)),
+                Err("c.toml: name is empty".into()),
+                Ok(loaded(&shared)),
+            ],
+        });
+        assert_eq!(h.core.projects(), [&ok, &shared]);
         assert_eq!(
             h.core.message(),
             Some("project b.toml: /r/b does not exist; project c.toml: name is empty")
         );
         // A reload replaces the projects.
-        h.send(Msg::ProjectsLoaded(Vec::new()));
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: Vec::new(),
+        });
         assert!(h.core.projects().is_empty());
     }
 
