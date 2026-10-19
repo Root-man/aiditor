@@ -21,6 +21,8 @@ pub(crate) struct Painted {
     pub(crate) rows: Vec<Row>,
     mode_line: ShapedLine,
     pub(crate) cursor: Option<Bounds<Pixels>>,
+    /// The char under the cursor, shaped in the background color to show through the block.
+    cursor_char: Option<ShapedLine>,
 }
 
 pub(crate) struct Row {
@@ -108,6 +110,7 @@ impl Element for FrameElement {
                 let bounds = to_bounds(w.rect, bounds.origin);
                 let mut top = px(0.);
                 let mut cursor = None;
+                let mut cursor_char = None;
                 let rows = (w.display.lines.iter().enumerate()).map(|(i, line)| {
                     let height = px(line.height);
                     let at = w.display.cursor.filter(|&(l, _)| l == i && w.selected);
@@ -116,9 +119,15 @@ impl Element for FrameElement {
                         line_runs(line, at.map(|(_, col)| col), marked, &font, &settings.theme);
                     let text = shape(text, &runs);
                     if at.is_some() {
-                        let x = text.x_for_index(byte);
+                        let (x, width, under) = block(&text, byte, cell);
                         let origin = bounds.origin + point(x, top);
-                        cursor = Some(Bounds::new(origin, gpui::size(px(2.), height)));
+                        cursor = Some(Bounds::new(origin, gpui::size(width, height)));
+                        let face = Face {
+                            fg: Some(settings.theme.background),
+                            bg: None,
+                        };
+                        let run = text_run(under.len(), face, false, &font, &settings.theme);
+                        cursor_char = Some(shape(under.to_string(), &[run]));
                     }
                     let row = Row {
                         number: line.number,
@@ -145,6 +154,7 @@ impl Element for FrameElement {
                     rows,
                     mode_line: shape(w.display.mode_line, &[run]),
                     cursor,
+                    cursor_char,
                 }
             });
             let painted = painted.collect();
@@ -195,6 +205,11 @@ impl Element for FrameElement {
                 }
                 if let Some(cursor) = p.cursor {
                     window.paint_quad(fill(cursor, rgb(theme.cursor)));
+                    if let Some(under) = &p.cursor_char {
+                        under
+                            .paint(cursor.origin, cursor.size.height, window, cx)
+                            .ok();
+                    }
                 }
                 let origin = point(p.bounds.left(), p.bounds.bottom() - line_height);
                 let color = match p.selected {
@@ -209,6 +224,19 @@ impl Element for FrameElement {
         let painted = std::mem::take(painted);
         self.editor.update(cx, |editor, _| editor.painted = painted);
     }
+}
+
+/// The block cursor at byte `byte` of `line`: its x, its width and the char it covers, which is
+/// empty at the end of the line, where the block is one `cell` wide.
+pub(crate) fn block(line: &ShapedLine, byte: usize, cell: Pixels) -> (Pixels, Pixels, &str) {
+    let x = line.x_for_index(byte);
+    let under =
+        (line.text[byte..].chars().next()).map_or("", |c| &line.text[byte..byte + c.len_utf8()]);
+    let width = match under.is_empty() {
+        true => cell,
+        false => line.x_for_index(byte + under.len()) - x,
+    };
+    (x, width, under)
 }
 
 /// `rect` from the frame display, placed at `origin`.
@@ -237,7 +265,7 @@ pub(crate) fn text_run(
     }
 }
 
-/// The echo line at a prompt: the prompt, the minibuffer's line and any `message` in brackets,
+/// The echo line at a prompt: the match count, the prompt, the minibuffer's line and any `message` in brackets,
 /// with the byte offset of point in it.
 pub(crate) fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -> (String, usize) {
     let spans = mb.display.lines.iter().flat_map(|l| &l.spans);
@@ -245,7 +273,7 @@ pub(crate) fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -
     let col = mb.display.cursor.map_or(usize::MAX, |(_, col)| col);
     let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
     // The echo line is shaped as one line; a prompt or message may name a buffer with newlines.
-    let prompt = mb.prompt.replace('\n', "^J");
+    let prompt = format!("{}{}", mb.count, mb.prompt.replace('\n', "^J"));
     let message = match message.is_empty() {
         true => String::new(),
         false => format!(" [{}]", message.replace('\n', "^J")),

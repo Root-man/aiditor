@@ -910,6 +910,15 @@ milestones:
               - "In `find-file`, going from a directory with 10 entries to one with 5 keeps 10 rows (5 empty) and the windows above don't move"
               - "The next minibuffer starts at the height its own candidates need"
             blocked_by: [m0-find-file]
+          - key: m5-find-file-listing
+            title: "find-file lists files like Emacs"
+            body: |
+              Found in the M0 gate (#54). Make the `find-file` completion list read like Emacs with Vertico and marginalia: nothing is selected until a file is picked, so the count before the prompt reads `*/5`, then `1/5` once the first file is selected (#54 added the count, always with a selection). Directories are drawn in a different face from files, and each entry is annotated with its mode bits (`drwxr-xr-x`), a human-readable size (`5k`, `10M`) and its age (`5s ago`, `3d10h ago`).
+            acceptance:
+              - "In a directory of 5 entries the prompt starts `*/5 ` and becomes `1/5 ` after `C-n`; `RET` with no selection visits the typed text"
+              - "Directories and files are drawn in different faces"
+              - "Each entry shows its mode bits, human-readable size and modification age, dimmed and never matched"
+            blocked_by: [m0-find-file]
       - key: m5-crash
         title: "Crash safety beyond commands"
         labels: [frontend]

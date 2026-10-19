@@ -4,6 +4,7 @@ expression: frame.minibuffer
 ---
 Some(
     Minibuffer {
+        count: "",
         prompt: "Text: ",
         display: WindowDisplay {
             lines: [

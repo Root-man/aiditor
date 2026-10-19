@@ -63,8 +63,9 @@ impl Ctx<'_> {
                 if r.path.is_some() {
                     buffer.disk = r.hash;
                 }
-                // Written under this session first, so the old file goes only once a copy exists.
-                keep = !autosaves(buffer);
+                // Written under this session first, so the old file goes only once a copy exists;
+                // a buffer with no file is not auto-saved, so its file just goes.
+                keep = r.path.is_some() && !autosaves(buffer);
                 self.write_autosaves();
             }
             if !keep {
@@ -120,9 +121,10 @@ impl Core {
     }
 }
 
-/// Whether `buffer` has edits a crash would lose: modified, and not read-only or hidden.
+/// Whether `buffer` has edits a crash would lose: modified and visiting a file, as Emacs's
+/// `auto-save-default` covers only file buffers.
 fn autosaves(buffer: &Buffer) -> bool {
-    buffer.modified() && !buffer.read_only && !buffer.name.starts_with(' ')
+    buffer.modified() && buffer.file.is_some()
 }
 
 #[cfg(test)]
@@ -166,20 +168,22 @@ mod tests {
 
     #[test]
     fn typing_without_pause_is_auto_saved_every_thirty_seconds() {
-        let mut h = Harness::new(&[]);
+        let mut h = Harness::new(&[("a", "")]);
+        h.open("a");
         for _ in 0..29 {
             h.keys("x").advance(SEC);
         }
         assert!(h.recovery.is_empty());
         h.keys("y").advance(SEC);
         let text = format!("{}y", "x".repeat(29));
-        assert_eq!(recovered(&h), [("*scratch*".into(), None, text)]);
+        assert_eq!(recovered(&h), [("a".into(), Some(h.path("a")), text)]);
     }
 
     #[test]
-    fn messages_and_the_minibuffer_are_not_auto_saved() {
+    fn scratch_messages_and_the_minibuffer_are_not_auto_saved() {
         let mut h = Harness::new(&[]);
-        h.send(Msg::Log("hi".into()))
+        h.keys("x")
+            .send(Msg::Log("hi".into()))
             .keys("M-x abc")
             .advance(3 * SEC);
         assert!(h.recovery.is_empty());
@@ -187,21 +191,19 @@ mod tests {
 
     #[test]
     fn killing_or_quitting_removes_recovery_files() {
-        let mut h = Harness::new(&[("a", "1\n")]);
+        let mut h = Harness::new(&[("a", "1\n"), ("b", "")]);
         h.open("a").keys("x").advance(2 * SEC);
         assert_eq!(h.recovery.len(), 1);
         h.keys("C-x k RET yes RET");
         assert!(h.recovery.is_empty());
-        h.keys("x")
-            .advance(2 * SEC)
-            .keys("C-x b z RET y")
-            .advance(2 * SEC);
+        h.open("a").keys("x").advance(2 * SEC);
+        h.open("b").keys("y").advance(2 * SEC);
         assert_eq!(h.recovery.len(), 2);
         // The quit's own save runs while a recovery file is still there.
         h.open("a")
             .keys("w")
             .advance(2 * SEC)
-            .keys("C-x C-c no RET yes RET");
+            .keys("C-x C-c no RET no RET yes RET");
         assert!(h.quit && h.recovery.is_empty());
     }
 

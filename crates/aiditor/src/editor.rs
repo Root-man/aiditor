@@ -11,7 +11,7 @@ use gpui::{
 };
 use tokio::sync::mpsc;
 
-use crate::element::{FrameElement, Painted, echo_line, text_run};
+use crate::element::{FrameElement, Painted, block, echo_line, text_run};
 use crate::input::to_key;
 use crate::{Args, FONT, read_config};
 
@@ -273,7 +273,7 @@ impl Render for Editor {
         let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
         let hint = frame.hint.map(|hint| {
             let entries: Vec<String> = (hint.entries.iter())
-                .map(|(key, what)| format!("{key} {what}"))
+                .map(|(key, what)| format!("{key} : {what}"))
                 .collect();
             let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
             let column = cell * width as f32;
@@ -296,13 +296,16 @@ impl Render for Editor {
                     &[run],
                     None,
                 );
+                let (x, width, under) = block(&shaped, byte, cell);
                 let cursor = div()
                     .absolute()
                     .top_0()
-                    .left(shaped.x_for_index(byte))
-                    .w(px(2.))
+                    .left(x)
+                    .w(width)
                     .h(line_height)
-                    .bg(rgb(theme.cursor));
+                    .bg(rgb(theme.cursor))
+                    .text_color(rgb(theme.background))
+                    .child(under.to_string());
                 let prompt = line().relative().child(text).child(cursor);
                 let rows = mb.candidates.into_iter().zip(mb.annotations).enumerate();
                 let candidates = rows.map(|(i, (c, note))| {
@@ -322,6 +325,9 @@ impl Render for Editor {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
+            // A gap like Emacs's 8px fringes, so the rounded window corners never clip text.
+            .px(px(8.))
+            .pb(px(2.))
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -468,8 +474,10 @@ mod tests {
             ..Args::default()
         };
         let channel = aiditor_services::channel();
-        let (editor, cx) = cx
-            .add_window_view(|window, cx| Editor::new(Core::default(), args, channel, window, cx));
+        let mut core = Core::default();
+        core.open(Path::new("/nonexistent/t.txt"), Some((Vec::new(), 0)));
+        let (editor, cx) =
+            cx.add_window_view(|window, cx| Editor::new(core, args, channel, window, cx));
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));
         cx.simulate_input("x");
         // The timer runs on real time; fire it now.
@@ -482,8 +490,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(count(), 1);
-        // Only `*scratch*` is modified, so this quits at once.
         editor.update(cx, |e, cx| e.handle(Msg::Quit, cx));
+        cx.simulate_input("no");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("yes");
+        cx.simulate_keystrokes("enter");
         assert_eq!(count(), 0);
     }
 
@@ -527,8 +538,8 @@ mod tests {
                 &frame.message.unwrap_or_default(),
             )
         });
-        let text = "M-x abc [M-z is undefined]".to_string();
-        assert_eq!(line, (text, "M-x a".len()));
+        let text = "0/0 M-x abc [M-z is undefined]".to_string();
+        assert_eq!(line, (text, "0/0 M-x a".len()));
     }
 
     #[gpui::test]
@@ -688,9 +699,14 @@ mod tests {
             cx.simulate_keystrokes(&format!("ctrl-a ctrl-u {col} ctrl-f"));
             let (line, x) = cursor(cx);
             assert_eq!(line.text.as_ref(), "hello world", "shaped whole at {col}");
-            assert_eq!(x, line.x_for_index(col));
+            assert!(
+                (x - line.x_for_index(col)).abs() < px(0.01),
+                "cursor at {col}"
+            );
         }
         assert!(cursor(cx).1 > px(0.), "the test platform lays text out");
+        let width = editor.read_with(cx, |e, _| e.painted[0].cursor.unwrap().size.width);
+        assert!(width > px(2.), "a block over the char at point");
         // Marked text goes in the line, the cursor after it.
         cx.simulate_keystrokes("ctrl-a ctrl-f ctrl-f ctrl-f");
         editor.update_in(cx, |e, window, cx| {

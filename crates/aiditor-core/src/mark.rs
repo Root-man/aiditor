@@ -58,6 +58,7 @@ impl Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Msg;
     use crate::harness::Harness;
     use crate::harness::mark;
     use crate::harness::on;
@@ -123,6 +124,14 @@ mod tests {
         assert_eq!(h.display(1).lines[0].spans.len(), 1, "no region shown");
         h.keys("C-x C-x C-/");
         assert!(!h.core.window.active(), "undo is a change too");
+    }
+
+    #[test]
+    fn the_mark_stays_active_in_messages() {
+        let mut h = Harness::new(&[]);
+        h.send(Msg::Log("hello".into()))
+            .keys("C-x b *Messages* RET C-SPC C-f");
+        assert!(h.core.window.active(), "logging `Mark set` is not an edit");
     }
 
     #[test]

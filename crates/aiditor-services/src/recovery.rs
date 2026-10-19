@@ -149,6 +149,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("recovery");
         let (mut core, t0) = (Core::default(), Instant::now());
+        core.open(Path::new("/nonexistent/a"), None);
         let insert = |text: &str| Msg::Insert {
             text: text.into(),
             replace: None,
@@ -169,8 +170,9 @@ mod tests {
         let text = fs::read_to_string(dir.join(&names[0])).unwrap();
         let (header, body) = text.split_once('\n').unwrap();
         let header: serde_json::Value = serde_json::from_str(header).unwrap();
-        assert_eq!(header["name"], "*scratch*");
-        assert!(header["path"].is_null() && header["hash"].is_null());
+        assert_eq!(header["name"], "a");
+        assert_eq!(header["path"], "/nonexistent/a");
+        assert!(header["hash"].is_null(), "a new file has no disk version");
         assert!(header["time"].as_u64().unwrap() > 0);
         assert_eq!(body, "hi\nyou!");
         let mode = fs::metadata(&dir).unwrap().permissions().mode();

@@ -263,11 +263,12 @@ impl Buffer {
     }
 
     /// Appends `text` at the end, past read-only and without undo, as Emacs logs to `*Messages*`.
+    /// The tick stays, so a command's own echo does not count as its edit and deactivate the mark.
     pub fn append(&mut self, text: &str) {
-        let read_only = std::mem::take(&mut self.read_only);
+        let (read_only, tick) = (std::mem::take(&mut self.read_only), self.tick);
         let end = self.len_chars();
         self.raw_insert(end, text).expect("the end is in range");
-        self.read_only = read_only;
+        (self.read_only, self.tick) = (read_only, tick);
     }
 
     /// Ends the open undo group with point at `point`; the next edit starts a group with point there.
