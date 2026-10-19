@@ -42,6 +42,16 @@ impl Project {
                 ));
             }
         }
+        // shortcut: paths are compared as written, so symlinks and `..` can hide an overlap; canonicalize in the services check if that bites.
+        let roots: Vec<_> = project.all_roots().map(|r| &r.path).collect();
+        for (i, a) in roots.iter().enumerate() {
+            for b in &roots[..i] {
+                let (inner, outer) = if a.starts_with(b) { (a, b) } else { (b, a) };
+                if inner.starts_with(outer) {
+                    return Err(format!("{} is inside {}", inner.display(), outer.display()));
+                }
+            }
+        }
         Ok(project)
     }
 
@@ -118,9 +128,31 @@ path = "/r/notes"
                 "not one line",
             ),
             (&format!("name = \"x\"\n{primary}\nrol = \"a\""), "rol"),
+            (
+                &format!("name = \"x\"\n{primary}\n[[roots]]\npath = \"/r/x/v/lib\""),
+                "/r/x/v/lib is inside /r/x",
+            ),
+            (
+                "name = \"x\"\n[primary]\npath = \"/r/x/v\"\n[[roots]]\npath = \"/r\"",
+                "/r/x/v is inside /r",
+            ),
+            (
+                &format!("name = \"x\"\n{primary}\n[[roots]]\npath = \"/r/x/\""),
+                "is inside /r/x",
+            ),
+            (
+                &format!("name = \"x\"\n{primary}\n[[roots]]\npath = \"/r/x\""),
+                "/r/x is inside /r/x",
+            ),
         ] {
             let err = Project::parse(text).unwrap_err();
             assert!(err.contains(needle), "{text:?}: {err}");
         }
+    }
+
+    #[test]
+    fn sibling_with_shared_prefix_loads() {
+        let text = "name = \"x\"\n[primary]\npath = \"/r/app\"\n[[roots]]\npath = \"/r/app2\"";
+        assert!(Project::parse(text).is_ok());
     }
 }

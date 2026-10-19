@@ -155,8 +155,12 @@ A project is a TOML file in the editor's config dir that lists a primary repo an
   role = "GPUI source, read only" # optional, empty by default
   ```
 
-  Every file is read at launch and again on `C-x C-r`, which replaces the projects loaded before. A file is rejected when it is not valid TOML, has an unknown key or a wrong type, an empty name, a path that is not absolute or not a directory, or a role on more than one line; the echo area and `*Messages*` show `project <file>: <reason>`, and the other files still load. The core parses and checks the text through the settings module; `aiditor-services` lists the files and checks the paths exist. Not yet: `default_agent` is not checked against the agent registry, duplicate names are not caught, and a project's `env` overrides are not read.
-- Nested or overlapping roots, opening a folder without a project, and what "switch project" means are open questions.
+  Every file is read at launch and again on `C-x C-r`, which replaces the projects loaded before. A file is rejected when it is not valid TOML, has an unknown key or a wrong type, an empty name, a path that is not absolute or not a directory, a root that is the same as or inside another root of the project, or a role on more than one line; the echo area and `*Messages*` show `project <file>: <reason>`, and the other files still load. The core parses and checks the text through the settings module; `aiditor-services` lists the files and checks the paths exist. Not yet: `default_agent` is not checked against the agent registry, duplicate names are not caught, and a project's `env` overrides are not read.
+- **Roots and folders** (decided in [#57](https://github.com/Root-man/aiditor/issues/57)):
+  - **Within one project**, roots never overlap: a root that is the same as or inside another, the primary included, rejects the file with `project <file>: <inner> is inside <outer>`. Find-file, grep and the watchers then see each file once, under one role line. Paths are compared as written, so symlinks and `..` are not resolved.
+  - **Across projects**, roots may be shared or overlap (`~/Repos/zed` in several projects): every workspace is bound to one project, so a shared root is never ambiguous, and nothing is checked across files.
+  - **A folder without a project** (named on the command line or opened with an open-folder command, [#64](https://github.com/Root-man/aiditor/issues/64)) gets an ad-hoc project held in memory, with the folder as primary and its name as the project name, and a workspace for it. Nothing is written until a save-project command ([#58](https://github.com/Root-man/aiditor/issues/58)) writes it to `projects/`.
+- What "switch project" means is an open question.
 
 ## Workspaces
 
@@ -329,8 +333,6 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Projects and workspaces**
 
-- Nested or overlapping roots, within one project or across projects.
-- Opening a single folder without a project.
 - What "switch project" does now that workspaces are bound to projects: jump to an existing workspace of that project, or create one.
 - Where the Messages buffer lives, given that every buffer belongs to one workspace.
 - Settings per language and per project (indent width, `.editorconfig`), themes and fonts.
