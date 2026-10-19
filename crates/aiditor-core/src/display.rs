@@ -2,6 +2,7 @@
 
 use crate::buffer::{Buffer, Decoration, Face, Prop};
 use crate::settings::Settings;
+use std::ops::Range;
 
 #[derive(Debug, PartialEq)]
 pub struct WindowDisplay {
@@ -78,8 +79,9 @@ pub struct Span {
     pub fold: bool,
 }
 
-/// Builds `rows` display lines from buffer line `top`, plus the cursor and mode line.
-// shortcut: lines are emitted whole and the frontend clips them; soft wrap (#112) cuts them here.
+/// Builds `rows` display lines from buffer line `top`, plus the cursor and mode line. Point's line
+/// holds its `shown` columns, every other line the first `shown.len()`.
+// shortcut: long lines are cut at the window edge; soft wrap (#112) breaks them here instead.
 pub fn build(
     buffer: &Buffer,
     top: usize,
@@ -87,6 +89,7 @@ pub fn build(
     point: usize,
     mark: Option<usize>,
     settings: &Settings,
+    shown: Range<usize>,
 ) -> WindowDisplay {
     let text = buffer.text();
     // shortcut: every char scans every property, fine for a screenful; index them when buffers get many.
@@ -116,19 +119,31 @@ pub fn build(
         }
         lines.push(std::mem::replace(line, new_line(next)));
     };
-    let col = |line: &Line| line.spans.iter().map(|s| s.text.chars().count()).sum();
+    // shortcut: point's line is the display line starting on point's buffer line, so one joined by a fold from an earlier line is not scrolled; compare display lines when folds get common.
+    let point_line = buffer.line_col(point).ok().map(|(l, _)| l);
+    // Display columns of `line` consumed so far, the skipped ones included.
+    let mut col: usize = 0;
     while lines.len() < rows {
+        let range = match Some(line.number) == point_line {
+            true => shown.clone(),
+            false => 0..shown.len(),
+        };
         let fold = props.iter().find_map(|(range, prop)| match prop {
             Prop::Invisible(placeholder) if range.contains(&pos) => Some((range.end, placeholder)),
             _ => None,
         });
         if point == pos || fold.is_some_and(|(end, _)| point > pos && point < end) {
-            cursor = Some((lines.len(), col(&line)));
+            cursor = Some((lines.len(), col.saturating_sub(range.start)));
         }
         if let Some((end, placeholder)) = fold {
-            if !placeholder.is_empty() {
+            let visible: String = (placeholder.chars().enumerate())
+                .filter(|(i, _)| range.contains(&(col + i)))
+                .map(|(_, c)| c)
+                .collect();
+            col += placeholder.chars().count();
+            if !visible.is_empty() {
                 line.spans.push(Span {
-                    text: placeholder.clone(),
+                    text: visible,
                     face: Face::default(),
                     fold: true,
                 });
@@ -140,11 +155,34 @@ pub fn build(
             finish(&mut lines, &mut line, start, pos, 0);
             break;
         }
+        if col >= range.end {
+            // The line is full: skip to its newline, or to a fold that may join the next line.
+            let l = text.char_to_line(pos);
+            let newline = match l + 1 < text.len_lines() {
+                true => text.line_to_char(l + 1) - 1,
+                false => text.len_chars(),
+            };
+            let target = (props.iter())
+                .filter(|(r, p)| {
+                    matches!(p, Prop::Invisible(_)) && (pos..newline).contains(&r.start)
+                })
+                .map(|(r, _)| r.start)
+                .fold(newline, usize::min);
+            if target > pos {
+                pos = target;
+                continue;
+            }
+        }
         let c = text.char(pos);
         pos += 1;
         if c == '\n' {
             finish(&mut lines, &mut line, start, pos, text.char_to_line(pos));
             start = pos;
+            col = 0;
+            continue;
+        }
+        col += 1;
+        if !range.contains(&(col - 1)) {
             continue;
         }
         let mut face = Face::default();

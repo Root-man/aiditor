@@ -1931,11 +1931,53 @@ mod tests {
         let (width, height) = (320., 600.);
         h.keys("C-e");
         let (lines, cursor) = shown(&h.frame(width, height));
-        assert_eq!(lines, [&long, &long[61..], &long]);
+        // Each line holds 40 columns plus the partly visible 41st.
+        assert_eq!(lines, [&long[..41], &long[61..], &long[..41]]);
         assert_eq!(cursor, Some((1, 39)));
         h.keys("C-a");
         let (lines, cursor) = shown(&h.frame(width, height));
-        assert_eq!((lines, cursor), (vec![long.clone(); 3], Some((1, 0))));
+        let unscrolled = long[..41].to_string();
+        assert_eq!((lines, cursor), (vec![unscrolled; 3], Some((1, 0))));
+    }
+
+    #[test]
+    fn a_line_far_wider_than_the_window_holds_only_the_shown_columns() {
+        let long: String = (0..10_000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let mut h = on(&format!("{long}\nnext"));
+        let id = h.core.window.buffer();
+        let buffer = h.core.buffers.get_mut(id).unwrap();
+        let rule = crate::buffer::Prop::Line(crate::buffer::Decoration::Rule(0x888888));
+        buffer.add_property(9_990..9_995, rule).unwrap();
+        // Before any resize the frame has no size: one row and no width.
+        let unsized_frame = h.core.frame();
+        assert_eq!(
+            shown(&unsized_frame).0[0].len(),
+            10_000,
+            "no width cuts nothing"
+        );
+        // 20 columns of 8 px cells.
+        h.keys("C-e");
+        let frame = h.frame(160., 600.);
+        assert_eq!(
+            shown(&frame),
+            (vec![long[9_981..].into(), "next".into()], Some((0, 19)))
+        );
+        let decorations = &frame.windows[0].display.lines[0].decorations;
+        assert_eq!(decorations.len(), 1, "a decoration in the cut-off tail");
+        h.keys("C-n");
+        let frame = h.frame(160., 600.);
+        assert_eq!(shown(&frame).0, [&long[..21], "next"]);
+        assert_eq!(frame.windows[0].display.lines[0].decorations.len(), 1);
+        // A fold over the long line's newline still joins it to the next line.
+        let buffer = h.core.buffers.get_mut(id).unwrap();
+        let fold = crate::buffer::Prop::Invisible("…".into());
+        buffer.add_property(9_998..10_002, fold).unwrap();
+        let frame = h.frame(160., 600.);
+        let lines = &frame.windows[0].display.lines;
+        assert_eq!(shown(&frame).0, [&long[..21]]);
+        assert_eq!((lines[0].number, lines.len()), (0, 1));
     }
 
     #[test]

@@ -2338,21 +2338,15 @@ fn window_display(
     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
     let point = window.point(buffers);
     let mark = window.mark(buffers).filter(|_| window.active());
-    let mut d = display::build(buffer, top, rows, point, mark, settings);
+    // shortcut: point's column is its char column in the buffer line, so a fold before point on its line shifts the scroll; use the display column when folds get common.
     // shortcut: a tab or wide char counts as one column, so the cursor can sit past the edge on such lines; measure widths when the display does.
-    if let Some((row, col)) = &mut d.cursor {
-        let mut cut = window.hscroll(*col, cols);
-        *col -= cut;
-        d.lines[*row].spans.retain_mut(|span| {
-            let chars = span.text.chars().count();
-            if cut >= chars {
-                cut -= chars;
-                return false;
-            }
-            span.text = span.text.chars().skip(cut).collect();
-            cut = 0;
-            true
-        });
-    }
-    d
+    let col = buffer.line_col(point).map_or(0, |(_, c)| c);
+    let left = window.hscroll(col, cols);
+    // One more than fits, for the partly visible last column; no width cuts nothing.
+    let width = match cols {
+        0 => usize::MAX,
+        _ => cols.saturating_add(1),
+    };
+    let shown = left..left.saturating_add(width);
+    display::build(buffer, top, rows, point, mark, settings, shown)
 }
