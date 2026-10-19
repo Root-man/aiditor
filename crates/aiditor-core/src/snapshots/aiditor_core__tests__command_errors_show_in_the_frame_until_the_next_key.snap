@@ -38,4 +38,6 @@ FrameDisplay {
         "boom",
     ),
     minibuffer: None,
+    hint: None,
+    title: "a.txt",
 }

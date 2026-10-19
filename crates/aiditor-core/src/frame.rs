@@ -94,10 +94,18 @@ impl Core {
                 }
             })
             .collect();
+        let buffer = self.current();
+        let title = format!(
+            "{}{}",
+            buffer.name,
+            if buffer.modified() { " *" } else { "" }
+        );
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
             minibuffer: self.minibuffer(),
+            hint: self.hint(),
+            title,
         }
     }
 
@@ -253,6 +261,15 @@ mod tests {
             .map(|w| w.display.mode_line.clone())
             .collect();
         assert_eq!(names, ["-- a.txt  1:0", "** *scratch*  1:1"]);
+    }
+
+    #[test]
+    fn the_title_is_the_buffer_name_marked_when_modified() {
+        let mut h = Harness::new(&[("t.txt", "")]);
+        h.open("t.txt");
+        assert_eq!(h.frame(80., 100.).title, "t.txt");
+        h.keys("x");
+        assert_eq!(h.frame(80., 100.).title, "t.txt *");
     }
 
     #[test]
