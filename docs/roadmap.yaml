@@ -542,10 +542,11 @@ milestones:
           - key: m1-ws-commands
             title: "Workspace commands"
             body: |
-              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`. Open folder: a folder named on the command line or picked with an open-folder command gets an ad-hoc in-memory project (folder as primary, its name as the project name) and a workspace for it; nothing is written to disk.
+              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`. Open folder: a folder named on the command line or picked with an open-folder command gets an ad-hoc in-memory project (folder as primary, its name as the project name) and a workspace for it; nothing is written to disk. Switch project: prompts for a project, then shows its most recently shown workspace, or creates one when it has none.
             acceptance:
               - "Key-script tests for each command"
               - "Opening a folder without a project gives a workspace on an ad-hoc project and writes no file"
+              - "Switch project shows the project's most recently shown workspace, and creates one only when the project has none"
             blocked_by: [m1-ws-model, m1-decide-switch]
           - key: m1-ws-strip
             title: "Workspace strip in the frontend"
