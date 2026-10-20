@@ -311,6 +311,7 @@ impl Render for Editor {
                     .text_color(rgb(theme.background))
                     .child(under.to_string());
                 let prompt = line().relative().child(text).child(cursor);
+                let padding = (mb.candidates.len()..mb.rows).map(|_| line());
                 let rows = mb.candidates.into_iter().zip(mb.annotations).enumerate();
                 let candidates = rows.map(|(i, (c, note))| {
                     let note =
@@ -321,7 +322,7 @@ impl Render for Editor {
                         false => row,
                     }
                 });
-                div().child(prompt).children(candidates)
+                div().child(prompt).children(candidates).children(padding)
             }
             None => div().child(line().child(message)),
         };
@@ -611,21 +612,29 @@ mod tests {
             e.handle(Msg::KeymapLoaded(Ok(Some(keymap.into()))), cx);
         });
         cx.simulate_keystrokes("ctrl-c p");
-        cx.simulate_input("an");
         cx.run_until_parked();
         // The matcher's threads may still be running; the core's repoll timer catches up.
         let listed = |cx: &mut VisualTestContext| {
             editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().candidates)
         };
-        for _ in 0..100 {
-            if listed(cx).len() == 1 {
-                break;
+        let wait = |cx: &mut VisualTestContext, n: usize| {
+            for _ in 0..100 {
+                if listed(cx).len() == n {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                cx.executor().advance_clock(Duration::from_millis(20));
+                cx.run_until_parked();
             }
-            std::thread::sleep(Duration::from_millis(5));
-            cx.executor().advance_clock(Duration::from_millis(20));
-            cx.run_until_parked();
-        }
+        };
+        wait(cx, 2);
+        let windows_size = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.reported);
+        let before = windows_size(cx);
+        cx.simulate_input("an");
+        cx.run_until_parked();
+        wait(cx, 1);
         assert_eq!(listed(cx), ["banana"]);
+        assert_eq!(windows_size(cx), before, "the list keeps its height");
         cx.simulate_keystrokes("enter");
         let message = editor.read_with(cx, |e, _| e.core.message().map(str::to_string));
         assert_eq!(message.as_deref(), Some("got banana"));
