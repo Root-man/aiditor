@@ -28,15 +28,15 @@ Each warning or error the app logs SHALL be appended to the end of `*Messages*` 
 - **THEN** no line of `*Messages*` contains `starting`
 
 ### Requirement: Messages is read-only and made on demand
-`*Messages*` SHALL be made when its first line arrives, and made again on the next line after it is killed. Its edits SHALL fail with `Buffer is read-only`, and appending SHALL NOT add to its undo history.
+`*Messages*` SHALL be made when its first line arrives, and `kill-buffer` SHALL refuse to kill it. Its edits SHALL fail with `Buffer is read-only`, and appending SHALL NOT add to its undo history.
 
 #### Scenario: Typing in Messages fails
 - **WHEN** a message was shown, `*Messages*` is switched to and `a` is typed
 - **THEN** the echo area shows `Buffer is read-only` and the buffer is unchanged apart from that line
 
-#### Scenario: Killed and made again
-- **WHEN** `*Messages*` is killed and then `C-g` is typed
-- **THEN** a new `*Messages*` holds `Quit\n`
+#### Scenario: Killing is refused
+- **WHEN** a message was shown and `C-x k *Messages* RET` is typed
+- **THEN** the echo area shows `Can't kill *Messages*` and `*Messages*` keeps its lines
 
 #### Scenario: No buffer before the first message
 - **WHEN** the editor starts and nothing has been shown or logged

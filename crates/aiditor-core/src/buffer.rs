@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use ropey::Rope;
 
+use crate::workspace::WorkspaceId;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferId(u64);
 
@@ -68,18 +70,22 @@ pub struct Buffers {
     map: BTreeMap<BufferId, Buffer>,
     /// Every buffer, most recently shown first; new buffers go last, as in Emacs's `buffer-list`.
     recent: Vec<BufferId>,
+    /// The current workspace, which owns every buffer made from now on.
+    pub(crate) workspace: WorkspaceId,
 }
 
 impl Buffers {
     pub fn create(&mut self, name: &str) -> BufferId {
         self.add(Buffer {
             name: name.to_string(),
+            workspace: Some(self.workspace),
             content: Content::Text(Rope::new()),
             file: None,
             crlf: false,
             bom: false,
             disk: None,
             read_only: false,
+            unkillable: false,
             modified: false,
             tick: 0,
             markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
@@ -90,6 +96,13 @@ impl Buffers {
             minor_modes: Vec::new(),
             point: MarkerId(0),
         })
+    }
+
+    /// A new unkillable `*scratch*`.
+    pub fn create_scratch(&mut self) -> BufferId {
+        let id = self.create("*scratch*");
+        self.map.get_mut(&id).expect("just created").unkillable = true;
+        id
     }
 
     /// A buffer visiting `path`, holding `text` already read from it.
@@ -137,11 +150,11 @@ impl Buffers {
             .map(|(&id, _)| id)
     }
 
-    /// The buffer visiting `path`.
+    /// The current workspace's buffer visiting `path`.
     pub fn visiting(&self, path: &Path) -> Option<BufferId> {
         self.map
             .iter()
-            .find(|(_, b)| b.file.as_deref() == Some(path))
+            .find(|(_, b)| b.workspace == Some(self.workspace) && b.file.as_deref() == Some(path))
             .map(|(&id, _)| id)
     }
 
@@ -166,6 +179,8 @@ pub enum Content {
 
 pub struct Buffer {
     pub name: String,
+    /// The workspace that owns it; `None` only for the global `*Messages*`.
+    pub workspace: Option<WorkspaceId>,
     content: Content,
     pub file: Option<PathBuf>,
     /// The file's line breaks are CRLF, written back on save.
@@ -175,6 +190,8 @@ pub struct Buffer {
     /// The hash of the file's bytes as last loaded or saved; `None` when there was no file.
     pub disk: Option<u64>,
     pub read_only: bool,
+    /// `kill-buffer` refuses it; killing its workspace still kills it.
+    pub unkillable: bool,
     modified: bool,
     /// Counts text changes, like Emacs's `buffer-modified-tick`.
     tick: u64,
