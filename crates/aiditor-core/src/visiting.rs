@@ -653,6 +653,35 @@ mod tests {
     }
 
     #[test]
+    fn the_completion_list_keeps_its_height_while_open() {
+        let names: Vec<_> = (0..10)
+            .map(|i| format!("d/ten/{i}"))
+            .chain((0..5).map(|i| format!("d/five/{i}")))
+            .collect();
+        let files: Vec<_> = names
+            .iter()
+            .map(|n| (n.as_str(), ""))
+            .chain([("d/a.txt", "")])
+            .collect();
+        let mut h = Harness::new(&files);
+        h.open("d/a.txt");
+        h.keys("C-x C-f ten/");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!((mb.candidates.len(), mb.rows), (10, 10));
+        h.keys("DEL five/");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!((mb.candidates.len(), mb.rows), (5, 10));
+        h.keys("C-g");
+        ask_completing(&mut h, fruit);
+        h.keys("C-c p");
+        assert_eq!(
+            h.core.minibuffer().unwrap().rows,
+            3,
+            "the next minibuffer starts afresh"
+        );
+    }
+
+    #[test]
     fn a_listing_error_shows_and_a_late_listing_is_dropped() {
         let mut h = in_dir();
         h.keys("C-x C-f nope/");

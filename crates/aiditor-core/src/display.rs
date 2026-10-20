@@ -48,6 +48,9 @@ pub struct Minibuffer {
     pub annotations: Vec<String>,
     /// Which of `candidates` is selected.
     pub selected: Option<usize>,
+    /// How many rows the completion list takes, the most shown since the minibuffer opened;
+    /// rows past `candidates` are drawn empty, so the windows above keep their height.
+    pub rows: usize,
 }
 
 #[derive(Debug, PartialEq)]

@@ -35,5 +35,6 @@ Some(
         candidates: [],
         annotations: [],
         selected: None,
+        rows: 0,
     },
 )

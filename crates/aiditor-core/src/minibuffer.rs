@@ -52,6 +52,8 @@ struct Completion {
     selected: usize,
     /// The first match shown, so the shown rows hold the selection.
     top: usize,
+    /// The most rows shown since the minibuffer opened, Emacs's `grow-only` mini-window.
+    rows: usize,
     /// For file names, the text through its last `/`: the directory listed or awaited.
     dir: Option<String>,
     /// Whether `dir`'s listing arrived, so a second answer is dropped.
@@ -197,6 +199,7 @@ impl Ctx<'_> {
                 pattern: String::new(),
                 selected: 0,
                 top: 0,
+                rows: 0,
                 // Nothing listed yet; `poll_completion` asks for the start directory.
                 dir: files.then(String::new),
                 listed: false,
@@ -411,11 +414,11 @@ impl Core {
 
     /// The open minibuffer's prompt and the line holding its point.
     pub(crate) fn minibuffer(&mut self) -> Option<display::Minibuffer> {
-        let mb = self.prompts.minibuffer.as_ref()?;
+        let mb = self.prompts.minibuffer.as_mut()?;
         let prompt = mb.prompt.to_string();
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
-        let mut count = String::new();
-        if let (Some(completion), Some(matcher)) = (&mb.completion, &mut self.prompts.matcher) {
+        let (mut count, mut shown) = (String::new(), 0);
+        if let (Some(completion), Some(matcher)) = (&mut mb.completion, &mut self.prompts.matcher) {
             matcher.tick(0);
             let snapshot = matcher.snapshot();
             let matched = snapshot.matched_item_count() as usize;
@@ -425,6 +428,8 @@ impl Core {
             let number = (matched > 0).then(|| completion.selected.min(matched - 1));
             selected = number.map(|n| n - rows.start);
             count = format!("{}/{matched} ", number.map_or(0, |n| n + 1));
+            completion.rows = completion.rows.max(rows.len());
+            shown = completion.rows;
         }
         // The minibuffer is selected while open; one row, as the height leaves out a mode line.
         let height = 2. * self.settings.line_height();
@@ -440,6 +445,7 @@ impl Core {
             candidates,
             annotations,
             selected,
+            rows: shown,
         })
     }
 
