@@ -39,11 +39,15 @@ impl Ctx<'_> {
         }
     }
 
-    /// Kills the buffer `name`, asking first when it is a modified file buffer.
+    /// Kills the buffer `name`, asking first when it is a modified file buffer; an unkillable
+    /// one is refused.
     pub(crate) fn kill_buffer(&mut self, args: Args) -> Result<(), String> {
         let name = &args.strings[0];
         let id = (self.core.buffers.find(name)).ok_or_else(|| format!("No such buffer {name}"))?;
         let buffer = self.core.buffers.get(id).expect("found");
+        if buffer.unkillable {
+            return Err(format!("Can't kill {name}"));
+        }
         if buffer.file.is_some() && buffer.modified() {
             match args.strings.get(1).map(String::as_str) {
                 None => {
@@ -233,7 +237,7 @@ impl Core {
             .map(|(b, _)| b);
         // Killed first, so a new `*scratch*` gets its name.
         _ = self.buffers.kill(id);
-        let next = next.unwrap_or_else(|| self.buffers.create("*scratch*"));
+        let next = next.unwrap_or_else(|| self.buffers.create_scratch());
         for window in std::iter::once(&mut self.window).chain(self.others.values_mut()) {
             if window.buffer() == id {
                 window.show(&mut self.buffers, next);
@@ -431,11 +435,11 @@ mod tests {
         // That message made *Messages*.
         assert_eq!(h.core.buffers.recent().count(), 2);
         h.keys("C-x k *Messages* RET");
-        assert_eq!(h.core.buffers.recent().count(), 1);
-        // Killing the last buffer leaves a new, empty *scratch*.
+        assert_eq!(h.core.message(), Some("Can't kill *Messages*"));
         h.keys("x C-x k RET");
-        assert_eq!((name(&h), h.text().as_str()), ("*scratch*", ""));
-        assert_eq!(h.core.buffers.recent().count(), 1);
+        assert_eq!(h.core.message(), Some("Can't kill *scratch*"));
+        assert_eq!((name(&h), h.text().as_str()), ("*scratch*", "x"));
+        assert_eq!(h.core.buffers.recent().count(), 2);
     }
 
     #[test]

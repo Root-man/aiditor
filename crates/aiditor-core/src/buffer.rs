@@ -85,6 +85,7 @@ impl Buffers {
             bom: false,
             disk: None,
             read_only: false,
+            unkillable: false,
             modified: false,
             tick: 0,
             markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
@@ -95,6 +96,13 @@ impl Buffers {
             minor_modes: Vec::new(),
             point: MarkerId(0),
         })
+    }
+
+    /// A new unkillable `*scratch*`.
+    pub fn create_scratch(&mut self) -> BufferId {
+        let id = self.create("*scratch*");
+        self.map.get_mut(&id).expect("just created").unkillable = true;
+        id
     }
 
     /// A buffer visiting `path`, holding `text` already read from it.
@@ -182,6 +190,8 @@ pub struct Buffer {
     /// The hash of the file's bytes as last loaded or saved; `None` when there was no file.
     pub disk: Option<u64>,
     pub read_only: bool,
+    /// `kill-buffer` refuses it; killing its workspace still kills it.
+    pub unkillable: bool,
     modified: bool,
     /// Counts text changes, like Emacs's `buffer-modified-tick`.
     tick: u64,

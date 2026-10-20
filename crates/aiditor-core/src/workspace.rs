@@ -24,7 +24,7 @@ impl Core {
             project: Some(project.into()),
         });
         self.buffers.workspace = id;
-        let scratch = self.buffers.create("*scratch*");
+        let scratch = self.buffers.create_scratch();
         self.switch_to(scratch);
         id
     }
@@ -98,6 +98,7 @@ mod tests {
     fn a_new_workspace_is_current_with_its_own_scratch() {
         let mut h = Harness::new(&[]);
         let w = h.core.new_workspace("w", "p");
+        assert!(h.core.current().unkillable);
         assert_eq!(h.core.workspace(), w);
         assert_eq!(h.core.workspaces()[1].project.as_deref(), Some("p"));
         assert_eq!((name(&h), h.text()), ("*scratch*<2>", String::new()));
@@ -122,10 +123,12 @@ mod tests {
 
     #[test]
     fn killing_a_buffer_never_shows_another_workspace_s_buffer() {
-        let mut h = Harness::new(&[("a.txt", "abc")]);
+        let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
         h.open("a.txt");
         let w = h.core.new_workspace("w", "p");
-        h.keys("C-x k RET");
+        // a.txt, shown here until #66, is more recent than w's scratch.
+        h.keys("C-x b a.txt RET");
+        h.open("b.txt").keys("C-x k RET");
         assert_eq!(
             (name(&h), h.core.current().workspace),
             ("*scratch*<2>", Some(w))

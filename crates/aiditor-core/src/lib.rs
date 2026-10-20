@@ -508,7 +508,7 @@ pub struct Core {
 impl Default for Core {
     fn default() -> Self {
         let mut buffers = Buffers::default();
-        let scratch = buffers.create("*scratch*");
+        let scratch = buffers.create_scratch();
         let window = Window::new(&mut buffers, scratch);
         let mut commands = HashMap::new();
         for c in builtins::builtins() {
@@ -578,7 +578,7 @@ impl Core {
         let id = self.buffers.find("*Messages*").unwrap_or_else(|| {
             let id = self.buffers.create("*Messages*");
             let buffer = self.buffers.get_mut(id).expect("just created");
-            (buffer.read_only, buffer.workspace) = (true, None);
+            (buffer.read_only, buffer.unkillable, buffer.workspace) = (true, true, None);
             id
         });
         let buffer = self.buffers.get_mut(id).expect("found or created");
@@ -998,13 +998,14 @@ mod tests {
     }
 
     #[test]
-    fn messages_is_read_only_and_made_again_after_a_kill() {
+    fn messages_is_read_only_and_unkillable() {
         let mut h = Harness::new(&[]);
         h.keys("C-g C-x b *Messages* RET a");
         assert_eq!(name(&h), "*Messages*");
         assert_eq!(h.core.message(), Some("Buffer is read-only"));
         assert_eq!(h.text(), "Quit\nBuffer is read-only\n");
-        h.keys("C-x k RET C-g");
-        assert_eq!(messages(&h).unwrap(), "Quit\n");
+        h.keys("C-x k RET");
+        assert_eq!(h.core.message(), Some("Can't kill *Messages*"));
+        assert_eq!(name(&h), "*Messages*");
     }
 }
