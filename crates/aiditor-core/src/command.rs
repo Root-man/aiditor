@@ -28,6 +28,9 @@ pub struct ArgSpec {
     /// The prompt at this index completes file names, starting at the current buffer's
     /// directory, from listings the app reads with `FileOp::ListDir`.
     pub files: Option<usize>,
+    /// The file-name prompt lists directories only, the typed one first as `./`, and `RET`
+    /// returns the selected one instead of entering it.
+    pub directories: bool,
     /// Text shown after a candidate in the list and not matched, worked out as the prompt opens.
     pub annotation: Option<fn(&Core, &str) -> Option<String>>,
 }

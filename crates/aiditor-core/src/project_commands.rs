@@ -249,16 +249,35 @@ mod tests {
     fn create_writes_a_file_that_loads_back() {
         let mut h = with(Vec::new());
         let a = h.path("a").display().to_string();
-        // RET would pick the first entry listed under it; M-RET takes the directory as typed.
-        h.keys(&format!("C-x p c app RET C-a C-k {a}/ M-RET"));
+        let tmp = h.dir.path().display().to_string();
+        // Only directories are listed, the typed one first, and RET takes the selected one.
+        h.keys(&format!("C-x p c app RET C-a C-k {tmp}/"));
+        assert_eq!(
+            crate::harness::listed(&mut h),
+            (vec!["./".into(), "a/".into(), "b/".into()], Some(0))
+        );
+        h.keys("C-n RET");
         let file = h.path("projects/app.toml");
         assert_eq!(
             h.core.message(),
             Some(&*format!("Wrote {}", file.display()))
         );
-        let p = Project::parse(&h.disk("projects/app.toml")).unwrap();
-        assert_eq!((p.name.as_str(), &p.primary.path), ("app", &h.path("a")));
+        let text = format!("name = \"app\"\n\n[primary]\npath = \"{a}\"\n");
+        assert_eq!(h.disk("projects/app.toml"), text, "no empty roots or role");
+        let p = Project::parse(&text).unwrap();
         assert_eq!(h.core.projects(), [&p]);
+        // Typing filters the list; `./` takes the directory typed.
+        h.keys(&format!("C-x p a app RET C-a C-k {tmp}/b RET Bee RET"));
+        h.keys(&format!("C-x p c two RET C-a C-k {tmp}/b/ RET"));
+        let (app, two) = (project(&h, "app"), project(&h, "two"));
+        assert_eq!(
+            app.roots,
+            [Root {
+                path: h.path("b"),
+                role: "Bee".into()
+            }]
+        );
+        assert_eq!(two.primary.path, h.path("b"));
         for (name, err) in [
             ("app", "Project app already exists"),
             (".app", ".app can't be a file name"),

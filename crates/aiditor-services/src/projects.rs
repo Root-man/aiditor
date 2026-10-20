@@ -117,6 +117,8 @@ mod tests {
         }
         for key in aiditor_core::key::parse_keys(script).unwrap() {
             send(core, aiditor_core::Msg::Key(key));
+            // A tick waits for the matcher again, as a user waits for the list to fill.
+            send(core, aiditor_core::Msg::Tick);
         }
     }
 
@@ -136,11 +138,12 @@ mod tests {
                 projects,
             },
         );
-        let (a, b) = (a.display(), b.display());
-        keys(&mut core, &format!("C-x p c app RET C-a C-k {a} M-RET"));
+        // As a user does: from a/, DEL up to the parent, then pick a listed directory.
+        let start = format!("C-a C-k {}/ DEL", a.display());
+        keys(&mut core, &format!("C-x p c app RET {start} C-n RET"));
         keys(
             &mut core,
-            &format!("C-x p a app RET C-a C-k {b} M-RET Docs RET"),
+            &format!("C-x p a app RET {start} b RET Docs RET"),
         );
         keys(&mut core, "C-x p d app RET claude RET");
         assert_eq!(
@@ -150,6 +153,7 @@ mod tests {
         let loaded: Vec<_> = read(&dir).into_iter().map(|p| p.unwrap().project).collect();
         assert_eq!(core.projects(), loaded.iter().collect::<Vec<_>>());
         let p = &loaded[0];
+        assert_eq!((&p.primary.path, &p.roots[0].path), (&a, &b));
         assert_eq!(
             (p.roots[0].role.as_str(), p.default_agent.as_deref()),
             ("Docs", Some("claude"))

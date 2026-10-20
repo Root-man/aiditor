@@ -976,6 +976,24 @@ milestones:
         design: "#open-questions"
         body: |
           Implement the commands chosen in M1's "Decide: C-s and the remaining editing commands". Break down when M5 starts.
+      - key: m5-keymap-config
+        title: "Keymap configuration polish"
+        labels: [keymap]
+        design: "#commands-and-keymaps"
+        body: |
+          What `keymap.toml` can't express yet. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m5-keymap-prefixes
+            title: "Named keymap prefixes, remappable as a whole"
+            body: |
+              Today a prefix such as `C-x p` exists only as the first keys of each binding, so moving the project commands to `C-c p` (projectile's prefix) means rebinding every command, and the old keys stay bound because unbinding is unsupported. Give prefixes a name in `keymap.toml` (a prefix keymap such as `project-prefix` holding `c = "project-create"` and so on, bound in `[global]` as `"C-x p" = "project-prefix"`), so a user file can bind the prefix to other keys, or unbind it, in one entry, Emacs's prefix-command style. The which-key hint shows the prefix's name.
+            acceptance:
+              - "The bundled project, workspace and agent bindings live in named prefix keymaps"
+              - "A user `keymap.toml` that binds `C-c p` to the project prefix and unbinds `C-x p` moves every project command, tested with a key script"
+              - "A prefix bound to two key sequences works under both"
+              - "The which-key hint shows a bound prefix by its name"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m0-keymap-toml]
 
   # ───────────────────────────────────────────── M6 ─────────────────────────────────────────────
   - key: m6

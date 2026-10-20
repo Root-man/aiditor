@@ -74,6 +74,14 @@ pub(crate) struct Prompts {
 }
 
 impl Prompts {
+    /// Whether the open prompt completes directories only.
+    fn directories(&self, commands: &HashMap<&'static str, Command>) -> bool {
+        self.minibuffer.as_ref().is_some_and(|mb| {
+            mb.completion.as_ref().is_some_and(|c| c.dir.is_some())
+                && commands[mb.command].spec.directories
+        })
+    }
+
     /// How many candidates match, 0 when not completing.
     fn matches(&self) -> usize {
         match (&self.minibuffer, &self.matcher) {
@@ -124,6 +132,7 @@ impl Ctx<'_> {
             return;
         };
         completion.listed = true;
+        let directories = core.prompts.directories(&core.commands);
         match result {
             Ok(names) => {
                 let matcher = core
@@ -132,7 +141,12 @@ impl Ctx<'_> {
                     .as_ref()
                     .expect("completing has a matcher");
                 let injector = matcher.injector();
-                for name in names {
+                // A directory prompt offers the listed directory itself first, as `./`.
+                let here = directories.then(|| "./".to_string());
+                let names = names
+                    .into_iter()
+                    .filter(|n| !directories || n.ends_with('/'));
+                for name in here.into_iter().chain(names) {
                     injector.push((name, String::new()), |(c, _), cols| {
                         cols[0] = c.as_str().into()
                     });
@@ -216,8 +230,11 @@ impl Ctx<'_> {
     }
 
     /// Closes the minibuffer and calls its command with the selected candidate, or with `input`
-    /// or no match the text, as the next string. A selected directory is entered instead.
+    /// or no match the text, as the next string. A selected directory is entered instead, except
+    /// in a directory prompt, which returns it.
     pub(crate) fn exit_minibuffer(&mut self, input: bool) -> Result<(), String> {
+        let core = &*self.core;
+        let directories = core.prompts.directories(&core.commands);
         let selected = (!input)
             .then(|| self.core.prompts.selected_candidate())
             .flatten();
@@ -228,6 +245,7 @@ impl Ctx<'_> {
             .as_ref()
             .and_then(|mb| mb.completion.as_ref());
         if completion.is_some_and(|c| c.dir.is_some())
+            && !directories
             && let Some(dir) = selected.as_ref().filter(|s| s.ends_with('/'))
         {
             return self.set_text(dir);

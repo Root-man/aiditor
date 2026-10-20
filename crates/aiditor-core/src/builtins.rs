@@ -227,6 +227,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             spec: ArgSpec {
                 prompts: &["Project name: ", "Primary root: "],
                 files: Some(1),
+                directories: true,
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.create_project(&args.strings[0], &args.strings[1]),
@@ -246,6 +247,7 @@ pub(crate) fn builtins() -> Vec<Command> {
                 prompts: &["Project: ", "Add root: ", "Role: "],
                 completion: Some(projects_then_free),
                 files: Some(1),
+                directories: true,
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.add_root(&args),
