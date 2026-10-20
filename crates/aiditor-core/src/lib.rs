@@ -27,6 +27,7 @@ pub mod settings;
 pub mod timer;
 mod visiting;
 pub mod window;
+pub mod workspace;
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
@@ -49,6 +50,7 @@ use project::{Loaded, Project};
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
+use workspace::{Workspace, WorkspaceId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
@@ -448,6 +450,10 @@ pub struct Core {
     /// Every window but the selected one.
     others: HashMap<WindowId, Window>,
     tree: Tree,
+    /// Every workspace, in creation order; `buffers.workspace` is the current one.
+    workspaces: Vec<Workspace>,
+    /// The id the next new workspace gets.
+    next_workspace: u64,
     /// The windows area's width and height and the cell width in px, as the frontend reported.
     frame_size: (f32, f32, f32),
     /// The id the next new window gets.
@@ -518,6 +524,12 @@ impl Default for Core {
             selected: WindowId(0),
             others: HashMap::new(),
             tree: Tree::Leaf(WindowId(0)),
+            workspaces: vec![Workspace {
+                id: WorkspaceId::default(),
+                name: "default".into(),
+                project: None,
+            }],
+            next_workspace: 1,
             frame_size: (0., 0., 0.),
             next_window: 1,
             timers: Timers::default(),
@@ -565,7 +577,8 @@ impl Core {
     fn log(&mut self, line: &str) {
         let id = self.buffers.find("*Messages*").unwrap_or_else(|| {
             let id = self.buffers.create("*Messages*");
-            self.buffers.get_mut(id).expect("just created").read_only = true;
+            let buffer = self.buffers.get_mut(id).expect("just created");
+            (buffer.read_only, buffer.workspace) = (true, None);
             id
         });
         let buffer = self.buffers.get_mut(id).expect("found or created");

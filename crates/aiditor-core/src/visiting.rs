@@ -220,11 +220,16 @@ impl Core {
         names.into_iter().map(|(_, b)| b.name.clone()).collect()
     }
 
-    /// Kills buffer `id`; windows showing it show the most recent listed buffer left, or a new
-    /// `*scratch*`.
-    fn kill_buffer(&mut self, id: BufferId) {
+    /// Kills buffer `id`; windows showing it show the most recent listed buffer left of the
+    /// current workspace or `*Messages*`, or a new `*scratch*`.
+    pub(crate) fn kill_buffer(&mut self, id: BufferId) {
+        let workspace = self.buffers.workspace;
         let next = (self.buffers.recent())
-            .find(|&(b, buffer)| b != id && !buffer.name.starts_with(' '))
+            .find(|&(b, buffer)| {
+                b != id
+                    && !buffer.name.starts_with(' ')
+                    && buffer.workspace.is_none_or(|w| w == workspace)
+            })
             .map(|(b, _)| b);
         // Killed first, so a new `*scratch*` gets its name.
         _ = self.buffers.kill(id);
