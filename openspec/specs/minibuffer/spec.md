@@ -123,6 +123,17 @@ While a completing minibuffer is open the frame display SHALL carry up to 10 can
 - **WHEN** a command completing over 15 candidates is run and `C-u 12 C-n` is typed
 - **THEN** the frame display's minibuffer lists 10 candidates ending with the 13th, which is selected, and its count is `13/15 `
 
+### Requirement: The completion list only grows while the minibuffer is open
+While one minibuffer is open, the frame display SHALL carry as many completion rows as the most it has shown since it opened, and the frontend SHALL draw the rows past the shown matches empty, so the windows above keep their height. A newly opened minibuffer SHALL start at the rows its own matches need.
+
+#### Scenario: Fewer matches keep the height
+- **WHEN** `find-file` lists a directory with 10 entries and the text then moves to a directory with 5
+- **THEN** the frame display's minibuffer lists 5 candidates in 10 rows, and the frontend's window area keeps its height
+
+#### Scenario: The next minibuffer starts afresh
+- **WHEN** a minibuffer that showed 10 rows closes and a prompt with 3 candidates opens
+- **THEN** the frame display's minibuffer carries 3 rows
+
 ### Requirement: Candidates can carry annotations
 A command that completes over candidates SHALL be able to annotate each one with text worked out when the minibuffer opens. The frame display SHALL carry each shown candidate's annotation, and the frontend SHALL draw it after the candidate. Annotations SHALL NOT be matched against the text.
 
