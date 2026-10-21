@@ -643,6 +643,7 @@ impl Core {
         let mut effects = ctx.effects;
         self.autosave(now, input, &mut effects);
         self.poll_completion(now, &mut effects);
+        self.preview();
         effects
     }
 

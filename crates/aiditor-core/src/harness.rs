@@ -100,6 +100,7 @@ impl Harness {
         while let (Some(_), Some(matcher)) = (&core.prompts.minibuffer, &mut core.prompts.matcher)
             && matcher.tick(50).running
         {}
+        self.core.preview();
     }
 
     /// Calls the command `name` with `args`, carrying out its effects as the app does.

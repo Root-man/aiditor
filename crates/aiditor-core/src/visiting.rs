@@ -430,6 +430,32 @@ mod tests {
     }
 
     #[test]
+    fn c_x_b_previews_the_selected_buffer() {
+        let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.open("a").open("b");
+        let shown = |h: &Harness| {
+            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+            h.core.buffers.get(id).unwrap().name.clone()
+        };
+        h.keys("C-x b");
+        assert_eq!(shown(&h), "a", "the previous buffer shows at once");
+        h.keys("C-n");
+        assert_eq!(shown(&h), "*scratch*<main>");
+        h.keys("C-g");
+        assert_eq!(name(&h), "b");
+        h.keys("C-x b");
+        // `Quit` made `*Messages*`.
+        assert_eq!(
+            listed(&mut h).0,
+            ["a", "*scratch*<main>", "*Messages*", "b"]
+        );
+        for keys in ["C-x 4 b", "C-x k"] {
+            h.keys(&format!("C-g {keys} C-n"));
+            assert_eq!(shown(&h), "b", "{keys} does not preview");
+        }
+    }
+
+    #[test]
     fn c_x_b_and_c_x_k_see_only_this_workspace_s_buffers() {
         // `x` matches neither `*scratch*<w>` nor `*Messages*`, so `RET` takes it as typed.
         let mut h = Harness::new(&[("x", "1")]);
