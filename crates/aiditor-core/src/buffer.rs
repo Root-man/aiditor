@@ -179,6 +179,16 @@ impl Buffers {
             .map(|(&id, _)| id)
     }
 
+    /// The buffer named `name` that the current workspace owns, or `*Messages*`.
+    pub fn find_here(&self, name: &str) -> Option<BufferId> {
+        self.find(name).filter(|&id| self.is_here(id))
+    }
+
+    /// Buffer `id` belongs to the current workspace or to none.
+    pub fn is_here(&self, id: BufferId) -> bool {
+        self.map[&id].workspace.is_none_or(|w| w == self.workspace)
+    }
+
     /// The current workspace's buffer visiting `path`.
     pub fn visiting(&self, path: &Path) -> Option<BufferId> {
         self.map
