@@ -100,7 +100,9 @@ impl Harness {
         while let (Some(_), Some(matcher)) = (&core.prompts.minibuffer, &mut core.prompts.matcher)
             && matcher.tick(50).running
         {}
-        self.core.preview();
+        let mut effects = Vec::new();
+        self.core.preview(&mut effects);
+        self.run(effects);
     }
 
     /// Calls the command `name` with `args`, carrying out its effects as the app does.
@@ -199,15 +201,12 @@ impl Harness {
                     });
                 }
                 Effect::File(FileOp::Open(path)) => {
-                    let result = match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            let h = hash(&bytes);
-                            Ok(Some((bytes, h)))
-                        }
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                        Err(err) => Err(format!("{}: {err}", path.display())),
-                    };
+                    let result = read(&path);
                     self.send(Msg::Opened { path, result });
+                }
+                Effect::File(FileOp::Preview(path)) => {
+                    let result = read(&path);
+                    self.send(Msg::Previewed { path, result });
                 }
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::Quit => self.quit = true,
@@ -433,4 +432,16 @@ pub(crate) fn listed(h: &mut Harness) -> (Vec<String>, Option<usize>) {
 
 pub(crate) fn name(h: &Harness) -> &str {
     h.core.current().name.as_str()
+}
+
+/// Reads `path` as the file service does: its bytes and hash, `None` when there is no file.
+fn read(path: &Path) -> Result<Option<(Vec<u8>, u64)>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let h = hash(&bytes);
+            Ok(Some((bytes, h)))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("{}: {err}", path.display())),
+    }
 }

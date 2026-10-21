@@ -46,9 +46,9 @@ Text that matches no candidate, or is returned with `M-RET`, SHALL be visited un
 - **WHEN** `notes.md` is typed, matching nothing, and `RET` pressed
 - **THEN** a buffer visiting `<primary>/notes.md` opens
 
-### Requirement: No preview
-`project-find-file` SHALL NOT preview the selected file: the window it was opened from keeps its buffer while the prompt is open.
+### Requirement: The finder previews the selected file
+`project-find-file` SHALL preview the selected candidate's file in the window it was opened from, as a previewing prompt does.
 
 #### Scenario: Moving the selection
-- **WHEN** the selection moves with `C-n` in `project-find-file`
-- **THEN** the selected window still shows the buffer it showed before
+- **WHEN** `C-n` selects `b/x` in `project-find-file`
+- **THEN** the window the finder was opened from shows `/r/b/x`'s text, and the minibuffer stays selected

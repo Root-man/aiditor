@@ -100,6 +100,11 @@ pub enum Msg {
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
     },
+    /// The file service's answer to `FileOp::Preview`, as to `FileOp::Open`.
+    Previewed {
+        path: PathBuf,
+        result: Result<Option<(Vec<u8>, u64)>, String>,
+    },
     /// The file service's answer to `FileOp::Index`: each root with its files, relative and
     /// sorted, or why it couldn't be walked.
     Indexed {
@@ -187,6 +192,8 @@ pub enum FileOp {
     ListDir(PathBuf),
     /// Read the file and send `Msg::Opened`.
     Open(PathBuf),
+    /// Read the file and send `Msg::Previewed`.
+    Preview(PathBuf),
     /// Walk every root of `project` and send `Msg::Indexed` with `walk`.
     Index {
         project: String,
@@ -337,6 +344,7 @@ impl Ctx<'_> {
                 Ok(file) => self.core.visit(&path, file, true),
                 Err(err) => self.core.echo(err),
             },
+            Msg::Previewed { path, result } => self.core.on_previewed(path, result),
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
                     Ok(settings) => self.core.settings = settings,
@@ -643,7 +651,7 @@ impl Core {
         let mut effects = ctx.effects;
         self.autosave(now, input, &mut effects);
         self.poll_completion(now, &mut effects);
-        self.preview();
+        self.preview(&mut effects);
         effects
     }
 

@@ -41,6 +41,10 @@ pub fn run(op: FileOp) -> Msg {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
             Msg::Opened { path, result }
         }
+        FileOp::Preview(path) => {
+            let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
+            Msg::Previewed { path, result }
+        }
         FileOp::Index {
             project,
             walk,
@@ -183,6 +187,10 @@ mod tests {
         assert_eq!(result, Ok(None));
         let file = dir.path().join("f");
         fs::write(&file, "").unwrap();
+        let Msg::Previewed { result, .. } = run(FileOp::Preview(file.clone())) else {
+            panic!("not previewed");
+        };
+        assert_eq!(result.unwrap().unwrap().0, b"");
         let Msg::Listed { result, .. } = run(FileOp::ListDir(file.clone())) else {
             panic!("not listed");
         };

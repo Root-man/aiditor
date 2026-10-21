@@ -1,6 +1,7 @@
 //! Named commands, the arguments they declare and the arguments they get.
 
 use std::ops::Range;
+use std::path::PathBuf;
 
 use crate::buffer::BufferId;
 use crate::{Core, Ctx};
@@ -34,8 +35,16 @@ pub struct ArgSpec {
     pub directories: bool,
     /// Text shown after a candidate in the list and not matched, worked out as the prompt opens.
     pub annotation: Option<fn(&Core, &str) -> Option<String>>,
-    /// The buffer to show for the selected candidate in the window the prompt was opened from.
-    pub preview: Option<fn(&Core, &str) -> Option<BufferId>>,
+    /// What to show for the selected candidate in the window the prompt was opened from.
+    pub preview: Option<fn(&Core, &str) -> Option<Preview>>,
+}
+
+/// What a preview shows for a candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Preview {
+    Buffer(BufferId),
+    /// A file, shown in the buffer visiting it, else read into a preview buffer.
+    File(PathBuf),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

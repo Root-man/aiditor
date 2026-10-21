@@ -141,7 +141,7 @@ impl Core {
 
     /// The file `text` names in `project`: under the root its first component names, else under
     /// the primary.
-    fn project_file(&self, project: &str, text: &str) -> Result<PathBuf, String> {
+    pub(crate) fn project_file(&self, project: &str, text: &str) -> Result<PathBuf, String> {
         let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
         if let Some((head, rest)) = text.split_once('/')
             && let Some(i) = root_names(roots).iter().position(|n| n == head)
@@ -701,16 +701,55 @@ mod tests {
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
     }
 
+    /// The name of the buffer the first window shows while the minibuffer is open.
+    fn shown(h: &Harness) -> String {
+        let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+        h.core.buffers.get(id).unwrap().name.clone()
+    }
+
     #[test]
-    fn the_finder_does_not_preview() {
+    fn the_finder_previews_files_in_a_hidden_buffer() {
+        let mut h = findable(&[]);
+        std::fs::write(h.path("b/x"), "bee").unwrap();
+        h.keys("C-x p f C-n");
+        assert_eq!(shown(&h), " x");
+        let peek = h.core.buffers.visiting(&h.path("b/x")).unwrap();
+        let buffer = h.core.buffers.get(peek).unwrap();
+        assert_eq!(
+            (buffer.text().to_string().as_str(), buffer.read_only),
+            ("bee", true)
+        );
+        assert!(
+            h.core.buffers.visiting(&h.path("a/x")).is_none(),
+            "one peek"
+        );
+        h.keys("C-g");
+        assert_eq!(name(&h), "*scratch*<main>");
+        assert!(h.core.buffers.visiting(&h.path("b/x")).is_none(), "killed");
+        h.keys("C-x p f C-n RET");
+        assert_eq!(visited(&h), Some(h.path("b/x")));
+        assert_eq!((name(&h), h.core.current().read_only), ("x", false));
+    }
+
+    #[test]
+    fn the_finder_previews_a_visited_file_s_own_buffer() {
         let mut h = findable(&[]);
         h.open("b/x").open("a/x");
-        let shown = |h: &Harness| {
-            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
-            h.core.buffers.get(id).unwrap().name.clone()
-        };
         h.keys("C-x p f C-n");
-        assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
-        assert_eq!(shown(&h), "x<2>");
+        assert_eq!(shown(&h), "x");
+    }
+
+    #[test]
+    fn a_read_no_longer_awaited_is_dropped() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f");
+        let result = Ok(Some((b"late".to_vec(), 0)));
+        h.send(Msg::Previewed {
+            path: h.path("b/x"),
+            result,
+        });
+        assert_eq!(shown(&h), " x");
+        assert!(h.core.buffers.visiting(&h.path("b/x")).is_none());
+        assert!(h.core.buffers.visiting(&h.path("a/x")).is_some());
     }
 }
