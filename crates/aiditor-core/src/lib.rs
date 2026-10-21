@@ -524,11 +524,7 @@ impl Default for Core {
             selected: WindowId(0),
             others: HashMap::new(),
             tree: Tree::Leaf(WindowId(0)),
-            workspaces: vec![Workspace {
-                id: WorkspaceId::default(),
-                name: "default".into(),
-                project: None,
-            }],
+            workspaces: vec![Workspace::new(WorkspaceId::default(), "default", None)],
             next_workspace: 1,
             frame_size: (0., 0., 0.),
             next_window: 1,
