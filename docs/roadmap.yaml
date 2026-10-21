@@ -960,6 +960,14 @@ milestones:
               - "Directories and files are drawn in different faces"
               - "Each entry shows its mode bits, human-readable size and modification age, dimmed and never matched"
             blocked_by: [m0-find-file]
+          - key: m5-highlight-matches
+            title: "Highlight matched characters in completion lists"
+            body: |
+              Draw the characters the fuzzy pattern matched in a distinct face in every completion list (`project-find-file`, `find-file`, `M-x`, `C-x b`), as Vertico with orderless does, so it is clear why a candidate matched. `nucleo` already reports the matched indices; annotations are never highlighted.
+            acceptance:
+              - "Typing `pff` in `M-x` highlights the `p`, `f` and `f` that matched in `project-find-file`"
+              - "Every completing prompt highlights its matches, and annotations stay dimmed"
+            blocked_by: [m1-find-in-project]
       - key: m5-crash
         title: "Crash safety beyond commands"
         labels: [frontend]

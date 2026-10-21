@@ -121,7 +121,46 @@ impl Core {
         let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
         let s = if n == 1 { "" } else { "s" };
         self.echo(format!("Indexed {n} file{s} in {project}{errors}"));
+        // An open finder is always the current workspace's, as switching closes the minibuffer.
+        if self.current_workspace().project == project {
+            let files = self.project_files(&project);
+            self.add_candidates("project-find-file", files);
+        }
     }
+
+    /// Every indexed file of `project` as `<root name>/<relative path>`, the primary's first.
+    fn project_files(&self, project: &str) -> Vec<String> {
+        let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
+        let names = root_names(roots);
+        (names.iter().zip(roots))
+            .flat_map(|(name, (_, files))| {
+                (files.iter()).map(move |f| format!("{name}/{}", f.display()))
+            })
+            .collect()
+    }
+
+    /// The file `text` names in `project`: under the root its first component names, else under
+    /// the primary.
+    pub(crate) fn project_file(&self, project: &str, text: &str) -> Result<PathBuf, String> {
+        let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
+        if let Some((head, rest)) = text.split_once('/')
+            && let Some(i) = root_names(roots).iter().position(|n| n == head)
+        {
+            return Ok(roots[i].0.join(rest));
+        }
+        let primary = &self.projects[self.project(project)?].project.primary.path;
+        Ok(primary.join(text))
+    }
+}
+
+/// Each indexed root's name: its last component, with `<2>` on for one an earlier root has.
+fn root_names(roots: &[(PathBuf, Vec<PathBuf>)]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (root, _) in roots {
+        let name = unique(&file_name(root), |n| names.iter().any(|taken| taken == n));
+        names.push(name);
+    }
+    names
 }
 
 impl Ctx<'_> {
@@ -254,6 +293,24 @@ impl Ctx<'_> {
             roots,
         }));
         Ok(())
+    }
+
+    /// Asks for a file in any root of the current workspace's project and visits it, indexing
+    /// the project first when it has no index yet.
+    pub(crate) fn project_find_file(&mut self, args: Args) -> Result<(), String> {
+        let project = self.core.current_workspace().project.clone();
+        if let Some(text) = args.strings.first() {
+            let path = self.core.project_file(&project, text)?;
+            return self.find_file(&path.to_string_lossy());
+        }
+        if !self.core.index.contains_key(&project) {
+            self.index_project(&project)?;
+        }
+        let files = self.core.project_files(&project);
+        let choices: Vec<&str> = files.iter().map(String::as_str).collect();
+        let command = self.core.commands["project-find-file"];
+        let prompt = format!("Find file in {project}: ");
+        self.read_string(command, args, prompt, Some(&choices))
     }
 
     pub(crate) fn open_project_file(&mut self, name: &str) -> Result<(), String> {
@@ -485,6 +542,7 @@ mod tests {
             "project-save",
             "project-switch",
             "project-index",
+            "project-find-file",
         ] {
             assert!(hint.contains(command), "{command} in {hint}");
         }
@@ -577,5 +635,121 @@ mod tests {
         h.core.projects.clear();
         h.run(pending);
         assert_eq!(h.core.message(), Some("Indexing tmp..."));
+    }
+
+    /// `indexable` with the current workspace bound to `tmp`.
+    fn findable(roots: &[&str]) -> Harness {
+        let mut h = indexable(roots);
+        h.core.workspaces[0].project = "tmp".into();
+        h
+    }
+
+    fn candidates(h: &mut Harness) -> Vec<String> {
+        h.core.minibuffer().unwrap().candidates
+    }
+
+    fn visited(h: &Harness) -> Option<std::path::PathBuf> {
+        h.core.current().file.clone()
+    }
+
+    #[test]
+    fn finds_files_in_the_primary_and_an_additional_root() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Find file in tmp: ");
+        assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
+        h.keys("b RET");
+        assert_eq!(visited(&h), Some(h.path("b/x")));
+        h.keys("C-x p f a RET");
+        assert_eq!(visited(&h), Some(h.path("a/x")));
+    }
+
+    #[test]
+    fn a_repeated_root_name_gets_a_number() {
+        let mut h = findable(&["q/a"]);
+        std::fs::create_dir_all(h.path("q/a")).unwrap();
+        std::fs::write(h.path("q/a/y"), "").unwrap();
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), ["a/x", "b/x", "a<2>/y"]);
+        h.keys("C-g");
+        call(&mut h, "project-find-file", &["a<2>/y"]);
+        assert_eq!(visited(&h), Some(h.path("q/a/y")));
+    }
+
+    #[test]
+    fn a_typed_name_is_visited_under_its_root_or_the_primary() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f b/new.rs M-RET");
+        assert_eq!(visited(&h), Some(h.path("b/new.rs")));
+        assert_eq!(h.text(), "");
+        h.keys("C-x p f notes.md RET");
+        assert_eq!(visited(&h), Some(h.path("a/notes.md")));
+    }
+
+    #[test]
+    fn the_first_use_indexes_and_fills_the_open_list() {
+        let mut h = findable(&[]);
+        let mut ctx = h.ctx();
+        ctx.call("project-find-file", Args::default());
+        let pending = ctx.effects;
+        assert_eq!(h.core.message(), Some("Indexing tmp..."));
+        assert_eq!(candidates(&mut h), Vec::<String>::new());
+        h.run(pending);
+        assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
+        h.keys("C-g C-x p f");
+        assert_eq!(h.core.index_walks, 1, "no second walk");
+        assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
+    }
+
+    /// The name of the buffer the first window shows while the minibuffer is open.
+    fn shown(h: &Harness) -> String {
+        let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+        h.core.buffers.get(id).unwrap().name.clone()
+    }
+
+    #[test]
+    fn the_finder_previews_files_in_a_hidden_buffer() {
+        let mut h = findable(&[]);
+        std::fs::write(h.path("b/x"), "bee").unwrap();
+        h.keys("C-x p f C-n");
+        assert_eq!(shown(&h), " x");
+        let peek = h.core.buffers.visiting(&h.path("b/x")).unwrap();
+        let buffer = h.core.buffers.get(peek).unwrap();
+        assert_eq!(
+            (buffer.text().to_string().as_str(), buffer.read_only),
+            ("bee", true)
+        );
+        assert!(
+            h.core.buffers.visiting(&h.path("a/x")).is_none(),
+            "one peek"
+        );
+        h.keys("C-g");
+        assert_eq!(name(&h), "*scratch*<main>");
+        assert!(h.core.buffers.visiting(&h.path("b/x")).is_none(), "killed");
+        h.keys("C-x p f C-n RET");
+        assert_eq!(visited(&h), Some(h.path("b/x")));
+        assert_eq!((name(&h), h.core.current().read_only), ("x", false));
+    }
+
+    #[test]
+    fn the_finder_previews_a_visited_file_s_own_buffer() {
+        let mut h = findable(&[]);
+        h.open("b/x").open("a/x");
+        h.keys("C-x p f C-n");
+        assert_eq!(shown(&h), "x");
+    }
+
+    #[test]
+    fn a_read_no_longer_awaited_is_dropped() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f");
+        let result = Ok(Some((b"late".to_vec(), 0)));
+        h.send(Msg::Previewed {
+            path: h.path("b/x"),
+            result,
+        });
+        assert_eq!(shown(&h), " x");
+        assert!(h.core.buffers.visiting(&h.path("b/x")).is_none());
+        assert!(h.core.buffers.visiting(&h.path("a/x")).is_some());
     }
 }

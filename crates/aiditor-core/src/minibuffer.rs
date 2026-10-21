@@ -1,14 +1,15 @@
 //! Prompts read in the minibuffer, with history and completion.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 
-use crate::command::{Args, Command};
+use crate::buffer::{BufferId, decode, file_name};
+use crate::command::{Args, Command, Preview};
 use crate::frame::window_display;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
@@ -46,6 +47,10 @@ pub(crate) struct Minibuffer {
     saved: Option<Window>,
     /// The candidate last previewed; `None` before any and with no selection.
     previewed: Option<String>,
+    /// The file whose read for a preview is awaited.
+    reading: Option<PathBuf>,
+    /// The hidden buffer a previewed file was read into, killed on closing.
+    peek: Option<BufferId>,
 }
 
 /// The selection in a completing minibuffer's list of matches.
@@ -100,6 +105,15 @@ impl Prompts {
             ) => m.snapshot().matched_item_count() as usize,
             _ => 0,
         }
+    }
+
+    /// The directory a file prompt's candidates are relative to.
+    pub(crate) fn completion_base(&self) -> Option<&Path> {
+        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
+        completion
+            .dir
+            .is_some()
+            .then_some(completion.base.as_path())
     }
 
     /// The selected candidate, if the minibuffer is completing and anything matches.
@@ -230,6 +244,8 @@ impl Ctx<'_> {
             history: choices.is_none(),
             saved: None,
             previewed: None,
+            reading: None,
+            peek: None,
         });
         core.select(MINIBUFFER);
         match start {
@@ -455,17 +471,19 @@ impl Core {
         })
     }
 
-    /// Shows the buffer the command's preview gives for the selected candidate in the window
-    /// the minibuffer was opened from, or that window as it was when it gives none.
-    pub(crate) fn preview(&mut self) {
+    /// Shows what the command's preview gives for the selected candidate in the window the
+    /// minibuffer was opened from, or that window as it was when it gives nothing. A file no
+    /// buffer visits is read first, the window keeping what it shows meanwhile.
+    pub(crate) fn preview(&mut self, effects: &mut Effects) {
         let Some(mb) = &self.prompts.minibuffer else {
             return;
         };
-        // A handler's own question completes over its choices, not the spec's candidates.
-        let Some(preview) = self.commands[mb.command]
-            .spec
+        let spec = &self.commands[mb.command].spec;
+        // A handler's own question completes over its choices, not the spec's candidates, unless
+        // the command declares no prompts, so that question is its only one.
+        let Some(preview) = spec
             .preview
-            .filter(|_| mb.history)
+            .filter(|_| mb.history || spec.prompts.is_empty())
         else {
             return;
         };
@@ -473,14 +491,79 @@ impl Core {
         if candidate == mb.previewed {
             return;
         }
+        let id = match candidate.as_deref().and_then(|c| preview(self, c)) {
+            Some(Preview::Buffer(id)) => Some(id),
+            // The peek buffer visits its file too, so this finds it once read.
+            Some(Preview::File(path)) => match self.buffers.visiting(&path) {
+                Some(id) => Some(id),
+                None => {
+                    let mb = self.prompts.minibuffer.as_mut().expect("checked above");
+                    mb.previewed = candidate;
+                    if mb.reading.as_ref() != Some(&path) {
+                        mb.reading = Some(path.clone());
+                        effects.push(Effect::File(FileOp::Preview(path)));
+                    }
+                    return;
+                }
+            },
+            None => None,
+        };
         self.unpreview();
-        let id = candidate.as_deref().and_then(|c| preview(self, c));
         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
         mb.previewed = candidate;
         let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
         if let Some(id) = id.filter(|&id| id != from.buffer()) {
             // Swapped out whole, so its point, mark, ring and scroll stay as markers until restored.
             mb.saved = Some(std::mem::replace(from, Window::new(&mut self.buffers, id)));
+        }
+    }
+
+    /// Takes the file service's answer to `FileOp::Preview` when it is the awaited read: the
+    /// file replaces the last one read in the hidden peek buffer, and the next `preview` shows
+    /// it. A file that can't be shown leaves the window as it was.
+    // shortcut: whole files are read however large; add consult's size limit if previews feel slow.
+    pub(crate) fn on_previewed(
+        &mut self,
+        path: PathBuf,
+        result: Result<Option<(Vec<u8>, u64)>, String>,
+    ) {
+        let awaited =
+            (self.prompts.minibuffer.as_ref()).is_some_and(|mb| mb.reading == Some(path.clone()));
+        if !awaited {
+            return;
+        }
+        self.unpreview();
+        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
+        mb.reading = None;
+        if let Some(old) = mb.peek.take() {
+            _ = self.buffers.kill(old);
+        }
+        let Ok(Some((bytes, _))) = result else {
+            return;
+        };
+        let Ok((text, ..)) = decode(&bytes) else {
+            return;
+        };
+        let id = self.buffers.create_for_file(&path, &text);
+        self.buffers.rename(id, &format!(" {}", file_name(&path)));
+        self.buffers.get_mut(id).expect("just created").read_only = true;
+        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
+        mb.peek = Some(id);
+        mb.previewed = None;
+    }
+
+    /// Adds `candidates` to the open minibuffer's list when `command` opened it completing.
+    pub(crate) fn add_candidates(&mut self, command: &str, candidates: Vec<String>) {
+        let open = (self.prompts.minibuffer.as_ref())
+            .is_some_and(|mb| mb.command == command && mb.completion.is_some());
+        let Some(matcher) = self.prompts.matcher.as_ref().filter(|_| open) else {
+            return;
+        };
+        let injector = matcher.injector();
+        for c in candidates {
+            injector.push((c, String::new()), |(c, _), cols| {
+                cols[0] = c.as_str().into()
+            });
         }
     }
 
@@ -500,6 +583,9 @@ impl Core {
     pub(crate) fn close_minibuffer(&mut self) -> Option<Minibuffer> {
         self.unpreview();
         let mb = self.prompts.minibuffer.take()?;
+        if let Some(peek) = mb.peek {
+            _ = self.buffers.kill(peek);
+        }
         self.select(mb.from);
         let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
         _ = self.buffers.kill(window.buffer());
@@ -512,6 +598,7 @@ mod tests {
     use crate::Msg;
     use crate::command::ArgSpec;
     use crate::command::Args;
+    use crate::command::Preview;
     use crate::harness::Harness;
     use crate::harness::ask;
     use crate::harness::ask_completing;
@@ -820,7 +907,7 @@ mod tests {
             ArgSpec {
                 prompts: &["Pick: "],
                 completion: Some(fruit),
-                preview: Some(|core, c| core.buffers.find_here(c)),
+                preview: Some(|core, c| core.buffers.find_here(c).map(Preview::Buffer)),
                 ..ArgSpec::default()
             },
         );
@@ -876,24 +963,28 @@ mod tests {
     }
 
     #[test]
-    fn a_command_s_own_question_does_not_preview() {
-        let mut h = on("");
-        h.core.register(crate::command::Command {
-            name: "test-cmd",
-            spec: ArgSpec {
-                preview: Some(|core, c| core.buffers.find_here(c)),
-                ..ArgSpec::default()
-            },
-            handler: |ctx, args| {
-                let command = ctx.core.commands["test-cmd"];
-                ctx.read_string(command, args, "Pick? ".into(), Some(&["apple"]))
-            },
-        });
-        bind_mode(&mut h, "global", "C-c p", "test-cmd");
-        h.core.buffers.create("apple");
-        let file = h.core.window.buffer();
-        h.keys("C-c p");
-        assert_eq!(h.core.others[&WindowId(0)].buffer(), file);
+    fn a_command_s_own_question_previews_only_without_declared_prompts() {
+        for (prompts, previews) in [(&["Pick: "][..], false), (&[][..], true)] {
+            let mut h = on("");
+            h.core.register(crate::command::Command {
+                name: "test-cmd",
+                spec: ArgSpec {
+                    prompts,
+                    preview: Some(|core, c| core.buffers.find_here(c).map(Preview::Buffer)),
+                    ..ArgSpec::default()
+                },
+                handler: |ctx, args| {
+                    let command = ctx.core.commands["test-cmd"];
+                    ctx.read_string(command, args, "Pick? ".into(), Some(&["apple"]))
+                },
+            });
+            bind_mode(&mut h, "global", "C-c p", "test-cmd");
+            let apple = h.core.buffers.create("apple");
+            let file = h.core.window.buffer();
+            h.keys(if previews { "C-c p" } else { "C-c p x RET" });
+            let shown = h.core.others[&WindowId(0)].buffer();
+            assert_eq!(shown, if previews { apple } else { file }, "{prompts:?}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The built-in commands.
 
-use crate::command::{ArgSpec, Args, Command, Prefix};
+use crate::command::{ArgSpec, Args, Command, Prefix, Preview};
 use crate::key::{Key, KeyCode};
 use crate::{Core, Effect};
 
@@ -10,6 +10,12 @@ fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
         0 => core.project_names(false),
         _ => Vec::new(),
     }
+}
+
+/// The file a file prompt's candidate names; a directory gives none.
+fn preview_file(core: &Core, candidate: &str) -> Option<Preview> {
+    let base = core.prompts.completion_base()?;
+    (!candidate.ends_with('/')).then(|| Preview::File(base.join(candidate)))
 }
 
 /// The built-in commands, each with its spec.
@@ -218,6 +224,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             spec: ArgSpec {
                 prompts: &["Find file: "],
                 files: Some(0),
+                preview: Some(preview_file),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.find_file(&args.strings[0]),
@@ -312,6 +319,18 @@ pub(crate) fn builtins() -> Vec<Command> {
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.index_project(&args.strings[0]),
+        },
+        Command {
+            name: "project-find-file",
+            // Asks its own question, so it can start indexing before the prompt opens.
+            spec: ArgSpec {
+                preview: Some(|core, c| {
+                    let project = &core.current_workspace().project;
+                    core.project_file(project, c).ok().map(Preview::File)
+                }),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.project_find_file(args),
         },
         Command {
             name: "workspace-new",
@@ -476,7 +495,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             spec: ArgSpec {
                 prompts: &["Switch to buffer: "],
                 completion: Some(|core, _| core.buffer_names(false)),
-                preview: Some(|core, name| core.buffers.find_here(name)),
+                preview: Some(|core, name| core.buffers.find_here(name).map(Preview::Buffer)),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| {

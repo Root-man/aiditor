@@ -698,6 +698,27 @@ mod tests {
     }
 
     #[test]
+    fn find_file_previews_the_selected_file_but_not_a_directory() {
+        let mut h = in_dir();
+        std::fs::write(h.path("d/bin"), b"a\0b").unwrap();
+        let shown = |h: &Harness| {
+            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+            h.core.buffers.get(id).unwrap().text().to_string()
+        };
+        h.keys("C-x C-f b.txt");
+        assert_eq!(shown(&h), "hi");
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/sub/");
+        assert_eq!(shown(&h), "", "c.txt is empty");
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/su");
+        assert_eq!(listed(&mut h).0, ["sub/"]);
+        assert_eq!(shown(&h), "a", "a directory shows the window as it was");
+        h.keys("bin");
+        assert_eq!(shown(&h), "a", "a binary file too");
+    }
+
+    #[test]
     fn find_file_visits_an_existing_or_a_new_file() {
         let mut h = in_dir();
         h.keys("C-x C-f b.txt RET");
