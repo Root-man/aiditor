@@ -60,11 +60,15 @@ The editor SHALL provide `workspace-new`, `workspace-switch`, `workspace-next`, 
 - **THEN** it lists a key for each of the eight workspace commands
 
 ### Requirement: New workspace prompts for a project
-`workspace-new` (`C-x t 2`) SHALL prompt `New workspace for project: `, completing over the projects' names, and make a new current workspace bound to the chosen project, named after it, with `<2>`, `<3>` appended while another workspace has that name. A name no project has SHALL fail with `No project named <name>` and change nothing.
+`workspace-new` (`C-x t 2`) SHALL prompt `New workspace for project: `, completing over the projects' names, then `Workspace name: `, and make a new current workspace bound to the chosen project. A blank name SHALL name it after the project, with `<2>`, `<3>` appended while another workspace has that name; a name another workspace has SHALL fail with `Workspace <name> already exists`. A name no project has SHALL fail with `No project named <name>`. A failure SHALL change nothing.
 
 #### Scenario: Two workspaces on one project
-- **WHEN** project `p` exists and `C-x t 2 p RET` is typed twice
+- **WHEN** project `p` exists and `C-x t 2 p RET RET` is typed twice
 - **THEN** workspaces `p` and `p<2>` exist, both bound to `p`, and `p<2>` is current, showing `*scratch*<p<2>>`
+
+#### Scenario: A given name
+- **WHEN** `C-x t 2 p RET mine RET` is typed
+- **THEN** a workspace `mine` bound to `p` is current, showing `*scratch*<mine>`, and typing the same again says `Workspace mine already exists`
 
 #### Scenario: Unknown project
 - **WHEN** `workspace-new` is given a name no project has

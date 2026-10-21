@@ -178,10 +178,18 @@ impl Core {
             .ok_or_else(|| format!("No workspace named {name}"))
     }
 
-    /// Makes a new workspace for the project `project`, named after it.
-    pub(crate) fn workspace_for(&mut self, project: &str) -> Result<(), String> {
+    /// Makes a new workspace for the project `project`, named `name`, or after the project when
+    /// `name` is blank.
+    pub(crate) fn workspace_for(&mut self, project: &str, name: &str) -> Result<(), String> {
         self.project(project)?;
-        self.new_workspace(project, project);
+        if name.trim().is_empty() {
+            self.new_workspace(project, project);
+            return Ok(());
+        }
+        if self.workspaces.iter().any(|w| w.name == name) {
+            return Err(format!("Workspace {name} already exists"));
+        }
+        self.new_workspace(name, project);
         Ok(())
     }
 
@@ -239,7 +247,7 @@ impl Core {
             .max_by_key(|w| w.shown);
         match latest.map(|w| w.id) {
             Some(id) => self.switch_workspace(id),
-            None => self.workspace_for(name),
+            None => self.workspace_for(name, ""),
         }
     }
 }
@@ -610,24 +618,32 @@ mod tests {
     fn new_workspace_prompts_for_a_project_and_is_named_after_it() {
         let mut h = projects();
         let launch = names(&h)[0].to_string();
-        h.keys("C-x t 2 one RET");
+        h.keys("C-x t 2 one RET RET");
         assert_eq!(h.core.minibuffer(), None);
-        h.keys("C-x t 2 one RET");
+        h.keys("C-x t 2 one RET RET");
         assert_eq!(names(&h), [launch.as_str(), "one", "one<2>"]);
         assert_eq!(
             (current(&h), name(&h)),
             (("one<2>", "one"), "*scratch*<one<2>>")
         );
-        h.keys("C-x t 2 zz M-RET");
+        h.keys("C-x t 2 one RET mine RET");
+        assert_eq!(
+            (current(&h), name(&h)),
+            (("mine", "one"), "*scratch*<mine>")
+        );
+        h.keys("C-x t 2 two RET mine RET");
+        assert_eq!(h.core.message(), Some("Workspace mine already exists"));
+        assert_eq!(names(&h).len(), 4);
+        h.keys("C-x t 2 zz M-RET RET");
         assert_eq!(h.core.message(), Some("No project named zz"));
-        assert_eq!(names(&h).len(), 3);
+        assert_eq!(names(&h).len(), 4);
     }
 
     #[test]
     fn switch_lists_the_others_most_recent_first_and_ret_goes_back() {
         let mut h = projects();
         let launch = names(&h)[0].to_string();
-        h.keys("C-x t 2 one RET C-x t 2 two RET C-x t RET");
+        h.keys("C-x t 2 one RET RET C-x t 2 two RET RET C-x t RET");
         assert_eq!(listed(&mut h).0, ["one", launch.as_str(), "two"]);
         h.keys("RET");
         assert_eq!(current(&h).0, "one");
@@ -641,7 +657,7 @@ mod tests {
     fn next_and_previous_wrap_and_take_a_count() {
         let mut h = projects();
         let launch = names(&h)[0].to_string();
-        h.keys("C-x t 2 one RET C-x t 2 two RET C-x t o");
+        h.keys("C-x t 2 one RET RET C-x t 2 two RET RET C-x t o");
         assert_eq!(current(&h).0, launch);
         h.keys("C-x t O");
         assert_eq!(current(&h).0, "two");
@@ -656,9 +672,9 @@ mod tests {
     #[test]
     fn rename_refuses_empty_and_taken_names() {
         let mut h = projects();
-        h.keys("C-x t 2 one RET C-x t r work RET");
+        h.keys("C-x t 2 one RET RET C-x t r work RET");
         assert_eq!(current(&h), ("work", "one"));
-        h.keys("C-x t 2 two RET C-x t r work RET");
+        h.keys("C-x t 2 two RET RET C-x t r work RET");
         assert_eq!(h.core.message(), Some("Workspace work already exists"));
         h.keys("C-x t r RET");
         assert_eq!(h.core.message(), Some("Empty workspace name"));
@@ -668,7 +684,7 @@ mod tests {
     #[test]
     fn list_shows_names_and_projects_with_the_current_one_marked() {
         let mut h = projects();
-        h.keys("C-x t 2 one RET C-x t r a RET C-x t 2 two RET C-x t r b RET");
+        h.keys("C-x t 2 one RET RET C-x t r a RET C-x t 2 two RET RET C-x t r b RET");
         h.core.kill_workspace(h.core.workspaces()[0].id).unwrap();
         h.keys("C-x t l");
         assert_eq!(h.core.message(), Some("a (one)  *b (two)"));
@@ -678,7 +694,7 @@ mod tests {
     /// `f.txt`.
     fn modified() -> Harness {
         let mut h = projects();
-        h.keys("C-x t 2 two RET");
+        h.keys("C-x t 2 two RET RET");
         h.open("f.txt").keys("x");
         h
     }
@@ -686,7 +702,7 @@ mod tests {
     #[test]
     fn killing_the_first_workspace_while_current_shows_the_next() {
         let mut h = projects();
-        h.keys("C-x t 2 one RET C-x t o C-x t 0");
+        h.keys("C-x t 2 one RET RET C-x t o C-x t 0");
         assert_eq!((names(&h), current(&h).0), (vec!["one"], "one"));
     }
 
@@ -694,7 +710,7 @@ mod tests {
     fn kill_with_nothing_modified_kills_at_once() {
         let mut h = projects();
         let launch = names(&h)[0].to_string();
-        h.keys("C-x t 2 one RET C-x t k");
+        h.keys("C-x t 2 one RET RET C-x t k");
         assert_eq!(listed(&mut h).0, ["one", launch.as_str()], "current first");
         h.keys("RET");
         assert_eq!(
@@ -746,7 +762,7 @@ mod tests {
     #[test]
     fn kill_asks_only_about_its_own_buffers() {
         let mut h = modified();
-        h.keys("C-x t 2 one RET C-x t 0");
+        h.keys("C-x t 2 one RET RET C-x t 0");
         assert_eq!(h.core.minibuffer(), None);
         assert_eq!(names(&h).len(), 2, "one killed without a question");
     }
@@ -791,7 +807,7 @@ mod tests {
     #[test]
     fn switch_project_shows_its_most_recent_workspace_or_makes_one() {
         let mut h = projects();
-        h.keys("C-x t 2 one RET C-x t 2 one RET C-x t 2 two RET");
+        h.keys("C-x t 2 one RET RET C-x t 2 one RET RET C-x t 2 two RET RET");
         let latest = h.core.workspaces()[2].id;
         h.keys("C-x p p one RET");
         assert_eq!(h.core.workspace(), latest);

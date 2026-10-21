@@ -17,6 +17,7 @@
 
 - [x] 4.1 Add `workspace-kill-current` on `C-x t 0` and move `workspace-kill` to `C-x t k`; verify the kill tests use both keys
 - [x] 4.2 Drop `workspace-open-folder`; verify the folder launch tests cover an ad-hoc folder, a reload keeping it, and a folder inside a saved project
+- [x] 4.4 Prompt `workspace-new` for a name, blank for the project's; verify the new-workspace test covers a given, a taken and a blank name
 - [x] 4.3 Name scratch buffers `*scratch*<workspace>` and rename them with the workspace; verify the rename and launch tests check the scratch name
 
 ## 3. Docs
