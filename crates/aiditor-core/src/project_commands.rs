@@ -9,6 +9,14 @@ use crate::command::Args;
 use crate::project::{Loaded, Project, Root, sync};
 use crate::{Core, Ctx, Effect, FileOp};
 
+/// A project's file index: the files under each root, relative to it, from the walk numbered
+/// `walk` once it answers.
+#[derive(Default)]
+pub(crate) struct FileIndex {
+    walk: u64,
+    roots: Vec<(PathBuf, Vec<PathBuf>)>,
+}
+
 impl Core {
     /// The loaded projects' names, only the ad-hoc ones' when `ad_hoc`.
     pub(crate) fn project_names(&self, ad_hoc: bool) -> Vec<String> {
@@ -85,6 +93,34 @@ impl Core {
             None => self.projects.push(loaded),
         }
         self.echo(format!("Wrote {}", path.display()));
+    }
+
+    /// Takes the file service's answer to `FileOp::Index`, unless a newer walk was asked for.
+    pub(crate) fn indexed(
+        &mut self,
+        project: String,
+        walk: u64,
+        roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
+    ) {
+        if self.project(&project).is_err() {
+            return;
+        }
+        let Some(index) = self.index.get_mut(&project).filter(|i| i.walk == walk) else {
+            return;
+        };
+        let mut errors = String::new();
+        index.roots = (roots.into_iter())
+            .map(|(root, files)| {
+                let files = files.unwrap_or_else(|err| {
+                    errors.push_str(&format!("; {err}"));
+                    Vec::new()
+                });
+                (root, files)
+            })
+            .collect();
+        let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
+        let s = if n == 1 { "" } else { "s" };
+        self.echo(format!("Indexed {n} file{s} in {project}{errors}"));
     }
 }
 
@@ -202,6 +238,22 @@ impl Ctx<'_> {
             p.default_agent = (!agent.is_empty()).then(|| agent.clone());
             Ok(())
         })
+    }
+
+    /// Walks every root of the project `name` again, off the core thread.
+    pub(crate) fn index_project(&mut self, name: &str) -> Result<(), String> {
+        let project = &self.core.projects[self.core.project(name)?].project;
+        let roots = project.all_roots().map(|r| r.path.clone()).collect();
+        self.core.index_walks += 1;
+        let walk = self.core.index_walks;
+        self.core.index.entry(name.into()).or_default().walk = walk;
+        self.core.echo(format!("Indexing {name}..."));
+        self.effects.push(Effect::File(FileOp::Index {
+            project: name.into(),
+            walk,
+            roots,
+        }));
+        Ok(())
     }
 
     pub(crate) fn open_project_file(&mut self, name: &str) -> Result<(), String> {
@@ -432,8 +484,98 @@ mod tests {
             "project-open-file",
             "project-save",
             "project-switch",
+            "project-index",
         ] {
             assert!(hint.contains(command), "{command} in {hint}");
         }
+    }
+
+    /// The `tmp` project from `ad_hoc` with `b` and `roots` as additional roots.
+    fn indexable(roots: &[&str]) -> Harness {
+        let mut h = with(Vec::new());
+        let mut loaded = ad_hoc(&h);
+        for root in ["b"].iter().chain(roots) {
+            loaded.project.roots.push(Root {
+                path: h.path(root),
+                role: String::new(),
+            });
+        }
+        h.core.projects.push(loaded);
+        h
+    }
+
+    /// Calls `project-index` for `tmp`, returning the walk it asks for without carrying it out.
+    fn start_index(h: &mut Harness) -> crate::Effects {
+        let mut ctx = h.ctx();
+        let strings = vec!["tmp".into()];
+        ctx.call(
+            "project-index",
+            Args {
+                strings,
+                ..Args::default()
+            },
+        );
+        ctx.effects
+    }
+
+    fn indexed(h: &Harness) -> Vec<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+        h.core.index["tmp"].roots.clone()
+    }
+
+    #[test]
+    fn index_holds_each_roots_files_and_counts_them() {
+        let mut h = indexable(&[]);
+        std::fs::create_dir_all(h.path("a/.git")).unwrap();
+        std::fs::write(h.path("a/.git/config"), "").unwrap();
+        std::fs::write(h.path("a/.env"), "").unwrap();
+        h.keys("C-x p i tmp RET");
+        assert_eq!(h.core.message(), Some("Indexed 3 files in tmp"));
+        assert_eq!(
+            indexed(&h),
+            [
+                (h.path("a"), vec![".env".into(), "x".into()]),
+                (h.path("b"), vec!["x".into()])
+            ]
+        );
+    }
+
+    #[test]
+    fn index_names_a_root_it_could_not_walk() {
+        let mut h = indexable(&["gone"]);
+        call(&mut h, "project-index", &["tmp"]);
+        let gone = h.path("gone").display().to_string();
+        let msg = h.core.message().unwrap();
+        assert!(
+            msg.starts_with(&format!("Indexed 2 files in tmp; {gone}: ")),
+            "{msg}"
+        );
+        assert_eq!(indexed(&h)[2], (h.path("gone"), Vec::new()));
+    }
+
+    #[test]
+    fn typing_goes_on_while_a_walk_runs() {
+        let mut h = indexable(&[]);
+        let pending = start_index(&mut h);
+        h.keys("hi");
+        assert_eq!(h.core.text(), "hi");
+        h.run(pending);
+        assert_eq!(h.core.message(), Some("Indexed 2 files in tmp"));
+    }
+
+    #[test]
+    fn index_drops_an_older_walks_answer() {
+        let mut h = indexable(&[]);
+        let first = start_index(&mut h);
+        assert_eq!(h.core.message(), Some("Indexing tmp..."));
+        call(&mut h, "project-index", &["tmp"]);
+        std::fs::write(h.path("a/y"), "").unwrap();
+        h.run(first);
+        assert_eq!(h.core.message(), Some("Indexed 2 files in tmp"));
+        assert_eq!(indexed(&h)[0], (h.path("a"), vec!["x".into()]));
+        // Nor is an answer for a project no longer loaded taken.
+        let pending = start_index(&mut h);
+        h.core.projects.clear();
+        h.run(pending);
+        assert_eq!(h.core.message(), Some("Indexing tmp..."));
     }
 }

@@ -47,6 +47,7 @@ use keymap::{Binding, Keymap};
 use kill_ring::KillRing;
 use minibuffer::Prompts;
 use project::{Loaded, Project};
+use project_commands::FileIndex;
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
@@ -98,6 +99,13 @@ pub enum Msg {
     Opened {
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
+    },
+    /// The file service's answer to `FileOp::Index`: each root with its files, relative and
+    /// sorted, or why it couldn't be walked.
+    Indexed {
+        project: String,
+        walk: u64,
+        roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
     },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
@@ -179,6 +187,12 @@ pub enum FileOp {
     ListDir(PathBuf),
     /// Read the file and send `Msg::Opened`.
     Open(PathBuf),
+    /// Walk every root of `project` and send `Msg::Indexed` with `walk`.
+    Index {
+        project: String,
+        walk: u64,
+        roots: Vec<PathBuf>,
+    },
     /// Write the project file `text` to `path` if it is a valid project and the file is still
     /// `old` (`None`: no file, making the directory), then send `Msg::ProjectWritten`.
     WriteProject {
@@ -352,6 +366,11 @@ impl Ctx<'_> {
                 }
             }
             Msg::ProjectWritten(result) => self.core.project_written(result),
+            Msg::Indexed {
+                project,
+                walk,
+                roots,
+            } => self.core.indexed(project, walk, roots),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
@@ -494,6 +513,10 @@ pub struct Core {
     projects: Vec<Loaded>,
     /// Where new project files go; `None` without a config dir.
     projects_dir: Option<PathBuf>,
+    /// Each indexed project's files, by project name.
+    index: HashMap<String, FileIndex>,
+    /// How many `FileOp::Index` walks were asked for; numbers each one.
+    index_walks: u64,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -557,6 +580,8 @@ impl Default for Core {
             settings: Settings::default(),
             projects: vec![Loaded::ad_hoc(&name, &home)],
             projects_dir: None,
+            index: HashMap::new(),
+            index_walks: 0,
             commands,
             message: None,
             quitting: Vec::new(),

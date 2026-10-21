@@ -1,7 +1,7 @@
 //! Headless core driven by key scripts and a fake clock, for tests.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -173,6 +173,30 @@ impl Harness {
                         file,
                     })));
                 }
+                // As `files::index` does, minus the ignore files.
+                Effect::File(FileOp::Index {
+                    project,
+                    walk,
+                    roots,
+                }) => {
+                    let roots = (roots.into_iter())
+                        .map(|root| {
+                            let mut files = Vec::new();
+                            let result = walk_files(&root, &root, &mut files)
+                                .map(|()| {
+                                    files.sort();
+                                    files
+                                })
+                                .map_err(|err| format!("{}: {err}", root.display()));
+                            (root, result)
+                        })
+                        .collect();
+                    self.send(Msg::Indexed {
+                        project,
+                        walk,
+                        roots,
+                    });
+                }
                 Effect::File(FileOp::Open(path)) => {
                     let result = match std::fs::read(&path) {
                         Ok(bytes) => {
@@ -221,6 +245,20 @@ impl Harness {
     pub fn disk(&self, name: &str) -> String {
         std::fs::read_to_string(self.path(name)).unwrap()
     }
+}
+
+/// Adds the files under `dir`, relative to `root`, skipping `.git`.
+fn walk_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            files.push(path.strip_prefix(root).unwrap().to_path_buf());
+        } else if !path.ends_with(".git") {
+            walk_files(root, &path, files)?;
+        }
+    }
+    Ok(())
 }
 
 impl Harness {
