@@ -40,8 +40,10 @@ impl Harness {
             std::fs::write(path, contents).unwrap();
         }
         let mut core = Core::default();
-        // Named the same whatever `$HOME` is, so scratch names and snapshots don't vary.
+        // Named the same whatever `$HOME` is, so scratch names, titles and snapshots don't vary.
         core.rename_workspace("main").unwrap();
+        core.projects[0].project.name = "home".into();
+        core.workspaces[0].project = "home".into();
         Harness {
             core,
             dir,

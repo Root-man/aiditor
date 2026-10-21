@@ -607,7 +607,8 @@ mod tests {
     #[test]
     fn a_launch_at_home_keeps_the_home_name() {
         let mut h = Harness::new(&[]);
-        let home = h.core.projects()[0].clone();
+        // A fresh core's, since the harness pins the home project's name.
+        let home = crate::Core::default().projects()[0].clone();
         h.core
             .launch(&home.primary.path.join("notes.txt"), &home.primary.path);
         assert_eq!(h.core.projects(), [&home], "the same project, not a `<2>`");
