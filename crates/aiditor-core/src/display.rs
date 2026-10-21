@@ -31,7 +31,8 @@ pub struct FrameDisplay {
     pub minibuffer: Option<Minibuffer>,
     /// The which-key hint, once a pending prefix's delay has passed.
     pub hint: Option<Hint>,
-    /// The frame's title: the current buffer's name, with ` *` when it is modified.
+    /// The frame's title: the current buffer's name, with ` *` when it is modified, then
+    /// ` | <workspace> | <project>` for the current workspace.
     pub title: String,
 }
 

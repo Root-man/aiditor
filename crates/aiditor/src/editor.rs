@@ -463,6 +463,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_window_title_follows_the_current_workspace(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        let shown = cx.window_title().unwrap();
+        assert!(shown.starts_with("t.txt | "), "{shown}");
+        editor.update(cx, |e, cx| {
+            e.core.new_workspace("w2", "other");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let shown = cx.window_title();
+        assert_eq!(shown.as_deref(), Some("*scratch*<w2> | w2 | other"));
+    }
+
+    #[gpui::test]
     fn closing_the_window_offers_to_save(cx: &mut TestAppContext) {
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");

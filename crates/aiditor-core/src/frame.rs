@@ -95,10 +95,13 @@ impl Core {
             })
             .collect();
         let buffer = self.current();
+        let workspace = self.current_workspace();
         let title = format!(
-            "{}{}",
+            "{}{} | {} | {}",
             buffer.name,
-            if buffer.modified() { " *" } else { "" }
+            if buffer.modified() { " *" } else { "" },
+            workspace.name,
+            workspace.project
         );
         display::FrameDisplay {
             windows,
@@ -264,12 +267,19 @@ mod tests {
     }
 
     #[test]
-    fn the_title_is_the_buffer_name_marked_when_modified() {
+    fn the_title_names_the_buffer_workspace_and_project() {
         let mut h = Harness::new(&[("t.txt", "")]);
         h.open("t.txt");
-        assert_eq!(h.frame(80., 100.).title, "t.txt");
+        let main = h.core.workspace();
+        assert_eq!(h.frame(80., 100.).title, "t.txt | main | home");
         h.keys("x");
-        assert_eq!(h.frame(80., 100.).title, "t.txt *");
+        assert_eq!(h.frame(80., 100.).title, "t.txt * | main | home");
+        h.core.new_workspace("w2", "other");
+        assert_eq!(h.frame(80., 100.).title, "*scratch*<w2> | w2 | other");
+        h.core.rename_workspace("w3").unwrap();
+        assert_eq!(h.frame(80., 100.).title, "*scratch*<w3> | w3 | other");
+        h.core.switch_workspace(main).unwrap();
+        assert_eq!(h.frame(80., 100.).title, "t.txt * | main | home");
     }
 
     #[test]

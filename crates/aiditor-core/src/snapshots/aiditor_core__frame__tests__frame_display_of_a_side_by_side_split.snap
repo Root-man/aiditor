@@ -114,5 +114,5 @@ FrameDisplay {
     message: None,
     minibuffer: None,
     hint: None,
-    title: "a.txt",
+    title: "a.txt | main | home",
 }
