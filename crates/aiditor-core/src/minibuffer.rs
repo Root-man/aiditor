@@ -484,6 +484,21 @@ impl Core {
         }
     }
 
+    /// Adds `candidates` to the open minibuffer's list when `command` opened it completing.
+    pub(crate) fn add_candidates(&mut self, command: &str, candidates: Vec<String>) {
+        let open = (self.prompts.minibuffer.as_ref())
+            .is_some_and(|mb| mb.command == command && mb.completion.is_some());
+        let Some(matcher) = self.prompts.matcher.as_ref().filter(|_| open) else {
+            return;
+        };
+        let injector = matcher.injector();
+        for c in candidates {
+            injector.push((c, String::new()), |(c, _), cols| {
+                cols[0] = c.as_str().into()
+            });
+        }
+    }
+
     /// Puts back the window a preview stands in for.
     fn unpreview(&mut self) {
         let Some(mb) = self.prompts.minibuffer.as_mut() else {

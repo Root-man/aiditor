@@ -314,6 +314,12 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.index_project(&args.strings[0]),
         },
         Command {
+            name: "project-find-file",
+            // Asks its own question, so it can start indexing before the prompt opens.
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.project_find_file(args),
+        },
+        Command {
             name: "workspace-new",
             spec: ArgSpec {
                 prompts: &["New workspace for project: ", "Workspace name: "],

@@ -579,7 +579,7 @@ milestones:
         labels: [minibuffer, project]
         design: "#subsystems"
         body: |
-          Find any file in any root of the project, with live preview.
+          Find any file in any root of the project.
         tasks:
           - key: m1-file-index
             title: "File index service"
@@ -591,14 +591,14 @@ milestones:
           - key: m1-preview
             title: "Live preview from the minibuffer"
             body: |
-              A generic preview hook: moving the selection shows the candidate in the selected window; `C-g` restores the previous window state. Used by buffer switching, the file finder and grep.
+              A generic preview hook: moving the selection shows the candidate in the selected window; `C-g` restores the previous window state. Used by buffer switching and grep.
             acceptance:
               - "Preview then `C-g` leaves windows exactly as before"
             blocked_by: [m1-ws-windows]
           - key: m1-find-in-project
             title: "Find file across roots"
             body: |
-              Candidates are relative paths prefixed by the root's name, matched with `nucleo`, with live preview.
+              Candidates are relative paths prefixed by the root's name, matched with `nucleo`. No preview (decided in #70).
             acceptance:
               - "Files from the primary repo and an additional root are both found"
             blocked_by: [m1-file-index, m1-preview]
