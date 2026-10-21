@@ -52,7 +52,8 @@ impl Ctx<'_> {
     /// one is refused.
     pub(crate) fn kill_buffer(&mut self, args: Args) -> Result<(), String> {
         let name = &args.strings[0];
-        let id = (self.core.buffers.find(name)).ok_or_else(|| format!("No such buffer {name}"))?;
+        let id =
+            (self.core.buffers.find_here(name)).ok_or_else(|| format!("No such buffer {name}"))?;
         let buffer = self.core.buffers.get(id).expect("found");
         if buffer.unkillable {
             return Err(format!("Can't kill {name}"));
@@ -225,18 +226,18 @@ impl Core {
 
     /// Switches to the buffer `name`, making an empty one if there is none.
     pub(crate) fn switch_to_name(&mut self, name: &str) {
-        let id = (self.buffers.find(name)).unwrap_or_else(|| self.buffers.create(name));
+        let id = (self.buffers.find_here(name)).unwrap_or_else(|| self.buffers.create(name));
         self.switch_to(id);
     }
 
-    /// The names of the buffers not hidden by a leading space, most recently shown first, with
-    /// the current buffer first or last.
+    /// The names of the current workspace's buffers and `*Messages*` not hidden by a leading
+    /// space, most recently shown first, with the current buffer first or last.
     pub(crate) fn buffer_names(&self, current_first: bool) -> Vec<String> {
         let current = self.window.buffer();
         let listed = self
             .buffers
             .recent()
-            .filter(|(_, b)| !b.name.starts_with(' '));
+            .filter(|&(id, b)| !b.name.starts_with(' ') && self.buffers.is_here(id));
         let (this, others): (Vec<_>, Vec<_>) = listed.partition(|(id, _)| *id == current);
         let names = match current_first {
             true => [this, others].concat(),
@@ -426,6 +427,32 @@ mod tests {
         assert_eq!(name(&h), "b");
         h.keys("C-x b notes RET");
         assert_eq!((name(&h), h.text().as_str()), ("notes", ""));
+    }
+
+    #[test]
+    fn c_x_b_and_c_x_k_see_only_this_workspace_s_buffers() {
+        // `x` matches neither `*scratch*<w>` nor `*Messages*`, so `RET` takes it as typed.
+        let mut h = Harness::new(&[("x", "1")]);
+        h.open("x");
+        let main = h.core.workspace();
+        let w = h.core.new_workspace("w", "p");
+        h.keys("C-x k x RET");
+        assert_eq!(h.core.message(), Some("No such buffer x"));
+        h.keys("C-x b");
+        assert_eq!(listed(&mut h).0, ["*Messages*", "*scratch*<w>"]);
+        h.keys("C-g C-x b x RET");
+        assert_eq!(
+            (name(&h), h.text().as_str(), h.core.current().workspace),
+            ("x<2>", "", Some(w))
+        );
+        let x = h.core.buffers.find("x").unwrap();
+        let x = h.core.buffers.get(x).unwrap();
+        assert_eq!(
+            (x.text().to_string(), x.workspace),
+            ("1".into(), Some(main))
+        );
+        h.keys("C-x 4 b");
+        assert!(!listed(&mut h).0.contains(&"x".into()));
     }
 
     #[test]

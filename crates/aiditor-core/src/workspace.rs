@@ -291,6 +291,11 @@ mod tests {
             .collect()
     }
 
+    /// Shows buffer `name` here even when another workspace owns it, which `C-x b` won't.
+    fn show(h: &mut Harness, name: &str) {
+        h.core.switch_to(h.core.buffers.find(name).unwrap());
+    }
+
     fn names(h: &Harness) -> Vec<&str> {
         h.core
             .workspaces()
@@ -346,8 +351,8 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
         h.open("a.txt");
         let w = h.core.new_workspace("w", "p");
-        // a.txt, shown here until #66, is more recent than w's scratch.
-        h.keys("C-x b a.txt RET");
+        // a.txt is more recent than w's scratch.
+        show(&mut h, "a.txt");
         h.open("b.txt").keys("C-x k RET");
         assert_eq!(
             (name(&h), h.core.current().workspace),
@@ -376,7 +381,7 @@ mod tests {
         assert_eq!(owned(&h, Some(default)), kept_default);
         assert_eq!(owned(&h, None), messages);
         assert_eq!(h.text(), "def", "b's buffer still shown");
-        h.keys("C-x b a.txt RET");
+        show(&mut h, "a.txt");
         assert_eq!(h.text(), "xabc", "the other workspace's edit is untouched");
     }
 
@@ -475,8 +480,8 @@ mod tests {
         let default = h.core.workspace();
         h.open("a.txt").keys("C-e");
         h.core.new_workspace("w", "p");
-        // Another workspace's buffer, shown here until #66.
-        h.keys("C-x b a.txt RET C-a X Y");
+        show(&mut h, "a.txt");
+        h.keys("C-a X Y");
         h.core.switch_workspace(default).unwrap();
         assert_eq!((h.text(), h.point()), ("XYabc".into(), 5));
     }
@@ -524,7 +529,7 @@ mod tests {
         let w = h.core.new_workspace("w", "p");
         h.open("a.txt");
         h.core.switch_workspace(default).unwrap();
-        h.keys("C-x b a.txt RET");
+        show(&mut h, "a.txt");
         h.core.switch_workspace(w).unwrap();
         h.keys("C-x k RET");
         h.core.switch_workspace(default).unwrap();
@@ -535,7 +540,7 @@ mod tests {
         h.open("b.txt");
         let b = h.core.window.buffer();
         h.core.switch_workspace(default).unwrap();
-        h.keys("C-x b b.txt<2> RET");
+        show(&mut h, "b.txt<2>");
         h.core.new_workspace("x", "p");
         h.core.kill_workspace(w).unwrap();
         assert!(h.core.buffers.get(b).is_none());
