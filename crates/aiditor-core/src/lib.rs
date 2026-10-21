@@ -342,7 +342,8 @@ impl Ctx<'_> {
             }
             Msg::ProjectsLoaded { dir, projects } => {
                 self.core.projects_dir = dir;
-                self.core.projects.clear();
+                // Ad-hoc projects stay, since workspaces are bound to them.
+                self.core.projects.retain(|p| p.file.is_none());
                 for project in projects {
                     match project {
                         Ok(project) => self.core.projects.push(project),
@@ -454,6 +455,8 @@ pub struct Core {
     workspaces: Vec<Workspace>,
     /// The id the next new workspace gets.
     next_workspace: u64,
+    /// How many times a workspace was shown, for `Workspace::shown`.
+    shown: u64,
     /// The windows area's width and height and the cell width in px, as the frontend reported.
     frame_size: (f32, f32, f32),
     /// The id the next new window gets.
@@ -494,8 +497,11 @@ pub struct Core {
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
-    /// The buffers whose saves a quit waits for; empty when not quitting.
+    /// The buffers whose saves a quit, or the kill of `then_kill`, waits for; empty when not
+    /// quitting.
     quitting: Vec<BufferId>,
+    /// The workspace to kill rather than quit once the saves in `quitting` succeed.
+    then_kill: Option<WorkspaceId>,
     /// Buffers with a recovery file, by the tick written to it.
     autosaved: HashMap<BufferId, u64>,
     /// The auto-save timers: restarted by each edit, and started by the first edit after a write.
@@ -507,6 +513,9 @@ pub struct Core {
 
 impl Default for Core {
     fn default() -> Self {
+        // The launch workspace's project until `launch` names another.
+        let home = std::env::home_dir().unwrap_or_else(|| "/".into());
+        let name = buffer::file_name(&home);
         let mut buffers = Buffers::default();
         let scratch = buffers.create_scratch();
         let window = Window::new(&mut buffers, scratch);
@@ -524,8 +533,9 @@ impl Default for Core {
             selected: WindowId(0),
             others: HashMap::new(),
             tree: Tree::Leaf(WindowId(0)),
-            workspaces: vec![Workspace::new(WorkspaceId::default(), "default", None)],
+            workspaces: vec![Workspace::new(WorkspaceId::default(), &name, &name)],
             next_workspace: 1,
+            shown: 0,
             frame_size: (0., 0., 0.),
             next_window: 1,
             timers: Timers::default(),
@@ -545,11 +555,12 @@ impl Default for Core {
             recenter: 0,
             kills: KillRing::default(),
             settings: Settings::default(),
-            projects: Vec::new(),
+            projects: vec![Loaded::ad_hoc(&name, &home)],
             projects_dir: None,
             commands,
             message: None,
             quitting: Vec::new(),
+            then_kill: None,
             autosaved: HashMap::new(),
             autosave_idle: None,
             autosave_max: None,
@@ -960,6 +971,7 @@ mod tests {
     #[test]
     fn projects_load_and_their_errors_share_the_echo_line() {
         let mut h = Harness::new(&[]);
+        let home = h.core.projects()[0].clone();
         let ok = crate::Project::parse("name = \"a\"\n[primary]\npath = \"/r/a\"").unwrap();
         // Projects may share a root.
         let shared = crate::Project::parse(
@@ -969,7 +981,7 @@ mod tests {
         use crate::project::{Loaded, Project};
         let loaded = |project: &Project| Loaded {
             project: project.clone(),
-            file: None,
+            file: Some(("/p.toml".into(), String::new())),
         };
         h.send(Msg::ProjectsLoaded {
             dir: None,
@@ -980,17 +992,17 @@ mod tests {
                 Ok(loaded(&shared)),
             ],
         });
-        assert_eq!(h.core.projects(), [&ok, &shared]);
+        assert_eq!(h.core.projects(), [&home, &ok, &shared]);
         assert_eq!(
             h.core.message(),
             Some("project b.toml: /r/b does not exist; project c.toml: name is empty")
         );
-        // A reload replaces the projects.
+        // A reload replaces the saved projects and keeps the ad-hoc ones.
         h.send(Msg::ProjectsLoaded {
             dir: None,
             projects: Vec::new(),
         });
-        assert!(h.core.projects().is_empty());
+        assert_eq!(h.core.projects(), [&home]);
     }
 
     #[test]

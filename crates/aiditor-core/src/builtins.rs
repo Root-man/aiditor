@@ -296,6 +296,78 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.open_project_file(&args.strings[0]),
         },
         Command {
+            name: "project-switch",
+            spec: ArgSpec {
+                prompts: &["Switch to project: "],
+                completion: Some(projects_then_free),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.core.switch_project(&args.strings[0]),
+        },
+        Command {
+            name: "workspace-new",
+            spec: ArgSpec {
+                prompts: &["New workspace for project: "],
+                completion: Some(projects_then_free),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.core.workspace_for(&args.strings[0]),
+        },
+        Command {
+            name: "workspace-switch",
+            spec: ArgSpec {
+                prompts: &["Switch to workspace: "],
+                completion: Some(|core, _| core.workspace_names(false)),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.core.switch_to_workspace(&args.strings[0]),
+        },
+        Command {
+            name: "workspace-next",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.core.cycle_workspace(args.count()),
+        },
+        Command {
+            name: "workspace-previous",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.core.cycle_workspace(args.count().saturating_neg()),
+        },
+        Command {
+            name: "workspace-rename",
+            spec: ArgSpec {
+                prompts: &["Rename workspace to: "],
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.core.rename_workspace(&args.strings[0]),
+        },
+        Command {
+            name: "workspace-kill",
+            spec: ArgSpec {
+                prompts: &["Kill workspace: "],
+                completion: Some(|core, _| core.workspace_names(true)),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.kill_workspace(args),
+        },
+        Command {
+            name: "workspace-list",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                ctx.core.list_workspaces();
+                Ok(())
+            },
+        },
+        Command {
+            name: "workspace-open-folder",
+            spec: ArgSpec {
+                prompts: &["Open folder: "],
+                files: Some(0),
+                directories: true,
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.core.open_folder(&args.strings[0]),
+        },
+        Command {
             name: "reload-settings",
             spec: ArgSpec::default(),
             handler: |ctx, _| {

@@ -32,10 +32,18 @@ impl Ctx<'_> {
             if ok && !core.buffers.get(id).is_some_and(Buffer::modified) {
                 core.quitting.swap_remove(at);
                 if core.quitting.is_empty() {
-                    self.effects.push(Effect::Quit);
+                    match core.then_kill.take() {
+                        Some(workspace) => {
+                            if let Err(err) = core.kill_workspace(workspace) {
+                                core.echo(err);
+                            }
+                        }
+                        None => self.effects.push(Effect::Quit),
+                    }
                 }
             } else {
                 core.quitting.clear();
+                core.then_kill = None;
             }
         }
     }
@@ -79,30 +87,54 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Offers to save each modified file buffer, then quits once those saves succeed. The
-    /// strings are name/answer pairs for the buffers asked about, then the `exit anyway` answer.
-    pub(crate) fn save_buffers_kill_terminal(&mut self, mut args: Args) -> Result<(), String> {
-        let command = self.core.commands["save-buffers-kill-terminal"];
-        let asked = |name: &str| args.strings.as_chunks::<2>().0.iter().any(|p| p[0] == name);
+    /// Offers to save each modified file buffer, then quits once those saves succeed.
+    pub(crate) fn save_buffers_kill_terminal(&mut self, args: Args) -> Result<(), String> {
+        let command = "save-buffers-kill-terminal";
+        let Some(saving) = self.save_some(command, args, 0, |_| true, "exit")? else {
+            return Ok(());
+        };
+        match saving.is_empty() {
+            true => self.effects.push(Effect::Quit),
+            false => (self.core.quitting, self.core.then_kill) = (saving, None),
+        }
+        Ok(())
+    }
+
+    /// Asks `command`'s questions about the modified file buffers `of` takes: whether to save
+    /// each, then, if any was declined, whether to `verb` anyway. The strings after the first
+    /// `skip` are name/answer pairs for the buffers asked about, then the `verb anyway` answer.
+    /// Starts the saves answered `Yes` and returns them once the command should go ahead;
+    /// `None` while asking or when declined.
+    pub(crate) fn save_some(
+        &mut self,
+        command: &str,
+        mut args: Args,
+        skip: usize,
+        of: impl Fn(&Buffer) -> bool,
+        verb: &str,
+    ) -> Result<Option<Vec<BufferId>>, String> {
+        let command = self.core.commands[command];
+        let answers = &args.strings[skip..];
+        let asked = |name: &str| answers.as_chunks::<2>().0.iter().any(|p| p[0] == name);
         let next = (self.core.buffers.recent())
-            .find(|(_, b)| b.file.is_some() && b.modified() && !asked(&b.name))
+            .find(|(_, b)| of(b) && b.file.is_some() && b.modified() && !asked(&b.name))
             .map(|(_, b)| (b.name.clone(), b.file.clone().expect("a file buffer")));
-        if args.strings.len().is_multiple_of(2)
-            && let Some((name, path)) = next
-        {
+        let paired = answers.len().is_multiple_of(2);
+        if paired && let Some((name, path)) = next {
             args.strings.push(name);
             let prompt = format!("Save file {}? ", path.display());
-            return self.read_string(command, args, prompt, Some(&["Yes", "No"]));
+            return (self.read_string(command, args, prompt, Some(&["Yes", "No"]))).map(|()| None);
         }
-        let yes: Vec<String> = (args.strings.as_chunks::<2>().0.iter())
+        let yes: Vec<String> = (answers.as_chunks::<2>().0.iter())
             .filter(|p| p[1].eq_ignore_ascii_case("yes"))
             .map(|p| p[0].clone())
             .collect();
-        let declined = yes.len() < args.strings.len() / 2;
-        if declined && args.strings.len().is_multiple_of(2) {
-            let prompt = "Modified buffers exist; exit anyway? ".into();
-            return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
+        let declined = yes.len() < answers.len() / 2;
+        if declined && paired {
+            let prompt = format!("Modified buffers exist; {verb} anyway? ");
+            return (self.read_string(command, args, prompt, Some(&["No", "Yes"]))).map(|()| None);
         }
+        let last_yes = (answers.last()).is_some_and(|a| a.eq_ignore_ascii_case("yes"));
         let core = &mut *self.core;
         let saving: Vec<BufferId> = (yes.iter())
             .filter_map(|name| core.buffers.find(name))
@@ -111,20 +143,8 @@ impl Ctx<'_> {
         for &id in &saving {
             self.save(id)?;
         }
-        // Declining to exit still saves the buffers answered `Yes`.
-        if declined
-            && args
-                .strings
-                .last()
-                .is_none_or(|a| !a.eq_ignore_ascii_case("yes"))
-        {
-            return Ok(());
-        }
-        match saving.is_empty() {
-            true => self.effects.push(Effect::Quit),
-            false => self.core.quitting = saving,
-        }
-        Ok(())
+        // Declining to go ahead still saves the buffers answered `Yes`.
+        Ok((!declined || last_yes).then_some(saving))
     }
 
     pub(crate) fn save(&mut self, id: BufferId) -> Result<(), String> {

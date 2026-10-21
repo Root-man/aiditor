@@ -151,7 +151,8 @@ mod tests {
             Some(&*format!("Wrote {}", dir.join("app.toml").display()))
         );
         let loaded: Vec<_> = read(&dir).into_iter().map(|p| p.unwrap().project).collect();
-        assert_eq!(core.projects(), loaded.iter().collect::<Vec<_>>());
+        // After the launch `$HOME` project.
+        assert_eq!(core.projects()[1..], loaded.iter().collect::<Vec<_>>());
         let p = &loaded[0];
         assert_eq!((&p.primary.path, &p.roots[0].path), (&a, &b));
         assert_eq!(
