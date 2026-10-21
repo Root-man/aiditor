@@ -2,8 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::buffer::{self, Buffer, BufferId};
+use crate::buffer::{self, Buffer, BufferId, Buffers};
 use crate::command::Args;
+use crate::workspace::WorkspaceId;
 use crate::{Core, Ctx, Effect, FileOp};
 
 impl Ctx<'_> {
@@ -224,17 +225,10 @@ impl Core {
         names.into_iter().map(|(_, b)| b.name.clone()).collect()
     }
 
-    /// Kills buffer `id`; windows showing it show the most recent listed buffer left of the
-    /// current workspace or `*Messages*`, or a new `*scratch*`.
+    /// Kills buffer `id`; windows showing it show the most recent listed buffer left of their
+    /// workspace or `*Messages*`, or a new `*scratch*` in the current workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
-        let workspace = self.buffers.workspace;
-        let next = (self.buffers.recent())
-            .find(|&(b, buffer)| {
-                b != id
-                    && !buffer.name.starts_with(' ')
-                    && buffer.workspace.is_none_or(|w| w == workspace)
-            })
-            .map(|(b, _)| b);
+        let next = replacement(&self.buffers, id, self.buffers.workspace);
         // Killed first, so a new `*scratch*` gets its name.
         _ = self.buffers.kill(id);
         let next = next.unwrap_or_else(|| self.buffers.create_scratch());
@@ -243,7 +237,30 @@ impl Core {
                 window.show(&mut self.buffers, next);
             }
         }
+        for workspace in &mut self.workspaces {
+            let Some(windows) = &mut workspace.windows else {
+                continue;
+            };
+            // Every live workspace keeps its `*scratch*`, so `next` is only a guard.
+            let theirs = replacement(&self.buffers, id, workspace.id).unwrap_or(next);
+            for window in windows.windows_mut() {
+                if window.buffer() == id {
+                    window.show(&mut self.buffers, theirs);
+                }
+            }
+        }
     }
+}
+
+/// The most recent listed buffer but `id` that belongs to `workspace` or to none.
+fn replacement(buffers: &Buffers, id: BufferId, workspace: WorkspaceId) -> Option<BufferId> {
+    (buffers.recent())
+        .find(|&(b, buffer)| {
+            b != id
+                && !buffer.name.starts_with(' ')
+                && buffer.workspace.is_none_or(|w| w == workspace)
+        })
+        .map(|(b, _)| b)
 }
 
 #[cfg(test)]
