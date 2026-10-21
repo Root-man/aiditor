@@ -119,7 +119,7 @@ impl Core {
             let next = self
                 .workspaces
                 .get(at + 1)
-                .unwrap_or(&self.workspaces[at - 1]);
+                .unwrap_or_else(|| &self.workspaces[at - 1]);
             self.switch_workspace(next.id)?;
         }
         let mut killed = self.workspaces.remove(at);
@@ -681,6 +681,13 @@ mod tests {
         h.keys("C-x t 2 two RET");
         h.open("f.txt").keys("x");
         h
+    }
+
+    #[test]
+    fn killing_the_first_workspace_while_current_shows_the_next() {
+        let mut h = projects();
+        h.keys("C-x t 2 one RET C-x t o C-x t 0");
+        assert_eq!((names(&h), current(&h).0), (vec!["one"], "one"));
     }
 
     #[test]
