@@ -350,22 +350,21 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.kill_workspace(args),
         },
         Command {
+            name: "workspace-kill-current",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| {
+                let strings = vec![ctx.core.current_workspace().name.clone()];
+                ctx.call("workspace-kill", Args { strings, ..args });
+                Ok(())
+            },
+        },
+        Command {
             name: "workspace-list",
             spec: ArgSpec::default(),
             handler: |ctx, _| {
                 ctx.core.list_workspaces();
                 Ok(())
             },
-        },
-        Command {
-            name: "workspace-open-folder",
-            spec: ArgSpec {
-                prompts: &["Open folder: "],
-                files: Some(0),
-                directories: true,
-                ..ArgSpec::default()
-            },
-            handler: |ctx, args| ctx.core.open_folder(&args.strings[0]),
         },
         Command {
             name: "reload-settings",

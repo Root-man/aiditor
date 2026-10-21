@@ -17,5 +17,5 @@ WindowDisplay {
             0,
         ),
     ),
-    mode_line: "-- *scratch*  1:0",
+    mode_line: "-- *scratch*<main>  1:0",
 }

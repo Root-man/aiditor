@@ -75,6 +75,11 @@ pub(crate) fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
     name
 }
 
+/// The name of the `*scratch*` of the workspace named `workspace`.
+pub(crate) fn scratch_name(workspace: &str) -> String {
+    format!("*scratch*<{workspace}>")
+}
+
 /// The last component of `path`, or the whole path when it has none, such as `/`.
 pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
@@ -118,11 +123,20 @@ impl Buffers {
         })
     }
 
-    /// A new unkillable `*scratch*`.
-    pub fn create_scratch(&mut self) -> BufferId {
-        let id = self.create("*scratch*");
+    /// A new unkillable `*scratch*<workspace>`.
+    pub fn create_scratch(&mut self, workspace: &str) -> BufferId {
+        let id = self.create(&scratch_name(workspace));
         self.map.get_mut(&id).expect("just created").unkillable = true;
         id
+    }
+
+    /// Renames buffer `id` to `name`, appending `<2>`, `<3>`, ... while another buffer has it.
+    pub(crate) fn rename(&mut self, id: BufferId, name: &str) {
+        let taken = |n: &str| (self.map.iter()).any(|(&b, buffer)| b != id && buffer.name == n);
+        let name = unique(name, taken);
+        if let Some(buffer) = self.map.get_mut(&id) {
+            buffer.name = name;
+        }
     }
 
     /// A buffer visiting `path`, holding `text` already read from it.

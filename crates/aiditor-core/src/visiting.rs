@@ -246,12 +246,15 @@ impl Core {
     }
 
     /// Kills buffer `id`; windows showing it show the most recent listed buffer left of their
-    /// workspace or `*Messages*`, or a new `*scratch*` in the current workspace.
+    /// workspace or `*Messages*`, or a new scratch in the current workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
         let next = replacement(&self.buffers, id, self.buffers.workspace);
-        // Killed first, so a new `*scratch*` gets its name.
+        // Killed first, so a new scratch gets its name.
         _ = self.buffers.kill(id);
-        let next = next.unwrap_or_else(|| self.buffers.create_scratch());
+        let next = next.unwrap_or_else(|| {
+            let name = self.current_workspace().name.clone();
+            self.buffers.create_scratch(&name)
+        });
         for window in std::iter::once(&mut self.window).chain(self.others.values_mut()) {
             if window.buffer() == id {
                 window.show(&mut self.buffers, next);
@@ -412,7 +415,10 @@ mod tests {
         h.keys("C-x b");
         assert_eq!(
             listed(&mut h),
-            (vec!["a".into(), "*scratch*".into(), "b".into()], Some(0))
+            (
+                vec!["a".into(), "*scratch*<main>".into(), "b".into()],
+                Some(0)
+            )
         );
         h.keys("RET");
         assert_eq!(name(&h), "a");
@@ -426,7 +432,7 @@ mod tests {
     fn two_files_with_one_name_get_unique_buffer_names() {
         let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
         h.open("a/x").open("b/x");
-        assert_eq!(h.core.buffer_names(true), ["x<2>", "x", "*scratch*"]);
+        assert_eq!(h.core.buffer_names(true), ["x<2>", "x", "*scratch*<main>"]);
     }
 
     #[test]
@@ -434,7 +440,7 @@ mod tests {
         let mut h = Harness::new(&[("a", "hello")]);
         h.open("a");
         h.keys("C-f C-f C-f C-x b RET");
-        assert_eq!((name(&h), h.point()), ("*scratch*", 0));
+        assert_eq!((name(&h), h.point()), ("*scratch*<main>", 0));
         h.keys("C-x b a RET");
         assert_eq!((name(&h), h.point()), ("a", 3));
     }
@@ -446,7 +452,7 @@ mod tests {
         h.keys("C-x 4 b RET");
         let leaves = h.core.tree.leaves();
         assert_eq!((leaves.len(), h.core.selected), (2, leaves[1]));
-        assert_eq!(name(&h), "*scratch*");
+        assert_eq!(name(&h), "*scratch*<main>");
         let upper = h.core.others[&leaves[0]].buffer();
         assert_eq!(h.core.buffers.get(upper).unwrap().name, "a");
         // With two windows it uses the next one rather than splitting again.
@@ -462,11 +468,14 @@ mod tests {
         let mut h = Harness::new(&[("a", "1")]);
         h.open("a");
         h.keys("C-x 2 C-x k");
-        assert_eq!(listed(&mut h).0, ["a", "*scratch*"]);
+        assert_eq!(listed(&mut h).0, ["a", "*scratch*<main>"]);
         h.keys("RET");
-        assert_eq!((name(&h), h.core.buffers.find("a")), ("*scratch*", None));
+        assert_eq!(
+            (name(&h), h.core.buffers.find("a")),
+            ("*scratch*<main>", None)
+        );
         let other = h.core.others[&WindowId(1)].buffer();
-        assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*");
+        assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*<main>");
         h.keys("C-x k nope RET");
         assert_eq!(h.core.message(), Some("No such buffer nope"));
         // That message made *Messages*.
@@ -474,8 +483,8 @@ mod tests {
         h.keys("C-x k *Messages* RET");
         assert_eq!(h.core.message(), Some("Can't kill *Messages*"));
         h.keys("x C-x k RET");
-        assert_eq!(h.core.message(), Some("Can't kill *scratch*"));
-        assert_eq!((name(&h), h.text().as_str()), ("*scratch*", "x"));
+        assert_eq!(h.core.message(), Some("Can't kill *scratch*<main>"));
+        assert_eq!((name(&h), h.text().as_str()), ("*scratch*<main>", "x"));
         assert_eq!(h.core.buffers.recent().count(), 2);
     }
 
@@ -492,7 +501,7 @@ mod tests {
         h.keys("RET");
         assert_eq!((name(&h), h.text().as_str()), ("a", "x1"));
         h.keys("C-x k RET yes RET");
-        assert_eq!(name(&h), "*scratch*");
+        assert_eq!(name(&h), "*scratch*<main>");
         assert_eq!(h.core.buffers.find("a"), None);
     }
 

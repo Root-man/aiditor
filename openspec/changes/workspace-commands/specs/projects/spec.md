@@ -14,7 +14,7 @@ The editor SHALL read every `*.toml` file in the projects directory at launch an
 - **THEN** the new project is loaded
 
 #### Scenario: Reload keeps ad-hoc projects
-- **WHEN** a folder was opened as an ad-hoc project and `C-x C-r` is pressed
+- **WHEN** the editor was started with a folder no saved project contains, giving an ad-hoc project, and `C-x C-r` is pressed
 - **THEN** the ad-hoc project is still there and its workspace is still bound to it
 
 ### Requirement: Project commands are keys and M-x commands

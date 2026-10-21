@@ -68,5 +68,5 @@ WindowDisplay {
             1,
         ),
     ),
-    mode_line: "** *scratch*  5:1",
+    mode_line: "** *scratch*<main>  5:1",
 }

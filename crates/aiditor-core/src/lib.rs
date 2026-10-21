@@ -517,7 +517,7 @@ impl Default for Core {
         let home = std::env::home_dir().unwrap_or_else(|| "/".into());
         let name = buffer::file_name(&home);
         let mut buffers = Buffers::default();
-        let scratch = buffers.create_scratch();
+        let scratch = buffers.create_scratch(&name);
         let window = Window::new(&mut buffers, scratch);
         let mut commands = HashMap::new();
         for c in builtins::builtins() {

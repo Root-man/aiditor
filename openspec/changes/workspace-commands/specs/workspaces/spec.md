@@ -3,11 +3,22 @@
 ## MODIFIED Requirements
 
 ### Requirement: The editor starts with one workspace
-At launch the editor SHALL have exactly one workspace, bound to a project, and it SHALL be current. The launch `*scratch*` buffer SHALL belong to it. No workspace SHALL ever be without a project.
+At launch the editor SHALL have exactly one workspace, bound to a project, and it SHALL be current. The launch scratch buffer SHALL belong to it. No workspace SHALL ever be without a project.
 
 #### Scenario: Launch
 - **WHEN** the editor starts
-- **THEN** there is one workspace, bound to a project, and `*scratch*` belongs to it
+- **THEN** there is one workspace, bound to a project, and its `*scratch*<name>` belongs to it
+
+### Requirement: A new workspace starts with a scratch buffer
+Making a workspace with a name and a project SHALL bind it to that project and make it current. It SHALL get one new empty scratch buffer named `*scratch*<name>` after the workspace, shown in a single window that is selected. The workspace that was current SHALL keep its window configuration.
+
+#### Scenario: New workspace
+- **WHEN** a workspace `w` is made for project `p`
+- **THEN** `w` is current and bound to `p`, and the frame shows one window, selected, on an empty `*scratch*<w>` owned by `w`
+
+#### Scenario: The previous workspace keeps its layout
+- **WHEN** a workspace is split into two windows, a new workspace is made, and the first is switched back to
+- **THEN** the first workspace shows its two windows again
 
 ## ADDED Requirements
 
@@ -18,8 +29,8 @@ A launch that names no file or folder SHALL bind its workspace to an ad-hoc proj
 - **WHEN** the editor starts with no argument
 - **THEN** its workspace is bound to an ad-hoc project whose primary is `$HOME`, and no project file is written
 
-### Requirement: A file on the command line opens in the project that contains it
-A file named on the command line SHALL open in the launch workspace, bound to the first saved project one of whose roots contains the file. With none, it SHALL be bound to an ad-hoc project at the nearest enclosing directory holding `.git`, or at the file's folder outside any repo, named after that directory. A folder on the command line SHALL get the project `workspace-open-folder` would give it. The `$HOME` project SHALL then not be listed.
+### Requirement: A file or folder on the command line opens in the project that contains it
+A file or folder named on the command line SHALL be bound to the first saved project one of whose roots contains it. With none, a file SHALL get an ad-hoc project at the nearest enclosing directory holding `.git`, or at its folder outside any repo, and a folder an ad-hoc project at itself, named after that directory. Nothing SHALL be written, and the `$HOME` project SHALL then not be listed.
 
 #### Scenario: A file in a saved project
 - **WHEN** a project `app` with an additional root `/r/lib` is saved and the editor starts with `/r/lib/x.rs`
@@ -35,10 +46,14 @@ A file named on the command line SHALL open in the launch workspace, bound to th
 
 #### Scenario: A folder
 - **WHEN** no saved project contains `/r/new` and the editor starts with that folder
-- **THEN** the workspace is bound to an ad-hoc project `new` whose primary is `/r/new`, showing `*scratch*`
+- **THEN** the workspace is `new`, bound to an ad-hoc project `new` whose primary is `/r/new`, showing `*scratch*<new>`, and no file is written
+
+#### Scenario: A folder inside a saved project
+- **WHEN** saved project `app` has a root `/r/lib` and the editor starts with `/r/lib/src`
+- **THEN** the workspace is bound to `app` and no ad-hoc project is made
 
 ### Requirement: Workspace commands are keys and M-x commands
-The editor SHALL provide `workspace-new`, `workspace-switch`, `workspace-next`, `workspace-previous`, `workspace-rename`, `workspace-kill`, `workspace-list` and `workspace-open-folder`, each runnable through `M-x` and bound under the `C-x t` prefix.
+The editor SHALL provide `workspace-new`, `workspace-switch`, `workspace-next`, `workspace-previous`, `workspace-rename`, `workspace-kill`, `workspace-kill-current` and `workspace-list`, each runnable through `M-x` and bound under the `C-x t` prefix.
 
 #### Scenario: Keys
 - **WHEN** `C-x t` is pressed and the prefix hint shows
@@ -49,7 +64,7 @@ The editor SHALL provide `workspace-new`, `workspace-switch`, `workspace-next`, 
 
 #### Scenario: Two workspaces on one project
 - **WHEN** project `p` exists and `C-x t 2 p RET` is typed twice
-- **THEN** workspaces `p` and `p<2>` exist, both bound to `p`, and `p<2>` is current
+- **THEN** workspaces `p` and `p<2>` exist, both bound to `p`, and `p<2>` is current, showing `*scratch*<p<2>>`
 
 #### Scenario: Unknown project
 - **WHEN** `workspace-new` is given a name no project has
@@ -74,40 +89,40 @@ The editor SHALL provide `workspace-new`, `workspace-switch`, `workspace-next`, 
 - **THEN** `c` is current
 
 ### Requirement: Rename the current workspace
-`workspace-rename` (`C-x t r`) SHALL prompt `Rename workspace to: ` and rename the current workspace. An empty name SHALL fail with `Empty workspace name`, and a name another workspace has SHALL fail with `Workspace <name> already exists`, changing nothing.
+`workspace-rename` (`C-x t r`) SHALL prompt `Rename workspace to: ` and rename the current workspace and its scratch buffer, which becomes `*scratch*<name>`. An empty name SHALL fail with `Empty workspace name`, and a name another workspace has SHALL fail with `Workspace <name> already exists`, changing nothing.
 
 #### Scenario: Rename
 - **WHEN** `C-x t r work RET` is typed
-- **THEN** the current workspace is named `work`
+- **THEN** the current workspace is named `work` and its scratch buffer `*scratch*<work>`
 
 #### Scenario: Taken name
 - **WHEN** workspaces `a` and `b` exist, `b` is current, and it is renamed to `a`
 - **THEN** the echo area says `Workspace a already exists` and the names are unchanged
 
 ### Requirement: Kill a workspace by name
-`workspace-kill` (`C-x t 0`) SHALL prompt `Kill workspace: `, completing over the workspaces' names with the current one first. Killing the sole workspace SHALL fail with `Attempt to delete the sole workspace` before any other question.
+`workspace-kill` (`C-x t k`) SHALL prompt `Kill workspace: `, completing over the workspaces' names with the current one first, and kill the chosen one. `workspace-kill-current` (`C-x t 0`) SHALL kill the current workspace without that prompt. Killing the sole workspace SHALL fail with `Attempt to delete the sole workspace` before any other question.
+
+#### Scenario: Kill the current one
+- **WHEN** workspaces `a` and `b` exist, `b` is current with no modified file buffer, and `C-x t 0` is typed
+- **THEN** `b` is killed without a question and `a` is current
 
 #### Scenario: Sole workspace
-- **WHEN** only one workspace exists and `C-x t 0 RET` is typed
+- **WHEN** only one workspace exists and `C-x t 0` or `C-x t k RET` is typed
 - **THEN** the echo area says `Attempt to delete the sole workspace` and nothing else is asked
 
 ### Requirement: Killing a workspace asks about its modified file buffers
-`workspace-kill` SHALL ask `Save file <path>? ` for each modified file buffer of that workspace, as quitting does, and, when any was declined, `Modified buffers exist; kill anyway? ` over `No` then `Yes`. The workspace SHALL be killed once every chosen save has succeeded; a declined `kill anyway`, or a failed save, SHALL leave it.
-
-#### Scenario: Nothing modified
-- **WHEN** workspaces `a` and `b` exist, `b` is current with no modified file buffer, and `C-x t 0 RET` is typed
-- **THEN** `b` is killed without a question and `a` is current
+Both kill commands SHALL ask `Save file <path>? ` for each modified file buffer of that workspace, as quitting does, and, when any was declined, `Modified buffers exist; kill anyway? ` over `No` then `Yes`. The workspace SHALL be killed once every chosen save has succeeded; a declined `kill anyway`, or a failed save, SHALL leave it.
 
 #### Scenario: Saving then killing
-- **WHEN** `b` has a modified file buffer and `C-x t 0 RET RET` is typed
-- **THEN** the second prompt was `Save file <path>? `, the file is written and `b` is killed
+- **WHEN** the current workspace `b` has a modified file buffer and `C-x t 0 RET` is typed
+- **THEN** the prompt was `Save file <path>? `, the file is written and `b` is killed
 
 #### Scenario: Declining keeps the workspace
-- **WHEN** `b` has a modified file buffer and `C-x t 0 RET no RET RET` is typed
+- **WHEN** `b` has a modified file buffer and `C-x t 0 no RET RET` is typed
 - **THEN** `b` and its modified buffer remain
 
 #### Scenario: Kill anyway
-- **WHEN** `b` has a modified file buffer and `C-x t 0 RET no RET yes RET` is typed
+- **WHEN** `b` has a modified file buffer and `C-x t k RET no RET yes RET` is typed
 - **THEN** `b` is killed and the file is unchanged on disk
 
 #### Scenario: Buffers of other workspaces are not asked about
@@ -120,18 +135,3 @@ The editor SHALL provide `workspace-new`, `workspace-switch`, `workspace-next`, 
 #### Scenario: Two workspaces
 - **WHEN** workspaces `a` on `p` and `b` on `q` exist, `b` is current, and `C-x t l` is typed
 - **THEN** the echo area shows `a (p)  *b (q)`
-
-### Requirement: Open a folder
-`workspace-open-folder` (`C-x t d`) SHALL prompt `Open folder: ` for a directory. The folder's project SHALL be the first saved project one of whose roots contains it, else an ad-hoc project whose primary is the folder, else a new ad-hoc project with the folder as primary, named after it with `<2>`, `<3>` appended while that name is taken. It SHALL then show that project's workspace as `project-switch` does. No file SHALL be written.
-
-#### Scenario: A folder without a project
-- **WHEN** no project contains folder `/r/new` and it is opened
-- **THEN** an ad-hoc project `new` with primary `/r/new` exists, a new workspace bound to it is current, and no file is written
-
-#### Scenario: Opening it again
-- **WHEN** `/r/new` was opened, another workspace is shown, and `/r/new` is opened again
-- **THEN** the workspace made the first time is current and no second project is made
-
-#### Scenario: A folder inside a saved project
-- **WHEN** saved project `app` has a root `/r/app` and `/r/app/src` is opened
-- **THEN** a workspace bound to `app` is current and no ad-hoc project is made

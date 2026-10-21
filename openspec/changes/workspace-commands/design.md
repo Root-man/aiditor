@@ -18,7 +18,9 @@
 - **Reload keeps ad-hoc projects**: `ProjectsLoaded` keeps `file: None` entries and replaces the rest, so workspaces stay bound across `C-x C-r`.
 - **Last shown.** `Workspace.shown: u64`, set from a core counter in `show_workspace` and at creation. `workspace-switch` sorts by it and `project-switch` takes the max.
 - **Kill reuses the quit questions.** `save_buffers_kill_terminal` becomes a shared `save_some(command, args, skip, of, verb)` that walks the pairs after `skip` leading strings, only over the buffers `of` accepts (the workspace's own for kill, all for quit), and returns the buffers to save, or nothing while it is still asking or was declined. Quit and kill differ only in what happens when the saves finish: `Core.quitting` keeps the buffers waited on and a new `Core.then_kill: Option<WorkspaceId>` says to kill rather than quit.
-- **Keys.** `C-x t`, Emacs's tab-bar prefix, the closest Emacs analogue (a tab is a window configuration): `2` new, `RET` switch, `o`/`O` next/previous, `r` rename, `0` kill, `l` list, `d` open folder; `C-x p p` is Emacs's `project-switch-project`.
+- **Keys.** `C-x t`, Emacs's tab-bar prefix, the closest Emacs analogue (a tab is a window configuration): `2` new, `RET` switch, `o`/`O` next/previous, `r` rename, `0` kill the current one (Emacs's `tab-close`), `k` kill one by name, `l` list; `C-x p p` is Emacs's `project-switch-project`. `workspace-kill-current` calls `workspace-kill` with the current name, so the questions' chain re-enters the one command.
+- **Scratch names.** A workspace's scratch is `*scratch*<name>`, found as its unkillable buffer and renamed through `Buffers::rename` (which keeps names unique) when the workspace is renamed, `launch` included. The harness renames its launch workspace to `main`, so test names and snapshots don't depend on `$HOME`.
+- **No open-folder command** (dropped in review): the folder-on-the-command-line path keeps `project_for(folder, folder)`.
 
 ## Risks / Trade-offs
 

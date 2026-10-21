@@ -40,7 +40,7 @@ impl Core {
 
     /// A directory typed at a prompt, taken from the current buffer's directory, without a
     /// trailing `/`.
-    pub(crate) fn root_path(&self, typed: &str) -> PathBuf {
+    fn root_path(&self, typed: &str) -> PathBuf {
         self.directory().join(typed).components().collect()
     }
 

@@ -39,8 +39,11 @@ impl Harness {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, contents).unwrap();
         }
+        let mut core = Core::default();
+        // Named the same whatever `$HOME` is, so scratch names and snapshots don't vary.
+        core.rename_workspace("main").unwrap();
         Harness {
-            core: Core::default(),
+            core,
             dir,
             now: Instant::now(),
             clipboard: None,

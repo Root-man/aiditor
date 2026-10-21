@@ -10,8 +10,14 @@
 
 - [x] 2.1 Add `workspace-new`, `workspace-switch`, `workspace-next`, `workspace-previous`, `workspace-rename`, `workspace-list` and their `C-x t` keys; verify with key-script tests for each spec scenario
 - [x] 2.2 Share the `C-x C-c` questions and add `workspace-kill`; verify the quitting tests still pass and key-script tests cover nothing modified, save then kill, decline, kill anyway, other workspaces' buffers and the sole workspace
-- [x] 2.3 Add `workspace-open-folder` and `project-switch` (`C-x p p`); verify key-script tests for a new folder writing no file, reopening it, a folder inside a saved project, and switch project reusing the most recent workspace or making one
+- [x] 2.3 Add `project-switch` (`C-x p p`); verify key-script tests for switch project reusing the most recent workspace or making one
 - [x] 2.4 Verify the `C-x t` and `C-x p` hints list every command
+
+## 4. Review changes
+
+- [x] 4.1 Add `workspace-kill-current` on `C-x t 0` and move `workspace-kill` to `C-x t k`; verify the kill tests use both keys
+- [x] 4.2 Drop `workspace-open-folder`; verify the folder launch tests cover an ad-hoc folder, a reload keeping it, and a folder inside a saved project
+- [x] 4.3 Name scratch buffers `*scratch*<workspace>` and rename them with the workspace; verify the rename and launch tests check the scratch name
 
 ## 3. Docs
 
