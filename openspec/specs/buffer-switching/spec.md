@@ -6,7 +6,7 @@ Moving between buffers and getting rid of them: switching a window to a buffer b
 ## Requirements
 
 ### Requirement: Switching the selected window to a buffer
-`switch-to-buffer` (`C-x b`) SHALL read a buffer name in the minibuffer, completing over every buffer whose name does not start with a space: the other buffers most recently shown first, then the current buffer. It SHALL show the named buffer in the selected window and make it the most recent. A name no buffer has SHALL create an empty buffer of that name and show it.
+`switch-to-buffer` (`C-x b`) SHALL read a buffer name in the minibuffer, completing over every buffer of the current workspace, and `*Messages*`, whose name does not start with a space: the other buffers most recently shown first, then the current buffer. It SHALL show the named buffer in the selected window and make it the most recent. A name no such buffer has SHALL create an empty buffer of that name in the current workspace and show it, even when another workspace has a buffer of that name.
 
 #### Scenario: Back to the previous buffer
 - **WHEN** a file is visited from `*scratch*` and `C-x b RET` is typed
@@ -24,6 +24,14 @@ Moving between buffers and getting rid of them: switching a window to a buffer b
 - **WHEN** `C-x b` is typed
 - **THEN** no listed name starts with a space
 
+#### Scenario: Another workspace's buffers are not listed
+- **WHEN** file `a` is visited in one workspace, a new workspace is made, and `C-x b` is typed
+- **THEN** the list holds the new workspace's `*scratch*` and `*Messages*`, and not `a` or the first workspace's `*scratch*`
+
+#### Scenario: Another workspace's name makes a new buffer
+- **WHEN** file `a` is visited in one workspace, a new workspace is made, and `C-x b a RET` is typed
+- **THEN** an empty buffer named `a<2>` of the new workspace is current, and the first workspace's `a` is unchanged
+
 ### Requirement: Switching back restores the buffer's point
 A buffer SHALL remember the point of the last window that stopped showing it, moved by later edits like any position; a window that starts showing the buffer SHALL put point there. A new buffer's remembered point SHALL be its start.
 
@@ -39,7 +47,7 @@ A buffer SHALL remember the point of the last window that stopped showing it, mo
 - **THEN** the frame has two windows, the lower one is selected and shows `*scratch*`, and the upper one still shows the file
 
 ### Requirement: Killing a buffer
-`kill-buffer` (`C-x k`) SHALL read a buffer name, completing over the listed buffers with the current one first, and kill that buffer. Every window showing it SHALL show the most recent other listed buffer of the current workspace, or `*Messages*`, instead. A buffer of another workspace SHALL NOT replace it. A name no buffer has SHALL fail with `No such buffer <name>`. `*Messages*` and each workspace's `*scratch*` SHALL NOT be killed: the kill SHALL fail with `Can't kill <name>`.
+`kill-buffer` (`C-x k`) SHALL read a buffer name, completing over the listed buffers of the current workspace and `*Messages*` with the current one first, and kill that buffer. Every window showing it SHALL show the most recent other listed buffer of the current workspace, or `*Messages*`, instead. A buffer of another workspace SHALL NOT replace it. A name no such buffer has, another workspace's buffer included, SHALL fail with `No such buffer <name>`. `*Messages*` and each workspace's `*scratch*` SHALL NOT be killed: the kill SHALL fail with `Can't kill <name>`.
 
 #### Scenario: Kill the current buffer
 - **WHEN** a file is visited from `*scratch*` and `C-x k RET` is typed
@@ -52,6 +60,10 @@ A buffer SHALL remember the point of the last window that stopped showing it, mo
 #### Scenario: Unknown name
 - **WHEN** `C-x k nope RET` is typed
 - **THEN** the echo area shows `No such buffer nope` and no buffer is killed
+
+#### Scenario: Another workspace's buffer is not killed
+- **WHEN** file `a` is visited in one workspace, a new workspace is made, and `C-x k a RET` is typed
+- **THEN** the echo area shows `No such buffer a` and `a` still exists
 
 #### Scenario: Another workspace's buffer is not shown
 - **WHEN** a file is visited in one workspace, a new workspace is made and shows it, then a file visited in the new workspace is killed
