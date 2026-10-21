@@ -539,15 +539,25 @@ milestones:
             acceptance:
               - "Switching away and back restores splits, buffers and points"
             blocked_by: [m1-ws-model]
+          - key: m1-decide-launch
+            title: "Decide: launching without a project"
+            labels: [decision]
+            design: "#projects"
+            body: |
+              Every workspace has a project, so what does a launch that names no project get? A file on the command line, and a launch with no argument (from a shell, or from the macOS Dock or Finder, whose working directory is `/`). Settles the projectless `default` workspace #62 started with, and what the file index and watcher do with a project as large as `$HOME`. Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
           - key: m1-ws-commands
             title: "Workspace commands"
             body: |
-              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`. Open folder: a folder named on the command line or picked with an open-folder command gets an ad-hoc in-memory project (folder as primary, its name as the project name) and a workspace for it; nothing is written to disk. Switch project: prompts for a project, then shows its most recently shown workspace, or creates one when it has none.
+              New workspace (prompts for project), switch, next/previous, rename, kill, list. Keys under the workspace prefix and `M-x`. Open folder: a folder named on the command line or picked with an open-folder command gets an ad-hoc in-memory project (folder as primary, its name as the project name) and a workspace for it; nothing is written to disk. Switch project: prompts for a project, then shows its most recently shown workspace, or creates one when it has none. Launch, as "Decide: launching without a project" settled: a file on the command line opens in a workspace of the first loaded project whose roots contain it, else of an ad-hoc project at its nearest enclosing git repo, else at its folder; a launch with no argument gets a workspace on an ad-hoc `$HOME` project, with file watching off. Every workspace then has a project: the projectless `default` workspace goes, and a workspace's project is required. Killing a workspace asks about its modified file buffers first, as `C-x C-c` does.
             acceptance:
               - "Key-script tests for each command"
               - "Opening a folder without a project gives a workspace on an ad-hoc project and writes no file"
               - "Switch project shows the project's most recently shown workspace, and creates one only when the project has none"
-            blocked_by: [m1-ws-model, m1-decide-switch]
+              - "A file named on the command line opens in a workspace of the project that contains it, or of an ad-hoc project at its git repo or folder; a launch with no argument gets an ad-hoc `$HOME` project; no workspace is without a project"
+              - "Killing a workspace with a modified file buffer asks before killing it"
+            blocked_by: [m1-ws-model, m1-decide-switch, m1-decide-launch]
           - key: m1-ws-strip
             title: "Workspace strip in the frontend"
             labels: [frontend]
@@ -649,7 +659,7 @@ milestones:
             labels: [decision, linux]
             design: "#open-questions"
             body: |
-              Files deleted or renamed on disk, files open from outside the project roots, skipping large ignored trees under inotify on Linux. (The editor's own saves are already settled: the watcher reports them, and each buffer filters by comparing hashes.) Record the answer in `docs/editor.md`.
+              Files deleted or renamed on disk, files open from outside the project roots, skipping large ignored trees under inotify on Linux (a project's ignore patterns and the watched-files limit, "Project ignore patterns for the index and the watcher" and "Limit on watched files per project", cover part of this). (The editor's own saves are already settled: the watcher reports them, and each buffer filters by comparing hashes.) Record the answer in `docs/editor.md`.
             acceptance:
               - "Decision recorded in docs/editor.md"
           - key: m1-revert-diff
@@ -667,6 +677,34 @@ milestones:
               - "External writes produce one event per change after debouncing"
               - "Creating or deleting a file updates the file finder"
             blocked_by: [m1-decide-watcher, m1-project-file, m1-file-index]
+          - key: m1-project-ignore
+            title: "Project ignore patterns for the index and the watcher"
+            labels: [project]
+            body: |
+              Projectile's `.projectile`, for aiditor: gitignore-syntax patterns in the project file (`ignore = [...]`), applied on top of `.gitignore` by the file index, grep and the watcher. Negations make an allow-list (`*` then `!notes/`), so a project as large as `$HOME` can be narrowed to the directories that matter. A `.ignore` file in a root is honoured too, as the `ignore` crate already does.
+            acceptance:
+              - "A file matched by a pattern is not in the file finder, grep results or watch events"
+              - "An allow-list (`*`, `!dir/`) indexes and watches only `dir`"
+              - "Patterns are checked when the project file loads; a bad one rejects the file like any other error"
+            blocked_by: [m1-file-index, m1-watcher, m1-decide-launch]
+          - key: m1-project-watch
+            title: "Project setting: file watching on or off"
+            labels: [project]
+            body: |
+              A `watch` key in the project file, `true` by default and `false` for the ad-hoc `$HOME` project (see "Decide: launching without a project"). With watching off, the project's roots get no watcher: the file index refreshes on demand only, and an open file is still caught by the hash check on save. Setting it through the project commands, and the mode line or `*Messages*` saying a project is unwatched, are part of this task.
+            acceptance:
+              - "A project with `watch = false` gets no root watcher, and its index still refreshes on demand"
+              - "The ad-hoc `$HOME` project is unwatched by default"
+            blocked_by: [m1-watcher, m1-decide-launch]
+          - key: m1-watch-limit
+            title: "Limit on watched files per project"
+            labels: [project]
+            body: |
+              Like lsp-mode's `lsp-file-watch-threshold`: a `max_watched_files` setting in `settings.toml`, overridable per project file. Counted after the ignore patterns. A project over the limit is not watched; the echo area and `*Messages*` say so with the count and the setting's name, and the project behaves as with `watch = false`. On Linux, the inotify watches go per directory, so the count also guards the system's `max_user_watches`.
+            acceptance:
+              - "A project over the limit gets no watcher and says why; under it, it is watched"
+              - "A project file's limit overrides the settings file's"
+            blocked_by: [m1-watcher, m1-project-ignore]
           - key: m1-auto-revert
             title: "Auto-revert clean buffers"
             body: |
@@ -994,6 +1032,12 @@ milestones:
               - "The which-key hint shows a bound prefix by its name"
               - "Spec updated in docs/editor.md"
             blocked_by: [m0-keymap-toml]
+      - key: m5-dashboard
+        title: "Welcome dashboard"
+        labels: [frontend, project]
+        design: "#projects"
+        body: |
+          Doom's dashboard for aiditor: a launch with no argument shows a welcome buffer in the `$HOME` workspace (see "Decide: launching without a project"), with quick commands such as recent files, recent projects and open project. Needs a recent files and projects history, which doesn't exist yet (see "Decide: C-s and the remaining editing commands"). Break down when M5 starts.
 
   # ───────────────────────────────────────────── M6 ─────────────────────────────────────────────
   - key: m6
