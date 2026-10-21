@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+use crate::buffer::BufferId;
 use crate::{Core, Ctx};
 
 pub type Handler = fn(&mut Ctx, Args) -> Result<(), String>;
@@ -33,6 +34,8 @@ pub struct ArgSpec {
     pub directories: bool,
     /// Text shown after a candidate in the list and not matched, worked out as the prompt opens.
     pub annotation: Option<fn(&Core, &str) -> Option<String>>,
+    /// The buffer to show for the selected candidate in the window the prompt was opened from.
+    pub preview: Option<fn(&Core, &str) -> Option<BufferId>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

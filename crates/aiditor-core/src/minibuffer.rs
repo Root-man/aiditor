@@ -42,6 +42,10 @@ pub(crate) struct Minibuffer {
     completion: Option<Completion>,
     /// Whether the answer joins the prompt's history; a handler's own question keeps none.
     history: bool,
+    /// The window it was opened from, as it was, while a preview stands in for it.
+    saved: Option<Window>,
+    /// The candidate last previewed; `None` before any and with no selection.
+    previewed: Option<String>,
 }
 
 /// The selection in a completing minibuffer's list of matches.
@@ -224,6 +228,8 @@ impl Ctx<'_> {
             input: String::new(),
             completion,
             history: choices.is_none(),
+            saved: None,
+            previewed: None,
         });
         core.select(MINIBUFFER);
         match start {
@@ -449,8 +455,50 @@ impl Core {
         })
     }
 
-    /// Closes the minibuffer, selecting the window it was opened from again.
+    /// Shows the buffer the command's preview gives for the selected candidate in the window
+    /// the minibuffer was opened from, or that window as it was when it gives none.
+    pub(crate) fn preview(&mut self) {
+        let Some(mb) = &self.prompts.minibuffer else {
+            return;
+        };
+        // A handler's own question completes over its choices, not the spec's candidates.
+        let Some(preview) = self.commands[mb.command]
+            .spec
+            .preview
+            .filter(|_| mb.history)
+        else {
+            return;
+        };
+        let candidate = self.prompts.selected_candidate();
+        if candidate == mb.previewed {
+            return;
+        }
+        self.unpreview();
+        let id = candidate.as_deref().and_then(|c| preview(self, c));
+        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
+        mb.previewed = candidate;
+        let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+        if let Some(id) = id.filter(|&id| id != from.buffer()) {
+            // Swapped out whole, so its point, mark, ring and scroll stay as markers until restored.
+            mb.saved = Some(std::mem::replace(from, Window::new(&mut self.buffers, id)));
+        }
+    }
+
+    /// Puts back the window a preview stands in for.
+    fn unpreview(&mut self) {
+        let Some(mb) = self.prompts.minibuffer.as_mut() else {
+            return;
+        };
+        if let Some(saved) = mb.saved.take() {
+            let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+            std::mem::replace(from, saved).release(&mut self.buffers);
+        }
+    }
+
+    /// Closes the minibuffer, selecting the window it was opened from again, as it was before
+    /// any preview.
     pub(crate) fn close_minibuffer(&mut self) -> Option<Minibuffer> {
+        self.unpreview();
         let mb = self.prompts.minibuffer.take()?;
         self.select(mb.from);
         let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
@@ -751,6 +799,101 @@ mod tests {
         assert_eq!(mb.annotations, ["apple-note", "banana-note", ""]);
         h.keys("note");
         assert_eq!(listed(&mut h).0, Vec::<String>::new());
+    }
+
+    /// The frame's windows and the selected window's point, mark, active mark and mark ring.
+    fn windows(h: &mut Harness) -> String {
+        let frame = h.frame(800., 600.).windows;
+        let (w, b) = (&h.core.window, &h.core.buffers);
+        format!(
+            "{:?}",
+            (frame, w.point(b), w.mark(b), w.active(), w.ring(b))
+        )
+    }
+
+    #[test]
+    fn preview_then_c_g_leaves_windows_as_they_were() {
+        let text: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let mut h = on(&text.join("\n"));
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(fruit),
+                preview: Some(|core, c| core.buffers.find_here(c)),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        let [apple, banana] = ["apple", "banana"].map(|n| h.core.buffers.create(n));
+        h.keys("C-x 2 C-SPC M-f C-SPC C-u 40 C-n C-SPC M-f C-SPC C-f C-SPC C-f");
+        let before = windows(&mut h);
+        let (file, point) = (h.core.window.buffer(), h.point());
+        let shown = |h: &Harness| h.core.others[&WindowId(0)].buffer();
+        h.keys("C-c p");
+        assert_eq!(shown(&h), apple, "the first match shows at once");
+        h.keys("C-n");
+        assert_eq!(shown(&h), banana);
+        h.keys("C-n");
+        assert_eq!(shown(&h), file, "cherry has no buffer");
+        h.keys("C-p zzz");
+        assert_eq!(shown(&h), file, "no match");
+        assert_eq!(h.core.others[&WindowId(0)].point(&h.core.buffers), point);
+        h.keys("C-g");
+        assert_eq!(windows(&mut h), before);
+        assert_eq!(
+            h.core.buffers.recent().next().unwrap().0,
+            file,
+            "not raised"
+        );
+        h.keys("C-c p C-n RET");
+        assert!(h.core.message().unwrap().contains(&strings(&["banana"])));
+        assert_eq!(
+            windows(&mut h),
+            before,
+            "RET runs from the window as it was"
+        );
+        h.keys("C-c p C-n").send(Msg::Click {
+            window: WindowId(1),
+            line: 0,
+            col: 0,
+        });
+        assert_eq!(shown(&h), file, "a click restores");
+        let (main, w) = (h.core.workspace(), h.core.new_workspace("w", "p"));
+        h.core.switch_workspace(main).unwrap();
+        // The click selected window 1, so the prompt opens from it.
+        let before = h.core.window.buffer();
+        h.keys("C-c p C-n");
+        assert_ne!(h.core.others[&WindowId(1)].buffer(), before);
+        h.core.switch_workspace(w).unwrap();
+        h.core.switch_workspace(main).unwrap();
+        assert_eq!(
+            h.core.window.buffer(),
+            before,
+            "a workspace switch restores"
+        );
+        assert!(h.core.minibuffer().is_none());
+    }
+
+    #[test]
+    fn a_command_s_own_question_does_not_preview() {
+        let mut h = on("");
+        h.core.register(crate::command::Command {
+            name: "test-cmd",
+            spec: ArgSpec {
+                preview: Some(|core, c| core.buffers.find_here(c)),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| {
+                let command = ctx.core.commands["test-cmd"];
+                ctx.read_string(command, args, "Pick? ".into(), Some(&["apple"]))
+            },
+        });
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        h.core.buffers.create("apple");
+        let file = h.core.window.buffer();
+        h.keys("C-c p");
+        assert_eq!(h.core.others[&WindowId(0)].buffer(), file);
     }
 
     #[test]

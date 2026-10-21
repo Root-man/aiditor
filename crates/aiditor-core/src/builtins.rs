@@ -476,6 +476,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             spec: ArgSpec {
                 prompts: &["Switch to buffer: "],
                 completion: Some(|core, _| core.buffer_names(false)),
+                preview: Some(|core, name| core.buffers.find_here(name)),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| {
