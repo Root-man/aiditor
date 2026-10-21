@@ -912,7 +912,7 @@ milestones:
             labels: [decision]
             design: "#open-questions"
             body: |
-              Indent width and style per language and project, `.editorconfig` support, themes and fonts beyond M0's single defaults. Record the answer in `docs/editor.md`.
+              Indent width and style per language and project, `.editorconfig` support, themes and fonts beyond M0's single defaults. Per-project values come from the project file overriding the global files, VS Code style (see "Project overrides for settings and keymaps"); this settles how per-language values and `.editorconfig` fit into those layers. Record the answer in `docs/editor.md`.
             acceptance:
               - "Decision recorded in docs/editor.md"
       - key: m5-soft-wrap
@@ -1032,6 +1032,13 @@ milestones:
               - "The which-key hint shows a bound prefix by its name"
               - "Spec updated in docs/editor.md"
             blocked_by: [m0-keymap-toml]
+      - key: m5-project-settings
+        title: "Project overrides for settings and keymaps"
+        labels: [project, keymap]
+        design: "#commands-and-keymaps"
+        body: |
+          VS Code's user and workspace settings, for aiditor: a project file can override any setting of `settings.toml` and any binding of `keymap.toml`, in `[settings]` and `[keymap.<keymap>]` tables. The project layer applies over the user files entry by entry, as the user keymap applies over the bundled one, while a workspace of that project is current; switching workspace switches the layer, and `C-x C-r` reloads it. Bad entries are reported as in the global files. Project-only keys such as `watch` and `max_watched_files` (#191, #192) stay as they are; per-project indent width becomes an ordinary override. Unbinding a key needs "Named keymap prefixes, remappable as a whole" or its own unbind support. Break down when M5 starts.
+        blocked_by: [m5-decide-settings]
       - key: m5-dashboard
         title: "Welcome dashboard"
         labels: [frontend, project]

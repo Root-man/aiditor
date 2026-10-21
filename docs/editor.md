@@ -340,7 +340,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Projects and workspaces**
 
-- Settings per language and per project (indent width, `.editorconfig`), themes and fonts.
+- Settings per language and per project (indent width, `.editorconfig`), themes and fonts. (Decided so far: a project file overrides any global setting or binding, VS Code style, [#194](https://github.com/Root-man/aiditor/issues/194).)
 
 **Agents**
 
