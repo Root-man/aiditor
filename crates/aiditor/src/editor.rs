@@ -503,7 +503,7 @@ mod tests {
                 .map(|p| p.name.clone())
                 .collect::<Vec<_>>()
         });
-        assert_eq!(names, ["p"]);
+        assert_eq!(names[1..], ["p"], "after the launch `$HOME` project");
     }
 
     #[gpui::test]

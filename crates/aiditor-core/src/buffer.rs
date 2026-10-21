@@ -63,6 +63,31 @@ impl From<ropey::Error> for Error {
     }
 }
 
+/// `base`, or `base<2>`, `base<3>`, ... while `taken` says the name is in use.
+pub(crate) fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut name = base.to_string();
+    for n in 2.. {
+        if !taken(&name) {
+            break;
+        }
+        name = format!("{base}<{n}>");
+    }
+    name
+}
+
+/// The name of the `*scratch*` of the workspace named `workspace`.
+pub(crate) fn scratch_name(workspace: &str) -> String {
+    format!("*scratch*<{workspace}>")
+}
+
+/// The last component of `path`, or the whole path when it has none, such as `/`.
+pub(crate) fn file_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Every buffer in the core. Ids only increase, so a stale id never finds a newer buffer.
 #[derive(Default)]
 pub struct Buffers {
@@ -98,17 +123,25 @@ impl Buffers {
         })
     }
 
-    /// A new unkillable `*scratch*`.
-    pub fn create_scratch(&mut self) -> BufferId {
-        let id = self.create("*scratch*");
+    /// A new unkillable `*scratch*<workspace>`.
+    pub fn create_scratch(&mut self, workspace: &str) -> BufferId {
+        let id = self.create(&scratch_name(workspace));
         self.map.get_mut(&id).expect("just created").unkillable = true;
         id
     }
 
+    /// Renames buffer `id` to `name`, appending `<2>`, `<3>`, ... while another buffer has it.
+    pub(crate) fn rename(&mut self, id: BufferId, name: &str) {
+        let taken = |n: &str| (self.map.iter()).any(|(&b, buffer)| b != id && buffer.name == n);
+        let name = unique(name, taken);
+        if let Some(buffer) = self.map.get_mut(&id) {
+            buffer.name = name;
+        }
+    }
+
     /// A buffer visiting `path`, holding `text` already read from it.
     pub fn create_for_file(&mut self, path: &Path, text: &str) -> BufferId {
-        let name = path.file_name().unwrap_or(path.as_os_str());
-        let id = self.create(&name.to_string_lossy());
+        let id = self.create(&file_name(path));
         let buffer = self.map.get_mut(&id).expect("just created");
         buffer.content = Content::Text(Rope::from_str(text));
         buffer.file = Some(path.to_path_buf());
@@ -117,13 +150,9 @@ impl Buffers {
 
     /// Adds `buffer`, appending `<2>`, `<3>`, ... to its name while another buffer has it.
     fn add(&mut self, mut buffer: Buffer) -> BufferId {
-        let base = buffer.name.clone();
-        for n in 2.. {
-            if !self.map.values().any(|b| b.name == buffer.name) {
-                break;
-            }
-            buffer.name = format!("{base}<{n}>");
-        }
+        buffer.name = unique(&buffer.name, |name| {
+            self.map.values().any(|b| b.name == name)
+        });
         let id = BufferId(self.next);
         self.next += 1;
         self.map.insert(id, buffer);

@@ -1,6 +1,6 @@
 //! Project files: a primary repo and additional roots, each with a role line.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
@@ -31,6 +31,26 @@ pub struct Root {
 pub struct Loaded {
     pub project: Project,
     pub file: Option<(PathBuf, String)>,
+}
+
+impl Loaded {
+    /// An ad-hoc project named `name` with `root` as its primary.
+    pub(crate) fn ad_hoc(name: &str, root: &Path) -> Self {
+        let primary = Root {
+            path: root.to_path_buf(),
+            role: String::new(),
+        };
+        let project = Project {
+            name: name.into(),
+            default_agent: None,
+            primary,
+            roots: Vec::new(),
+        };
+        Loaded {
+            project,
+            file: None,
+        }
+    }
 }
 
 impl Project {

@@ -1,9 +1,10 @@
 //! The project commands: making, editing, visiting and saving projects.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use toml_edit::DocumentMut;
 
+use crate::buffer::{file_name, unique};
 use crate::command::Args;
 use crate::project::{Loaded, Project, Root, sync};
 use crate::{Core, Ctx, Effect, FileOp};
@@ -19,7 +20,7 @@ impl Core {
 
     /// The project named `name`, as an index into `projects`.
     // shortcut: duplicate names across files are not caught (#56), so the first wins; check names at load if that bites.
-    fn project(&self, name: &str) -> Result<usize, String> {
+    pub(crate) fn project(&self, name: &str) -> Result<usize, String> {
         (self.projects.iter())
             .position(|p| p.project.name == name)
             .ok_or_else(|| format!("No project named {name}"))
@@ -41,6 +42,23 @@ impl Core {
     /// trailing `/`.
     fn root_path(&self, typed: &str) -> PathBuf {
         self.directory().join(typed).components().collect()
+    }
+
+    /// The name of the project for `path`: the first saved project with a root containing it,
+    /// else the ad-hoc project whose primary is `root`, else a new ad-hoc project at `root`.
+    pub(crate) fn project_for(&mut self, path: &Path, root: &Path) -> String {
+        let saved = (self.projects.iter())
+            .find(|p| p.file.is_some() && p.project.all_roots().any(|r| path.starts_with(&r.path)));
+        // Ad-hoc projects match only exactly, or the `$HOME` one would take every folder.
+        let ad_hoc =
+            || (self.projects.iter()).find(|p| p.file.is_none() && p.project.primary.path == root);
+        if let Some(found) = saved.or_else(ad_hoc) {
+            return found.project.name.clone();
+        }
+        let taken = |name: &str| self.projects.iter().any(|p| p.project.name == name);
+        let name = unique(&file_name(root), taken);
+        self.projects.push(Loaded::ad_hoc(&name, root));
+        name
     }
 
     /// Takes the file service's answer to `FileOp::WriteProject`: the project replaces the one
@@ -204,6 +222,8 @@ mod tests {
     /// A harness with directories `a` and `b`, projects going to `projects/` and `loaded` loaded.
     fn with(loaded: Vec<Loaded>) -> Harness {
         let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
+        // Without the launch `$HOME` project, so the lists hold only the test's.
+        h.core.projects.clear();
         let dir = Some(h.path("projects"));
         let projects = loaded.into_iter().map(Ok).collect();
         h.send(Msg::ProjectsLoaded { dir, projects });
@@ -411,6 +431,7 @@ mod tests {
             "project-set-default-agent",
             "project-open-file",
             "project-save",
+            "project-switch",
         ] {
             assert!(hint.contains(command), "{command} in {hint}");
         }

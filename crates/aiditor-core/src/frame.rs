@@ -260,7 +260,7 @@ mod tests {
         let names: Vec<_> = (h.frame(80., 100.).windows.iter())
             .map(|w| w.display.mode_line.clone())
             .collect();
-        assert_eq!(names, ["-- a.txt  1:0", "** *scratch*  1:1"]);
+        assert_eq!(names, ["-- a.txt  1:0", "** *scratch*<main>  1:1"]);
     }
 
     #[test]

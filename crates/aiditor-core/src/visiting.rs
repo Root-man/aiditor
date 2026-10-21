@@ -32,10 +32,18 @@ impl Ctx<'_> {
             if ok && !core.buffers.get(id).is_some_and(Buffer::modified) {
                 core.quitting.swap_remove(at);
                 if core.quitting.is_empty() {
-                    self.effects.push(Effect::Quit);
+                    match core.then_kill.take() {
+                        Some(workspace) => {
+                            if let Err(err) = core.kill_workspace(workspace) {
+                                core.echo(err);
+                            }
+                        }
+                        None => self.effects.push(Effect::Quit),
+                    }
                 }
             } else {
                 core.quitting.clear();
+                core.then_kill = None;
             }
         }
     }
@@ -79,30 +87,54 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Offers to save each modified file buffer, then quits once those saves succeed. The
-    /// strings are name/answer pairs for the buffers asked about, then the `exit anyway` answer.
-    pub(crate) fn save_buffers_kill_terminal(&mut self, mut args: Args) -> Result<(), String> {
-        let command = self.core.commands["save-buffers-kill-terminal"];
-        let asked = |name: &str| args.strings.as_chunks::<2>().0.iter().any(|p| p[0] == name);
+    /// Offers to save each modified file buffer, then quits once those saves succeed.
+    pub(crate) fn save_buffers_kill_terminal(&mut self, args: Args) -> Result<(), String> {
+        let command = "save-buffers-kill-terminal";
+        let Some(saving) = self.save_some(command, args, 0, |_| true, "exit")? else {
+            return Ok(());
+        };
+        match saving.is_empty() {
+            true => self.effects.push(Effect::Quit),
+            false => (self.core.quitting, self.core.then_kill) = (saving, None),
+        }
+        Ok(())
+    }
+
+    /// Asks `command`'s questions about the modified file buffers `of` takes: whether to save
+    /// each, then, if any was declined, whether to `verb` anyway. The strings after the first
+    /// `skip` are name/answer pairs for the buffers asked about, then the `verb anyway` answer.
+    /// Starts the saves answered `Yes` and returns them once the command should go ahead;
+    /// `None` while asking or when declined.
+    pub(crate) fn save_some(
+        &mut self,
+        command: &str,
+        mut args: Args,
+        skip: usize,
+        of: impl Fn(&Buffer) -> bool,
+        verb: &str,
+    ) -> Result<Option<Vec<BufferId>>, String> {
+        let command = self.core.commands[command];
+        let answers = &args.strings[skip..];
+        let asked = |name: &str| answers.as_chunks::<2>().0.iter().any(|p| p[0] == name);
         let next = (self.core.buffers.recent())
-            .find(|(_, b)| b.file.is_some() && b.modified() && !asked(&b.name))
+            .find(|(_, b)| of(b) && b.file.is_some() && b.modified() && !asked(&b.name))
             .map(|(_, b)| (b.name.clone(), b.file.clone().expect("a file buffer")));
-        if args.strings.len().is_multiple_of(2)
-            && let Some((name, path)) = next
-        {
+        let paired = answers.len().is_multiple_of(2);
+        if paired && let Some((name, path)) = next {
             args.strings.push(name);
             let prompt = format!("Save file {}? ", path.display());
-            return self.read_string(command, args, prompt, Some(&["Yes", "No"]));
+            return (self.read_string(command, args, prompt, Some(&["Yes", "No"]))).map(|()| None);
         }
-        let yes: Vec<String> = (args.strings.as_chunks::<2>().0.iter())
+        let yes: Vec<String> = (answers.as_chunks::<2>().0.iter())
             .filter(|p| p[1].eq_ignore_ascii_case("yes"))
             .map(|p| p[0].clone())
             .collect();
-        let declined = yes.len() < args.strings.len() / 2;
-        if declined && args.strings.len().is_multiple_of(2) {
-            let prompt = "Modified buffers exist; exit anyway? ".into();
-            return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
+        let declined = yes.len() < answers.len() / 2;
+        if declined && paired {
+            let prompt = format!("Modified buffers exist; {verb} anyway? ");
+            return (self.read_string(command, args, prompt, Some(&["No", "Yes"]))).map(|()| None);
         }
+        let last_yes = (answers.last()).is_some_and(|a| a.eq_ignore_ascii_case("yes"));
         let core = &mut *self.core;
         let saving: Vec<BufferId> = (yes.iter())
             .filter_map(|name| core.buffers.find(name))
@@ -111,20 +143,8 @@ impl Ctx<'_> {
         for &id in &saving {
             self.save(id)?;
         }
-        // Declining to exit still saves the buffers answered `Yes`.
-        if declined
-            && args
-                .strings
-                .last()
-                .is_none_or(|a| !a.eq_ignore_ascii_case("yes"))
-        {
-            return Ok(());
-        }
-        match saving.is_empty() {
-            true => self.effects.push(Effect::Quit),
-            false => self.core.quitting = saving,
-        }
-        Ok(())
+        // Declining to go ahead still saves the buffers answered `Yes`.
+        Ok((!declined || last_yes).then_some(saving))
     }
 
     pub(crate) fn save(&mut self, id: BufferId) -> Result<(), String> {
@@ -226,12 +246,15 @@ impl Core {
     }
 
     /// Kills buffer `id`; windows showing it show the most recent listed buffer left of their
-    /// workspace or `*Messages*`, or a new `*scratch*` in the current workspace.
+    /// workspace or `*Messages*`, or a new scratch in the current workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
         let next = replacement(&self.buffers, id, self.buffers.workspace);
-        // Killed first, so a new `*scratch*` gets its name.
+        // Killed first, so a new scratch gets its name.
         _ = self.buffers.kill(id);
-        let next = next.unwrap_or_else(|| self.buffers.create_scratch());
+        let next = next.unwrap_or_else(|| {
+            let name = self.current_workspace().name.clone();
+            self.buffers.create_scratch(&name)
+        });
         for window in std::iter::once(&mut self.window).chain(self.others.values_mut()) {
             if window.buffer() == id {
                 window.show(&mut self.buffers, next);
@@ -392,7 +415,10 @@ mod tests {
         h.keys("C-x b");
         assert_eq!(
             listed(&mut h),
-            (vec!["a".into(), "*scratch*".into(), "b".into()], Some(0))
+            (
+                vec!["a".into(), "*scratch*<main>".into(), "b".into()],
+                Some(0)
+            )
         );
         h.keys("RET");
         assert_eq!(name(&h), "a");
@@ -406,7 +432,7 @@ mod tests {
     fn two_files_with_one_name_get_unique_buffer_names() {
         let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
         h.open("a/x").open("b/x");
-        assert_eq!(h.core.buffer_names(true), ["x<2>", "x", "*scratch*"]);
+        assert_eq!(h.core.buffer_names(true), ["x<2>", "x", "*scratch*<main>"]);
     }
 
     #[test]
@@ -414,7 +440,7 @@ mod tests {
         let mut h = Harness::new(&[("a", "hello")]);
         h.open("a");
         h.keys("C-f C-f C-f C-x b RET");
-        assert_eq!((name(&h), h.point()), ("*scratch*", 0));
+        assert_eq!((name(&h), h.point()), ("*scratch*<main>", 0));
         h.keys("C-x b a RET");
         assert_eq!((name(&h), h.point()), ("a", 3));
     }
@@ -426,7 +452,7 @@ mod tests {
         h.keys("C-x 4 b RET");
         let leaves = h.core.tree.leaves();
         assert_eq!((leaves.len(), h.core.selected), (2, leaves[1]));
-        assert_eq!(name(&h), "*scratch*");
+        assert_eq!(name(&h), "*scratch*<main>");
         let upper = h.core.others[&leaves[0]].buffer();
         assert_eq!(h.core.buffers.get(upper).unwrap().name, "a");
         // With two windows it uses the next one rather than splitting again.
@@ -442,11 +468,14 @@ mod tests {
         let mut h = Harness::new(&[("a", "1")]);
         h.open("a");
         h.keys("C-x 2 C-x k");
-        assert_eq!(listed(&mut h).0, ["a", "*scratch*"]);
+        assert_eq!(listed(&mut h).0, ["a", "*scratch*<main>"]);
         h.keys("RET");
-        assert_eq!((name(&h), h.core.buffers.find("a")), ("*scratch*", None));
+        assert_eq!(
+            (name(&h), h.core.buffers.find("a")),
+            ("*scratch*<main>", None)
+        );
         let other = h.core.others[&WindowId(1)].buffer();
-        assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*");
+        assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*<main>");
         h.keys("C-x k nope RET");
         assert_eq!(h.core.message(), Some("No such buffer nope"));
         // That message made *Messages*.
@@ -454,8 +483,8 @@ mod tests {
         h.keys("C-x k *Messages* RET");
         assert_eq!(h.core.message(), Some("Can't kill *Messages*"));
         h.keys("x C-x k RET");
-        assert_eq!(h.core.message(), Some("Can't kill *scratch*"));
-        assert_eq!((name(&h), h.text().as_str()), ("*scratch*", "x"));
+        assert_eq!(h.core.message(), Some("Can't kill *scratch*<main>"));
+        assert_eq!((name(&h), h.text().as_str()), ("*scratch*<main>", "x"));
         assert_eq!(h.core.buffers.recent().count(), 2);
     }
 
@@ -472,7 +501,7 @@ mod tests {
         h.keys("RET");
         assert_eq!((name(&h), h.text().as_str()), ("a", "x1"));
         h.keys("C-x k RET yes RET");
-        assert_eq!(name(&h), "*scratch*");
+        assert_eq!(name(&h), "*scratch*<main>");
         assert_eq!(h.core.buffers.find("a"), None);
     }
 

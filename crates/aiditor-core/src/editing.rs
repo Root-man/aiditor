@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(h.text(), "hello\nwörld");
         assert_eq!(h.point(), 11);
         assert!(h.core.current().modified());
-        assert_eq!(h.core.current().name, "*scratch*");
+        assert_eq!(h.core.current().name, "*scratch*<main>");
         assert!(h.core.current().file.is_none());
     }
 

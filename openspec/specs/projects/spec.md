@@ -57,22 +57,26 @@ A project file that is not valid TOML, has a value of the wrong type, a key the 
 - **THEN** both projects load
 
 ### Requirement: Projects load at launch and on C-x C-r
-The editor SHALL read every `*.toml` file in the projects directory at launch and again when `C-x C-r` reloads settings, replacing the projects it had. A missing projects directory SHALL mean no projects and no error.
+The editor SHALL read every `*.toml` file in the projects directory at launch and again when `C-x C-r` reloads settings, replacing the saved projects it had. Ad-hoc projects SHALL stay. A missing projects directory SHALL mean no saved projects and no error.
 
 #### Scenario: No projects directory
 - **WHEN** the config dir has no `projects` directory
-- **THEN** there are no projects and no error is shown
+- **THEN** there are no saved projects and no error is shown
 
 #### Scenario: Reload picks up a new file
 - **WHEN** a project file is added and `C-x C-r` is pressed
 - **THEN** the new project is loaded
 
+#### Scenario: Reload keeps ad-hoc projects
+- **WHEN** the editor was started with a folder no saved project contains, giving an ad-hoc project, and `C-x C-r` is pressed
+- **THEN** the ad-hoc project is still there and its workspace is still bound to it
+
 ### Requirement: Project commands are keys and M-x commands
-The editor SHALL provide `project-create`, `project-add-root`, `project-remove-root`, `project-set-role`, `project-set-default-agent`, `project-open-file` and `project-save`, each runnable through `M-x` and bound under the `C-x p` prefix. Every command but `project-create` SHALL first prompt `Project: ` completing over the loaded projects' names.
+The editor SHALL provide `project-create`, `project-add-root`, `project-remove-root`, `project-set-role`, `project-set-default-agent`, `project-open-file`, `project-save` and `project-switch`, each runnable through `M-x` and bound under the `C-x p` prefix. Every command but `project-create`, `project-save` and `project-switch` SHALL first prompt `Project: ` completing over the loaded projects' names.
 
 #### Scenario: Keys
 - **WHEN** `C-x p` is pressed and the prefix hint shows
-- **THEN** it lists a key for each of the seven project commands
+- **THEN** it lists a key for each of the eight project commands
 
 #### Scenario: Unknown project
 - **WHEN** a project command is given a name no loaded project has
@@ -140,3 +144,14 @@ A project without a file (ad-hoc) SHALL be edited in memory by the edit commands
 #### Scenario: Save a project with a file
 - **WHEN** `project-save` is answered with a project that already has a file
 - **THEN** nothing is written and the echo area says the project is already saved
+
+### Requirement: Switch project
+`project-switch` (`C-x p p`) SHALL prompt `Switch to project: `, completing over the projects' names, then show that project's most recently shown workspace, or make a new workspace for it, as `workspace-new` does, when it has none. It SHALL ask nothing more.
+
+#### Scenario: The project has workspaces
+- **WHEN** project `p` has workspaces `p` and `p<2>`, `p<2>` was shown after `p`, another project's workspace is current, and `C-x p p p RET` is typed
+- **THEN** `p<2>` is current and no workspace is made
+
+#### Scenario: The project has none
+- **WHEN** project `q` has no workspace and `C-x p p q RET` is typed
+- **THEN** a new workspace `q` bound to `q` is current

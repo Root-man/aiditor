@@ -1,0 +1,25 @@
+# Tasks
+
+## 1. Required project and launch
+
+- [x] 1.1 Make `Workspace.project` a `String`, bind the launch workspace to an ad-hoc `$HOME` project, track `shown`, and keep ad-hoc projects on `ProjectsLoaded`; update the workspace and project tests and verify `cargo test -p aiditor-core` passes
+- [x] 1.2 Add `project_for(path, root)` and `Core::launch(path, root)`; verify with tests for a saved project's root, an existing ad-hoc primary, a new ad-hoc name with `<2>`, and the `$HOME` project dropped
+- [x] 1.3 In `main.rs`, pass the git repo or folder as `root` and open a directory argument as a folder; verify with a test of the root lookup
+
+## 2. Commands
+
+- [x] 2.1 Add `workspace-new`, `workspace-switch`, `workspace-next`, `workspace-previous`, `workspace-rename`, `workspace-list` and their `C-x t` keys; verify with key-script tests for each spec scenario
+- [x] 2.2 Share the `C-x C-c` questions and add `workspace-kill`; verify the quitting tests still pass and key-script tests cover nothing modified, save then kill, decline, kill anyway, other workspaces' buffers and the sole workspace
+- [x] 2.3 Add `project-switch` (`C-x p p`); verify key-script tests for switch project reusing the most recent workspace or making one
+- [x] 2.4 Verify the `C-x t` and `C-x p` hints list every command
+
+## 4. Review changes
+
+- [x] 4.1 Add `workspace-kill-current` on `C-x t 0` and move `workspace-kill` to `C-x t k`; verify the kill tests use both keys
+- [x] 4.2 Drop `workspace-open-folder`; verify the folder launch tests cover an ad-hoc folder, a reload keeping it, and a folder inside a saved project
+- [x] 4.4 Prompt `workspace-new` for a name, blank for the project's; verify the new-workspace test covers a given, a taken and a blank name
+- [x] 4.3 Name scratch buffers `*scratch*<workspace>` and rename them with the workspace; verify the rename and launch tests check the scratch name
+
+## 3. Docs
+
+- [x] 3.1 Add "Built in #64" notes under Workspaces and Projects in `docs/editor.md` and drop the `default` workspace wording; verify the text matches the specs
