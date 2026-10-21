@@ -72,11 +72,11 @@ The editor SHALL read every `*.toml` file in the projects directory at launch an
 - **THEN** the ad-hoc project is still there and its workspace is still bound to it
 
 ### Requirement: Project commands are keys and M-x commands
-The editor SHALL provide `project-create`, `project-add-root`, `project-remove-root`, `project-set-role`, `project-set-default-agent`, `project-open-file`, `project-save` and `project-switch`, each runnable through `M-x` and bound under the `C-x p` prefix. Every command but `project-create`, `project-save` and `project-switch` SHALL first prompt `Project: ` completing over the loaded projects' names.
+The editor SHALL provide `project-create`, `project-add-root`, `project-remove-root`, `project-set-role`, `project-set-default-agent`, `project-open-file`, `project-save`, `project-switch` and `project-index`, each runnable through `M-x` and bound under the `C-x p` prefix. Every command but `project-create`, `project-save` and `project-switch` SHALL first prompt `Project: ` completing over the loaded projects' names.
 
 #### Scenario: Keys
 - **WHEN** `C-x p` is pressed and the prefix hint shows
-- **THEN** it lists a key for each of the eight project commands
+- **THEN** it lists a key for each of the nine project commands
 
 #### Scenario: Unknown project
 - **WHEN** a project command is given a name no loaded project has

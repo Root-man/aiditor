@@ -3,10 +3,11 @@
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aiditor_core::buffer::{encode, hash};
 use aiditor_core::{FileOp, Msg};
+use ignore::WalkBuilder;
 
 /// Carries out `op` and returns its reply for the core; the one place the app and headless share.
 pub fn run(op: FileOp) -> Msg {
@@ -39,6 +40,23 @@ pub fn run(op: FileOp) -> Msg {
         FileOp::Open(path) => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
             Msg::Opened { path, result }
+        }
+        FileOp::Index {
+            project,
+            walk,
+            roots,
+        } => {
+            let roots = (roots.into_iter())
+                .map(|root| {
+                    let files = index(&root);
+                    (root, files)
+                })
+                .collect();
+            Msg::Indexed {
+                project,
+                walk,
+                roots,
+            }
         }
         FileOp::WriteProject { path, old, text } => {
             Msg::ProjectWritten(crate::projects::write(&path, old.as_deref(), text))
@@ -76,6 +94,28 @@ pub fn list(dir: &Path) -> io::Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// The files under `root`, relative to it and sorted: gitignored ones left out, hidden ones in,
+/// `.git` never, symlinked directories not followed.
+pub fn index(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fs::read_dir(root).map_err(|err| format!("{}: {err}", root.display()))?;
+    // shortcut: one thread walks; switch to `build_parallel` if large repos index slowly.
+    let walk = WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build();
+    // Unreadable entries are skipped, as `rg` skips them.
+    let mut files: Vec<PathBuf> = (walk.flatten())
+        .filter(|e| {
+            e.file_type()
+                .is_some_and(|ft| ft.is_file() || ft.is_symlink() && e.path().is_file())
+        })
+        .filter_map(|e| e.path().strip_prefix(root).ok().map(Path::to_path_buf))
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 /// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file), and
@@ -151,6 +191,62 @@ mod tests {
                 .unwrap_err()
                 .starts_with(&format!("{}: ", file.display()))
         );
+    }
+
+    #[test]
+    fn indexes_hidden_and_unignored_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (name, text) in [
+            (".gitignore", "target/\n"),
+            (".ignore", "*.log\n"),
+            ("target/out", ""),
+            (".github/ci.yml", ""),
+            (".git/config", ""),
+            ("sub/.git", "gitdir: elsewhere\n"),
+            ("src/a.rs", ""),
+            ("src/b.log", ""),
+            ("elsewhere/c", ""),
+        ] {
+            fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+            fs::write(root.join(name), text).unwrap();
+        }
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("dir-link")).unwrap();
+        std::os::unix::fs::symlink(root.join("src/a.rs"), root.join("file-link")).unwrap();
+        // Not a git repo, so this checks `.gitignore` applies without one.
+        assert_eq!(
+            index(root).unwrap(),
+            [
+                ".github/ci.yml",
+                ".gitignore",
+                ".ignore",
+                "elsewhere/c",
+                "file-link",
+                "src/a.rs"
+            ]
+            .map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn index_reports_a_missing_root_by_path() {
+        let gone = tempfile::tempdir().unwrap().path().join("gone");
+        let msg = run(FileOp::Index {
+            project: "p".into(),
+            walk: 3,
+            roots: vec![gone.clone()],
+        });
+        let Msg::Indexed {
+            project,
+            walk,
+            roots,
+        } = msg
+        else {
+            panic!("not indexed");
+        };
+        assert_eq!((&*project, walk, roots.len()), ("p", 3, 1));
+        let err = roots[0].1.clone().unwrap_err();
+        assert!(err.starts_with(&format!("{}: ", gone.display())), "{err}");
     }
 
     #[test]

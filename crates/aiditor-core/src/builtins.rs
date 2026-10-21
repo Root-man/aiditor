@@ -305,6 +305,15 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.core.switch_project(&args.strings[0]),
         },
         Command {
+            name: "project-index",
+            spec: ArgSpec {
+                prompts: &["Project: "],
+                completion: Some(projects_then_free),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.index_project(&args.strings[0]),
+        },
+        Command {
             name: "workspace-new",
             spec: ArgSpec {
                 prompts: &["New workspace for project: ", "Workspace name: "],
