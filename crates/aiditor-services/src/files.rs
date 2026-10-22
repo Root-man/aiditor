@@ -104,22 +104,28 @@ pub fn list(dir: &Path) -> io::Result<Vec<String>> {
 /// `.git` never, symlinked directories not followed.
 pub fn index(root: &Path) -> Result<Vec<PathBuf>, String> {
     fs::read_dir(root).map_err(|err| format!("{}: {err}", root.display()))?;
-    // shortcut: one thread walks; switch to `build_parallel` if large repos index slowly.
+    let files = (walk(root))
+        .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .collect();
+    Ok(files)
+}
+
+/// The files under `root` that the index lists, as full paths in path order.
+pub(crate) fn walk(root: &Path) -> impl Iterator<Item = PathBuf> {
+    // shortcut: one thread walks; switch to `build_parallel` if large repos index or grep slowly.
     let walk = WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
         .filter_entry(|e| e.file_name() != ".git")
+        .sort_by_file_name(|a, b| a.cmp(b))
         .build();
     // Unreadable entries are skipped, as `rg` skips them.
-    let mut files: Vec<PathBuf> = (walk.flatten())
+    (walk.flatten())
         .filter(|e| {
             e.file_type()
                 .is_some_and(|ft| ft.is_file() || ft.is_symlink() && e.path().is_file())
         })
-        .filter_map(|e| e.path().strip_prefix(root).ok().map(Path::to_path_buf))
-        .collect();
-    files.sort();
-    Ok(files)
+        .map(ignore::DirEntry::into_path)
 }
 
 /// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file), and

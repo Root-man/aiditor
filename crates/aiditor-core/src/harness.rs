@@ -224,6 +224,8 @@ impl Harness {
                         .expect("deletes a written file");
                 }
                 Effect::Recovery(RecoveryOp::DeleteRecovery(file)) => self.deleted.push(file),
+                // shortcut: no command searches yet; carry it out once project grep (#74) does.
+                Effect::Grep(_) => {}
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));

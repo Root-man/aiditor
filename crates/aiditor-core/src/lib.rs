@@ -113,6 +113,13 @@ pub enum Msg {
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
     },
+    /// The grep service's hits for search `search`, in batches as they are found, or why the
+    /// pattern is invalid; `done` on its last message. A cancelled search sends nothing more.
+    Grepped {
+        search: u64,
+        hits: Result<Vec<Hit>, String>,
+        done: bool,
+    },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
     /// The user's keymap file, the same way.
@@ -154,6 +161,20 @@ pub struct Recovered {
     pub disk: Option<(Vec<u8>, u64)>,
 }
 
+/// A line matching a grep search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub root: PathBuf,
+    /// The file, relative to `root`.
+    pub path: PathBuf,
+    /// 0-based.
+    pub line: usize,
+    /// The char column where the line's first match starts, 0-based.
+    pub col: usize,
+    /// The line without its line ending.
+    pub text: String,
+}
+
 /// Chains a panic hook, once, that keeps each panic's report and backtrace for `Ctx::try_call`.
 static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
 
@@ -165,6 +186,8 @@ thread_local! {
 pub enum Effect {
     /// A visited file's read, write or listing, answered with a message.
     File(FileOp),
+    /// A project grep, answered with `Msg::Grepped` batches.
+    Grep(GrepOp),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
     /// Read the user's settings, keymap and project files and send `Msg::SettingsLoaded`,
@@ -208,6 +231,23 @@ pub enum FileOp {
         old: Option<String>,
         text: String,
     },
+}
+
+/// Work for the grep service.
+pub enum GrepOp {
+    /// Cancel the running search and start this one.
+    Search(GrepSearch),
+    /// Cancel the running search.
+    Cancel,
+}
+
+/// Search the files the index lists under `roots` for the regexp `pattern`, smart case, until
+/// `limit` hits; numbered `id`, from 1.
+pub struct GrepSearch {
+    pub id: u64,
+    pub roots: Vec<PathBuf>,
+    pub pattern: String,
+    pub limit: usize,
 }
 
 /// Recovery file work for the recovery thread.
@@ -380,6 +420,8 @@ impl Ctx<'_> {
                 walk,
                 roots,
             } => self.core.indexed(project, walk, roots),
+            // shortcut: no command searches yet; project grep (#74) takes these.
+            Msg::Grepped { .. } => {}
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
