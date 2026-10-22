@@ -15,7 +15,7 @@ impl Ctx<'_> {
         match (self.core.buffers.get_mut(id), result) {
             (None, _) => {}
             (Some(buffer), Ok(hash)) => {
-                (buffer.disk, buffer.deleted) = (Some(hash), false);
+                (buffer.disk, buffer.deleted, buffer.conflict) = (Some(hash), false, None);
                 // Edits made while the write ran are still unsaved.
                 if buffer.tick() == tick {
                     buffer.set_saved();
@@ -24,7 +24,13 @@ impl Ctx<'_> {
                 let msg = format!("Wrote {}", path.display());
                 self.core.echo(msg);
             }
-            (Some(_), Err(err)) => self.core.echo(err),
+            (Some(buffer), Err(err)) => {
+                // A change on disk the watcher missed becomes a conflict.
+                if let Some(path) = buffer.file.clone() {
+                    self.effects.push(Effect::File(FileOp::Check(vec![path])));
+                }
+                self.core.echo(err)
+            }
         }
         let core = &mut *self.core;
         if let Some(at) = core.quitting.iter().position(|&b| b == id) {
@@ -100,6 +106,49 @@ impl Ctx<'_> {
             path,
             text: buffer.text().clone(),
         }));
+        Ok(())
+    }
+
+    /// Asks how to resolve the current buffer's conflict with its file, as `command`
+    /// (`resolve-conflict` or `save-buffer`), then does what the answer says; `save-buffer`
+    /// saves after `Keep mine`, and saves at once when there is no conflict.
+    pub(crate) fn resolve_conflict(&mut self, command: &str, args: Args) -> Result<(), String> {
+        let save = command == "save-buffer";
+        let id = self.core.window.buffer();
+        let buffer = self.core.current_mut();
+        let (Some(path), Some(hash)) = (buffer.file.clone(), buffer.conflict) else {
+            // An answer arriving after the conflict ended does nothing more.
+            return match (save, args.strings.is_empty()) {
+                (true, _) => self.save(id),
+                (false, true) => Err("No conflict with the file on disk".into()),
+                (false, false) => Ok(()),
+            };
+        };
+        let Some(answer) = args.strings.first() else {
+            let command = self.core.commands[command];
+            let prompt = format!("{} changed on disk: ", path.display());
+            // Safe to destructive, so `RET` right away loses nothing.
+            let choices = ["Compare", "Take disk", "Keep mine"];
+            return self.read_string(command, args, prompt, Some(&choices));
+        };
+        match answer.to_ascii_lowercase().as_str() {
+            "keep mine" => {
+                // The disk version becomes the save's base, so the save overwrites it.
+                (buffer.disk, buffer.conflict) = (Some(hash), None);
+                if save {
+                    return self.save(id);
+                }
+            }
+            "take disk" => {
+                let yes = vec!["Yes".to_string()];
+                return self.revert_buffer(Args {
+                    strings: yes,
+                    ..Args::default()
+                });
+            }
+            "compare" => return self.diff_buffer_with_file(),
+            _ => {}
+        }
         Ok(())
     }
 
@@ -286,6 +335,7 @@ impl Core {
         let buffer = self.buffers.get_mut(id).expect("live");
         buffer.undo_boundary(after);
         (buffer.disk, buffer.crlf, buffer.bom) = (Some(revert.hash), revert.crlf, revert.bom);
+        buffer.conflict = None;
         buffer.set_saved();
     }
 

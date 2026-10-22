@@ -212,7 +212,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "save-buffer",
             spec: ArgSpec::default(),
-            handler: |ctx, _| ctx.save(ctx.core.window.buffer()),
+            handler: |ctx, args| ctx.resolve_conflict("save-buffer", args),
         },
         Command {
             name: "save-buffers-kill-terminal",
@@ -552,6 +552,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "revert-buffer",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.revert_buffer(args),
+        },
+        Command {
+            name: "resolve-conflict",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.resolve_conflict("resolve-conflict", args),
         },
         Command {
             name: "diff-buffer-with-file",

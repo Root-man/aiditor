@@ -767,8 +767,7 @@ mod tests {
         assert_eq!(h.core.message(), Some(err.as_str()));
         assert_eq!(names(&h).len(), 2);
         // The cancelled kill doesn't come back with a later save.
-        std::fs::write(h.path("f.txt"), "").unwrap();
-        h.keys("C-x C-s");
+        h.keys("C-x C-s Keep SPC mine RET");
         assert_eq!(h.disk("f.txt"), "x\n");
         assert_eq!(names(&h).len(), 2);
     }

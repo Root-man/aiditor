@@ -655,6 +655,9 @@ pub struct Core {
     recovered: Vec<Recovered>,
     /// The watch set last sent to the watcher.
     watching: WatchSet,
+    /// The selected window's buffer after the last message handled with no minibuffer open,
+    /// for `ask_on_focus`.
+    focused: BufferId,
 }
 
 impl Default for Core {
@@ -715,6 +718,7 @@ impl Default for Core {
             autosave_max: None,
             recovered: Vec::new(),
             watching: WatchSet::default(),
+            focused: scratch,
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
@@ -765,6 +769,7 @@ impl Core {
                 ctx.dispatch(msg);
             }
         }
+        ctx.ask_on_focus();
         let mut effects = ctx.effects;
         self.autosave(now, input, &mut effects);
         self.poll_completion(now, &mut effects);

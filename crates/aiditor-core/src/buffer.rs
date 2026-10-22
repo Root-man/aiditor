@@ -110,6 +110,8 @@ impl Buffers {
             bom: false,
             disk: None,
             deleted: false,
+            conflict: None,
+            conflict_asked: false,
             read_only: false,
             unkillable: false,
             modified: false,
@@ -236,6 +238,10 @@ pub struct Buffer {
     pub disk: Option<u64>,
     /// The file was found deleted on disk; a save writes it back.
     pub deleted: bool,
+    /// The hash of the disk version its unsaved edits conflict with, until resolved.
+    pub conflict: Option<u64>,
+    /// Focusing it already asked about `conflict`; a save still asks.
+    pub conflict_asked: bool,
     pub read_only: bool,
     /// `kill-buffer` refuses it; killing its workspace still kills it.
     pub unkillable: bool,

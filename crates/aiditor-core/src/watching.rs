@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::command::Args;
 use crate::project_commands::FileIndex;
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
 
@@ -37,25 +38,45 @@ impl Core {
 
 impl Ctx<'_> {
     /// Takes the file service's answer to `FileOp::Check`: a gone file puts every buffer
-    /// visiting it in the deleted state, and a present one takes them out of it and reverts
-    /// the unmodified ones whose hash differs. An equal hash is the buffer's own save; a
-    /// modified buffer keeps its hash, so its save is still refused.
+    /// visiting it in the deleted state, and a present one takes them out of it, reverts the
+    /// unmodified ones whose hash differs and marks the modified ones conflicted. An equal
+    /// hash is the buffer's own save, or the file back as the buffer last had it.
     pub(crate) fn on_checked(&mut self, files: Vec<(PathBuf, Option<u64>)>) {
         for (path, hash) in files {
             let visiting = self.core.buffers.iter_mut();
             for (id, buffer) in visiting.filter(|(_, b)| b.file.as_ref() == Some(&path)) {
                 buffer.deleted = hash.is_none();
                 if buffer.deleted {
-                    buffer.disk = None;
-                } else if buffer.disk != hash && !buffer.modified() {
+                    // Nothing on disk is lost by writing the buffer back, so there is no conflict.
+                    (buffer.disk, buffer.conflict) = (None, None);
+                } else if buffer.disk == hash {
+                    buffer.conflict = None;
+                } else if !buffer.modified() {
                     self.effects.push(Effect::File(FileOp::Revert {
                         buffer: id,
                         tick: buffer.tick(),
                         path: path.clone(),
                         text: buffer.text().clone(),
                     }));
+                } else if buffer.conflict != hash {
+                    (buffer.conflict, buffer.conflict_asked) = (hash, false);
                 }
             }
+        }
+    }
+
+    /// Asks how to resolve the current buffer's conflict when it has just been focused, once
+    /// per disk version; a minibuffer being open defers the focus until it closes.
+    pub(crate) fn ask_on_focus(&mut self) {
+        if self.core.prompts.minibuffer.is_some() {
+            return;
+        }
+        let id = self.core.window.buffer();
+        let focused = std::mem::replace(&mut self.core.focused, id);
+        let buffer = self.core.current_mut();
+        if focused != id && buffer.conflict.is_some() && !buffer.conflict_asked {
+            buffer.conflict_asked = true;
+            self.call("resolve-conflict", Args::default());
         }
     }
 
@@ -216,18 +237,141 @@ mod tests {
         assert_eq!(h.core.message(), Some(binary.as_str()));
     }
 
-    #[test]
-    fn a_modified_buffer_is_not_reverted() {
+    /// `a.txt` holding `a`, edited to `xa`, then rewritten to `other` by another program.
+    fn conflicted() -> Harness {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
         h.keys("x");
         std::fs::write(h.path("a.txt"), "other\n").unwrap();
         report(&mut h, &["a.txt"]);
+        h
+    }
+
+    fn prompt(h: &mut Harness) -> Option<String> {
+        h.core.minibuffer().map(|m| m.prompt)
+    }
+
+    fn asked(h: &mut Harness) -> String {
+        format!("{} changed on disk: ", h.path("a.txt").display())
+    }
+
+    #[test]
+    fn a_modified_buffer_is_conflicted_not_reverted() {
+        let mut h = conflicted();
         assert_eq!(h.text(), "xa\n");
-        assert!(h.core.current().modified());
+        assert_eq!(mode_line(&mut h), "** a.txt [conflict]  1:1");
+        assert_eq!(prompt(&mut h), None, "already focused, so not asked");
         h.keys("C-x C-s");
+        assert_eq!(prompt(&mut h), Some(asked(&mut h)));
+        let candidates = h.core.minibuffer().unwrap().candidates;
+        assert_eq!(candidates, ["Compare", "Take disk", "Keep mine"]);
+        h.keys("C-g");
         assert_eq!(h.disk("a.txt"), "other\n");
+        assert!(mode_line(&mut h).contains("[conflict]"));
+    }
+
+    #[test]
+    fn keep_mine_from_a_save_overwrites_the_disk() {
+        let mut h = conflicted();
+        h.keys("C-x C-s Keep SPC mine RET");
+        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(mode_line(&mut h), "-- a.txt  1:1");
+    }
+
+    #[test]
+    fn keep_mine_from_m_x_waits_for_the_save() {
+        let mut h = conflicted();
+        h.keys("M-x resolve-conflict RET Keep SPC mine RET");
+        assert_eq!(h.disk("a.txt"), "other\n");
+        assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "xa\n");
+    }
+
+    #[test]
+    fn an_answer_after_the_conflict_ended_does_nothing() {
+        let mut h = conflicted();
+        h.keys("M-x resolve-conflict RET");
+        std::fs::write(h.path("a.txt"), "a\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        h.keys("Keep SPC mine RET");
+        assert_eq!(h.core.message(), None);
+        assert_eq!(h.disk("a.txt"), "a\n");
+    }
+
+    #[test]
+    fn take_disk_reverts_and_keeps_the_edits_in_undo() {
+        let mut h = conflicted();
+        h.keys("M-x resolve-conflict RET Take SPC disk RET");
+        assert_eq!(h.text(), "other\n");
+        assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
+        h.keys("C-/");
+        assert_eq!(h.text(), "xa\n");
+    }
+
+    #[test]
+    fn compare_shows_the_diff_and_stays_conflicted() {
+        let mut h = conflicted();
+        h.keys("C-x C-s RET");
+        assert_eq!(name(&h), "a.txt");
+        assert!(mode_line(&mut h).contains("[conflict]"));
+        let other = *h.core.others.keys().next().unwrap();
+        let diff = h.core.others[&other].buffer();
+        let text = h.core.buffers.get(diff).unwrap().text().to_string();
+        assert!(text.contains("-other\n+xa\n"), "{text}");
+        assert_eq!(h.disk("a.txt"), "other\n");
+    }
+
+    #[test]
+    fn focusing_a_conflicted_buffer_asks_once() {
+        let mut h = conflicted();
+        h.keys("C-x b RET");
+        assert_eq!(name(&h), "*scratch*<main>");
+        h.keys("C-x b RET");
+        assert_eq!(prompt(&mut h), Some(asked(&mut h)));
+        h.keys("C-g C-x b RET C-x b RET");
+        assert_eq!(prompt(&mut h), None);
+        assert_eq!(name(&h), "a.txt");
+        // A new disk version asks again; keep mine then lets a plain save overwrite it.
+        std::fs::write(h.path("a.txt"), "third\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        h.keys("C-x b RET C-x b RET");
+        assert_eq!(prompt(&mut h), Some(asked(&mut h)));
+        h.keys("Keep SPC mine RET");
+        assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "xa\n");
+    }
+
+    #[test]
+    fn a_conflict_ends_when_the_file_goes_back_or_is_deleted() {
+        let mut h = conflicted();
+        std::fs::write(h.path("a.txt"), "a\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        std::fs::write(h.path("a.txt"), "other\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        std::fs::remove_file(h.path("a.txt")).unwrap();
+        report(&mut h, &["a.txt"]);
+        assert_eq!(mode_line(&mut h), "** a.txt [deleted]  1:1");
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "xa\n");
+        h.keys("M-x resolve-conflict RET");
+        let none = "No conflict with the file on disk";
+        assert_eq!(h.core.message(), Some(none));
+    }
+
+    #[test]
+    fn a_change_the_watcher_missed_conflicts_on_save() {
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.open("a.txt");
+        h.keys("x");
+        std::fs::write(h.path("a.txt"), "other\n").unwrap();
+        h.keys("C-x C-s");
         assert!(h.core.message().unwrap().contains("changed on disk"));
+        assert!(mode_line(&mut h).contains("[conflict]"));
+        h.keys("C-x C-s");
+        assert_eq!(prompt(&mut h), Some(asked(&mut h)));
     }
 
     #[test]
