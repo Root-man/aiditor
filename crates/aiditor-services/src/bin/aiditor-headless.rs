@@ -11,8 +11,8 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use aiditor_core::key::{Key, KeyCode, parse_keys};
-use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{files, recovery};
+use aiditor_core::{Core, Effect, GrepOp, Msg, RecoveryOp};
+use aiditor_services::{files, grep, recovery};
 
 /// The recovery service, until the core quits.
 type Service = Option<(Sender<RecoveryOp>, JoinHandle<()>)>;
@@ -53,6 +53,16 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
     for effect in core.handle(Instant::now(), msg) {
         let reply = match effect {
             Effect::File(op) => files::run(op),
+            // Runs to the end before the next key, so nothing is left to cancel.
+            Effect::Grep(GrepOp::Search(op)) => {
+                let mut replies = Vec::new();
+                grep::search(&op, || false, |msg| replies.push(msg));
+                for reply in replies {
+                    send(core, service, reply);
+                }
+                continue;
+            }
+            Effect::Grep(GrepOp::Cancel) => continue,
             Effect::Recovery(op) => {
                 _ = service.as_ref().unwrap().0.send(op);
                 continue;

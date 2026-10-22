@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{files, recovery};
+use aiditor_services::{files, grep, recovery};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
     Point, ScrollWheelEvent, Task, Window, div, font, prelude::*, px, rgb,
@@ -24,6 +24,7 @@ pub(crate) struct Editor {
     timer: Option<Task<()>>,
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
+    grep: grep::Grep,
     /// The recovery service, when there is a data dir.
     recovery: Option<(
         std::sync::mpsc::Sender<RecoveryOp>,
@@ -90,6 +91,7 @@ impl Editor {
             tx,
             timer: None,
             config_dir: args.config_dir,
+            grep: grep::Grep::default(),
             recovery: args.recovery_dir.map(recovery::spawn),
             debug: args.debug.then(Stats::default),
             marked: None,
@@ -112,6 +114,7 @@ impl Editor {
                     let tx = self.tx.clone();
                     tokio::task::spawn_blocking(move || _ = tx.blocking_send(files::run(op)));
                 }
+                Effect::Grep(op) => self.grep.run(op, self.tx.clone()),
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
