@@ -635,7 +635,7 @@ milestones:
           - key: m1-swiper
             title: "Swiper-style line search"
             body: |
-              List the current buffer's matching lines in the minibuffer with preview; `RET` jumps. Bound as the `C-s` decision says.
+              List the current buffer's matching lines in the minibuffer with preview; `RET` jumps. Bound to `C-s`, as decided in #72.
             acceptance:
               - "Key-script test: search, move, jump"
             blocked_by: [m1-preview, m1-decide-editing]
@@ -1019,9 +1019,9 @@ milestones:
       - key: m5-editing
         title: "Remaining editing commands"
         labels: [text]
-        design: "#open-questions"
+        design: "#commands-and-keymaps"
         body: |
-          Implement the commands chosen in M1's "Decide: C-s and the remaining editing commands". Break down when M5 starts.
+          Implement the commands chosen in M1's "Decide: C-s and the remaining editing commands": comment toggle (`M-;`), fill paragraph (`M-q`) with Markdown prefixes, literal query-replace (`M-%`), save-as (`C-x C-w`) and a global recent files list. Break down when M5 starts.
       - key: m5-keymap-config
         title: "Keymap configuration polish"
         labels: [keymap]
