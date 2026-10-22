@@ -64,7 +64,7 @@ When the mark is set and active, the text between point and mark SHALL have the 
 - **THEN** no span has the region background
 
 ### Requirement: Each window has a mode line
-The display SHALL end each window with a mode line showing whether the buffer is read-only (`%%`), modified (`**`) or neither (`--`), its name followed by ` (DOS)` when its file uses CRLF line endings, and point's line (from 1) and column (from 0).
+The display SHALL end each window with a mode line showing whether the buffer is read-only (`%%`), modified (`**`) or neither (`--`), its name followed by ` (DOS)` when its file uses CRLF line endings and ` [deleted]` when its file was deleted on disk, and point's line (from 1) and column (from 0).
 
 #### Scenario: A modified file
 - **WHEN** `a.txt` has been edited and point is on line 3, column 2
@@ -77,6 +77,10 @@ The display SHALL end each window with a mode line showing whether the buffer is
 #### Scenario: A read-only buffer
 - **WHEN** a refused binary file `a.bin` is shown
 - **THEN** the mode line reads `%% a.bin  1:0`
+
+#### Scenario: A deleted file
+- **WHEN** the file of an unmodified buffer `a.txt` is deleted on disk, with point at the start
+- **THEN** the mode line reads `-- a.txt [deleted]  1:0`
 
 ### Requirement: The frame display lays windows out by the split tree
 Given the frame's width and height in pixels and the font's cell width, as last reported by the frontend, the frame display SHALL list every window in the split tree's order with its id, its rectangle, whether it is selected, and its window display built for the rectangle's height. A split SHALL give its first part the split's ratio of the space rounded to whole lines for stacked splits and whole cells for side-by-side splits, the second part taking the rest, and the rectangles SHALL tile the frame without overlap.

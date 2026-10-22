@@ -74,7 +74,8 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
                 thread.join().unwrap();
                 std::process::exit(0);
             }
-            Effect::SetClipboard(_) | Effect::LoadSettings => continue,
+            // Key scripts run against files nothing else touches.
+            Effect::SetClipboard(_) | Effect::LoadSettings | Effect::Watch(_) => continue,
         };
         send(core, service, reply);
     }

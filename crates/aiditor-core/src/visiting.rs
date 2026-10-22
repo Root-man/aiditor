@@ -15,7 +15,7 @@ impl Ctx<'_> {
         match (self.core.buffers.get_mut(id), result) {
             (None, _) => {}
             (Some(buffer), Ok(hash)) => {
-                buffer.disk = Some(hash);
+                (buffer.disk, buffer.deleted) = (Some(hash), false);
                 // Edits made while the write ran are still unsaved.
                 if buffer.tick() == tick {
                     buffer.set_saved();
@@ -180,7 +180,8 @@ impl Ctx<'_> {
             tracing::info!(name = buffer.name, "buffer visits no file");
             return Ok(());
         };
-        if !buffer.modified() {
+        // A deleted file is written back even unmodified, since nothing on disk is lost.
+        if !buffer.modified() && !buffer.deleted {
             return Err("(No changes need to be saved)".into());
         }
         let len = buffer.text().len_chars();

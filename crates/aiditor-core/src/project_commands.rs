@@ -1,5 +1,6 @@
 //! The project commands: making, editing, visiting and saving projects.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use toml_edit::DocumentMut;
@@ -14,7 +15,11 @@ use crate::{Core, Ctx, Effect, FileOp};
 #[derive(Default)]
 pub(crate) struct FileIndex {
     walk: u64,
-    roots: Vec<(PathBuf, Vec<PathBuf>)>,
+    /// The pending walk was asked for by the user, so its answer is echoed.
+    loud: bool,
+    pub(crate) roots: Vec<(PathBuf, Vec<PathBuf>)>,
+    /// Reported files the index lacked, which already started a walk.
+    pub(crate) missed: BTreeSet<PathBuf>,
 }
 
 impl Core {
@@ -108,6 +113,7 @@ impl Core {
         let Some(index) = self.index.get_mut(&project).filter(|i| i.walk == walk) else {
             return;
         };
+        let loud = std::mem::take(&mut index.loud);
         let mut errors = String::new();
         index.roots = (roots.into_iter())
             .map(|(root, files)| {
@@ -118,6 +124,12 @@ impl Core {
                 (root, files)
             })
             .collect();
+        if !loud {
+            if !errors.is_empty() {
+                tracing::info!(project, errors, "re-walk after a file change");
+            }
+            return;
+        }
         let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
         let s = if n == 1 { "" } else { "s" };
         self.echo(format!("Indexed {n} file{s} in {project}{errors}"));
@@ -281,14 +293,19 @@ impl Ctx<'_> {
         })
     }
 
-    /// Walks every root of the project `name` again, off the core thread.
-    pub(crate) fn index_project(&mut self, name: &str) -> Result<(), String> {
+    /// Walks every root of the project `name` again, off the core thread; `quiet` echoes
+    /// nothing, unless a walk the user asked for is still pending.
+    pub(crate) fn index_project(&mut self, name: &str, quiet: bool) -> Result<(), String> {
         let project = &self.core.projects[self.core.project(name)?].project;
         let roots = project.all_roots().map(|r| r.path.clone()).collect();
         self.core.index_walks += 1;
         let walk = self.core.index_walks;
-        self.core.index.entry(name.into()).or_default().walk = walk;
-        self.core.echo(format!("Indexing {name}..."));
+        let index = self.core.index.entry(name.into()).or_default();
+        index.walk = walk;
+        index.loud |= !quiet;
+        if !quiet {
+            self.core.echo(format!("Indexing {name}..."));
+        }
         self.effects.push(Effect::File(FileOp::Index {
             project: name.into(),
             walk,
@@ -306,7 +323,7 @@ impl Ctx<'_> {
             return self.find_file(&path.to_string_lossy());
         }
         if !self.core.index.contains_key(&project) {
-            self.index_project(&project)?;
+            self.index_project(&project, false)?;
         }
         let files = self.core.project_files(&project);
         let choices: Vec<&str> = files.iter().map(String::as_str).collect();

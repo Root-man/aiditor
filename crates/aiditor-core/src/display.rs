@@ -223,12 +223,13 @@ pub fn build(
         _ => "--",
     };
     let dos = if buffer.crlf { " (DOS)" } else { "" };
+    let deleted = if buffer.deleted { " [deleted]" } else { "" };
     WindowDisplay {
         lines,
         cursor,
         // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
         mode_line: format!(
-            "{state} {}{dos}  {}:{c}",
+            "{state} {}{dos}{deleted}  {}:{c}",
             buffer.name.replace('\n', "^J"),
             l + 1
         ),

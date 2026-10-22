@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use regex::RegexBuilder;
 
 use crate::{
-    Core, Ctx, Effect, Effects, FileOp, GrepOp, GrepSearch, Hit, Msg, RecoveryOp,
+    Core, Ctx, Effect, Effects, FileOp, GrepOp, GrepSearch, Hit, Msg, RecoveryOp, WatchSet,
     buffer::{BufferId, encode, hash},
     command::{ArgSpec, Args, Command},
     display::{FrameDisplay, WindowDisplay},
@@ -34,6 +34,8 @@ pub struct Harness {
     pub greps: Vec<Option<String>>,
     /// Leaves grep searches unanswered, for tests that answer them by hand.
     pub grep_paused: bool,
+    /// What the core last asked the watcher to watch.
+    pub watched: WatchSet,
 }
 
 impl Harness {
@@ -60,6 +62,7 @@ impl Harness {
             deleted: Vec::new(),
             greps: Vec::new(),
             grep_paused: false,
+            watched: WatchSet::default(),
         }
     }
 
@@ -138,7 +141,8 @@ impl Harness {
                 }) => {
                     let bytes = encode(&text, crlf, bom);
                     let on_disk = std::fs::read(&path).ok().map(|b| hash(&b));
-                    let result = match on_disk == expected {
+                    // A gone file is written back.
+                    let result = match on_disk.is_none() || on_disk == expected {
                         false => Err(format!("{} changed on disk; not saved", path.display())),
                         true => std::fs::write(&path, &bytes)
                             .map(|()| hash(&bytes))
@@ -229,6 +233,17 @@ impl Harness {
                     let result = read(&path);
                     self.send(Msg::Previewed { path, result });
                 }
+                // As `files::run` does.
+                Effect::File(FileOp::Check(paths)) => {
+                    let files = (paths.into_iter())
+                        .map(|path| {
+                            let hash = std::fs::read(&path).ok().map(|b| hash(&b));
+                            (path, hash)
+                        })
+                        .collect();
+                    self.send(Msg::Checked(files));
+                }
+                Effect::Watch(set) => self.watched = set,
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::Quit => self.quit = true,
                 Effect::Recovery(RecoveryOp::AutoSave {

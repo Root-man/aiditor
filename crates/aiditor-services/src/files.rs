@@ -58,6 +58,18 @@ pub fn run(op: FileOp) -> Msg {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
             Msg::Previewed { path, result }
         }
+        FileOp::Check(paths) => {
+            let files = (paths.into_iter())
+                .filter_map(|path| match read(&path) {
+                    Ok(file) => Some((path, file.map(|(_, h)| h))),
+                    Err(err) => {
+                        tracing::info!(path = %path.display(), %err, "unreadable, not checked");
+                        None
+                    }
+                })
+                .collect();
+            Msg::Checked(files)
+        }
         FileOp::Index {
             project,
             walk,
@@ -125,15 +137,8 @@ pub fn index(root: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// The files under `root` that the index lists, as full paths in path order.
 pub(crate) fn walk(root: &Path) -> impl Iterator<Item = PathBuf> {
-    // shortcut: one thread walks; switch to `build_parallel` if large repos index or grep slowly.
-    let walk = WalkBuilder::new(root)
-        .hidden(false)
-        .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git")
-        .sort_by_file_name(|a, b| a.cmp(b))
-        .build();
     // Unreadable entries are skipped, as `rg` skips them.
-    (walk.flatten())
+    (walker(root).build().flatten())
         .filter(|e| {
             e.file_type()
                 .is_some_and(|ft| ft.is_file() || ft.is_symlink() && e.path().is_file())
@@ -141,12 +146,25 @@ pub(crate) fn walk(root: &Path) -> impl Iterator<Item = PathBuf> {
         .map(ignore::DirEntry::into_path)
 }
 
-/// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file), and
-/// returns the new hash.
+/// The index's walk of `root`: gitignored entries left out, hidden ones in, `.git` never,
+/// symlinked directories not followed, in path order.
+pub(crate) fn walker(root: &Path) -> WalkBuilder {
+    // shortcut: one thread walks; switch to `build_parallel` if large repos index or grep slowly.
+    let mut walk = WalkBuilder::new(root);
+    walk.hidden(false)
+        .require_git(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .sort_by_file_name(|a, b| a.cmp(b));
+    walk
+}
+
+/// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file) or the
+/// file is gone, and returns the new hash.
 pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, String> {
     let err = |e: io::Error| format!("{}: {e}", path.display());
     let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
-    if on_disk != expected {
+    // A gone file is written back: nothing on disk is lost.
+    if on_disk.is_some() && on_disk != expected {
         // `projects::write` rewrites "not saved" in this message.
         return Err(format!("{} changed on disk; not saved", path.display()));
     }
@@ -246,6 +264,20 @@ mod tests {
     }
 
     #[test]
+    fn check_hashes_files_and_reports_gone_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, gone) = (dir.path().join("a"), dir.path().join("gone"));
+        fs::write(&a, "x").unwrap();
+        let msg = run(FileOp::Check(vec![
+            a.clone(),
+            gone.clone(),
+            dir.path().into(),
+        ]));
+        // The directory can't be read, so it is left out.
+        assert_eq!(msg, Msg::Checked(vec![(a, Some(hash(b"x"))), (gone, None)]));
+    }
+
+    #[test]
     fn indexes_hidden_and_unignored_files_only() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -323,6 +355,10 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
         // A file that appeared since it was opened as missing.
         assert!(write(&path, b"x", None).is_err());
+        // A file gone since it was loaded is written back.
+        fs::remove_file(&path).unwrap();
+        assert_eq!(write(&path, b"back", loaded), Ok(hash(b"back")));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "back");
     }
 
     #[test]

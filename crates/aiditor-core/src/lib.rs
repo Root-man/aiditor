@@ -29,6 +29,7 @@ pub mod settings;
 mod swiper;
 pub mod timer;
 mod visiting;
+mod watching;
 pub mod window;
 pub mod workspace;
 
@@ -122,6 +123,14 @@ pub enum Msg {
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
     },
+    /// The watcher's debounced report: the paths that may have changed and what each is now, and
+    /// whether events were lost, so every visited file needs checking.
+    FilesChanged {
+        paths: Vec<(PathBuf, Disk)>,
+        rescan: bool,
+    },
+    /// The file service's answer to `FileOp::Check`: each readable file's hash, `None` when gone.
+    Checked(Vec<(PathBuf, Option<u64>)>),
     /// The grep service's hits for search `search`, in batches as they are found, or why the
     /// pattern is invalid; `done` on its last message. A cancelled search sends nothing more.
     Grepped {
@@ -170,6 +179,21 @@ pub struct Recovered {
     pub disk: Option<(Vec<u8>, u64)>,
 }
 
+/// What a path the watcher reports is on disk now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Disk {
+    Gone,
+    File,
+    Dir,
+}
+
+/// What the watcher should watch: project roots, and the files buffers visit.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WatchSet {
+    pub roots: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
+}
+
 /// A line matching a grep search.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hit {
@@ -197,6 +221,8 @@ pub enum Effect {
     File(FileOp),
     /// A project grep, answered with `Msg::Grepped` batches.
     Grep(GrepOp),
+    /// Watch this set from now on, answered with `Msg::FilesChanged` reports.
+    Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
     /// Read the user's settings, keymap and project files and send `Msg::SettingsLoaded`,
@@ -235,6 +261,8 @@ pub enum FileOp {
     Open(PathBuf),
     /// Read the file and send `Msg::Previewed`.
     Preview(PathBuf),
+    /// Hash each file and send `Msg::Checked`.
+    Check(Vec<PathBuf>),
     /// Walk every root of `project` and send `Msg::Indexed` with `walk`.
     Index {
         project: String,
@@ -446,6 +474,8 @@ impl Ctx<'_> {
                 roots,
             } => self.core.indexed(project, walk, roots),
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
+            Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
+            Msg::Checked(files) => self.core.on_checked(files),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
@@ -608,6 +638,8 @@ pub struct Core {
     autosave_max: Option<TimerId>,
     /// Earlier sessions' recovery files not yet recovered or discarded, oldest first.
     recovered: Vec<Recovered>,
+    /// The watch set last sent to the watcher.
+    watching: WatchSet,
 }
 
 impl Default for Core {
@@ -667,6 +699,7 @@ impl Default for Core {
             autosave_idle: None,
             autosave_max: None,
             recovered: Vec::new(),
+            watching: WatchSet::default(),
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
@@ -721,6 +754,7 @@ impl Core {
         self.autosave(now, input, &mut effects);
         self.poll_completion(now, &mut effects);
         self.preview(&mut effects);
+        self.watch(&mut effects);
         effects
     }
 

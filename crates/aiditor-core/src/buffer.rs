@@ -109,6 +109,7 @@ impl Buffers {
             crlf: false,
             bom: false,
             disk: None,
+            deleted: false,
             read_only: false,
             unkillable: false,
             modified: false,
@@ -205,6 +206,11 @@ impl Buffers {
         self.map.get_mut(&id)
     }
 
+    /// Every buffer, in any workspace.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Buffer> {
+        self.map.values_mut()
+    }
+
     pub fn kill(&mut self, id: BufferId) -> Result<Buffer, Error> {
         self.recent.retain(|&b| b != id);
         self.map.remove(&id).ok_or(Error::NoSuchBuffer(id))
@@ -228,6 +234,8 @@ pub struct Buffer {
     pub bom: bool,
     /// The hash of the file's bytes as last loaded or saved; `None` when there was no file.
     pub disk: Option<u64>,
+    /// The file was found deleted on disk; a save writes it back.
+    pub deleted: bool,
     pub read_only: bool,
     /// `kill-buffer` refuses it; killing its workspace still kills it.
     pub unkillable: bool,

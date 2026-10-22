@@ -4,6 +4,7 @@ pub mod files;
 pub mod grep;
 pub mod projects;
 pub mod recovery;
+pub mod watcher;
 
 use aiditor_core::Msg;
 use tokio::sync::mpsc;

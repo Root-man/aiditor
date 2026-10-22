@@ -318,7 +318,7 @@ pub(crate) fn builtins() -> Vec<Command> {
                 completion: Some(projects_then_free),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.index_project(&args.strings[0]),
+            handler: |ctx, args| ctx.index_project(&args.strings[0], false),
         },
         Command {
             name: "project-find-file",
