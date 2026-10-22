@@ -89,10 +89,9 @@ impl Core {
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
     pub fn frame(&mut self) -> display::FrameDisplay {
-        let unwatched = self
-            .projects
-            .iter()
-            .any(|p| p.project.name == self.current_workspace().project && !p.project.watch);
+        let unwatched = self.projects.iter().any(|p| {
+            p.project.name == self.current_workspace().project && !self.project_watched(&p.project)
+        });
         let (width, height, cell_width) = self.frame_size;
         let cell = (cell_width, self.settings.line_height());
         let frame = display::Rect {
@@ -302,7 +301,8 @@ mod tests {
 
     #[test]
     fn unwatched_status_follows_the_workspace_project_and_watch_setting() {
-        let mut h = Harness::new(&[]);
+        let mut h = Harness::new(&[("other/x", "")]);
+        h.core.projects[0].project.primary.path = h.path("");
         let lines = |h: &mut Harness| {
             h.frame(800., 600.)
                 .windows
@@ -320,6 +320,7 @@ mod tests {
             .projects
             .push(crate::project::Loaded::ad_hoc("other", &h.path("other")));
         h.core.new_workspace("other", "other");
+        h.send(crate::Msg::Tick);
         assert_eq!(lines(&mut h), ["-- *scratch*<other>  1:0"]);
         h.keys("C-x p p home RET");
         assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);

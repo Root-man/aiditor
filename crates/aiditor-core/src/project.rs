@@ -11,6 +11,8 @@ pub struct Project {
     pub name: String,
     #[serde(default = "watch_default", skip_serializing_if = "is_true")]
     pub watch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_watched_files: Option<usize>,
     /// shortcut: any string is accepted; check it against the agent registry once there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
@@ -57,6 +59,7 @@ impl Loaded {
         let project = Project {
             name: name.into(),
             watch: std::env::home_dir().as_deref() != Some(root),
+            max_watched_files: None,
             default_agent: None,
             ignore: Vec::new(),
             primary,
@@ -247,6 +250,24 @@ path = "/r/notes"
         p.watch = false;
         sync(&mut doc, &p);
         assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
+    }
+
+    #[test]
+    fn watched_file_limit_round_trips_and_survives_project_commands() {
+        let text = "name = \"x\"\nmax_watched_files = 2 # small\n[primary]\npath = \"/r/x\"\n";
+        let mut p = Project::parse(text).unwrap();
+        assert_eq!(p.max_watched_files, Some(2));
+        assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
+        let mut doc: DocumentMut = text.parse().unwrap();
+        p.watch = false;
+        sync(&mut doc, &p);
+        assert!(doc.to_string().contains("max_watched_files = 2 # small"));
+        assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
+        assert!(
+            Project::parse(&text.replace("= 2", "= -1"))
+                .unwrap_err()
+                .contains("max_watched_files")
+        );
     }
 
     #[test]

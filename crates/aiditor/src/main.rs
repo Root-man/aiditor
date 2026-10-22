@@ -159,9 +159,15 @@ fn main() {
         }
     }
     // Read before this session writes any, so all are an earlier session's.
-    if let Some(dir) = &args.recovery_dir {
-        core.handle(Instant::now(), Msg::Recover(recovery::list(dir)));
-    }
+    let recovered = args
+        .recovery_dir
+        .as_deref()
+        .map(recovery::list)
+        .unwrap_or_default();
+    channel
+        .0
+        .try_send(Msg::Recover(recovered))
+        .expect("the new service channel has room");
 
     // Services run here, on background threads; GPUI owns the main thread.
     let runtime = tokio::runtime::Runtime::new().expect("failed to start the Tokio runtime");

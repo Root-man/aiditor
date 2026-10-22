@@ -35,6 +35,7 @@ pub struct Settings {
     pub font_size: f32,
     /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
     pub option_as_meta: bool,
+    pub max_watched_files: usize,
     pub theme: Theme,
 }
 
@@ -89,6 +90,13 @@ mod tests {
         assert_eq!(s.font_size, 14.0);
         assert_eq!(s.theme.cursor, 0xffcc00);
         assert!(s.option_as_meta);
+        assert_eq!(s.max_watched_files, 10000);
+        assert_eq!(
+            Settings::parse(Some("max_watched_files = 0"))
+                .unwrap()
+                .max_watched_files,
+            0
+        );
     }
 
     #[test]
@@ -114,6 +122,8 @@ mod tests {
             ("[theme]\nbackgrund = 1", "backgrund"),
             ("font_size = 0", "outside"),
             ("font_size = ", ""),
+            ("max_watched_files = -1", "max_watched_files"),
+            ("max_watched_files = \"many\"", "max_watched_files"),
         ] {
             let err = Settings::parse(Some(user)).unwrap_err();
             assert!(err.contains(needle), "{user:?}: {err}");

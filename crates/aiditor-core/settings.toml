@@ -5,6 +5,9 @@ font_size = 14.0
 # macOS: Option as Meta, or false to type special characters and dead keys with it.
 option_as_meta = true
 
+# Maximum kept files and directories per watched project; project files can override it.
+max_watched_files = 10000
+
 [theme]
 background = 0x1e1e1e
 foreground = 0xd4d4d4

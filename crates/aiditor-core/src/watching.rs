@@ -3,16 +3,35 @@
 use std::path::PathBuf;
 
 use crate::command::Args;
+use crate::project::Project;
 use crate::project_commands::FileIndex;
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
 
 impl Core {
+    pub(crate) fn project_watched(&self, project: &Project) -> bool {
+        project.watch
+            && self.index.get(&project.name).is_some_and(|index| {
+                let limit = project
+                    .max_watched_files
+                    .unwrap_or(self.settings.max_watched_files);
+                index.ready
+                    && index.project.as_ref() == Some(project)
+                    && index.directories <= limit
+                    && index
+                        .roots
+                        .iter()
+                        .map(|(_, files)| files.len())
+                        .sum::<usize>()
+                        <= limit
+            })
+    }
+
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
     /// file a buffer visits.
     pub fn watch_set(&self) -> WatchSet {
         let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.project.name))
-            .filter(|p| p.project.watch)
+            .filter(|p| self.project_watched(&p.project))
             .flat_map(|p| {
                 (p.project.all_roots()).map(|r| (r.path.clone(), p.project.ignore.clone()))
             })
@@ -29,6 +48,34 @@ impl Core {
 
     /// Sends the watch set when it changed since last sent.
     pub(crate) fn watch(&mut self, effects: &mut Effects) {
+        let refusals: std::collections::BTreeMap<_, _> = (self.projects.iter())
+            .filter(|p| {
+                p.project.watch && self.workspaces.iter().any(|w| w.project == p.project.name)
+            })
+            .filter_map(|p| {
+                let index = self
+                    .index
+                    .get(&p.project.name)
+                    .filter(|i| i.ready && i.project.as_ref() == Some(&p.project))?;
+                let files = index
+                    .roots
+                    .iter()
+                    .map(|(_, files)| files.len())
+                    .sum::<usize>();
+                let limit = p
+                    .project
+                    .max_watched_files
+                    .unwrap_or(self.settings.max_watched_files);
+                (files > limit || index.directories > limit)
+                    .then(|| (p.project.name.clone(), (files, index.directories, limit)))
+            })
+            .collect();
+        for (name, &(files, directories, limit)) in &refusals {
+            if self.watch_refusals.get(name) != Some(&(files, directories, limit)) {
+                self.report(format!("Project {name} is unwatched: files = {files}, directories = {directories}; max_watched_files = {limit} exceeded"));
+            }
+        }
+        self.watch_refusals = refusals;
         let set = self.watch_set();
         if set != self.watching {
             self.watching = set.clone();
@@ -38,6 +85,32 @@ impl Core {
 }
 
 impl Ctx<'_> {
+    pub(crate) fn ensure_watch_indexes(&mut self) {
+        let names: Vec<_> = self
+            .core
+            .projects
+            .iter()
+            .filter(|p| {
+                p.project.watch
+                    && self
+                        .core
+                        .index
+                        .get(&p.project.name)
+                        .is_none_or(|i| i.project.as_ref() != Some(&p.project))
+            })
+            .filter(|p| {
+                self.core
+                    .workspaces
+                    .iter()
+                    .any(|w| w.project == p.project.name)
+            })
+            .map(|p| p.project.name.clone())
+            .collect();
+        for name in names {
+            _ = self.index_project(&name, true);
+        }
+    }
+
     /// Takes the file service's answer to `FileOp::Check`: a gone file puts every buffer
     /// visiting it in the deleted state, and a present one takes them out of it, reverts the
     /// unmodified ones whose hash differs and marks the modified ones conflicted. An equal
@@ -93,13 +166,15 @@ impl Ctx<'_> {
         if !check.is_empty() {
             self.effects.push(Effect::File(FileOp::Check(check)));
         }
-        let watched = &self.core.projects;
+        let watched: std::collections::BTreeSet<_> = self
+            .core
+            .projects
+            .iter()
+            .filter(|p| self.core.project_watched(&p.project))
+            .map(|p| p.project.name.clone())
+            .collect();
         let stale: Vec<String> = (self.core.index.iter_mut())
-            .filter(|(name, _)| {
-                watched
-                    .iter()
-                    .any(|p| p.project.name == **name && p.project.watch)
-            })
+            .filter(|(name, _)| watched.contains(*name))
             .filter_map(|(name, index)| (stale(index, &paths) || rescan).then(|| name.clone()))
             .collect();
         for name in stale {
@@ -126,7 +201,7 @@ fn stale(index: &mut FileIndex, paths: &[(PathBuf, Disk)]) -> bool {
                     index.missed.remove(path);
                     files.iter().any(|f| f.starts_with(rel))
                 }
-                Disk::Dir => false,
+                Disk::Dir => index.missed.insert(path.clone()),
             };
         }
     }
@@ -458,6 +533,7 @@ mod tests {
         let project = Project {
             name: "p".into(),
             watch: true,
+            max_watched_files: None,
             default_agent: None,
             ignore: vec!["*.log".into()],
             primary: Root {
@@ -495,6 +571,142 @@ mod tests {
         let files = h.core.minibuffer().unwrap().candidates.clone();
         h.keys("C-g");
         files
+    }
+
+    #[test]
+    fn startup_waits_for_counts_and_project_limit_overrides_settings() {
+        let mut h = Harness::new(&[("a/x", ""), ("a/y", "")]);
+        let mut project = Loaded::ad_hoc("p", &h.path("a"));
+        project.project.max_watched_files = Some(2);
+        h.core.projects.push(project);
+        h.core.workspaces[0].project = "p".into();
+        h.core.settings.max_watched_files = 1;
+        let effects = h.core.handle(h.now, Msg::Tick);
+        assert_eq!(h.core.watch_set().roots, []);
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, Effect::File(FileOp::Index { project, .. }) if project == "p")
+            )
+        );
+        h.keys("C-x p f");
+        h.run(effects);
+        assert_eq!(h.core.minibuffer().unwrap().candidates, ["a/x", "a/y"]);
+        h.keys("C-g");
+        assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+        h.core
+            .projects
+            .last_mut()
+            .unwrap()
+            .project
+            .max_watched_files = None;
+        h.send(Msg::Tick);
+        assert_eq!(h.watched.roots, []);
+        let message =
+            "Project p is unwatched: files = 2, directories = 1; max_watched_files = 1 exceeded";
+        assert!(h.core.message().unwrap().ends_with(message));
+        let messages = || {
+            h.core
+                .buffers
+                .recent()
+                .find(|(_, b)| b.name == "*Messages*")
+                .unwrap()
+                .1
+                .text()
+                .to_string()
+        };
+        assert_eq!(messages().matches(message).count(), 1);
+        h.send(Msg::Tick);
+        let messages = h
+            .core
+            .buffers
+            .recent()
+            .find(|(_, b)| b.name == "*Messages*")
+            .unwrap()
+            .1
+            .text()
+            .to_string();
+        assert_eq!(messages.matches(message).count(), 1);
+        assert!(
+            h.frame(800., 600.).windows[0]
+                .display
+                .mode_line
+                .ends_with("[unwatched]")
+        );
+        h.send(Msg::SettingsLoaded(Ok(Some(
+            "max_watched_files = 2".into(),
+        ))));
+        assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+    }
+
+    #[test]
+    fn over_limit_projects_keep_file_watches_and_resume_after_manual_index() {
+        let mut h = indexed();
+        h.core.settings.max_watched_files = 1;
+        h.open("a/x");
+        std::fs::write(h.path("a/y"), "").unwrap();
+        report(&mut h, &["a/y"]);
+        assert_eq!(h.watched.roots, []);
+        assert_eq!(h.watched.files, [h.path("a/x")]);
+        let walks = h.core.index_walks;
+        std::fs::write(h.path("a/x"), "changed").unwrap();
+        report(&mut h, &["a/x"]);
+        assert_eq!(h.text(), "changed");
+        assert_eq!(h.core.index_walks, walks);
+        std::fs::remove_file(h.path("a/y")).unwrap();
+        h.keys("C-x p i p RET");
+        assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+    }
+
+    #[test]
+    fn kept_directories_and_additional_roots_share_the_project_limit() {
+        let mut h = indexed();
+        std::fs::create_dir_all(h.path("a/empty/nested")).unwrap();
+        h.core.settings.max_watched_files = 2;
+        report(&mut h, &["a/empty"]);
+        assert_eq!(h.watched.roots, []);
+        assert!(
+            h.core
+                .message()
+                .unwrap()
+                .contains("files = 1, directories = 3")
+        );
+        h.core.settings.max_watched_files = 3;
+        h.send(Msg::Tick);
+        assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+        std::fs::create_dir(h.path("b")).unwrap();
+        let b = h.path("b");
+        h.core
+            .projects
+            .last_mut()
+            .unwrap()
+            .project
+            .roots
+            .push(Root {
+                path: b,
+                role: String::new(),
+            });
+        h.send(Msg::Tick);
+        assert_eq!(h.watched.roots, []);
+        assert!(h.core.message().unwrap().contains("directories = 4"));
+        let mut empty = Harness::new(&[]);
+        empty
+            .core
+            .projects
+            .push(Loaded::ad_hoc("p", &empty.path("")));
+        empty.core.workspaces[0].project = "p".into();
+        empty.core.settings.max_watched_files = 0;
+        empty.send(Msg::Tick);
+        assert!(
+            empty
+                .core
+                .message()
+                .unwrap()
+                .contains("files = 0, directories = 1; max_watched_files = 0 exceeded")
+        );
+        empty.send(Msg::SettingsLoaded(Ok(Some(
+            "max_watched_files = 1".into(),
+        ))));
+        assert_eq!(empty.watched.roots, [(empty.path(""), vec![])]);
     }
 
     #[test]

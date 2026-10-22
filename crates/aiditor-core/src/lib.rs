@@ -35,7 +35,7 @@ pub mod workspace;
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -128,6 +128,7 @@ pub enum Msg {
         project: String,
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
+        directories: usize,
     },
     /// The watcher's debounced report: the paths that may have changed and what each is now, and
     /// whether events were lost, so every visited file needs checking.
@@ -488,6 +489,7 @@ impl Ctx<'_> {
                 // A hand edit may have changed roots or ignore patterns; a project gone fails to walk.
                 let indexed: Vec<String> = self.core.index.keys().cloned().collect();
                 for name in indexed {
+                    self.core.index.get_mut(&name).unwrap().ready = false;
                     _ = self.index_project(&name, true);
                 }
             }
@@ -496,7 +498,8 @@ impl Ctx<'_> {
                 project,
                 walk,
                 roots,
-            } => self.core.indexed(project, walk, roots),
+                directories,
+            } => self.core.indexed(project, walk, roots, directories),
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
@@ -664,6 +667,7 @@ pub struct Core {
     recovered: Vec<Recovered>,
     /// The watch set last sent to the watcher.
     watching: WatchSet,
+    watch_refusals: BTreeMap<String, (usize, usize, usize)>,
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
     focused: BufferId,
@@ -727,6 +731,7 @@ impl Default for Core {
             autosave_max: None,
             recovered: Vec::new(),
             watching: WatchSet::default(),
+            watch_refusals: BTreeMap::new(),
             focused: scratch,
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
@@ -778,6 +783,7 @@ impl Core {
                 ctx.dispatch(msg);
             }
         }
+        ctx.ensure_watch_indexes();
         ctx.ask_on_focus();
         let mut effects = ctx.effects;
         self.autosave(now, input, &mut effects);

@@ -127,6 +127,12 @@ impl Harness {
     }
 
     pub(crate) fn run(&mut self, effects: Effects) {
+        // File replies arrive after the entire effect batch in the app.
+        for effect in &effects {
+            if let Effect::Watch(set) = effect {
+                self.watched = set.clone();
+            }
+        }
         for effect in effects {
             match effect {
                 // As the file service does, minus its atomic write.
@@ -195,10 +201,11 @@ impl Harness {
                     roots,
                     ..
                 }) => {
+                    let mut directories = 0;
                     let roots = (roots.into_iter())
                         .map(|root| {
                             let mut files = Vec::new();
-                            let result = walk_files(&root, &root, &mut files)
+                            let result = walk_files(&root, &root, &mut files, &mut directories)
                                 .map(|()| {
                                     files.sort();
                                     files
@@ -211,6 +218,7 @@ impl Harness {
                         project,
                         walk,
                         roots,
+                        directories,
                     });
                 }
                 Effect::File(FileOp::Revert {
@@ -253,7 +261,7 @@ impl Harness {
                         .collect();
                     self.send(Msg::Checked(files));
                 }
-                Effect::Watch(set) => self.watched = set,
+                Effect::Watch(_) => {}
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
                 Effect::Quit => self.quit = true,
                 Effect::Recovery(RecoveryOp::AutoSave {
@@ -306,14 +314,20 @@ impl Harness {
 }
 
 /// Adds the files under `dir`, relative to `root`, skipping `.git`.
-fn walk_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn walk_files(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    directories: &mut usize,
+) -> std::io::Result<()> {
+    *directories += 1;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if !entry.file_type()?.is_dir() {
             files.push(path.strip_prefix(root).unwrap().to_path_buf());
         } else if !path.ends_with(".git") {
-            walk_files(root, &path, files)?;
+            walk_files(root, &path, files, directories)?;
         }
     }
     Ok(())
@@ -330,7 +344,7 @@ fn grep(op: &GrepSearch) -> Result<Vec<Hit>, String> {
     let mut hits = Vec::new();
     for root in &op.roots {
         let mut files = Vec::new();
-        _ = walk_files(root, root, &mut files);
+        _ = walk_files(root, root, &mut files, &mut 0);
         files.sort();
         for path in files {
             let text = std::fs::read_to_string(root.join(&path)).unwrap_or_default();

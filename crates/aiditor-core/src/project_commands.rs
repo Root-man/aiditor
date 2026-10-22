@@ -15,6 +15,9 @@ use crate::{Core, Ctx, Effect, FileOp};
 #[derive(Default)]
 pub(crate) struct FileIndex {
     walk: u64,
+    pub(crate) ready: bool,
+    pub(crate) project: Option<Project>,
+    pub(crate) directories: usize,
     /// The pending walk was asked for by the user, so its answer is echoed.
     loud: bool,
     pub(crate) roots: Vec<(PathBuf, Vec<PathBuf>)>,
@@ -93,6 +96,9 @@ impl Core {
             (self.projects.iter())
                 .position(|p| p.file.is_none() && p.project.name == loaded.project.name)
         };
+        if let Some(index) = self.index.get_mut(&loaded.project.name) {
+            index.project = None;
+        }
         match file.or_else(ad_hoc) {
             Some(i) => self.projects[i] = loaded,
             None => self.projects.push(loaded),
@@ -106,6 +112,7 @@ impl Core {
         project: String,
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
+        directories: usize,
     ) {
         if self.project(&project).is_err() {
             return;
@@ -124,6 +131,8 @@ impl Core {
                 (root, files)
             })
             .collect();
+        index.ready = errors.is_empty();
+        index.directories = directories;
         if !loud {
             if !errors.is_empty() {
                 tracing::info!(project, errors, "re-walk after a file change");
@@ -185,6 +194,7 @@ impl Ctx<'_> {
         let project = Project {
             name: name.into(),
             watch: true,
+            max_watched_files: None,
             default_agent: None,
             ignore: Vec::new(),
             primary: Root {
@@ -245,6 +255,9 @@ impl Ctx<'_> {
         project.check()?;
         let Some((path, old)) = &loaded.file else {
             loaded.project = project;
+            if let Some(index) = self.core.index.get_mut(name) {
+                index.project = None;
+            }
             return Ok(());
         };
         let mut doc: DocumentMut = old.parse().map_err(|err| format!("{err}"))?;
@@ -311,10 +324,15 @@ impl Ctx<'_> {
         let project = &self.core.projects[self.core.project(name)?].project;
         let roots = project.all_roots().map(|r| r.path.clone()).collect();
         let ignore = project.ignore.clone();
+        let project = project.clone();
         self.core.index_walks += 1;
         let walk = self.core.index_walks;
         let index = self.core.index.entry(name.into()).or_default();
         index.walk = walk;
+        if index.project.as_ref() != Some(&project) {
+            index.ready = false;
+        }
+        index.project = Some(project);
         index.loud |= !quiet;
         if !quiet {
             self.core.echo(format!("Indexing {name}..."));
@@ -336,7 +354,9 @@ impl Ctx<'_> {
             let path = self.core.project_file(&project, text)?;
             return self.find_file(&path.to_string_lossy());
         }
-        if !self.core.index.contains_key(&project) {
+        if let Some(index) = self.core.index.get_mut(&project) {
+            index.loud |= !index.ready;
+        } else {
             self.index_project(&project, false)?;
         }
         let files = self.core.project_files(&project);
@@ -395,6 +415,7 @@ mod tests {
         let project = Project {
             name: "tmp".into(),
             watch: true,
+            max_watched_files: None,
             default_agent: None,
             ignore: Vec::new(),
             primary: Root {

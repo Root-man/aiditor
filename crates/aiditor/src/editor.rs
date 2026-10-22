@@ -496,6 +496,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn startup_indexes_before_watching_and_applies_ignores(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("ignored")).unwrap();
+        std::fs::write(root.join("x"), "").unwrap();
+        std::fs::write(root.join("ignored/y"), "").unwrap();
+        std::fs::write(root.join(".ignore"), "ignored/\n.ignore\n").unwrap();
+        let mut core = Core::default();
+        core.handle(
+            std::time::Instant::now(),
+            Msg::SettingsLoaded(Ok(Some("max_watched_files = 1".into()))),
+        );
+        core.launch(root, root);
+        let channel = aiditor_services::channel();
+        channel.0.try_send(Msg::Recover(Vec::new())).unwrap();
+        let (editor, cx) = cx
+            .add_window_view(|window, cx| Editor::new(core, Args::default(), channel, window, cx));
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if !editor.read_with(cx, |e, _| e.core.watch_set().roots.is_empty()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.watch_set().roots),
+            [(root.to_path_buf(), Vec::<String>::new())]
+        );
+        editor.update(cx, |e, cx| {
+            e.handle(
+                Msg::SettingsLoaded(Ok(Some("max_watched_files = 0".into()))),
+                cx,
+            )
+        });
+        let message = editor.read_with(cx, |e, _| e.core.message().unwrap().to_owned());
+        assert!(message.contains("files = 1, directories = 1; max_watched_files = 0 exceeded"));
+    }
+
+    #[gpui::test]
     fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let args = Args {

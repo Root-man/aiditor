@@ -90,9 +90,13 @@ pub fn run(op: FileOp) -> Msg {
             ignore,
         } => {
             let patterns = Patterns::lenient(&ignore);
+            let mut directories = 0;
             let roots = (roots.into_iter())
                 .map(|root| {
-                    let files = index(&root, &patterns);
+                    let files = inventory(&root, &patterns).map(|(files, count)| {
+                        directories += count;
+                        files
+                    });
                     (root, files)
                 })
                 .collect();
@@ -100,6 +104,7 @@ pub fn run(op: FileOp) -> Msg {
                 project,
                 walk,
                 roots,
+                directories,
             }
         }
         FileOp::WriteProject { path, old, text } => {
@@ -143,11 +148,24 @@ pub fn list(dir: &Path) -> io::Result<Vec<String>> {
 /// The files under `root`, relative to it and sorted: gitignored ones and those `patterns`
 /// match left out, hidden ones in, `.git` never, symlinked directories not followed.
 pub fn index(root: &Path, patterns: &Patterns) -> Result<Vec<PathBuf>, String> {
+    inventory(root, patterns).map(|(files, _)| files)
+}
+
+fn inventory(root: &Path, patterns: &Patterns) -> Result<(Vec<PathBuf>, usize), String> {
     fs::read_dir(root).map_err(|err| format!("{}: {err}", root.display()))?;
-    let files = (walk(root, patterns))
-        .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
-        .collect();
-    Ok(files)
+    let mut files = Vec::new();
+    let mut directories = 0;
+    for entry in walker(root, root, patterns).build().flatten() {
+        let Some(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            directories += 1;
+        } else if kind.is_file() || kind.is_symlink() && entry.path().is_file() {
+            files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+    Ok((files, directories))
 }
 
 /// The files under `root` that the index lists, as full paths in path order.
@@ -439,6 +457,28 @@ mod tests {
     }
 
     #[test]
+    fn inventory_counts_only_kept_files_and_directories_including_empty_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in ["target/deep/x", "kept/a", "other/y", ".git/config"] {
+            fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+            fs::write(root.join(name), "").unwrap();
+        }
+        fs::create_dir_all(root.join("kept/empty/nested")).unwrap();
+        fs::write(root.join(".ignore"), "target/\n").unwrap();
+        let patterns = Patterns::new(&["other/".into(), ".ignore".into()]).unwrap();
+        assert_eq!(
+            inventory(root, &patterns).unwrap(),
+            (vec![PathBuf::from("kept/a")], 4)
+        );
+        let patterns = Patterns::new(&["*".into(), "!kept/".into()]).unwrap();
+        assert_eq!(
+            inventory(root, &patterns).unwrap(),
+            (vec![PathBuf::from("kept/a")], 4)
+        );
+    }
+
+    #[test]
     fn bad_patterns_are_named() {
         let err = Patterns::new(&["ok".into(), "src/[z-a]".into()]).unwrap_err();
         assert_eq!(
@@ -460,6 +500,7 @@ mod tests {
             project,
             walk,
             roots,
+            ..
         } = msg
         else {
             panic!("not indexed");
