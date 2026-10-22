@@ -131,7 +131,7 @@ impl Core {
     /// Every indexed file of `project` as `<root name>/<relative path>`, the primary's first.
     fn project_files(&self, project: &str) -> Vec<String> {
         let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
-        let names = root_names(roots);
+        let names = root_names(roots.iter().map(|(root, _)| root.as_path()));
         (names.iter().zip(roots))
             .flat_map(|(name, (_, files))| {
                 (files.iter()).map(move |f| format!("{name}/{}", f.display()))
@@ -144,7 +144,9 @@ impl Core {
     pub(crate) fn project_file(&self, project: &str, text: &str) -> Result<PathBuf, String> {
         let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
         if let Some((head, rest)) = text.split_once('/')
-            && let Some(i) = root_names(roots).iter().position(|n| n == head)
+            && let Some(i) = root_names(roots.iter().map(|(root, _)| root.as_path()))
+                .iter()
+                .position(|n| n == head)
         {
             return Ok(roots[i].0.join(rest));
         }
@@ -154,9 +156,9 @@ impl Core {
 }
 
 /// Each indexed root's name: its last component, with `<2>` on for one an earlier root has.
-fn root_names(roots: &[(PathBuf, Vec<PathBuf>)]) -> Vec<String> {
+pub(crate) fn root_names<'a>(roots: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for (root, _) in roots {
+    for root in roots {
         let name = unique(&file_name(root), |n| names.iter().any(|taken| taken == n));
         names.push(name);
     }

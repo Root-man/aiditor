@@ -203,7 +203,10 @@ mod tests {
         let [Msg::Grepped { hits, done, .. }] = &run(&op(&[dir.path()], "(", 100))[..] else {
             panic!("not one message");
         };
-        assert!(*done && hits.as_ref().is_err_and(|e| !e.is_empty()));
+        assert!(*done);
+        // The core echoes the last line.
+        let err = hits.as_ref().unwrap_err();
+        assert_eq!(err.lines().last(), Some("error: unclosed group"), "{err}");
     }
 
     #[test]

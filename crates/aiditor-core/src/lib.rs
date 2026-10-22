@@ -12,6 +12,7 @@ pub mod command;
 pub mod display;
 mod editing;
 mod frame;
+mod grep;
 #[cfg(test)]
 mod harness;
 pub mod key;
@@ -381,10 +382,13 @@ impl Ctx<'_> {
                 result,
             } => self.on_saved(buffer, tick, result),
             Msg::Listed { dir, result } => self.on_listed(dir, result),
-            Msg::Opened { path, result } => match result {
-                Ok(file) => self.core.visit(&path, file, true),
-                Err(err) => self.core.echo(err),
-            },
+            Msg::Opened { path, result } => {
+                match result {
+                    Ok(file) => self.core.visit(&path, file, true),
+                    Err(err) => self.core.echo(err),
+                }
+                self.core.grep_jump(&path);
+            }
             Msg::Previewed { path, result } => self.core.on_previewed(path, result),
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
@@ -420,8 +424,7 @@ impl Ctx<'_> {
                 walk,
                 roots,
             } => self.core.indexed(project, walk, roots),
-            // shortcut: no command searches yet; project grep (#74) takes these.
-            Msg::Grepped { .. } => {}
+            Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
@@ -568,6 +571,7 @@ pub struct Core {
     index: HashMap<String, FileIndex>,
     /// How many `FileOp::Index` walks were asked for; numbers each one.
     index_walks: u64,
+    grep: grep::ProjectGrep,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -633,6 +637,7 @@ impl Default for Core {
             projects_dir: None,
             index: HashMap::new(),
             index_walks: 0,
+            grep: grep::ProjectGrep::default(),
             commands,
             message: None,
             quitting: Vec::new(),

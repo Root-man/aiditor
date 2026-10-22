@@ -333,6 +333,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.project_find_file(args),
         },
         Command {
+            name: "project-grep",
+            // Asks its own question, which names the project; the hits are matched already.
+            spec: ArgSpec {
+                filter: Some(|_, items| (0..items.len()).collect()),
+                preview: Some(crate::grep::preview),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.project_grep(args),
+        },
+        Command {
             name: "workspace-new",
             spec: ArgSpec {
                 prompts: &["New workspace for project: ", "Workspace name: "],
