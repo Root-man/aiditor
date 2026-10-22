@@ -162,10 +162,17 @@ impl Ctx<'_> {
         if let Some(label) = args.strings.first() {
             let hit = self.core.grep.hit(label).ok_or("No match")?;
             let (path, line, col) = (hit.root.join(&hit.path), hit.line, hit.col);
+            let from = self.core.window.buffer();
             self.find_file(&path.to_string_lossy())?;
             // A visited file is switched to at once; another jumps once read.
             match self.core.buffers.visiting(&path) == Some(self.core.window.buffer()) {
-                true => self.core.goto_line_col(line, col),
+                true => {
+                    // Switching to another buffer recorded the jump already.
+                    if self.core.window.buffer() == from {
+                        self.core.push_jump();
+                    }
+                    self.core.goto_line_col(line, col)
+                }
                 false => self.core.grep.jump = Some((path, line, col)),
             }
             return Ok(());

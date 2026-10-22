@@ -501,6 +501,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.delete_other_windows(),
         },
         Command {
+            name: "xref-go-back",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.core.xref_go(false),
+        },
+        Command {
+            name: "xref-go-forward",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.core.xref_go(true),
+        },
+        Command {
             name: "switch-to-buffer",
             spec: ArgSpec {
                 prompts: &["Switch to buffer: "],

@@ -132,6 +132,9 @@ impl Ctx<'_> {
         let core = &mut *self.core;
         let start = core.point();
         let p = target(core.current(), line, &core.prompts.last_text).ok_or("No candidates")?;
+        if p != start {
+            core.push_jump();
+        }
         core.window.jump(&mut core.buffers, p)?;
         if p != start && !core.window.active() {
             core.window.push_mark(&mut core.buffers, start, false)?;

@@ -216,8 +216,16 @@ impl Core {
         self.switch_to(id);
     }
 
-    /// Shows buffer `id` in the selected window and makes it the most recent.
+    /// Shows buffer `id` in the selected window, as a jump, and makes it the most recent.
     pub(crate) fn switch_to(&mut self, id: BufferId) {
+        if self.window.buffer() != id {
+            self.push_jump();
+        }
+        self.show_buffer(id);
+    }
+
+    /// Shows buffer `id` in the selected window and makes it the most recent.
+    pub(crate) fn show_buffer(&mut self, id: BufferId) {
         self.buffers.raise(id);
         if self.window.buffer() != id {
             self.window.show(&mut self.buffers, id);

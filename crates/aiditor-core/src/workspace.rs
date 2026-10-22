@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::buffer::{scratch_name, unique};
+use crate::buffer::{BufferId, MarkerId, scratch_name, unique};
 use crate::command::Args;
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx};
@@ -22,6 +22,10 @@ pub struct Workspace {
     pub(crate) shown: u64,
     /// Its window configuration while another workspace is current; `None` while it is current.
     pub(crate) windows: Option<Windows>,
+    /// Positions jumps left, newest last.
+    pub(crate) back: Vec<(BufferId, MarkerId)>,
+    /// Positions `xref-go-back` left, newest last.
+    pub(crate) forward: Vec<(BufferId, MarkerId)>,
 }
 
 /// A window configuration, saved while its workspace is not current; the current one lives in
@@ -47,6 +51,8 @@ impl Workspace {
             project: project.into(),
             shown: 0,
             windows: None,
+            back: Vec::new(),
+            forward: Vec::new(),
         }
     }
 }
@@ -130,6 +136,8 @@ impl Core {
         for window in windows.windows_mut() {
             window.release(&mut self.buffers);
         }
+        let jumps = killed.back.drain(..).chain(killed.forward.drain(..));
+        crate::jump::release(&mut self.buffers, jumps);
         let owned: Vec<_> = (self.buffers.recent())
             .filter(|(_, b)| b.workspace == Some(id))
             .map(|(b, _)| b)
