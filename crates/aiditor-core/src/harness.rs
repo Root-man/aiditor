@@ -188,11 +188,12 @@ impl Harness {
                         file,
                     })));
                 }
-                // As `files::index` does, minus the ignore files.
+                // As `files::index` does, minus the ignore files and patterns.
                 Effect::File(FileOp::Index {
                     project,
                     walk,
                     roots,
+                    ..
                 }) => {
                     let roots = (roots.into_iter())
                         .map(|root| {

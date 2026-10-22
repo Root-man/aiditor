@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use aiditor_core::{Disk, Msg, WatchSet};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
-use crate::files::walker;
+use crate::files::{Patterns, walker};
 
 /// A report waits until no change has come for `QUIET`, and at most `MAX` after its first one.
 const QUIET: Duration = Duration::from_millis(100);
@@ -92,11 +92,23 @@ fn run(mut state: State, rx: Receiver<In>, send: impl Fn(Msg)) {
     }
 }
 
+/// A watched root with its project's ignore patterns; a root shared by projects with different
+/// patterns is one of these per project.
+struct Root {
+    path: PathBuf,
+    ignore: Vec<String>,
+    patterns: Patterns,
+    /// The kept directories, the root included: those the index's walk enters.
+    dirs: BTreeSet<PathBuf>,
+}
+
+/// Each listed directory's entries that a root's walk keeps, by root index and directory.
+type Listings = BTreeMap<(usize, PathBuf), BTreeSet<PathBuf>>;
+
 /// What is watched, and how.
 struct State {
     watcher: RecommendedWatcher,
-    /// Each watched root's kept directories, the root included: those the index's walk enters.
-    roots: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
+    roots: Vec<Root>,
     /// The visited files.
     files: Vec<PathBuf>,
     /// The visited files' directories that no root covers.
@@ -112,7 +124,7 @@ impl State {
     fn new(watcher: RecommendedWatcher) -> Self {
         State {
             watcher,
-            roots: BTreeMap::new(),
+            roots: Vec::new(),
             files: Vec::new(),
             extra: BTreeSet::new(),
             watched: BTreeMap::new(),
@@ -121,13 +133,25 @@ impl State {
     }
 
     fn set(&mut self, set: WatchSet) {
-        self.roots.retain(|root, _| set.roots.contains(root));
-        for root in set.roots {
-            self.roots.entry(root).or_insert_with_key(|root| {
-                (walker(root).build().flatten())
-                    .filter(|e| e.file_type().is_some_and(|t| t.is_dir()))
-                    .map(ignore::DirEntry::into_path)
-                    .collect()
+        (self.roots).retain(|r| set.roots.contains(&(r.path.clone(), r.ignore.clone())));
+        for (path, ignore) in set.roots {
+            if self
+                .roots
+                .iter()
+                .any(|r| r.path == path && r.ignore == ignore)
+            {
+                continue;
+            }
+            let patterns = Patterns::lenient(&ignore);
+            let dirs = (walker(&path, &path, &patterns).build().flatten())
+                .filter(|e| e.file_type().is_some_and(|t| t.is_dir()))
+                .map(ignore::DirEntry::into_path)
+                .collect();
+            self.roots.push(Root {
+                path,
+                ignore,
+                patterns,
+                dirs,
             });
         }
         self.files = set.files;
@@ -136,7 +160,22 @@ impl State {
 
     /// Whether some root's walk enters `dir`.
     fn kept(&self, dir: &Path) -> bool {
-        self.roots.values().any(|dirs| dirs.contains(dir))
+        self.roots.iter().any(|r| r.dirs.contains(dir))
+    }
+
+    /// Whether root `i` keeps `dir` and its walk, listing `dir`, keeps `path`; listing the
+    /// directory applies the ignore files above it, as the index's walk does.
+    fn listed(&self, listings: &mut Listings, i: usize, dir: &Path, path: &Path) -> bool {
+        let root = &self.roots[i];
+        root.dirs.contains(dir)
+            && (listings.entry((i, dir.to_path_buf())))
+                .or_insert_with(|| {
+                    let listing = walker(dir, &root.path, &root.patterns)
+                        .max_depth(Some(1))
+                        .build();
+                    (listing.flatten().map(ignore::DirEntry::into_path)).collect()
+                })
+                .contains(path)
     }
 
     /// Whether a change at `path` is reported: one in a kept or extra directory, or of a kept one.
@@ -153,13 +192,11 @@ impl State {
             .map(Path::to_path_buf)
             .collect();
         let mut want = BTreeMap::new();
-        for (root, dirs) in &self.roots {
+        for root in &self.roots {
             match cfg!(target_os = "macos") {
-                true => _ = want.insert(root.clone(), RecursiveMode::Recursive),
-                false => want.extend(
-                    dirs.iter()
-                        .map(|d| (d.clone(), RecursiveMode::NonRecursive)),
-                ),
+                true => _ = want.insert(root.path.clone(), RecursiveMode::Recursive),
+                false => want
+                    .extend((root.dirs.iter()).map(|d| (d.clone(), RecursiveMode::NonRecursive))),
             }
         }
         for dir in &self.extra {
@@ -210,23 +247,19 @@ impl State {
     /// The report for the event paths `raw`, if there is anything to report. A new kept
     /// directory is watched and its files reported; a gone one stops being watched.
     fn flush(&mut self, raw: BTreeSet<PathBuf>, rescan: bool) -> Option<Msg> {
-        // Each kept directory's entries the index's walk keeps, listed once per report; listing
-        // the parent applies the ignore files above it, as the index's walk does.
-        let mut listings: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
-        let mut listed = |parent: &Path, path: &Path| {
-            (listings.entry(parent.to_path_buf()))
-                .or_insert_with(|| {
-                    let listing = walker(parent).max_depth(Some(1)).build().flatten();
-                    listing.map(ignore::DirEntry::into_path).collect()
-                })
-                .contains(path)
+        let mut listings = Listings::new();
+        // The roots whose walk keeps `path`, listing its parent `dir`.
+        let mut keeping = |s: &Self, dir: &Path, path: &Path| -> Vec<usize> {
+            (0..s.roots.len())
+                .filter(|&i| s.listed(&mut listings, i, dir, path))
+                .collect()
         };
         let mut report = BTreeSet::new();
         for path in raw.iter().filter(|p| self.keep(p)) {
             // An ignored file in a kept directory is left out, unless a buffer visits it.
             let ignored = match path.parent().filter(|dir| self.kept(dir)) {
                 Some(dir) if !self.files.contains(path) && fs::symlink_metadata(path).is_ok() => {
-                    !listed(dir, path)
+                    keeping(self, dir, path).is_empty()
                 }
                 _ => false,
             };
@@ -239,22 +272,20 @@ impl State {
             let dir = fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
             let parent = path.parent().filter(|parent| self.kept(parent));
             if dir && let Some(parent) = parent.filter(|_| !self.kept(path)) {
-                if !listed(parent, path) {
-                    continue;
-                }
-                // Files made before the watch was in place are reported.
-                for entry in walker(path).build().flatten() {
-                    match entry.file_type().is_some_and(|t| t.is_dir()) {
-                        true => (self.roots.values_mut())
-                            .filter(|dirs| dirs.contains(parent))
-                            .for_each(|dirs| _ = dirs.insert(entry.path().to_path_buf())),
-                        false => _ = report.insert(entry.into_path()),
+                for i in keeping(self, parent, path) {
+                    let root = &mut self.roots[i];
+                    // Files made before the watch was in place are reported.
+                    for entry in walker(path, &root.path, &root.patterns).build().flatten() {
+                        match entry.file_type().is_some_and(|t| t.is_dir()) {
+                            true => _ = root.dirs.insert(entry.into_path()),
+                            false => _ = report.insert(entry.into_path()),
+                        }
                     }
+                    changed = true;
                 }
-                changed = true;
-            } else if !dir && self.kept(path) && !self.roots.contains_key(path) {
-                for dirs in self.roots.values_mut() {
-                    dirs.retain(|d| !d.starts_with(path));
+            } else if !dir && self.kept(path) && !self.roots.iter().any(|r| r.path == *path) {
+                for root in &mut self.roots {
+                    root.dirs.retain(|d| !d.starts_with(path));
                 }
                 changed = true;
             }
@@ -296,7 +327,10 @@ mod tests {
 
     fn set(roots: &[&Path], files: &[&Path]) -> WatchSet {
         WatchSet {
-            roots: roots.iter().map(|r| r.to_path_buf()).collect(),
+            roots: roots
+                .iter()
+                .map(|r| (r.to_path_buf(), Vec::new()))
+                .collect(),
             files: files.iter().map(|f| f.to_path_buf()).collect(),
         }
     }
@@ -435,7 +469,7 @@ mod tests {
         let mut s = state();
         s.set(set(&[root], &[]));
         assert_eq!(
-            s.roots[root].iter().cloned().collect::<Vec<_>>(),
+            s.roots[0].dirs.iter().cloned().collect::<Vec<_>>(),
             [root.to_path_buf(), root.join("src")]
         );
         if cfg!(target_os = "linux") {
@@ -477,6 +511,64 @@ mod tests {
     }
 
     #[test]
+    fn project_patterns_leave_files_and_directories_out() {
+        let dir = tree(&[
+            ("a.log", ""),
+            ("b.rs", ""),
+            ("src/c.rs", ""),
+            ("notes/d/e", ""),
+        ]);
+        let root = dir.path();
+        let ignoring = |ignore: &[&str]| WatchSet {
+            roots: vec![(
+                root.to_path_buf(),
+                ignore.iter().map(|p| p.to_string()).collect(),
+            )],
+            files: Vec::new(),
+        };
+        let mut s = state();
+        s.set(ignoring(&["*.log"]));
+        let raw = ["a.log", "b.rs"].map(|n| root.join(n));
+        let Some(Msg::FilesChanged { paths, .. }) = s.flush(raw.into(), false) else {
+            panic!("no report");
+        };
+        assert_eq!(paths, [(root.join("b.rs"), Disk::File)]);
+        // An allow-list keeps only the root and `notes/` with what is under it.
+        s.set(ignoring(&["*", "!notes/"]));
+        let kept = [root.to_path_buf(), root.join("notes"), root.join("notes/d")];
+        assert_eq!(s.roots.len(), 1, "the old patterns' root is gone");
+        assert_eq!(s.roots[0].dirs.iter().cloned().collect::<Vec<_>>(), kept);
+        if cfg!(target_os = "linux") {
+            assert_eq!(s.watched.keys().cloned().collect::<Vec<_>>(), kept);
+        }
+        let raw = ["b.rs", "src/c.rs", "notes/d/e"].map(|n| root.join(n));
+        let Some(Msg::FilesChanged { paths, .. }) = s.flush(raw.into(), false) else {
+            panic!("no report");
+        };
+        assert_eq!(paths, [(root.join("notes/d/e"), Disk::File)]);
+        // A new directory the patterns leave out is neither kept nor scanned.
+        fs::create_dir(root.join("new")).unwrap();
+        fs::write(root.join("new/f"), "").unwrap();
+        assert_eq!(s.flush([root.join("new")].into(), false), None);
+        assert!(!s.kept(&root.join("new")));
+        // A root shared by projects with different patterns: what either keeps is watched.
+        let mut both = ignoring(&["*.log"]);
+        both.roots.extend(ignoring(&["*", "!notes/"]).roots);
+        s.set(both);
+        assert_eq!(s.roots.len(), 2);
+        assert!(s.kept(&root.join("src")) && s.kept(&root.join("notes/d")));
+        let raw = ["a.log", "src/c.rs", "notes/d/e"].map(|n| root.join(n));
+        let Some(Msg::FilesChanged { paths, .. }) = s.flush(raw.into(), false) else {
+            panic!("no report");
+        };
+        let want = [
+            (root.join("notes/d/e"), Disk::File),
+            (root.join("src/c.rs"), Disk::File),
+        ];
+        assert_eq!(paths, want);
+    }
+
+    #[test]
     fn lost_events_are_reported_with_nothing_else() {
         let dir = tree(&[("c", "")]);
         let mut s = state();
@@ -505,7 +597,7 @@ mod tests {
                 rescan: false
             })
         );
-        assert_eq!(s.roots[root].iter().collect::<Vec<_>>(), [root]);
+        assert_eq!(s.roots[0].dirs.iter().collect::<Vec<_>>(), [root]);
         fs::create_dir_all(d.join("e")).unwrap();
         fs::write(d.join("e/f"), "").unwrap();
         let Some(Msg::FilesChanged { paths, .. }) = s.flush([d.clone()].into(), false) else {

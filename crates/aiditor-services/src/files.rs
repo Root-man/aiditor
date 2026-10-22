@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use aiditor_core::buffer::{encode, hash, revert, unified_diff};
 use aiditor_core::{FileOp, Msg};
 use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 /// Carries out `op` and returns its reply for the core; the one place the app and headless share.
 pub fn run(op: FileOp) -> Msg {
@@ -86,10 +87,12 @@ pub fn run(op: FileOp) -> Msg {
             project,
             walk,
             roots,
+            ignore,
         } => {
+            let patterns = Patterns::lenient(&ignore);
             let roots = (roots.into_iter())
                 .map(|root| {
-                    let files = index(&root);
+                    let files = index(&root, &patterns);
                     (root, files)
                 })
                 .collect();
@@ -137,20 +140,20 @@ pub fn list(dir: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// The files under `root`, relative to it and sorted: gitignored ones left out, hidden ones in,
-/// `.git` never, symlinked directories not followed.
-pub fn index(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// The files under `root`, relative to it and sorted: gitignored ones and those `patterns`
+/// match left out, hidden ones in, `.git` never, symlinked directories not followed.
+pub fn index(root: &Path, patterns: &Patterns) -> Result<Vec<PathBuf>, String> {
     fs::read_dir(root).map_err(|err| format!("{}: {err}", root.display()))?;
-    let files = (walk(root))
+    let files = (walk(root, patterns))
         .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
         .collect();
     Ok(files)
 }
 
 /// The files under `root` that the index lists, as full paths in path order.
-pub(crate) fn walk(root: &Path) -> impl Iterator<Item = PathBuf> {
+pub(crate) fn walk(root: &Path, patterns: &Patterns) -> impl Iterator<Item = PathBuf> {
     // Unreadable entries are skipped, as `rg` skips them.
-    (walker(root).build().flatten())
+    (walker(root, root, patterns).build().flatten())
         .filter(|e| {
             e.file_type()
                 .is_some_and(|ft| ft.is_file() || ft.is_symlink() && e.path().is_file())
@@ -158,16 +161,69 @@ pub(crate) fn walk(root: &Path) -> impl Iterator<Item = PathBuf> {
         .map(ignore::DirEntry::into_path)
 }
 
-/// The index's walk of `root`: gitignored entries left out, hidden ones in, `.git` never,
-/// symlinked directories not followed, in path order.
-pub(crate) fn walker(root: &Path) -> WalkBuilder {
+/// The index's walk of `dir`, inside `root`: gitignored entries and those `patterns` match
+/// left out, hidden ones in, `.git` never, symlinked directories not followed, in path order.
+pub(crate) fn walker(dir: &Path, root: &Path, patterns: &Patterns) -> WalkBuilder {
     // shortcut: one thread walks; switch to `build_parallel` if large repos index or grep slowly.
-    let mut walk = WalkBuilder::new(root);
+    let mut walk = WalkBuilder::new(dir);
+    let (root, patterns) = (root.to_path_buf(), patterns.clone());
     walk.hidden(false)
         .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(move |e| {
+            let ignored = (e.path().strip_prefix(&root)).is_ok_and(|rel| {
+                let dir = e.file_type().is_some_and(|t| t.is_dir());
+                patterns.ignored(rel, dir)
+            });
+            e.file_name() != ".git" && !ignored
+        })
         .sort_by_file_name(|a, b| a.cmp(b));
     walk
+}
+
+/// One `ignore` pattern as its own matcher, so the patterns' order can be followed.
+fn compile(line: &str) -> Result<Gitignore, String> {
+    let mut builder = GitignoreBuilder::new("");
+    let err = |e: ignore::Error| match e {
+        // Its own message repeats the pattern.
+        ignore::Error::Glob { err, .. } => format!("ignore pattern {line:?}: {err}"),
+        e => format!("ignore pattern {line:?}: {e}"),
+    };
+    builder.add_line(None, line).map_err(err)?;
+    builder.build().map_err(err)
+}
+
+/// A project's `ignore` patterns, compiled; they apply on top of the ignore files.
+#[derive(Clone, Debug, Default)]
+pub struct Patterns(Vec<Gitignore>);
+
+impl Patterns {
+    /// Compiles `lines`, failing on the first invalid one.
+    pub fn new(lines: &[String]) -> Result<Self, String> {
+        lines
+            .iter()
+            .map(|line| compile(line))
+            .collect::<Result<_, _>>()
+            .map(Patterns)
+    }
+
+    /// Compiles `lines`, which a project check has passed, logging and dropping any that fail.
+    pub(crate) fn lenient(lines: &[String]) -> Self {
+        let compiled = lines.iter().filter_map(|line| {
+            compile(line)
+                .inspect_err(|err| tracing::warn!(%err, "pattern dropped"))
+                .ok()
+        });
+        Patterns(compiled.collect())
+    }
+
+    /// Whether `rel`, relative to a root, is left out: the last pattern matching it or a
+    /// directory above it decides, so `*` then `!notes/` keeps everything under `notes/`.
+    fn ignored(&self, rel: &Path, dir: bool) -> bool {
+        (self.0.iter().rev())
+            .map(|p| p.matched_path_or_any_parents(rel, dir))
+            .find(|m| !m.is_none())
+            .is_some_and(|m| m.is_ignore())
+    }
 }
 
 /// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file) or the
@@ -329,7 +385,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("src/a.rs"), root.join("file-link")).unwrap();
         // Not a git repo, so this checks `.gitignore` applies without one.
         assert_eq!(
-            index(root).unwrap(),
+            index(root, &Patterns::default()).unwrap(),
             [
                 ".github/ci.yml",
                 ".gitignore",
@@ -343,12 +399,62 @@ mod tests {
     }
 
     #[test]
+    fn project_patterns_narrow_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in [
+            ".gitignore",
+            "a.rs",
+            "b.log",
+            "docs/x.md",
+            "src/c.log",
+            "notes/n.md",
+            "notes/deep/d.md",
+            "notes/x.tmp",
+            "target/t",
+        ] {
+            fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+            fs::write(root.join(name), "").unwrap();
+        }
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        let indexed = |lines: &[&str]| {
+            let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            let files = index(root, &Patterns::new(&lines).unwrap()).unwrap();
+            files
+                .iter()
+                .map(|f| f.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            indexed(&["*.log", "docs/", "notes/", ".gitignore"]),
+            ["a.rs"]
+        );
+        // An allow-list: `!notes/` keeps what is under it, until a later pattern excludes again.
+        assert_eq!(
+            indexed(&["*", "!notes/", "notes/*.tmp"]),
+            ["notes/deep/d.md", "notes/n.md"]
+        );
+        // Patterns only add to the ignore files.
+        assert!(!indexed(&["!target/"]).contains(&"target/t".into()));
+    }
+
+    #[test]
+    fn bad_patterns_are_named() {
+        let err = Patterns::new(&["ok".into(), "src/[z-a]".into()]).unwrap_err();
+        assert_eq!(
+            err,
+            "ignore pattern \"src/[z-a]\": invalid range; 'z' > 'a'"
+        );
+    }
+
+    #[test]
     fn index_reports_a_missing_root_by_path() {
         let gone = tempfile::tempdir().unwrap().path().join("gone");
         let msg = run(FileOp::Index {
             project: "p".into(),
             walk: 3,
             roots: vec![gone.clone()],
+            ignore: Vec::new(),
         });
         let Msg::Indexed {
             project,

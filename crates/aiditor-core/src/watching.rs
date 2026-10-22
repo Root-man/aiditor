@@ -7,14 +7,17 @@ use crate::project_commands::FileIndex;
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
 
 impl Core {
-    /// The roots of every project a workspace is bound to and every file a buffer visits.
+    /// The roots of every project a workspace is bound to, with its ignore patterns, and every
+    /// file a buffer visits.
     pub fn watch_set(&self) -> WatchSet {
         let home = std::env::home_dir();
-        let mut roots: Vec<PathBuf> = (self.projects.iter())
+        let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.project.name))
             // shortcut: the ad-hoc `$HOME` project is never watched, as inotify would need a watch per directory under it; #191 makes it a `watch = false` default.
             .filter(|p| p.file.is_some() || home.as_ref() != Some(&p.project.primary.path))
-            .flat_map(|p| p.project.all_roots().map(|r| r.path.clone()))
+            .flat_map(|p| {
+                (p.project.all_roots()).map(|r| (r.path.clone(), p.project.ignore.clone()))
+            })
             .collect();
         roots.sort();
         roots.dedup();
@@ -446,15 +449,12 @@ mod tests {
         let mut h = Harness::new(&[("a/x", ""), ("out.txt", "")]);
         h.open("out.txt");
         h.keys("C-g");
-        assert_eq!(
-            h.watched.roots,
-            Vec::<PathBuf>::new(),
-            "$HOME isn't watched"
-        );
+        assert_eq!(h.watched.roots, [], "$HOME isn't watched");
         assert_eq!(h.watched.files, [h.path("out.txt")]);
         let project = Project {
             name: "p".into(),
             default_agent: None,
+            ignore: vec!["*.log".into()],
             primary: Root {
                 path: h.path("a"),
                 role: String::new(),
@@ -467,9 +467,9 @@ mod tests {
         });
         h.core.new_workspace("w", "p");
         h.keys("C-g");
-        assert_eq!(h.watched.roots, [h.path("a")]);
+        assert_eq!(h.watched.roots, [(h.path("a"), vec!["*.log".into()])]);
         h.keys("C-x t 0");
-        assert_eq!(h.watched.roots, Vec::<PathBuf>::new());
+        assert_eq!(h.watched.roots, []);
         h.keys("C-x k RET");
         assert_eq!(name(&h), "*scratch*<main>");
         assert_eq!(h.watched.files, Vec::<PathBuf>::new());
@@ -490,6 +490,40 @@ mod tests {
         let files = h.core.minibuffer().unwrap().candidates.clone();
         h.keys("C-g");
         files
+    }
+
+    #[test]
+    fn a_reload_rewalks_the_indexes_quietly() {
+        let mut h = indexed();
+        let walks = h.core.index_walks;
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: Vec::new(),
+        });
+        assert_eq!((h.core.index_walks, h.core.message()), (walks + 1, None));
+        // A saved project edited by hand is walked with its new patterns.
+        let mut q = Loaded::ad_hoc("q", &h.path("a"));
+        q.file = Some((h.path("q.toml"), String::new()));
+        h.core.projects.push(q.clone());
+        h.keys("C-x p i q RET");
+        q.project.ignore = vec!["*.log".into()];
+        let effects = (h.core).handle(
+            std::time::Instant::now(),
+            Msg::ProjectsLoaded {
+                dir: None,
+                projects: vec![Ok(q)],
+            },
+        );
+        let mut ignores: Vec<_> = (effects.iter())
+            .filter_map(|e| match e {
+                Effect::File(FileOp::Index {
+                    project, ignore, ..
+                }) => Some((&**project, ignore)),
+                _ => None,
+            })
+            .collect();
+        ignores.sort();
+        assert_eq!(ignores, [("p", &vec![]), ("q", &vec!["*.log".to_string()])]);
     }
 
     #[test]

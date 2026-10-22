@@ -185,6 +185,7 @@ impl Ctx<'_> {
         let project = Project {
             name: name.into(),
             default_agent: None,
+            ignore: Vec::new(),
             primary: Root {
                 path: self.core.root_path(primary),
                 role: String::new(),
@@ -298,6 +299,7 @@ impl Ctx<'_> {
     pub(crate) fn index_project(&mut self, name: &str, quiet: bool) -> Result<(), String> {
         let project = &self.core.projects[self.core.project(name)?].project;
         let roots = project.all_roots().map(|r| r.path.clone()).collect();
+        let ignore = project.ignore.clone();
         self.core.index_walks += 1;
         let walk = self.core.index_walks;
         let index = self.core.index.entry(name.into()).or_default();
@@ -310,6 +312,7 @@ impl Ctx<'_> {
             project: name.into(),
             walk,
             roots,
+            ignore,
         }));
         Ok(())
     }
@@ -381,6 +384,7 @@ mod tests {
         let project = Project {
             name: "tmp".into(),
             default_agent: None,
+            ignore: Vec::new(),
             primary: Root {
                 path: h.path("a"),
                 role: String::new(),

@@ -193,10 +193,11 @@ pub enum Disk {
     Dir,
 }
 
-/// What the watcher should watch: project roots, and the files buffers visit.
+/// What the watcher should watch: project roots, each with its project's ignore patterns, and
+/// the files buffers visit.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WatchSet {
-    pub roots: Vec<PathBuf>,
+    pub roots: Vec<(PathBuf, Vec<String>)>,
     pub files: Vec<PathBuf>,
 }
 
@@ -277,11 +278,13 @@ pub enum FileOp {
     Preview(PathBuf),
     /// Hash each file and send `Msg::Checked`.
     Check(Vec<PathBuf>),
-    /// Walk every root of `project` and send `Msg::Indexed` with `walk`.
+    /// Walk every root of `project`, leaving out what its `ignore` patterns match, and send
+    /// `Msg::Indexed` with `walk`.
     Index {
         project: String,
         walk: u64,
         roots: Vec<PathBuf>,
+        ignore: Vec<String>,
     },
     /// Write the project file `text` to `path` if it is a valid project and the file is still
     /// `old` (`None`: no file, making the directory), then send `Msg::ProjectWritten`.
@@ -300,11 +303,12 @@ pub enum GrepOp {
     Cancel,
 }
 
-/// Search the files the index lists under `roots` for the regexp `pattern`, smart case, until
-/// `limit` hits; numbered `id`, from 1.
+/// Search the files the index lists under `roots`, with the project's `ignore` patterns, for the
+/// regexp `pattern`, smart case, until `limit` hits; numbered `id`, from 1.
 pub struct GrepSearch {
     pub id: u64,
     pub roots: Vec<PathBuf>,
+    pub ignore: Vec<String>,
     pub pattern: String,
     pub limit: usize,
 }
@@ -480,6 +484,11 @@ impl Ctx<'_> {
                         Ok(project) => self.core.projects.push(project),
                         Err(err) => self.core.report(format!("project {err}")),
                     }
+                }
+                // A hand edit may have changed roots or ignore patterns; a project gone fails to walk.
+                let indexed: Vec<String> = self.core.index.keys().cloned().collect();
+                for name in indexed {
+                    _ = self.index_project(&name, true);
                 }
             }
             Msg::ProjectWritten(result) => self.core.project_written(result),

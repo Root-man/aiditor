@@ -61,8 +61,9 @@ pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool, mut send: impl FnMu
         .binary_detection(BinaryDetection::quit(b'\0'))
         .build();
     let (mut hits, mut found, mut sent) = (Vec::new(), 0, Instant::now());
+    let patterns = crate::files::Patterns::lenient(&op.ignore);
     'roots: for root in &op.roots {
-        for file in crate::files::walk(root) {
+        for file in crate::files::walk(root, &patterns) {
             if cancelled() {
                 return;
             }
@@ -126,6 +127,7 @@ mod tests {
         GrepSearch {
             id: 7,
             roots: roots.iter().map(|r| r.to_path_buf()).collect(),
+            ignore: Vec::new(),
             pattern: pattern.into(),
             limit,
         }
@@ -168,6 +170,16 @@ mod tests {
             hits(&op(&[dir.path()], "needle", 100)),
             ["src/a.rs:0:0:needle"]
         );
+    }
+
+    #[test]
+    fn skips_what_the_project_patterns_leave_out() {
+        let dir = tree(&[("notes/n.md", "needle\n"), ("src/a.rs", "needle\n")]);
+        let op = GrepSearch {
+            ignore: vec!["*".into(), "!notes/".into()],
+            ..op(&[dir.path()], "needle", 100)
+        };
+        assert_eq!(hits(&op), ["notes/n.md:0:0:needle"]);
     }
 
     #[test]

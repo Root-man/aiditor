@@ -60,9 +60,11 @@ fn name(file: &Path) -> std::borrow::Cow<'_, str> {
     file.file_name().unwrap_or_default().to_string_lossy()
 }
 
-/// Parses a project file's text and checks its roots are directories.
+/// Parses a project file's text and checks its roots are directories and its ignore patterns
+/// compile.
 fn check(text: &str) -> Result<Project, String> {
     let project = Project::parse(text)?;
+    files::Patterns::new(&project.ignore)?;
     if let Some(root) = project.all_roots().find(|root| !root.path.is_dir()) {
         return Err(format!("{} is not a directory", root.path.display()));
     }
@@ -172,6 +174,12 @@ mod tests {
         assert_eq!(read(file.parent().unwrap()), [Ok(wrote.clone())]);
         let exists = write(&file, None, text.clone()).unwrap_err();
         assert!(exists.ends_with("p.toml already exists"), "{exists}");
+        let bad = format!("ignore = [\"[z-a]\"]\n{text}");
+        let err = write(&file, Some(&text), bad).unwrap_err();
+        assert!(
+            err.starts_with("p.toml: ignore pattern \"[z-a]\": "),
+            "{err}"
+        );
         let missing = format!("{text}[[roots]]\npath = \"{root}2\"\n");
         assert_eq!(
             write(&file, Some(&text), missing),

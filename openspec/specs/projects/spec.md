@@ -7,7 +7,7 @@ The project file: a TOML file in the editor's config dir naming a primary repo, 
 ## Requirements
 
 ### Requirement: Project file format
-A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, a `primary` table and zero or more `roots` tables. Each root SHALL have a `path` and a `role`; a missing role SHALL mean an empty one. A project written back out SHALL read back as the same project.
+A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional `ignore` list of gitignore-syntax patterns, a `primary` table and zero or more `roots` tables. Each root SHALL have a `path` and a `role`; a missing role SHALL mean an empty one, and a missing `ignore` an empty list. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore` as it is in the file.
 
 #### Scenario: Full file
 - **WHEN** a project file sets a name, a default agent, a primary root and two additional roots
@@ -19,10 +19,14 @@ A project SHALL be a TOML file in the `projects` directory of the editor's confi
 
 #### Scenario: Minimal file
 - **WHEN** a project file sets only a name and a primary path
-- **THEN** the project has no default agent, no additional roots and an empty primary role
+- **THEN** the project has no default agent, no ignore patterns, no additional roots and an empty primary role
+
+#### Scenario: Ignore patterns
+- **WHEN** a project file sets `ignore = ["*", "!notes/"]`
+- **THEN** the loaded project has those two patterns, in that order
 
 ### Requirement: Invalid project files are rejected with a clear error
-A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, or a role spanning more than one line SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
+A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, a role spanning more than one line, or an ignore pattern that is not a valid gitignore pattern SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
 
 #### Scenario: Relative path
 - **WHEN** a project file's primary path is `src`
@@ -55,6 +59,10 @@ A project file that is not valid TOML, has a value of the wrong type, a key the 
 #### Scenario: Root shared across projects
 - **WHEN** two project files both list `/r/zed` as a root
 - **THEN** both projects load
+
+#### Scenario: Bad ignore pattern
+- **WHEN** a project file sets `ignore = ["src/[z-a]"]`
+- **THEN** the project is not loaded and the error names the file and the pattern
 
 ### Requirement: Projects load at launch and on C-x C-r
 The editor SHALL read every `*.toml` file in the projects directory at launch and again when `C-x C-r` reloads settings, replacing the saved projects it had. Ad-hoc projects SHALL stay. A missing projects directory SHALL mean no saved projects and no error.

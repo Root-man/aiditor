@@ -12,6 +12,10 @@ pub struct Project {
     /// shortcut: any string is accepted; check it against the agent registry once there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
+    /// Gitignore-syntax patterns, relative to each root, leaving files out of the index, grep
+    /// and the watcher; `aiditor-services` checks them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
     pub primary: Root,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<Root>,
@@ -43,6 +47,7 @@ impl Loaded {
         let project = Project {
             name: name.into(),
             default_agent: None,
+            ignore: Vec::new(),
             primary,
             roots: Vec::new(),
         };
@@ -159,6 +164,7 @@ mod tests {
     const FULL: &str = r#"
 name = "aiditor"
 default_agent = "claude"
+ignore = ["*", "!notes/"]
 
 [primary]
 path = "/r/aiditor"
@@ -177,6 +183,7 @@ path = "/r/notes"
         let p = Project::parse(FULL).unwrap();
         assert_eq!(p.name, "aiditor");
         assert_eq!(p.default_agent.as_deref(), Some("claude"));
+        assert_eq!(p.ignore, ["*", "!notes/"]);
         assert_eq!(p.primary.role, "The editor itself");
         let paths: Vec<_> = p.roots.iter().map(|r| r.path.to_str().unwrap()).collect();
         assert_eq!(paths, ["/r/zed", "/r/notes"]);
@@ -189,6 +196,7 @@ path = "/r/notes"
     fn minimal_file_round_trips() {
         let p = Project::parse("name = \"x\"\n[primary]\npath = \"/r/x\"").unwrap();
         assert_eq!((p.default_agent.as_ref(), p.roots.len()), (None, 0));
+        assert!(p.ignore.is_empty());
         assert_eq!(p.primary.role, "");
         assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
     }
@@ -246,6 +254,7 @@ path = "/r/notes"
         let text = r#"# My project
 name = "aiditor"
 default_agent = "claude" # for now
+ignore = ["target/"] # project commands leave this alone
 
 [primary]
 path = "/r/aiditor"

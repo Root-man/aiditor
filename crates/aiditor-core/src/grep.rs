@@ -33,6 +33,8 @@ pub(crate) struct ProjectGrep {
     answered: bool,
     /// The project's roots with their names, the primary first.
     roots: Vec<(PathBuf, String)>,
+    /// The project's ignore patterns.
+    ignore: Vec<String>,
     /// The listed hits with their labels, kept after the prompt closes for its handler.
     hits: Vec<(String, Hit)>,
     /// The file, line and column to put point at once the file's read arrives.
@@ -104,6 +106,7 @@ impl Core {
         effects.push(Effect::Grep(GrepOp::Search(GrepSearch {
             id: grep.searches,
             roots: grep.roots.iter().map(|(root, _)| root.clone()).collect(),
+            ignore: grep.ignore.clone(),
             pattern: text,
             limit: LIMIT,
         })));
@@ -178,14 +181,14 @@ impl Ctx<'_> {
             return Ok(());
         }
         let project = self.core.current_workspace().project.clone();
-        let roots: Vec<PathBuf> = (self.core.projects[self.core.project(&project)?].project)
-            .all_roots()
-            .map(|root| root.path.clone())
-            .collect();
+        let loaded = &self.core.projects[self.core.project(&project)?].project;
+        let roots: Vec<PathBuf> = loaded.all_roots().map(|root| root.path.clone()).collect();
+        let ignore = loaded.ignore.clone();
         let names = root_names(roots.iter().map(PathBuf::as_path));
         self.core.grep = ProjectGrep {
             searches: self.core.grep.searches,
             roots: roots.into_iter().zip(names).collect(),
+            ignore,
             ..ProjectGrep::default()
         };
         let command = self.core.commands["project-grep"];
