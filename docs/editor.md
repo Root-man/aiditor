@@ -381,7 +381,7 @@ Each layer is tested on its own, and the assembled app is tested end to end with
 | Text model: rope, undo, markers | Unit tests plus property tests (`proptest`) on random edit sequences and undo/redo round trips |
 | Commands and keymaps | Headless core driven by scripted key sequences; assertions on buffer text and point, snapshots of the display model (`insta`) |
 | Projects, workspaces, session index | Temp-dir fixtures; workspace lifecycle (killing a workspace kills its buffers); session index round trips |
-| File sync | External writes to temp repos; check that the right buffers auto-revert and that dirty buffers become conflicted |
+| File sync | Native watcher → file service → Core integration tests in `aiditor-services/tests/file_sync.rs` ([#84](https://github.com/Root-man/aiditor/issues/84)): external atomic writes and later rewrites to temp repos, clean copies across workspaces, dirty conflicts, own-save undo history, unrelated buffers and visited-file fallback for disabled or size-limited root watching; run by `cargo test` on macOS and Linux |
 | ACP client | A fake agent built on the same ACP crate, scripted to stream updates, request permissions, write files to disk and create terminals; recorded transcripts from real Claude Code and Codex sessions replayed against the client |
 | Terminal | Byte streams fed into the emulator grid with snapshot assertions; PTY tests against small shell scripts |
 | Crash recovery | Kill the app mid-edit, relaunch, check the recovered buffers |
