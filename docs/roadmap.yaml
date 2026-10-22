@@ -672,10 +672,14 @@ milestones:
           - key: m1-watcher
             title: "File watcher service"
             body: |
-              `notify` watchers for the project roots and for open files outside them, with debounced events. The watcher reports every change, including the editor's own saves; filtering happens per buffer. File creates and deletes also refresh the file index.
+              `notify` backends per OS that report, debounced, the paths that may have changed, as "Decide: file watcher edge cases" settled: on macOS one recursive FSEvents watch per root, with events under ignored paths dropped; on Linux one non-recursive inotify watch per directory the `ignore` walk keeps, added for new directories as they appear. A visited file no root watch covers (outside the roots, under an ignored directory, or in an unwatched project) gets a shared watch on its parent directory. Each buffer visiting a reported path, or a file under a reported directory, is checked against the disk; a missing file puts it in the deleted state (`[deleted]` in the mode line, `C-x C-s` writes it back), and a lost-events rescan checks them all. The watcher reports every change, including the editor's own saves; filtering happens per buffer. File creates and deletes also refresh the file index.
             acceptance:
               - "External writes produce one event per change after debouncing"
               - "Creating or deleting a file updates the file finder"
+              - "Another program's atomic save (a rename over the file) is still seen, and so are later writes to it"
+              - "Deleting or renaming an open file, or the directory holding it, shows `[deleted]`; `C-x C-s` writes it back, and a clean deleted buffer doesn't stop `C-x C-c`"
+              - "A file outside the project's roots is watched while a buffer visits it, and its watch goes with the last such buffer"
+              - "On Linux, an ignored `node_modules` gets no inotify watch"
             blocked_by: [m1-decide-watcher, m1-project-file, m1-file-index]
           - key: m1-project-ignore
             title: "Project ignore patterns for the index and the watcher"
@@ -691,9 +695,10 @@ milestones:
             title: "Project setting: file watching on or off"
             labels: [project]
             body: |
-              A `watch` key in the project file, `true` by default and `false` for the ad-hoc `$HOME` project (see "Decide: launching without a project"). With watching off, the project's roots get no watcher: the file index refreshes on demand only, and an open file is still caught by the hash check on save. Setting it through the project commands, and the mode line or `*Messages*` saying a project is unwatched, are part of this task.
+              A `watch` key in the project file, `true` by default and `false` for the ad-hoc `$HOME` project (see "Decide: launching without a project"). With watching off, the project's roots get no watcher: the file index refreshes on demand only, and an open file is still watched through its parent directory (see "Decide: file watcher edge cases"). Setting it through the project commands, and the mode line or `*Messages*` saying a project is unwatched, are part of this task.
             acceptance:
               - "A project with `watch = false` gets no root watcher, and its index still refreshes on demand"
+              - "An open file in an unwatched project still auto-reverts when it changes on disk"
               - "The ad-hoc `$HOME` project is unwatched by default"
             blocked_by: [m1-watcher, m1-decide-launch]
           - key: m1-watch-limit
