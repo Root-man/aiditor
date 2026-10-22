@@ -142,7 +142,7 @@ Every save also checks the file's hash on disk against the last version the buff
 - **Files no root watch covers.** A visited file outside the project's roots, under an ignored directory (`target/`, `node_modules/`), or in a project with `watch = false` gets a non-recursive watch on its parent directory, shared by the buffers visiting files there and dropped with the last of them.
 - **Per platform.** On macOS each root gets one recursive FSEvents watch, and events under ignored paths are dropped. On Linux, inotify needs a watch per directory, so the backend walks each root with `ignore`, using the file index's filter, and watches each directory it keeps non-recursively; a directory created later gets a watch unless ignored, then is scanned for files made before the watch was in place. Ignored trees cost no watches, and the watched-files limit counts what is really watched.
 
-How a revert keeps point, mark and markers is still to be decided (see Open questions).
+**Reverting** (decided in [#79](https://github.com/Root-man/aiditor/issues/79)): a revert applies a diff instead of replacing the text, so point, mark and markers stay with their text. The file service reads and decodes the file and diffs it line by line against a snapshot of the buffer (`similar`, `buffer::revert`); the core applies the changed hunks as one undo group, past read-only, so one `C-/` brings the old text back, and the buffer ends unmodified with the file's hash, line ending and BOM. A marker on an unchanged line keeps its line and column; one inside a changed hunk goes to the hunk's start. A diff that arrives after the buffer was edited or killed is dropped. Formatter runs are to apply their output the same way. `M-x revert-buffer` reverts the current buffer, asking `Revert buffer from file <path>? ` only when it is modified, as Emacs's `revert-buffer-quick` does; it says `Buffer does not seem to be associated with any file`, `File <path> no longer exists` or why the file can't be visited, leaving the buffer as it was. Not yet: char-level diffs inside changed lines, a key (Emacs's `C-x x g`).
 
 ## Projects
 
@@ -340,10 +340,6 @@ Agent streams need nothing more than that: ACP updates are small and slow compar
 The emulator sits behind a terminal interface so it can move later. If typing lags during a flood (check by running `yes`, or `cat` on a large file, in one terminal while typing in another buffer), move the emulator into the terminal task behind a lock, as Zed and Alacritty do. That takes parsing off the UI thread at the cost of shared mutable state, the one exception principle 4 would then allow.
 
 ## Open questions
-
-**Text model and files**
-
-- How a revert or formatter run keeps point, mark and markers. Likely by applying a computed diff (`similar` or `imara-diff`) instead of replacing the whole text. (Decided: a window's point and mark follow edits made elsewhere as markers in the buffer, each staying before or moving past text inserted at it.)
 
 **Display**
 

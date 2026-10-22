@@ -549,6 +549,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.kill_buffer(args),
         },
         Command {
+            name: "revert-buffer",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.revert_buffer(args),
+        },
+        Command {
             name: "recover-buffers",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.recover_buffers(args),
