@@ -10,11 +10,9 @@ impl Core {
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
     /// file a buffer visits.
     pub fn watch_set(&self) -> WatchSet {
-        let home = std::env::home_dir();
         let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.project.name))
-            // shortcut: the ad-hoc `$HOME` project is never watched, as inotify would need a watch per directory under it; #191 makes it a `watch = false` default.
-            .filter(|p| p.file.is_some() || home.as_ref() != Some(&p.project.primary.path))
+            .filter(|p| p.project.watch)
             .flat_map(|p| {
                 (p.project.all_roots()).map(|r| (r.path.clone(), p.project.ignore.clone()))
             })
@@ -95,7 +93,13 @@ impl Ctx<'_> {
         if !check.is_empty() {
             self.effects.push(Effect::File(FileOp::Check(check)));
         }
+        let watched = &self.core.projects;
         let stale: Vec<String> = (self.core.index.iter_mut())
+            .filter(|(name, _)| {
+                watched
+                    .iter()
+                    .any(|p| p.project.name == **name && p.project.watch)
+            })
             .filter_map(|(name, index)| (stale(index, &paths) || rescan).then(|| name.clone()))
             .collect();
         for name in stale {
@@ -453,6 +457,7 @@ mod tests {
         assert_eq!(h.watched.files, [h.path("out.txt")]);
         let project = Project {
             name: "p".into(),
+            watch: true,
             default_agent: None,
             ignore: vec!["*.log".into()],
             primary: Root {
@@ -554,5 +559,58 @@ mod tests {
             rescan: true,
         });
         assert_eq!((h.core.index_walks, h.core.message()), (walks + 2, None));
+    }
+
+    #[test]
+    fn unwatched_roots_keep_file_reverts_and_on_demand_indexing() {
+        let mut h = indexed();
+        h.open("a/x");
+        h.keys("C-x p w p RET C-n RET");
+        assert_eq!(h.watched.roots, []);
+        assert_eq!(h.watched.files, [h.path("a/x")]);
+        let walks = h.core.index_walks;
+        std::fs::write(h.path("a/y"), "").unwrap();
+        std::fs::write(h.path("a/x"), "changed").unwrap();
+        report(&mut h, &["a/x", "a/y"]);
+        assert_eq!(h.text(), "changed");
+        assert_eq!(h.core.index_walks, walks);
+        assert_eq!(found(&mut h), ["a/x"]);
+        h.keys("C-x p i p RET");
+        assert_eq!(found(&mut h), ["a/x", "a/y"]);
+        std::fs::write(h.path("a/z"), "").unwrap();
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: Vec::new(),
+        });
+        assert_eq!(found(&mut h), ["a/x", "a/y", "a/z"]);
+        h.keys("C-x p w p RET C-p RET");
+        assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+        std::fs::write(h.path("a/new"), "").unwrap();
+        report(&mut h, &["a/new"]);
+        assert_eq!(found(&mut h), ["a/new", "a/x", "a/y", "a/z"]);
+    }
+
+    #[test]
+    fn shared_root_and_rescan_reports_refresh_only_watched_indexes() {
+        let mut h = indexed();
+        h.keys("C-x p w p RET C-n RET");
+        h.core.projects.push(Loaded::ad_hoc("q", &h.path("a")));
+        h.core.new_workspace("q", "q");
+        h.keys("C-x p i q RET");
+        assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+        let walks = h.core.index_walks;
+        std::fs::write(h.path("a/y"), "").unwrap();
+        report(&mut h, &["a/y"]);
+        assert_eq!(h.core.index_walks, walks + 1);
+        assert_eq!(found(&mut h), ["a/x", "a/y"]);
+        std::fs::write(h.path("a/z"), "").unwrap();
+        h.send(Msg::FilesChanged {
+            paths: Vec::new(),
+            rescan: true,
+        });
+        assert_eq!(h.core.index_walks, walks + 2);
+        assert_eq!(found(&mut h), ["a/x", "a/y", "a/z"]);
+        h.keys("C-x p p p RET");
+        assert_eq!(found(&mut h), ["a/x"]);
     }
 }

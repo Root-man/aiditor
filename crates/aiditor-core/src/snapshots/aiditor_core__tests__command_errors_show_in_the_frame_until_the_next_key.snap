@@ -30,7 +30,7 @@ FrameDisplay {
                         0,
                     ),
                 ),
-                mode_line: "-- a.txt  1:0",
+                mode_line: "-- a.txt  1:0 [unwatched]",
             },
         },
     ],

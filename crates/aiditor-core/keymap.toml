@@ -18,6 +18,7 @@
 "C-x p r" = "project-remove-root"
 "C-x p l" = "project-set-role"
 "C-x p d" = "project-set-default-agent"
+"C-x p w" = "project-set-watch"
 "C-x p o" = "project-open-file"
 "C-x p s" = "project-save"
 "C-x p p" = "project-switch"

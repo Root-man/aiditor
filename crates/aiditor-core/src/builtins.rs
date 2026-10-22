@@ -294,6 +294,24 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.set_default_agent(&args),
         },
         Command {
+            name: "project-set-watch",
+            spec: ArgSpec {
+                prompts: &["Project: ", "Watch: "],
+                completion: Some(|core, args| match args.strings.len() {
+                    0 => core.project_names(false),
+                    _ => vec!["true".into(), "false".into()],
+                }),
+                preselect: Some(|core, args| {
+                    args.strings
+                        .first()
+                        .and_then(|name| core.project(name).ok())
+                        .map_or(0, |i| usize::from(!core.projects[i].project.watch))
+                }),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.set_watch(&args),
+        },
+        Command {
             name: "project-open-file",
             spec: ArgSpec {
                 prompts: &["Project: "],

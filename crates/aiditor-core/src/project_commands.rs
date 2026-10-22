@@ -184,6 +184,7 @@ impl Ctx<'_> {
         }
         let project = Project {
             name: name.into(),
+            watch: true,
             default_agent: None,
             ignore: Vec::new(),
             primary: Root {
@@ -294,6 +295,16 @@ impl Ctx<'_> {
         })
     }
 
+    pub(crate) fn set_watch(&mut self, args: &Args) -> Result<(), String> {
+        let watch = args.strings[1]
+            .parse::<bool>()
+            .map_err(|_| "Watch must be true or false".to_string())?;
+        self.edit_project(&args.strings[0], |p| {
+            p.watch = watch;
+            Ok(())
+        })
+    }
+
     /// Walks every root of the project `name` again, off the core thread; `quiet` echoes
     /// nothing, unless a walk the user asked for is still pending.
     pub(crate) fn index_project(&mut self, name: &str, quiet: bool) -> Result<(), String> {
@@ -383,6 +394,7 @@ mod tests {
     fn ad_hoc(h: &Harness) -> Loaded {
         let project = Project {
             name: "tmp".into(),
+            watch: true,
             default_agent: None,
             ignore: Vec::new(),
             primary: Root {
@@ -457,7 +469,8 @@ mod tests {
             h.path("a").display().to_string(),
             h.path("b").display().to_string(),
         );
-        let text = format!("# Mine\nname = \"app\"\n\n[primary]\npath = \"{a}\"\n");
+        let text =
+            format!("# Mine\nname = \"app\"\nwatch = true # quiet\n\n[primary]\npath = \"{a}\"\n");
         std::fs::create_dir(h.path("projects")).unwrap();
         std::fs::write(h.path("projects/app.toml"), &text).unwrap();
         let loaded = Loaded {
@@ -471,10 +484,13 @@ mod tests {
         call(&mut h, "project-add-root", &["app", &format!("{b}/"), "B"]);
         call(&mut h, "project-set-role", &["app", &a, "Main"]);
         call(&mut h, "project-set-default-agent", &["app", "claude"]);
+        call(&mut h, "project-set-watch", &["app", "false"]);
         let disk = h.disk("projects/app.toml");
         assert!(disk.starts_with("# Mine\n"), "{disk}");
+        assert!(disk.contains("watch = false # quiet"), "{disk}");
         let p = Project::parse(&disk).unwrap();
         assert_eq!(p, project(&h, "app"));
+        assert!(!p.watch);
         assert_eq!(
             (p.primary.role.as_str(), p.default_agent.as_deref()),
             ("Main", Some("claude"))
@@ -502,7 +518,16 @@ mod tests {
         assert!(err.starts_with("project "), "{err}");
         assert_eq!(h.disk("projects/app.toml"), format!("{disk}# theirs\n"));
         assert_eq!(project(&h, "app"), before);
+        let err = call(&mut h, "project-set-watch", &["app", "true"]).unwrap();
+        assert!(
+            err.ends_with("changed on disk; reload with C-x C-r"),
+            "{err}"
+        );
+        assert_eq!(project(&h, "app"), before);
         std::fs::write(h.path("projects/app.toml"), &disk).unwrap();
+        call(&mut h, "project-set-watch", &["app", "true"]);
+        assert!(project(&h, "app").watch);
+        assert!(h.disk("projects/app.toml").contains("watch = true # quiet"));
         call(&mut h, "project-remove-root", &["app", &b]);
         call(&mut h, "project-set-default-agent", &["app", ""]);
         let p = project(&h, "app");
@@ -525,6 +550,7 @@ mod tests {
         let b = h.path("b").display().to_string();
         call(&mut h, "project-add-root", &["tmp", &b, "B"]);
         call(&mut h, "project-set-role", &["tmp", &b, "Bee"]);
+        call(&mut h, "project-set-watch", &["tmp", "false"]);
         let err = call(&mut h, "project-open-file", &["tmp"]);
         assert_eq!(
             err.as_deref(),
@@ -536,6 +562,7 @@ mod tests {
         );
         let edited = project(&h, "tmp");
         assert_eq!(edited.roots[0].role, "Bee");
+        assert!(!edited.watch);
         call(&mut h, "project-save", &["tmp"]);
         assert_eq!(
             Project::parse(&h.disk("projects/tmp.toml")).unwrap(),
@@ -551,6 +578,36 @@ mod tests {
     }
 
     #[test]
+    fn watch_prompt_selects_the_current_value_and_rejects_other_text() {
+        let mut h = with(Vec::new());
+        h.core.projects.push(ad_hoc(&h));
+        h.keys("C-x p w tmp RET");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Watch: ");
+        assert_eq!(
+            crate::harness::listed(&mut h),
+            (vec!["true".into(), "false".into()], Some(0))
+        );
+        h.keys("C-n RET");
+        assert!(!project(&h, "tmp").watch);
+        h.keys("M-x project-set-watch RET tmp RET");
+        assert_eq!(
+            crate::harness::listed(&mut h),
+            (vec!["true".into(), "false".into()], Some(1))
+        );
+        h.keys("C-p RET");
+        assert!(project(&h, "tmp").watch);
+        assert_eq!(
+            call(&mut h, "project-set-watch", &["tmp", "yes"]).as_deref(),
+            Some("Watch must be true or false")
+        );
+        assert!(project(&h, "tmp").watch);
+        assert_eq!(
+            call(&mut h, "project-set-watch", &["missing", "false"]).as_deref(),
+            Some("No project named missing")
+        );
+    }
+
+    #[test]
     fn c_x_p_lists_the_project_commands() {
         let mut h = with(Vec::new());
         h.keys("C-x p").advance(crate::bindings::HINT_DELAY);
@@ -561,6 +618,7 @@ mod tests {
             "project-remove-root",
             "project-set-role",
             "project-set-default-agent",
+            "project-set-watch",
             "project-open-file",
             "project-save",
             "project-switch",

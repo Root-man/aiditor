@@ -54,7 +54,7 @@ FrameDisplay {
                         0,
                     ),
                 ),
-                mode_line: "-- a.txt  2:0",
+                mode_line: "-- a.txt  2:0 [unwatched]",
             },
         },
         FrameWindow {
@@ -107,7 +107,7 @@ FrameDisplay {
                         0,
                     ),
                 ),
-                mode_line: "-- a.txt  2:0",
+                mode_line: "-- a.txt  2:0 [unwatched]",
             },
         },
     ],

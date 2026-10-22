@@ -9,6 +9,8 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub name: String,
+    #[serde(default = "watch_default", skip_serializing_if = "is_true")]
+    pub watch: bool,
     /// shortcut: any string is accepted; check it against the agent registry once there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
@@ -19,6 +21,14 @@ pub struct Project {
     pub primary: Root,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<Root>,
+}
+
+fn watch_default() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +56,7 @@ impl Loaded {
         };
         let project = Project {
             name: name.into(),
+            watch: std::env::home_dir().as_deref() != Some(root),
             default_agent: None,
             ignore: Vec::new(),
             primary,
@@ -106,6 +117,15 @@ impl Project {
 /// comments and layout stay.
 pub fn sync(doc: &mut DocumentMut, project: &Project) {
     set(doc.as_table_mut(), "name", &project.name);
+    match doc.get_mut("watch") {
+        Some(Item::Value(old)) if old.as_bool() != Some(project.watch) => {
+            let decor = old.decor().clone();
+            *old = project.watch.into();
+            *old.decor_mut() = decor;
+        }
+        None if !project.watch => doc["watch"] = toml_edit::value(false),
+        _ => {}
+    }
     let agent = project.default_agent.as_deref().unwrap_or_default();
     set(doc.as_table_mut(), "default_agent", agent);
     let primary = (doc.entry("primary").or_insert(toml_edit::table()))
@@ -195,10 +215,45 @@ path = "/r/notes"
     #[test]
     fn minimal_file_round_trips() {
         let p = Project::parse("name = \"x\"\n[primary]\npath = \"/r/x\"").unwrap();
+        assert!(p.watch);
         assert_eq!((p.default_agent.as_ref(), p.roots.len()), (None, 0));
         assert!(p.ignore.is_empty());
         assert_eq!(p.primary.role, "");
         assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
+    }
+
+    #[test]
+    fn watch_round_trips_and_sync_preserves_comments() {
+        for watch in [true, false] {
+            let text =
+                format!("name = \"x\"\nwatch = {watch} # quiet\n[primary]\npath = \"/r/x\"\n");
+            let mut p = Project::parse(&text).unwrap();
+            assert_eq!(p.watch, watch);
+            assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
+            let mut doc: DocumentMut = text.parse().unwrap();
+            sync(&mut doc, &p);
+            assert_eq!(doc.to_string(), text);
+            p.watch = !watch;
+            sync(&mut doc, &p);
+            assert_eq!(
+                doc.to_string(),
+                text.replace(&watch.to_string(), &(!watch).to_string())
+            );
+            assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
+        }
+        let text = "name = \"x\"\n[primary]\npath = \"/r/x\"\n";
+        let mut p = Project::parse(text).unwrap();
+        let mut doc: DocumentMut = text.parse().unwrap();
+        p.watch = false;
+        sync(&mut doc, &p);
+        assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
+    }
+
+    #[test]
+    fn home_ad_hoc_is_unwatched_and_other_roots_are_watched() {
+        let home = std::env::home_dir().unwrap();
+        assert!(!Loaded::ad_hoc("home", &home).project.watch);
+        assert!(Loaded::ad_hoc("other", &home.join("other")).project.watch);
     }
 
     #[test]
@@ -207,6 +262,10 @@ path = "/r/notes"
         for (text, needle) in [
             ("name = ", "parse error"),
             (&format!("name = 1\n{primary}"), "name"),
+            (
+                &format!("name = \"x\"\nwatch = \"false\"\n{primary}"),
+                "watch",
+            ),
             (
                 &format!("name = \"x\"\ndefualt_agent = \"a\"\n{primary}"),
                 "defualt_agent",

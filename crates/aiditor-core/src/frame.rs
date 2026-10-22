@@ -89,6 +89,10 @@ impl Core {
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
     pub fn frame(&mut self) -> display::FrameDisplay {
+        let unwatched = self
+            .projects
+            .iter()
+            .any(|p| p.project.name == self.current_workspace().project && !p.project.watch);
         let (width, height, cell_width) = self.frame_size;
         let cell = (cell_width, self.settings.line_height());
         let frame = display::Rect {
@@ -106,7 +110,10 @@ impl Core {
                 };
                 let cols = (rect.width / cell_width) as usize;
                 let (buffers, settings) = (&self.buffers, &self.settings);
-                let display = window_display(window, buffers, settings, rect.height, cols);
+                let mut display = window_display(window, buffers, settings, rect.height, cols);
+                if unwatched {
+                    display.mode_line.push_str(" [unwatched]");
+                }
                 display::FrameWindow {
                     id,
                     rect,
@@ -284,7 +291,38 @@ mod tests {
         let names: Vec<_> = (h.frame(80., 100.).windows.iter())
             .map(|w| w.display.mode_line.clone())
             .collect();
-        assert_eq!(names, ["-- a.txt  1:0", "** *scratch*<main>  1:1"]);
+        assert_eq!(
+            names,
+            [
+                "-- a.txt  1:0 [unwatched]",
+                "** *scratch*<main>  1:1 [unwatched]"
+            ]
+        );
+    }
+
+    #[test]
+    fn unwatched_status_follows_the_workspace_project_and_watch_setting() {
+        let mut h = Harness::new(&[]);
+        let lines = |h: &mut Harness| {
+            h.frame(800., 600.)
+                .windows
+                .into_iter()
+                .map(|w| w.display.mode_line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
+        h.keys("C-x p w home RET C-p RET");
+        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0"]);
+        h.keys("C-x p w home RET C-n RET M-x");
+        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
+        h.keys("C-g");
+        h.core
+            .projects
+            .push(crate::project::Loaded::ad_hoc("other", &h.path("other")));
+        h.core.new_workspace("other", "other");
+        assert_eq!(lines(&mut h), ["-- *scratch*<other>  1:0"]);
+        h.keys("C-x p p home RET");
+        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
     }
 
     #[test]
