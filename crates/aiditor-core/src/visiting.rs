@@ -77,6 +77,32 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Reverts the current buffer from its file, asking first when it is modified.
+    pub(crate) fn revert_buffer(&mut self, args: Args) -> Result<(), String> {
+        let buffer = self.core.current();
+        let path =
+            (buffer.file.clone()).ok_or("Buffer does not seem to be associated with any file")?;
+        if buffer.modified() {
+            match args.strings.first() {
+                None => {
+                    let command = self.core.commands["revert-buffer"];
+                    let prompt = format!("Revert buffer from file {}? ", path.display());
+                    return self.read_string(command, args, prompt, Some(&["Yes", "No"]));
+                }
+                Some(answer) if answer.eq_ignore_ascii_case("yes") => {}
+                Some(_) => return Ok(()),
+            }
+        }
+        let buffer = self.core.current();
+        self.effects.push(Effect::File(FileOp::Revert {
+            buffer: self.core.window.buffer(),
+            tick: buffer.tick(),
+            path,
+            text: buffer.text().clone(),
+        }));
+        Ok(())
+    }
+
     /// Visits `name`, taken from the current buffer's directory: switches to a buffer visiting
     /// it, or asks the app to read it.
     pub(crate) fn find_file(&mut self, name: &str) -> Result<(), String> {
@@ -181,6 +207,42 @@ impl Core {
             Some(dir) => dir.to_path_buf(),
             None => std::env::current_dir().unwrap_or_default(),
         }
+    }
+
+    /// Applies the file service's answer to a revert of buffer `id` at `tick` as one undo group,
+    /// unless the buffer changed since; errors are echoed.
+    pub(crate) fn on_reverted(
+        &mut self,
+        id: BufferId,
+        tick: u64,
+        result: Result<buffer::Revert, String>,
+    ) {
+        let revert = match result {
+            Ok(revert) => revert,
+            Err(err) => return self.echo(err),
+        };
+        // Edits made since, or a kill, leave the diff nothing to apply to.
+        if self.buffers.get(id).is_none_or(|b| b.tick() != tick) {
+            return;
+        }
+        let point = |core: &Core| match core.window.buffer() == id {
+            true => core.window.point(&core.buffers),
+            false => {
+                let b = core.buffers.get(id).expect("live");
+                b.marker(b.point).unwrap_or(0)
+            }
+        };
+        let before = point(self);
+        let buffer = self.buffers.get_mut(id).expect("live");
+        buffer.undo_boundary(before);
+        buffer
+            .replace(&revert.edits)
+            .expect("the diff is of this text");
+        let after = point(self);
+        let buffer = self.buffers.get_mut(id).expect("live");
+        buffer.undo_boundary(after);
+        (buffer.disk, buffer.crlf, buffer.bom) = (Some(revert.hash), revert.crlf, revert.bom);
+        buffer.set_saved();
     }
 
     /// Visits `path` in a new current buffer, given the file's bytes and their hash, or `None`
@@ -307,6 +369,138 @@ mod tests {
     use crate::harness::on;
     use crate::harness::strings;
     use crate::window::WindowId;
+
+    const LINES: &str = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+
+    /// `a.txt` open with lines `a` to `j`, and point at column 1 of line `f`.
+    fn reverting() -> Harness {
+        let mut h = Harness::new(&[("a.txt", LINES)]);
+        h.open("a.txt");
+        h.core.window.set_point(&mut h.core.buffers, 11).unwrap();
+        h
+    }
+
+    fn revert(h: &mut Harness, disk: &str) {
+        std::fs::write(h.path("a.txt"), disk).unwrap();
+        h.keys("M-x revert-buffer RET");
+    }
+
+    #[test]
+    fn point_stays_on_its_line_after_a_revert_changes_lines_above() {
+        let mut h = reverting();
+        let disk = "a\n1\n2\n3\n4\nd\ne\nf\ng\nh\ni\nj\n";
+        revert(&mut h, disk);
+        assert_eq!(h.text(), disk);
+        assert_eq!(h.core.current().line_col(h.point()), Ok((7, 1)));
+        assert!(!h.core.current().modified());
+        assert_eq!(h.core.minibuffer().map(|m| m.prompt.clone()), None);
+    }
+
+    #[test]
+    fn a_revert_keeps_the_mark_and_other_windows_on_their_lines() {
+        let mut h = reverting();
+        h.core.window.set_mark(&mut h.core.buffers, 14).unwrap();
+        h.keys("C-x 2");
+        let other = *h.core.others.keys().next().unwrap();
+        let w = &h.core.others[&other];
+        w.set_point(&mut h.core.buffers, 16).unwrap();
+        revert(&mut h, &LINES[2..]);
+        assert_eq!(h.core.window.mark(&h.core.buffers), Some(12), "on h");
+        assert_eq!(h.core.others[&other].point(&h.core.buffers), 14, "on i");
+        assert_eq!(h.point(), 9, "still at column 1 of f");
+    }
+
+    #[test]
+    fn point_in_a_changed_line_goes_to_its_replacement() {
+        let mut h = reverting();
+        h.core.window.set_point(&mut h.core.buffers, 5).unwrap();
+        revert(&mut h, &LINES.replace("c\n", "ccc\n"));
+        assert_eq!(h.point(), 4);
+    }
+
+    #[test]
+    fn a_revert_undoes_in_one_step_and_saves_afterwards() {
+        let mut h = reverting();
+        h.keys("x");
+        revert(&mut h, "z\n");
+        h.keys("RET");
+        assert_eq!(h.text(), "z\n");
+        assert!(!h.core.current().modified());
+        h.keys("C-/");
+        assert_eq!(h.text(), LINES.replace("f\n", "fx\n"));
+        h.keys("C-/ C-x C-s");
+        assert_eq!(h.disk("a.txt"), LINES, "the revert took the disk's hash");
+    }
+
+    #[test]
+    fn a_revert_takes_the_file_s_line_ending() {
+        let mut h = reverting();
+        revert(&mut h, &LINES.replace('\n', "\r\n"));
+        assert_eq!(h.text(), LINES);
+        assert!(h.display(5).mode_line.contains("(DOS)"));
+    }
+
+    #[test]
+    fn a_revert_of_edited_text_is_dropped() {
+        let mut h = reverting();
+        std::fs::write(h.path("a.txt"), "z\n").unwrap();
+        let mut ctx = h.ctx();
+        ctx.call("revert-buffer", Args::default());
+        let effects = ctx.effects;
+        h.keys("x");
+        h.run(effects);
+        assert_eq!(h.text(), LINES.replace("f\n", "fx\n"));
+        assert!(h.core.current().modified());
+        // Nor is one for a killed buffer.
+        let mut ctx = h.ctx();
+        ctx.call("revert-buffer", Args::default());
+        let effects = ctx.effects;
+        let id = h.core.window.buffer();
+        h.core.kill_buffer(id);
+        h.run(effects);
+        assert!(h.core.buffers.get(id).is_none());
+    }
+
+    #[test]
+    fn a_read_only_buffer_reverts() {
+        let mut h = reverting();
+        crate::harness::buffer(&mut h).read_only = true;
+        revert(&mut h, "z\n");
+        assert_eq!(h.text(), "z\n");
+        assert!(h.core.current().read_only);
+    }
+
+    #[test]
+    fn reverting_a_modified_buffer_asks() {
+        let mut h = reverting();
+        h.keys("x");
+        revert(&mut h, "z\n");
+        let prompt = format!("Revert buffer from file {}? ", h.path("a.txt").display());
+        assert_eq!(h.core.minibuffer().unwrap().prompt, prompt);
+        assert_eq!(listed(&mut h).0, ["Yes", "No"]);
+        h.keys("No RET");
+        assert!(h.core.current().modified());
+        h.keys("M-x revert-buffer RET y RET");
+        assert_eq!(h.text(), "z\n");
+    }
+
+    #[test]
+    fn revert_buffer_fails_without_a_file_to_take() {
+        let mut h = Harness::new(&[]);
+        h.keys("M-x revert-buffer RET");
+        assert!(h.core.current().name.starts_with("*scratch*"));
+        let no_file = "Buffer does not seem to be associated with any file";
+        assert_eq!(h.core.message(), Some(no_file));
+        let mut h = reverting();
+        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.keys("M-x revert-buffer RET");
+        let gone = format!("File {} no longer exists", h.path("a.txt").display());
+        assert_eq!(h.core.message(), Some(gone.as_str()));
+        revert(&mut h, "a\0");
+        let binary = format!("{}: binary file", h.path("a.txt").display());
+        assert_eq!(h.core.message(), Some(binary.as_str()));
+        assert_eq!(h.text(), LINES);
+    }
 
     #[test]
     fn opens_edits_and_saves_a_file() {

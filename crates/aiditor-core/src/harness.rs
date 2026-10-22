@@ -208,6 +208,19 @@ impl Harness {
                         roots,
                     });
                 }
+                Effect::File(FileOp::Revert {
+                    buffer,
+                    tick,
+                    path,
+                    text,
+                }) => {
+                    let result = crate::buffer::revert(&path, &text, read(&path));
+                    self.send(Msg::Reverted {
+                        buffer,
+                        tick,
+                        result,
+                    });
+                }
                 Effect::File(FileOp::Open(path)) => {
                     let result = read(&path);
                     self.send(Msg::Opened { path, result });

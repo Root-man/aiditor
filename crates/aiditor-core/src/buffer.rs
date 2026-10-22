@@ -521,6 +521,78 @@ impl Buffer {
     pub fn set_saved(&mut self) {
         self.modified = false;
     }
+
+    /// Applies `edits` as `diff` makes them, past read-only. A marker at an edit's end keeps
+    /// the text after it, so one at a line's start stays on that line when lines go in above.
+    pub fn replace(&mut self, edits: &[(Range<usize>, String)]) -> Result<(), Error> {
+        let read_only = std::mem::take(&mut self.read_only);
+        let mut result = Ok(());
+        // Back to front, so each range is still where `diff` found it.
+        for (range, text) in edits.iter().rev() {
+            let after: Vec<MarkerId> = (self.markers.iter())
+                .filter(|(_, (pos, _))| *pos == range.end)
+                .map(|(&id, _)| id)
+                .collect();
+            result = self
+                .delete(range.clone())
+                .and_then(|()| self.insert(range.start, text));
+            if result.is_err() {
+                break;
+            }
+            let end = range.start + text.chars().count();
+            for id in after {
+                self.markers.get_mut(&id).expect("live").0 = end;
+            }
+        }
+        self.read_only = read_only;
+        result
+    }
+}
+
+/// What turns a buffer's text into its file's: the edits, and the file's line ending, BOM and hash.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Revert {
+    pub edits: Vec<(Range<usize>, String)>,
+    pub crlf: bool,
+    pub bom: bool,
+    pub hash: u64,
+}
+
+/// What turns `old` into the file at `path`, given its read: its bytes and hash, `None` when
+/// there is no file, or why it couldn't be read. Diffing is slow, so services call this.
+pub fn revert(
+    path: &Path,
+    old: &Rope,
+    file: Result<Option<(Vec<u8>, u64)>, String>,
+) -> Result<Revert, String> {
+    let (bytes, hash) = file?.ok_or_else(|| format!("File {} no longer exists", path.display()))?;
+    let (new, crlf, bom) =
+        decode(&bytes).map_err(|reason| format!("{}: {reason}", path.display()))?;
+    let edits = diff(&old.to_string(), &new);
+    Ok(Revert {
+        edits,
+        crlf,
+        bom,
+        hash,
+    })
+}
+
+/// The changed lines between `old` and `new`, in order: each old char range with its new text.
+// shortcut: a marker inside a changed line goes to the hunk's start; diff hunks by chars if that grates.
+pub fn diff(old: &str, new: &str) -> Vec<(Range<usize>, String)> {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let (olds, news) = (diff.old_slices(), diff.new_slices());
+    let mut at = 0;
+    let mut edits = Vec::new();
+    for op in diff.ops() {
+        let (tag, old_lines, new_lines) = op.as_tag_tuple();
+        let len: usize = olds[old_lines].iter().map(|s| s.chars().count()).sum();
+        if tag != similar::DiffTag::Equal {
+            edits.push((at..at + len, news[new_lines].concat()));
+        }
+        at += len;
+    }
+    edits
 }
 
 /// The text as the file's bytes: its BOM and line ending, as loaded.
@@ -924,5 +996,72 @@ mod tests {
         let b = buffers.get(id).unwrap();
         assert_eq!(b.len_lines(), 2);
         assert_eq!(b.line_col(7), Ok((1, 0)));
+    }
+
+    /// `old` with `diff`'s edits to `new` applied, and where a marker at `at` ends up.
+    fn replaced(old: &str, new: &str, at: usize) -> (String, usize) {
+        let (mut buffers, id) = with_text(old);
+        let b = buffers.get_mut(id).unwrap();
+        let m = b.add_marker(at, InsertionType::Stay).unwrap();
+        b.replace(&diff(old, new)).unwrap();
+        (b.text().to_string(), b.marker(m).unwrap())
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_diff_turns_the_old_text_into_the_new(
+            old in "[ab\\n\\ré]{0,12}",
+            new in "[ab\\n\\ré]{0,12}",
+        ) {
+            proptest::prop_assert_eq!(replaced(&old, &new, 0).0, new);
+        }
+    }
+
+    #[test]
+    fn markers_on_unchanged_lines_keep_their_line_and_column() {
+        let old = "a\nb\nc\nd\n";
+        // Lines inserted right above "c", and "a" replaced: "c" at column 0 stays on "c".
+        assert_eq!(
+            replaced(old, "A\nb\nx\ny\nc\nd\n", 4),
+            ("A\nb\nx\ny\nc\nd\n".into(), 8)
+        );
+        // A marker inside a changed line goes to the start of its replacement.
+        assert_eq!(replaced(old, "a\nB\nc\nd\n", 3).1, 2);
+        // The end of the text stays the end.
+        assert_eq!(replaced("a\nb", "a\nbc", 3).1, 4);
+    }
+
+    #[test]
+    fn replace_is_one_undoable_edit_past_read_only() {
+        let (mut buffers, id) = with_text("a\nb\n");
+        let b = buffers.get_mut(id).unwrap();
+        b.read_only = true;
+        b.undo_boundary(0);
+        b.replace(&diff("a\nb\n", "x\nb\ny\n")).unwrap();
+        assert!(b.read_only);
+        b.undo_boundary(0);
+        b.read_only = false;
+        b.undo();
+        assert_eq!(b.text().to_string(), "a\nb\n");
+    }
+
+    #[test]
+    fn revert_decodes_the_file_or_says_why_not() {
+        let path = Path::new("/t/a.txt");
+        let old = Rope::from_str("a\n");
+        let r = revert(
+            path,
+            &old,
+            Ok(Some((b"\xEF\xBB\xBFa\r\nb\r\n".to_vec(), 7))),
+        )
+        .unwrap();
+        assert_eq!(
+            (r.edits, r.crlf, r.bom, r.hash),
+            (vec![(2..2, "b\n".into())], true, true, 7)
+        );
+        let err = |file| revert(path, &old, file).unwrap_err();
+        assert_eq!(err(Ok(None)), "File /t/a.txt no longer exists");
+        assert_eq!(err(Ok(Some((b"a\0".to_vec(), 0)))), "/t/a.txt: binary file");
+        assert_eq!(err(Err("/t/a.txt: denied".into())), "/t/a.txt: denied");
     }
 }

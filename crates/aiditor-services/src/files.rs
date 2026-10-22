@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use aiditor_core::buffer::{encode, hash};
+use aiditor_core::buffer::{encode, hash, revert};
 use aiditor_core::{FileOp, Msg};
 use ignore::WalkBuilder;
 
@@ -31,6 +31,19 @@ pub fn run(op: FileOp) -> Msg {
                 buffer,
                 tick,
                 result,
+            }
+        }
+        FileOp::Revert {
+            buffer,
+            tick,
+            path,
+            text,
+        } => {
+            let file = read(&path).map_err(|err| format!("{}: {err}", path.display()));
+            Msg::Reverted {
+                buffer,
+                tick,
+                result: revert(&path, &text, file),
             }
         }
         FileOp::ListDir(dir) => {
@@ -181,6 +194,31 @@ mod tests {
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
+    }
+
+    #[test]
+    fn run_diffs_a_revert_against_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        fs::write(&path, "a\r\nb\r\n").unwrap();
+        let op = |path: &Path| FileOp::Revert {
+            buffer: aiditor_core::buffer::Buffers::default().create("f"),
+            tick: 3,
+            path: path.to_path_buf(),
+            text: "a\n".into(),
+        };
+        let Msg::Reverted { tick, result, .. } = run(op(&path)) else {
+            panic!("not reverted");
+        };
+        let revert = result.unwrap();
+        assert_eq!(
+            (tick, revert.edits, revert.crlf),
+            (3, vec![(2..2, "b\n".into())], true)
+        );
+        let Msg::Reverted { result, .. } = run(op(&dir.path().join("gone"))) else {
+            panic!("not reverted");
+        };
+        assert!(result.unwrap_err().ends_with("gone no longer exists"));
     }
 
     #[test]

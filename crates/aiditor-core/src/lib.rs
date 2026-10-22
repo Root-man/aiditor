@@ -91,6 +91,13 @@ pub enum Msg {
         tick: u64,
         result: Result<u64, String>,
     },
+    /// The file service's answer to `FileOp::Revert`: what turns the buffer's text at `tick` into
+    /// the file's, or why it can't.
+    Reverted {
+        buffer: BufferId,
+        tick: u64,
+        result: Result<buffer::Revert, String>,
+    },
     /// The file service's answer to `FileOp::ListDir`: the directory's entries, or why it
     /// couldn't be listed.
     Listed {
@@ -213,6 +220,14 @@ pub enum FileOp {
         crlf: bool,
         bom: bool,
         hash: Option<u64>,
+    },
+    /// Read the file at `path`, diff `text`, `buffer`'s text at `tick`, against it with
+    /// `buffer::revert` and send `Msg::Reverted`.
+    Revert {
+        buffer: BufferId,
+        tick: u64,
+        path: PathBuf,
+        text: Rope,
     },
     /// List the directory and send `Msg::Listed`.
     ListDir(PathBuf),
@@ -382,6 +397,11 @@ impl Ctx<'_> {
                 tick,
                 result,
             } => self.on_saved(buffer, tick, result),
+            Msg::Reverted {
+                buffer,
+                tick,
+                result,
+            } => self.core.on_reverted(buffer, tick, result),
             Msg::Listed { dir, result } => self.on_listed(dir, result),
             Msg::Opened { path, result } => {
                 match result {
