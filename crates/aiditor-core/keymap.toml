@@ -86,6 +86,8 @@
 "C-x k" = "kill-buffer"
 "C-k" = "kill-line"
 "C-s" = "swiper"
+"M-," = "xref-go-back"
+"C-M-," = "xref-go-forward"
 "C-w" = "kill-region"
 "M-w" = "kill-ring-save"
 "C-y" = "yank"

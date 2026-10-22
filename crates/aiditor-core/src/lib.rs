@@ -15,6 +15,7 @@ mod frame;
 mod grep;
 #[cfg(test)]
 mod harness;
+mod jump;
 pub mod key;
 pub mod keymap;
 mod kill_ring;

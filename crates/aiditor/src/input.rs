@@ -207,6 +207,8 @@ mod tests {
             ("alt-backspace", Some("M-DEL")),
             ("enter", Some("RET")),
             ("alt-enter", Some("M-RET")),
+            ("alt-,", Some("M-,")),
+            ("ctrl-alt-,", Some("C-M-,")),
             ("left", Some("<left>")),
             ("f1", None),
             ("fn-a", None),
