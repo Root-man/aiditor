@@ -165,6 +165,17 @@ impl Window {
         self.top
     }
 
+    /// Moves point to `char_idx`, centering its line when it is not among the rows shown.
+    pub fn jump(&mut self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
+        self.set_point(buffers, char_idx)?;
+        let buffer = buffers.get(self.buffer).expect("window buffer is live");
+        let (line, _) = buffer.line_col(char_idx)?;
+        if !(self.top..self.top + self.rows).contains(&line) {
+            self.top = line.saturating_sub(self.rows / 2);
+        }
+        Ok(())
+    }
+
     /// Shows from `line` on; the next `scroll` moves it if point's line is not shown.
     pub fn set_top(&mut self, line: usize) {
         self.top = line;

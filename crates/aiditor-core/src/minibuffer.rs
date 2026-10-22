@@ -45,8 +45,8 @@ pub(crate) struct Minibuffer {
     history: bool,
     /// The window it was opened from, as it was, while a preview stands in for it.
     saved: Option<Window>,
-    /// The candidate last previewed; `None` before any and with no selection.
-    previewed: Option<String>,
+    /// What was last previewed; `None` before any and with no selection.
+    previewed: Option<Preview>,
     /// The file whose read for a preview is awaited.
     reading: Option<PathBuf>,
     /// The hidden buffer a previewed file was read into, killed on closing.
@@ -69,6 +69,18 @@ struct Completion {
     listed: bool,
     /// The directory a relative `dir` is listed from, as `find-file` visits from it.
     base: PathBuf,
+    /// The command's own matches, in place of the matcher's.
+    filtered: Option<Filtered>,
+}
+
+/// A command's candidates matched by its spec's `filter`.
+struct Filtered {
+    items: Vec<String>,
+    notes: Vec<String>,
+    /// The indices of the matching items, in the filter's order.
+    matched: Vec<usize>,
+    /// The item last selected, kept while nothing matches.
+    anchor: usize,
 }
 
 /// The open prompt, each prompt's history and the completion matcher.
@@ -82,6 +94,8 @@ pub(crate) struct Prompts {
     pub(crate) matcher: Option<Nucleo<(String, String)>>,
     /// The timer that polls the matcher again while it is still matching.
     repoll: Option<TimerId>,
+    /// The text of the last minibuffer closed, as ivy's `ivy-text` outlives the read.
+    pub(crate) last_text: String,
 }
 
 impl Prompts {
@@ -95,15 +109,28 @@ impl Prompts {
 
     /// How many candidates match, 0 when not completing.
     fn matches(&self) -> usize {
-        match (&self.minibuffer, &self.matcher) {
+        let completion = self
+            .minibuffer
+            .as_ref()
+            .and_then(|mb| mb.completion.as_ref());
+        match (completion, &self.matcher) {
             (
-                Some(Minibuffer {
-                    completion: Some(_),
-                    ..
+                Some(Completion {
+                    filtered: Some(f), ..
                 }),
-                Some(m),
-            ) => m.snapshot().matched_item_count() as usize,
+                _,
+            ) => f.matched.len(),
+            (Some(_), Some(m)) => m.snapshot().matched_item_count() as usize,
             _ => 0,
+        }
+    }
+
+    /// Adds `text` to the newest end of `prompt`'s history, unless empty or the newest already.
+    fn remember(&mut self, prompt: &str, text: String) {
+        let history = self.history.entry(prompt.to_string()).or_default();
+        if !text.is_empty() && history.first() != Some(&text) {
+            history.insert(0, text);
+            history.truncate(HISTORY_MAX);
         }
     }
 
@@ -119,6 +146,10 @@ impl Prompts {
     /// The selected candidate, if the minibuffer is completing and anything matches.
     pub(crate) fn selected_candidate(&self) -> Option<String> {
         let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
+        if let Some(f) = &completion.filtered {
+            let last = f.matched.len().checked_sub(1)?;
+            return Some(f.items[f.matched[completion.selected.min(last)]].clone());
+        }
         let snapshot = self.matcher.as_ref()?.snapshot();
         let last = snapshot.matched_item_count().checked_sub(1)?;
         let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
@@ -192,14 +223,33 @@ impl Ctx<'_> {
         let base = core.directory();
         let files = command.spec.files == Some(args.strings.len());
         let start = files.then(|| base.join("").to_string_lossy().into_owned());
-        let candidates = match choices {
+        let mut candidates = match choices {
             Some(choices) => Some(choices.iter().map(|c| c.to_string()).collect()),
             // No candidates is a plain prompt, so one command can mix completing and free text.
             None => (command.spec.completion)
                 .map(|candidates| candidates(core, &args))
                 .filter(|c: &Vec<String>| !c.is_empty()),
         };
-        let completion = (candidates.is_some() || start.is_some()).then(|| {
+        let note = |core: &Core, c: &String| {
+            (command.spec.annotation.and_then(|f| f(core, c))).unwrap_or_default()
+        };
+        let filtered = match (command.spec.filter, choices) {
+            // A filtering prompt lists even no candidates, so it still requires a match.
+            (Some(filter), None) => {
+                let items = candidates.take().unwrap_or_default();
+                Some(Filtered {
+                    notes: items.iter().map(|c| note(core, c)).collect(),
+                    matched: filter("", &items),
+                    items,
+                    anchor: 0,
+                })
+            }
+            _ => None,
+        };
+        let preselect = command.spec.preselect.map_or(0, |f| f(core, &args));
+        // A filtering command took its candidates; the rest go to the matcher.
+        let matching = candidates.is_some() || start.is_some();
+        if matching {
             // One matcher for the core, as each one starts a thread pool.
             let matcher = core.prompts.matcher.get_or_insert_with(|| {
                 Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1)
@@ -208,12 +258,12 @@ impl Ctx<'_> {
             (matcher.pattern).reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
             let injector = matcher.injector();
             for c in candidates.into_iter().flatten() {
-                let note = command.spec.annotation.and_then(|f| f(core, &c));
-                injector.push((c, note.unwrap_or_default()), |(c, _), cols| {
-                    cols[0] = c.as_str().into()
-                });
+                let note = note(core, &c);
+                injector.push((c, note), |(c, _), cols| cols[0] = c.as_str().into());
             }
-            Completion {
+        }
+        let completion = (matching || filtered.is_some()).then(|| {
+            let mut completion = Completion {
                 pattern: String::new(),
                 selected: 0,
                 top: 0,
@@ -222,7 +272,10 @@ impl Ctx<'_> {
                 dir: files.then(String::new),
                 listed: false,
                 base,
-            }
+                filtered,
+            };
+            completion.select(preselect);
+            completion
         });
         // A fresh buffer per prompt, so undo and markers never carry over.
         let id = core.buffers.create(" *Minibuf-1*");
@@ -231,6 +284,8 @@ impl Ctx<'_> {
         if completion.is_some() {
             buffer.minor_modes.push("minibuffer-completion");
         }
+        // So a keymap named after the command binds keys at its prompts, as ivy's `:keymap`.
+        buffer.minor_modes.push(command.name);
         let window = Window::new(&mut core.buffers, id);
         core.others.insert(MINIBUFFER, window);
         core.prompts.minibuffer = Some(Minibuffer {
@@ -269,6 +324,10 @@ impl Ctx<'_> {
             .minibuffer
             .as_ref()
             .and_then(|mb| mb.completion.as_ref());
+        let filtered = completion.is_some_and(|c| c.filtered.is_some());
+        if filtered && selected.is_none() {
+            return Err("Match required".into());
+        }
         if completion.is_some_and(|c| c.dir.is_some())
             && !directories
             && let Some(dir) = selected.as_ref().filter(|s| s.ends_with('/'))
@@ -277,12 +336,9 @@ impl Ctx<'_> {
         }
         let text = selected.unwrap_or_else(|| self.core.text());
         let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
-        if mb.history {
-            let history = self.core.prompts.history.entry(mb.prompt).or_default();
-            if !text.is_empty() && history.first() != Some(&text) {
-                history.insert(0, text.clone());
-                history.truncate(HISTORY_MAX);
-            }
+        // A filtering prompt's typed text was remembered on closing.
+        if mb.history && !filtered {
+            self.core.prompts.remember(&mb.prompt, text.clone());
         }
         let mut args = mb.args;
         args.strings.push(text);
@@ -365,11 +421,27 @@ impl Core {
             return;
         }
         let text = self.text();
-        let Some(completion) =
-            (self.prompts.minibuffer.as_mut()).and_then(|mb| mb.completion.as_mut())
-        else {
+        let Some(mb) = self.prompts.minibuffer.as_mut() else {
             return;
         };
+        let Some(completion) = mb.completion.as_mut() else {
+            return;
+        };
+        if let Some(f) = &mut completion.filtered {
+            if completion.pattern != text {
+                if let Some(last) = f.matched.len().checked_sub(1) {
+                    f.anchor = f.matched[completion.selected.min(last)];
+                }
+                let filter = self.commands[mb.command].spec.filter;
+                f.matched = filter.expect("filtered by the spec")(&text, &f.items);
+                // ivy's swiper rule: the selected item if it still matches, else the next one.
+                let next = f.matched.iter().position(|&i| i >= f.anchor);
+                let next = next.unwrap_or(f.matched.len().saturating_sub(1));
+                completion.select(next);
+                completion.pattern = text;
+            }
+            return;
+        }
         let matcher = self
             .prompts
             .matcher
@@ -440,13 +512,30 @@ impl Core {
         let prompt = mb.prompt.to_string();
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
         let (mut count, mut shown) = (String::new(), 0);
-        if let (Some(completion), Some(matcher)) = (&mut mb.completion, &mut self.prompts.matcher) {
-            matcher.tick(0);
-            let snapshot = matcher.snapshot();
-            let matched = snapshot.matched_item_count() as usize;
-            let rows = completion.top.min(matched)..(completion.top + COMPLETION_ROWS).min(matched);
-            let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
-            (candidates, annotations) = items.map(|item| item.data.clone()).unzip();
+        if let Some(completion) = &mut mb.completion {
+            let range = |matched: usize| {
+                completion.top.min(matched)..(completion.top + COMPLETION_ROWS).min(matched)
+            };
+            let (matched, rows) = match (&completion.filtered, self.prompts.matcher.as_mut()) {
+                (Some(f), _) => {
+                    let rows = range(f.matched.len());
+                    let items = f.matched[rows.clone()].iter();
+                    (candidates, annotations) = items
+                        .map(|&i| (f.items[i].clone(), f.notes[i].clone()))
+                        .unzip();
+                    (f.matched.len(), rows)
+                }
+                (None, Some(matcher)) => {
+                    matcher.tick(0);
+                    let snapshot = matcher.snapshot();
+                    let matched = snapshot.matched_item_count() as usize;
+                    let rows = range(matched);
+                    let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
+                    (candidates, annotations) = items.map(|item| item.data.clone()).unzip();
+                    (matched, rows)
+                }
+                (None, None) => (0, 0..0),
+            };
             let number = (matched > 0).then(|| completion.selected.min(matched - 1));
             selected = number.map(|n| n - rows.start);
             count = format!("{}/{matched} ", number.map_or(0, |n| n + 1));
@@ -487,18 +576,19 @@ impl Core {
         else {
             return;
         };
-        let candidate = self.prompts.selected_candidate();
-        if candidate == mb.previewed {
+        // Compared by value, as a position also follows the text.
+        let shown = (self.prompts.selected_candidate()).and_then(|c| preview(self, &c));
+        if shown == mb.previewed {
             return;
         }
-        let id = match candidate.as_deref().and_then(|c| preview(self, c)) {
+        let id = match shown.clone() {
             Some(Preview::Buffer(id)) => Some(id),
             // The peek buffer visits its file too, so this finds it once read.
             Some(Preview::File(path)) => match self.buffers.visiting(&path) {
                 Some(id) => Some(id),
                 None => {
                     let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-                    mb.previewed = candidate;
+                    mb.previewed = shown;
                     if mb.reading.as_ref() != Some(&path) {
                         mb.reading = Some(path.clone());
                         effects.push(Effect::File(FileOp::Preview(path)));
@@ -506,11 +596,20 @@ impl Core {
                     return;
                 }
             },
+            Some(Preview::Point(p)) => {
+                self.preview_point(p);
+                self.prompts
+                    .minibuffer
+                    .as_mut()
+                    .expect("checked above")
+                    .previewed = shown;
+                return;
+            }
             None => None,
         };
         self.unpreview();
         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-        mb.previewed = candidate;
+        mb.previewed = shown;
         let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
         if let Some(id) = id.filter(|&id| id != from.buffer()) {
             // Swapped out whole, so its point, mark, ring and scroll stay as markers until restored.
@@ -567,6 +666,35 @@ impl Core {
         }
     }
 
+    /// Shows point at `p` in a copy of the window the minibuffer was opened from. A copy already
+    /// standing in on the same buffer keeps its scroll, as swiper keeps its window start.
+    fn preview_point(&mut self, p: usize) {
+        let mb = self.prompts.minibuffer.as_ref().expect("previewing");
+        let from = &self.others[&mb.from];
+        if mb
+            .saved
+            .as_ref()
+            .is_none_or(|saved| saved.buffer() != from.buffer())
+        {
+            self.unpreview();
+            let mb = self.prompts.minibuffer.as_mut().expect("previewing");
+            let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+            let copy = from.split(&mut self.buffers);
+            mb.saved = Some(std::mem::replace(from, copy));
+        }
+        let mb = self.prompts.minibuffer.as_ref().expect("previewing");
+        let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+        if let Err(err) = from.jump(&mut self.buffers, p) {
+            tracing::debug!(%err, "preview outside the buffer");
+        }
+    }
+
+    /// The window the open minibuffer was opened from, as it was before any preview.
+    pub(crate) fn origin(&self) -> Option<&Window> {
+        let mb = self.prompts.minibuffer.as_ref()?;
+        mb.saved.as_ref().or_else(|| self.others.get(&mb.from))
+    }
+
     /// Puts back the window a preview stands in for.
     fn unpreview(&mut self) {
         let Some(mb) = self.prompts.minibuffer.as_mut() else {
@@ -588,6 +716,16 @@ impl Core {
         }
         self.select(mb.from);
         let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
+        let buffer = self
+            .buffers
+            .get(window.buffer())
+            .expect("minibuffer buffer is live");
+        let text = buffer.text().to_string();
+        // A filtering prompt remembers what was typed however it closes, as swiper does.
+        if mb.history && mb.completion.as_ref().is_some_and(|c| c.filtered.is_some()) {
+            self.prompts.remember(&mb.prompt, text.clone());
+        }
+        self.prompts.last_text = text;
         _ = self.buffers.kill(window.buffer());
         Some(mb)
     }
