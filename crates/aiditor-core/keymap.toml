@@ -84,6 +84,7 @@
 "C-x 4 b" = "switch-to-buffer-other-window"
 "C-x k" = "kill-buffer"
 "C-k" = "kill-line"
+"C-s" = "swiper"
 "C-w" = "kill-region"
 "M-w" = "kill-ring-save"
 "C-y" = "yank"
@@ -101,6 +102,10 @@
 "C-g" = "abort-minibuffers"
 "M-p" = "previous-history-element"
 "M-n" = "next-history-element"
+
+# Each minibuffer has its command's name as a minor mode.
+[swiper]
+"C-s" = "swiper-C-s"
 
 # A minor mode of a minibuffer that completes over candidates.
 [minibuffer-completion]

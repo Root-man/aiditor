@@ -8,6 +8,9 @@ use crate::{Core, Ctx};
 
 pub type Handler = fn(&mut Ctx, Args) -> Result<(), String>;
 
+/// Given the text and every candidate, the indices of those that match, in the order to list them.
+pub type Filter = fn(&str, &[String]) -> Vec<usize>;
+
 #[derive(Clone, Copy)]
 pub struct Command {
     pub name: &'static str,
@@ -37,6 +40,10 @@ pub struct ArgSpec {
     pub annotation: Option<fn(&Core, &str) -> Option<String>>,
     /// What to show for the selected candidate in the window the prompt was opened from.
     pub preview: Option<fn(&Core, &str) -> Option<Preview>>,
+    /// Matches the candidates itself in place of the fuzzy matcher.
+    pub filter: Option<Filter>,
+    /// The index of the candidate selected when the list opens, ivy's `:preselect`.
+    pub preselect: Option<fn(&Core, &Args) -> usize>,
 }
 
 /// What a preview shows for a candidate.
@@ -45,6 +52,8 @@ pub enum Preview {
     Buffer(BufferId),
     /// A file, shown in the buffer visiting it, else read into a preview buffer.
     File(PathBuf),
+    /// A char position in the buffer of the window the minibuffer was opened from.
+    Point(usize),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

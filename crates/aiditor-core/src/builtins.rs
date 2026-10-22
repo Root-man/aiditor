@@ -571,6 +571,26 @@ pub(crate) fn builtins() -> Vec<Command> {
             },
         },
         Command {
+            name: "swiper",
+            spec: ArgSpec {
+                prompts: &["Swiper: "],
+                completion: Some(crate::swiper::candidates),
+                filter: Some(crate::swiper::filter),
+                preselect: Some(crate::swiper::preselect),
+                preview: Some(crate::swiper::preview),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.swiper(&args.strings[0]),
+        },
+        Command {
+            name: "swiper-C-s",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| match ctx.core.text().is_empty() {
+                true => ctx.history_element(1),
+                false => ctx.next_completion(args.count()),
+            },
+        },
+        Command {
             name: "previous-history-element",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.history_element(args.count()),

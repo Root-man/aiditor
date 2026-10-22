@@ -385,8 +385,8 @@ mod tests {
         h.open("a.txt");
         h.keys("x C-x C-g");
         assert_eq!(h.core.message(), Some("Quit"));
-        h.keys("C-s");
-        assert_eq!(h.core.message(), Some("C-s is undefined"));
+        h.keys("C-r");
+        assert_eq!(h.core.message(), Some("C-r is undefined"));
         assert_eq!(h.disk("a.txt"), "");
         h.keys("C-g");
         assert_eq!(h.core.message(), Some("Quit"));

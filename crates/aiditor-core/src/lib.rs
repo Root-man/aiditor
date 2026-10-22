@@ -24,6 +24,7 @@ mod prefix;
 pub mod project;
 mod project_commands;
 pub mod settings;
+mod swiper;
 pub mod timer;
 mod visiting;
 pub mod window;
