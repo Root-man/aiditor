@@ -65,7 +65,7 @@ When a project is indexed again before an earlier walk is done, the earlier walk
 - **THEN** the index holds the second walk's files and nothing is echoed for the first
 
 ### Requirement: Creates and deletes refresh the index
-When the watcher reports a path under a root of an indexed project that exists but is not in the index, or that is gone while the index holds it or files under it, the project SHALL be walked again without anything echoed, and its index replaced by the walk's answer as with `project-index`. A reported path that the index already holds and that still exists (a write) SHALL NOT start a walk, and a file the index lacks SHALL start a walk only the first time it is reported, so writes to a file the walk ignores start none. When the watcher reports lost events, every indexed project SHALL be walked again the same way.
+When the watcher reports a path under a root of an indexed project with `watch = true` that exists but is not in the index, or that is gone while the index holds it or files under it, the project SHALL be walked again without anything echoed, and its index replaced by the walk's answer as with `project-index`. A reported path that the index already holds and that still exists (a write) SHALL NOT start a walk, and a file the index lacks SHALL start a walk only the first time it is reported, so writes to a file the walk ignores start none. When the watcher reports lost events, every indexed project with `watch = true` SHALL be walked again the same way.
 
 #### Scenario: A created file
 - **WHEN** a file is created under the root of an indexed project and the watcher reports it
@@ -85,7 +85,13 @@ When the watcher reports a path under a root of an indexed project that exists b
 
 #### Scenario: Lost events
 - **WHEN** the watcher reports that events were lost
-- **THEN** every indexed project is walked again without anything echoed
+- **THEN** every indexed project with watching enabled is walked again without anything echoed
+
+
+#### Scenario: Unwatched project refreshes on demand
+- **GIVEN** an indexed project with `watch = false`
+- **WHEN** a file is created, visited-file or shared-root reports arrive, or events are lost
+- **THEN** the index stays at its previous snapshot until explicit indexing or settings reload refreshes it
 
 ### Requirement: A project reload re-walks the indexes
 When `C-x C-r` reloads the project files, every project that has an index and is still loaded SHALL be walked again without echoing, so the index follows roots and ignore patterns edited by hand.

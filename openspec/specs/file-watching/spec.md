@@ -17,7 +17,7 @@ The watcher SHALL report the paths that may have changed, collected until no new
 - **THEN** a report naming the file arrives for the save and another for the later write
 
 ### Requirement: Project roots are watched
-Every root of every project bound to a live workspace SHALL be watched, except the launch `$HOME` project's. A root stops being watched once no live workspace's project has it. Changes under directories the file index leaves out SHALL NOT be reported, nor changes to existing files it leaves out that no buffer visits. On macOS each root SHALL get one recursive watch. On Linux each directory the index's walk keeps SHALL get its own non-recursive watch, ignored directories getting none; a directory created later SHALL get a watch unless ignored, and the files already in it SHALL be reported.
+Every root of every project bound to a live workspace SHALL be watched when its `watch` setting is true; roots of a project with `watch = false` SHALL contribute no root watches. A root stops being watched once no live workspace's project has it. Changes under directories the file index leaves out SHALL NOT be reported, nor changes to existing files it leaves out that no buffer visits. On macOS each root SHALL get one recursive watch. On Linux each directory the index's walk keeps SHALL get its own non-recursive watch, ignored directories getting none; a directory created later SHALL get a watch unless ignored, and the files already in it SHALL be reported.
 
 #### Scenario: A file created in a project
 - **WHEN** a file is created under a root of the current workspace's project
@@ -34,6 +34,12 @@ Every root of every project bound to a live workspace SHALL be watched, except t
 #### Scenario: A new directory
 - **WHEN** a directory holding a file is moved into a watched root, and a file in it is written later
 - **THEN** reports name the moved-in file and, later, the written one
+
+
+#### Scenario: Unwatched project with an open file
+- **GIVEN** a project with `watch = false` and a clean buffer visiting one of its files
+- **WHEN** another program rewrites that file
+- **THEN** a parent-directory watch reports it and the buffer auto-reverts
 
 ### Requirement: Visited files are watched through their directories
 A file that a buffer visits, in any workspace, and that no root watch covers (outside the watched roots, under an ignored directory, or in an unwatched project) SHALL get a non-recursive watch on its parent directory. The watch SHALL be shared by every buffer visiting a file there and SHALL be dropped once no buffer visits a file in that directory. Files are always watched through their directory, never on their own.
