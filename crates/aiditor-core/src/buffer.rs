@@ -207,8 +207,8 @@ impl Buffers {
     }
 
     /// Every buffer, in any workspace.
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Buffer> {
-        self.map.values_mut()
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (BufferId, &mut Buffer)> {
+        self.map.iter_mut().map(|(&id, b)| (id, b))
     }
 
     pub fn kill(&mut self, id: BufferId) -> Result<Buffer, Error> {

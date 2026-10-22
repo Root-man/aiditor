@@ -33,23 +33,32 @@ impl Core {
             effects.push(Effect::Watch(set));
         }
     }
+}
 
+impl Ctx<'_> {
     /// Takes the file service's answer to `FileOp::Check`: a gone file puts every buffer
-    /// visiting it in the deleted state, and a present one takes them out of it.
+    /// visiting it in the deleted state, and a present one takes them out of it and reverts
+    /// the unmodified ones whose hash differs. An equal hash is the buffer's own save; a
+    /// modified buffer keeps its hash, so its save is still refused.
     pub(crate) fn on_checked(&mut self, files: Vec<(PathBuf, Option<u64>)>) {
         for (path, hash) in files {
-            let visiting = self.buffers.iter_mut();
-            for buffer in visiting.filter(|b| b.file.as_ref() == Some(&path)) {
+            let visiting = self.core.buffers.iter_mut();
+            for (id, buffer) in visiting.filter(|(_, b)| b.file.as_ref() == Some(&path)) {
                 buffer.deleted = hash.is_none();
                 if buffer.deleted {
                     buffer.disk = None;
+                } else if buffer.disk != hash && !buffer.modified() {
+                    self.effects.push(Effect::File(FileOp::Revert {
+                        buffer: id,
+                        tick: buffer.tick(),
+                        path: path.clone(),
+                        text: buffer.text().clone(),
+                    }));
                 }
             }
         }
     }
-}
 
-impl Ctx<'_> {
     /// Checks the files visited at or under a reported path, every one on a rescan, and
     /// re-walks the indexes a create or delete made stale.
     pub(crate) fn on_files_changed(&mut self, paths: Vec<(PathBuf, Disk)>, rescan: bool) {
@@ -100,9 +109,10 @@ fn stale(index: &mut FileIndex, paths: &[(PathBuf, Disk)]) -> bool {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::buffer::hash;
     use crate::harness::{Harness, name};
     use crate::project::{Loaded, Project, Root};
-    use crate::{Disk, Msg};
+    use crate::{Disk, Effect, FileOp, Msg};
 
     /// Reports `names` in the temp dir as the watcher would, each as it is on disk now.
     fn report(h: &mut Harness, names: &[&str]) {
@@ -138,10 +148,96 @@ mod tests {
         assert!(!buffer.modified() && buffer.disk.is_none());
         std::fs::write(h.path("a.txt"), "back\n").unwrap();
         report(&mut h, &["a.txt"]);
+        // A clean buffer reverts to the file that came back, taking its hash.
         assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
-        // Its hash is not taken: the file isn't the buffer's text, so a save is refused (#81 reverts).
+        assert_eq!(h.text(), "back\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "back\n");
+        assert_eq!(h.disk("a.txt"), "xback\n");
+    }
+
+    #[test]
+    fn a_save_in_one_workspace_reverts_the_other_workspaces_buffer() {
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.open("a.txt");
+        let main = h.core.window.buffer();
+        h.core.new_workspace("w", "home");
+        h.open("a.txt");
+        h.keys("x C-x C-s");
+        assert_eq!(h.disk("a.txt"), "xa\n");
+        // The check the watcher's report of that save starts, answered by hand to see who reverts.
+        let checked = vec![(h.path("a.txt"), Some(hash(b"xa\n")))];
+        let effects = h.core.handle(h.now, Msg::Checked(checked));
+        let reverted: Vec<_> = (effects.iter())
+            .filter_map(|e| match e {
+                Effect::File(FileOp::Revert { buffer, .. }) => Some(*buffer),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reverted, [main], "the saving buffer is left alone");
+        h.run(effects);
+        let buffer = h.core.buffers.get(main).unwrap();
+        assert_eq!(
+            (buffer.text().to_string(), buffer.modified()),
+            ("xa\n".into(), false)
+        );
+        // Through the watcher's report too.
+        std::fs::write(h.path("a.txt"), "xay\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        let buffer = h.core.buffers.get(main).unwrap();
+        assert_eq!(buffer.text().to_string(), "xay\n");
+        assert_eq!(h.text(), "xay\n");
+    }
+
+    #[test]
+    fn another_programs_write_reverts_a_clean_buffer_quietly() {
+        let mut h = Harness::new(&[("a.txt", "a\nb\nc\n")]);
+        h.open("a.txt");
+        h.keys("C-n C-n C-f");
+        h.core.message = None;
+        std::fs::write(h.path("a.txt"), "new\na\nb\nc\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        assert_eq!(h.text(), "new\na\nb\nc\n");
+        assert_eq!(mode_line(&mut h), "-- a.txt  4:1");
+        assert_eq!(h.core.message(), None);
+        assert!(!h.core.current().modified());
+        h.keys("C-/");
+        assert_eq!(h.text(), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn a_failed_auto_revert_says_why() {
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.open("a.txt");
+        let path = h.path("a.txt");
+        std::fs::write(&path, b"a\0").unwrap();
+        report(&mut h, &["a.txt"]);
+        assert_eq!(h.text(), "a\n");
+        let binary = format!("{}: binary file", path.display());
+        assert_eq!(h.core.message(), Some(binary.as_str()));
+    }
+
+    #[test]
+    fn a_modified_buffer_is_not_reverted() {
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.open("a.txt");
+        h.keys("x");
+        std::fs::write(h.path("a.txt"), "other\n").unwrap();
+        report(&mut h, &["a.txt"]);
+        assert_eq!(h.text(), "xa\n");
+        assert!(h.core.current().modified());
+        h.keys("C-x C-s");
+        assert_eq!(h.disk("a.txt"), "other\n");
+        assert!(h.core.message().unwrap().contains("changed on disk"));
+    }
+
+    #[test]
+    fn a_clean_buffer_of_a_missing_file_takes_the_created_file() {
+        let mut h = Harness::new(&[]);
+        h.open("new.txt");
+        std::fs::write(h.path("new.txt"), "made\n").unwrap();
+        report(&mut h, &["new.txt"]);
+        assert_eq!(h.text(), "made\n");
+        assert!(!h.core.current().modified());
     }
 
     #[test]

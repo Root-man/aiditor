@@ -475,7 +475,7 @@ impl Ctx<'_> {
             } => self.core.indexed(project, walk, roots),
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
-            Msg::Checked(files) => self.core.on_checked(files),
+            Msg::Checked(files) => self.on_checked(files),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
