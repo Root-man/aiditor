@@ -143,6 +143,11 @@ impl Prompts {
             .then_some(completion.base.as_path())
     }
 
+    /// The command the open prompt answers.
+    pub(crate) fn command(&self) -> Option<&'static str> {
+        self.minibuffer.as_ref().map(|mb| mb.command)
+    }
+
     /// The selected candidate, if the minibuffer is completing and anything matches.
     pub(crate) fn selected_candidate(&self) -> Option<String> {
         let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
@@ -411,6 +416,7 @@ impl Core {
     /// and polls again on a timer while the matcher is still running. A file prompt matches the
     /// text after the last `/`, asking for a listing when the part before it changes.
     pub(crate) fn poll_completion(&mut self, now: Instant, effects: &mut Effects) {
+        self.poll_grep(now, effects);
         // Checked before copying the text: this runs after every message.
         if !self
             .prompts
@@ -581,32 +587,42 @@ impl Core {
         if shown == mb.previewed {
             return;
         }
-        let id = match shown.clone() {
-            Some(Preview::Buffer(id)) => Some(id),
+        let (id, at) = match shown.clone() {
+            Some(Preview::Buffer(id)) => (Some(id), None),
+            Some(Preview::Point(p)) => (self.origin().map(Window::buffer), Some(p)),
             // The peek buffer visits its file too, so this finds it once read.
-            Some(Preview::File(path)) => match self.buffers.visiting(&path) {
-                Some(id) => Some(id),
-                None => {
-                    let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-                    mb.previewed = shown;
-                    if mb.reading.as_ref() != Some(&path) {
-                        mb.reading = Some(path.clone());
-                        effects.push(Effect::File(FileOp::Preview(path)));
+            Some(Preview::File(path) | Preview::FileAt(path, ..)) => {
+                match self.buffers.visiting(&path) {
+                    Some(id) => {
+                        let at = match shown {
+                            Some(Preview::FileAt(_, line, col)) => {
+                                let buffer = self.buffers.get(id).expect("visiting is live");
+                                // A line past the end, the file having changed since, is the end.
+                                Some(buffer.char_idx(line, col).unwrap_or(buffer.len_chars()))
+                            }
+                            _ => None,
+                        };
+                        (Some(id), at)
                     }
-                    return;
+                    None => {
+                        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
+                        mb.previewed = shown;
+                        if mb.reading.as_ref() != Some(&path) {
+                            mb.reading = Some(path.clone());
+                            effects.push(Effect::File(FileOp::Preview(path)));
+                        }
+                        return;
+                    }
                 }
-            },
-            Some(Preview::Point(p)) => {
-                self.preview_point(p);
-                self.prompts
-                    .minibuffer
-                    .as_mut()
-                    .expect("checked above")
-                    .previewed = shown;
-                return;
             }
-            None => None,
+            None => (None, None),
         };
+        if let (Some(id), Some(p)) = (id, at) {
+            self.preview_at(id, p);
+            let mb = self.prompts.minibuffer.as_mut().expect("checked above");
+            mb.previewed = shown;
+            return;
+        }
         self.unpreview();
         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
         mb.previewed = shown;
@@ -666,21 +682,44 @@ impl Core {
         }
     }
 
-    /// Shows point at `p` in a copy of the window the minibuffer was opened from. A copy already
-    /// standing in on the same buffer keeps its scroll, as swiper keeps its window start.
-    fn preview_point(&mut self, p: usize) {
+    /// Replaces the items of the filtering prompt `command` opened, or adds to them, every item
+    /// listed; a replaced list selects its first.
+    pub(crate) fn set_items(&mut self, command: &str, items: Vec<String>, replace: bool) {
+        let completion = (self.prompts.minibuffer.as_mut())
+            .filter(|mb| mb.command == command)
+            .and_then(|mb| mb.completion.as_mut());
+        let Some(completion) = completion.filter(|c| c.filtered.is_some()) else {
+            return;
+        };
+        if replace {
+            completion.select(0);
+        }
+        let f = completion.filtered.as_mut().expect("checked above");
+        if replace {
+            f.items.clear();
+            f.notes.clear();
+        }
+        f.notes.extend(items.iter().map(|_| String::new()));
+        f.items.extend(items);
+        f.matched = (0..f.items.len()).collect();
+    }
+
+    /// Shows point at `p` of buffer `id` in the window the minibuffer was opened from, standing
+    /// in a copy of it for its own buffer. A stand-in already on `id` keeps its scroll, as swiper
+    /// keeps its window start.
+    // shortcut: releasing the stand-in leaves `id`'s remembered point at the preview; save and restore it if reopened buffers start in odd places.
+    fn preview_at(&mut self, id: BufferId, p: usize) {
         let mb = self.prompts.minibuffer.as_ref().expect("previewing");
-        let from = &self.others[&mb.from];
-        if mb
-            .saved
-            .as_ref()
-            .is_none_or(|saved| saved.buffer() != from.buffer())
-        {
+        if mb.saved.is_none() || self.others[&mb.from].buffer() != id {
             self.unpreview();
             let mb = self.prompts.minibuffer.as_mut().expect("previewing");
             let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
-            let copy = from.split(&mut self.buffers);
-            mb.saved = Some(std::mem::replace(from, copy));
+            // A copy, so another buffer's stand-in keeps the rows it centers in.
+            let mut stand_in = from.split(&mut self.buffers);
+            if stand_in.buffer() != id {
+                stand_in.show(&mut self.buffers, id);
+            }
+            mb.saved = Some(std::mem::replace(from, stand_in));
         }
         let mb = self.prompts.minibuffer.as_ref().expect("previewing");
         let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");

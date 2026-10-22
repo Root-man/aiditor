@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use regex::RegexBuilder;
+
 use crate::{
-    Core, Ctx, Effect, Effects, FileOp, Msg, RecoveryOp,
+    Core, Ctx, Effect, Effects, FileOp, GrepOp, GrepSearch, Hit, Msg, RecoveryOp,
     buffer::{BufferId, encode, hash},
     command::{ArgSpec, Args, Command},
     display::{FrameDisplay, WindowDisplay},
@@ -28,6 +30,10 @@ pub struct Harness {
     pub recovery: HashMap<BufferId, (String, Option<PathBuf>, String)>,
     /// Earlier sessions' recovery files deleted, in order.
     pub deleted: Vec<PathBuf>,
+    /// Each grep search's pattern, and `None` for each cancel, in order.
+    pub greps: Vec<Option<String>>,
+    /// Leaves grep searches unanswered, for tests that answer them by hand.
+    pub grep_paused: bool,
 }
 
 impl Harness {
@@ -52,6 +58,8 @@ impl Harness {
             quit: false,
             recovery: HashMap::new(),
             deleted: Vec::new(),
+            greps: Vec::new(),
+            grep_paused: false,
         }
     }
 
@@ -224,8 +232,18 @@ impl Harness {
                         .expect("deletes a written file");
                 }
                 Effect::Recovery(RecoveryOp::DeleteRecovery(file)) => self.deleted.push(file),
-                // shortcut: no command searches yet; carry it out once project grep (#74) does.
-                Effect::Grep(_) => {}
+                Effect::Grep(GrepOp::Search(op)) => {
+                    self.greps.push(Some(op.pattern.clone()));
+                    if !self.grep_paused {
+                        let hits = grep(&op);
+                        self.send(Msg::Grepped {
+                            search: op.id,
+                            hits,
+                            done: true,
+                        });
+                    }
+                }
+                Effect::Grep(GrepOp::Cancel) => self.greps.push(None),
                 Effect::LoadSettings => {
                     let text = std::fs::read_to_string(self.path("settings.toml")).ok();
                     self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
@@ -261,6 +279,38 @@ fn walk_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Res
         }
     }
     Ok(())
+}
+
+/// The hits for `op` in one batch, as the grep service finds them in the files `walk_files` lists.
+fn grep(op: &GrepSearch) -> Result<Vec<Hit>, String> {
+    // Smart case: case is ignored while the pattern has no upper-case letter.
+    let fold = op.pattern == op.pattern.to_lowercase();
+    let regex = (RegexBuilder::new(&op.pattern)
+        .case_insensitive(fold)
+        .build())
+    .map_err(|err| err.to_string())?;
+    let mut hits = Vec::new();
+    for root in &op.roots {
+        let mut files = Vec::new();
+        _ = walk_files(root, root, &mut files);
+        files.sort();
+        for path in files {
+            let text = std::fs::read_to_string(root.join(&path)).unwrap_or_default();
+            for (line, text) in text.lines().enumerate() {
+                if let Some(m) = regex.find(text) {
+                    hits.push(Hit {
+                        root: root.clone(),
+                        path: path.clone(),
+                        line,
+                        col: text[..m.start()].chars().count(),
+                        text: text.into(),
+                    });
+                }
+            }
+        }
+    }
+    hits.truncate(op.limit);
+    Ok(hits)
 }
 
 impl Harness {

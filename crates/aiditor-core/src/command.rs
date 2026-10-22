@@ -54,6 +54,8 @@ pub enum Preview {
     File(PathBuf),
     /// A char position in the buffer of the window the minibuffer was opened from.
     Point(usize),
+    /// A file, as `File`, at a 0-based line and char column.
+    FileAt(PathBuf, usize, usize),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

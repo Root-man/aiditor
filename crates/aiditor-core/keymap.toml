@@ -23,6 +23,7 @@
 "C-x p p" = "project-switch"
 "C-x p i" = "project-index"
 "C-x p f" = "project-find-file"
+"C-x p g" = "project-grep"
 # Workspaces, on Emacs's tab-bar prefix.
 "C-x t 2" = "workspace-new"
 "C-x t RET" = "workspace-switch"
