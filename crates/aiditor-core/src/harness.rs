@@ -225,6 +225,15 @@ impl Harness {
                         result,
                     });
                 }
+                Effect::File(FileOp::Diff {
+                    buffer,
+                    name,
+                    path,
+                    text,
+                }) => {
+                    let result = crate::buffer::unified_diff(&path, &name, &text, read(&path));
+                    self.send(Msg::Diffed { buffer, result });
+                }
                 Effect::File(FileOp::Open(path)) => {
                     let result = read(&path);
                     self.send(Msg::Opened { path, result });

@@ -1,6 +1,6 @@
 //! Windows and the frame's display model.
 
-use crate::buffer::Buffers;
+use crate::buffer::{BufferId, Buffers};
 use crate::settings::Settings;
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx, display};
@@ -16,6 +16,27 @@ impl Ctx<'_> {
         core.others.insert(id, new);
         core.tree.split(core.selected, id, side_by_side);
         Ok(())
+    }
+
+    /// Shows buffer `id` in a window other than the selected one, splitting a lone window, and
+    /// keeps the selection, as Emacs's `display-buffer`; a window already showing it is enough.
+    pub(crate) fn display_buffer(&mut self, id: BufferId) {
+        let core = &mut *self.core;
+        if std::iter::once(&core.window)
+            .chain(core.others.values())
+            .any(|w| w.buffer() == id)
+        {
+            return;
+        }
+        if core.tree.leaves().len() == 1 {
+            self.split_window(false).expect("outside the minibuffer");
+        }
+        let core = &mut *self.core;
+        let leaves = core.tree.leaves();
+        let at = leaves.iter().position(|&w| w == core.selected);
+        let next = leaves[(at.expect("the selected window is in the tree") + 1) % leaves.len()];
+        let window = core.others.get_mut(&next).expect("a leaf is live");
+        window.show(&mut core.buffers, id);
     }
 
     /// Selects the window `n` on from the selected one in tree order, wrapping round.

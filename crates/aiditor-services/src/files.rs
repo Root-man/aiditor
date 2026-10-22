@@ -5,7 +5,7 @@ use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use aiditor_core::buffer::{encode, hash, revert};
+use aiditor_core::buffer::{encode, hash, revert, unified_diff};
 use aiditor_core::{FileOp, Msg};
 use ignore::WalkBuilder;
 
@@ -44,6 +44,18 @@ pub fn run(op: FileOp) -> Msg {
                 buffer,
                 tick,
                 result: revert(&path, &text, file),
+            }
+        }
+        FileOp::Diff {
+            buffer,
+            name,
+            path,
+            text,
+        } => {
+            let file = read(&path).map_err(|err| format!("{}: {err}", path.display()));
+            Msg::Diffed {
+                buffer,
+                result: unified_diff(&path, &name, &text, file),
             }
         }
         FileOp::ListDir(dir) => {
@@ -237,6 +249,24 @@ mod tests {
             panic!("not reverted");
         };
         assert!(result.unwrap_err().ends_with("gone no longer exists"));
+    }
+
+    #[test]
+    fn run_diffs_the_file_against_the_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        fs::write(&path, "a\r\n").unwrap();
+        let op = FileOp::Diff {
+            buffer: aiditor_core::buffer::Buffers::default().create("f"),
+            name: "f".into(),
+            path: path.clone(),
+            text: "b\n".into(),
+        };
+        let Msg::Diffed { result, .. } = run(op) else {
+            panic!("not diffed");
+        };
+        let header = format!("--- {}\n+++ f\n", path.display());
+        assert_eq!(result.unwrap(), format!("{header}@@ -1 +1 @@\n-a\n+b\n"));
     }
 
     #[test]

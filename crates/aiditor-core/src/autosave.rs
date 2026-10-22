@@ -264,6 +264,22 @@ mod tests {
     }
 
     #[test]
+    fn a_recovered_buffer_can_be_compared_with_its_file() {
+        let mut h = Harness::new(&[("a", "2\n")]);
+        let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        h.send(Msg::Recover(vec![r]))
+            .keys("RET M-x diff-buffer-with-file RET");
+        let id = h.core.buffers.find("*Diff*").unwrap();
+        let diff = h.core.buffers.get(id).unwrap().text().to_string();
+        let path = h.path("a").display().to_string();
+        assert_eq!(
+            diff,
+            format!("--- {path}\n+++ a\n@@ -1 +1,2 @@\n-2\n+1\n+x\n")
+        );
+        assert!(h.core.current().modified() && h.text() == "1\nx\n");
+    }
+
+    #[test]
     fn a_recovered_file_changed_on_disk_since_is_not_saved_over() {
         let mut h = Harness::new(&[("a", "2\n")]);
         let r = left(&h, Some("a"), "1\n", "1\nx\n");

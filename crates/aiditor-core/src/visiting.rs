@@ -103,6 +103,49 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Asks the file service to diff the current buffer against its file, for `on_diffed`.
+    pub(crate) fn diff_buffer_with_file(&mut self) -> Result<(), String> {
+        let buffer = self.core.current();
+        let path =
+            (buffer.file.clone()).ok_or("Buffer does not seem to be associated with any file")?;
+        self.effects.push(Effect::File(FileOp::Diff {
+            buffer: self.core.window.buffer(),
+            name: buffer.name.clone(),
+            path,
+            text: buffer.text().clone(),
+        }));
+        Ok(())
+    }
+
+    /// Shows the file service's diff of buffer `id` in the workspace's read-only `*Diff*`, in
+    /// another window; echoes `No differences` or why there is no diff.
+    pub(crate) fn on_diffed(&mut self, id: BufferId, result: Result<String, String>) {
+        let core = &mut *self.core;
+        // A killed buffer, or one of a workspace no longer current, has nowhere to show it.
+        if core.buffers.get(id).is_none() || !core.buffers.is_here(id) {
+            return;
+        }
+        let diff = match result {
+            Ok(diff) if diff.is_empty() => return core.echo("No differences".into()),
+            Ok(diff) => diff,
+            Err(err) => return core.echo(err),
+        };
+        // By mode, not name: another workspace's `*Diff*` makes this one's `*Diff*<2>`.
+        let found = (core.buffers.recent())
+            .find(|&(b, buffer)| buffer.major_mode == "diff-mode" && core.buffers.is_here(b));
+        let diff_id = found.map(|(b, _)| b).unwrap_or_else(|| {
+            let b = core.buffers.create("*Diff*");
+            let buffer = core.buffers.get_mut(b).expect("just created");
+            (buffer.read_only, buffer.major_mode) = (true, "diff-mode");
+            b
+        });
+        (core.buffers.get_mut(diff_id).expect("live")).set_text(&diff);
+        // shortcut: an answer arriving mid-prompt leaves `*Diff*` unshown (`C-x b` finds it); show it on close if that bites.
+        if self.outside_minibuffer("").is_ok() {
+            self.display_buffer(diff_id);
+        }
+    }
+
     /// Visits `name`, taken from the current buffer's directory: switches to a buffer visiting
     /// it, or asks the app to read it.
     pub(crate) fn find_file(&mut self, name: &str) -> Result<(), String> {
@@ -501,6 +544,93 @@ mod tests {
         let binary = format!("{}: binary file", h.path("a.txt").display());
         assert_eq!(h.core.message(), Some(binary.as_str()));
         assert_eq!(h.text(), LINES);
+    }
+
+    /// The text of the current workspace's `*Diff*`, if there is one.
+    fn diff_text(h: &Harness) -> Option<String> {
+        let id = h.core.buffers.find_here("*Diff*")?;
+        Some(h.core.buffers.get(id).unwrap().text().to_string())
+    }
+
+    /// The buffer names the windows show, the selected one first.
+    fn shown(h: &Harness) -> Vec<String> {
+        let ws = std::iter::once(&h.core.window).chain(h.core.others.values());
+        let names = ws.map(|w| h.core.buffers.get(w.buffer()).unwrap().name.clone());
+        names.collect()
+    }
+
+    #[test]
+    fn diff_buffer_with_file_shows_the_disk_against_the_buffer_in_another_window() {
+        let mut h = Harness::new(&[("a.txt", LINES)]);
+        h.open("a.txt");
+        h.keys("C-n C-n C-n C-n e M-x diff-buffer-with-file RET");
+        let diff = format!(
+            "--- {}\n+++ a.txt\n@@ -2,7 +2,7 @@\n b\n c\n d\n-e\n+ee\n f\n g\n h\n",
+            h.path("a.txt").display()
+        );
+        assert_eq!(diff_text(&h), Some(diff));
+        assert_eq!(shown(&h), ["a.txt", "*Diff*"]);
+        let buffer = h.core.current();
+        assert!(buffer.modified() && h.text() == LINES.replace("e\n", "ee\n"));
+        // Read-only, with nothing to undo.
+        h.keys("C-x o x");
+        assert_eq!(h.core.message(), Some("Buffer is read-only"));
+        assert!(!h.core.current().modified());
+        h.keys("C-/");
+        assert_eq!(h.core.message(), Some("No further undo information"));
+        // A second run refills the same buffer in the same window.
+        h.keys("C-x o C-a C-k M-x diff-buffer-with-file RET");
+        let diff = diff_text(&h).unwrap();
+        assert!(diff.ends_with(" d\n-e\n+\n f\n g\n h\n"), "{diff}");
+        assert_eq!(shown(&h), ["a.txt", "*Diff*"]);
+        let diffs = h
+            .core
+            .buffers
+            .recent()
+            .filter(|(_, b)| b.major_mode == "diff-mode");
+        assert_eq!(diffs.count(), 1);
+    }
+
+    #[test]
+    fn diff_buffer_with_file_says_when_there_is_nothing_to_show() {
+        let mut h = Harness::new(&[]);
+        h.keys("M-x diff-buffer-with-file RET");
+        let no_file = "Buffer does not seem to be associated with any file";
+        assert_eq!(h.core.message(), Some(no_file));
+        let mut h = reverting();
+        h.keys("M-x diff-buffer-with-file RET");
+        assert_eq!(h.core.message(), Some("No differences"));
+        assert_eq!(shown(&h), ["a.txt"]);
+        std::fs::write(h.path("a.txt"), "a\0").unwrap();
+        h.keys("M-x diff-buffer-with-file RET");
+        let binary = format!("{}: binary file", h.path("a.txt").display());
+        assert_eq!(h.core.message(), Some(binary.as_str()));
+        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.keys("M-x diff-buffer-with-file RET");
+        let gone = format!("File {} no longer exists", h.path("a.txt").display());
+        assert_eq!(h.core.message(), Some(gone.as_str()));
+        assert_eq!((diff_text(&h), shown(&h)), (None, vec!["a.txt".into()]));
+    }
+
+    #[test]
+    fn a_diff_for_a_killed_buffer_or_another_workspace_is_dropped() {
+        let mut h = reverting();
+        h.keys("x");
+        let mut ctx = h.ctx();
+        ctx.call("diff-buffer-with-file", Args::default());
+        let effects = ctx.effects;
+        let id = h.core.window.buffer();
+        h.core.kill_buffer(id);
+        h.run(effects);
+        assert!(h.core.buffers.find("*Diff*").is_none());
+        let mut h = reverting();
+        h.keys("x");
+        let mut ctx = h.ctx();
+        ctx.call("diff-buffer-with-file", Args::default());
+        let effects = ctx.effects;
+        h.core.new_workspace("w", "home");
+        h.run(effects);
+        assert!(h.core.buffers.find("*Diff*").is_none());
     }
 
     #[test]

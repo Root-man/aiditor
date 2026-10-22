@@ -530,6 +530,15 @@ impl Buffer {
         self.modified = false;
     }
 
+    /// Replaces the whole text with `text`, past read-only and without undo, as `append` writes.
+    pub fn set_text(&mut self, text: &str) {
+        let (read_only, modified) = (std::mem::take(&mut self.read_only), self.modified);
+        self.raw_delete(0..self.len_chars())
+            .expect("the whole text is in range");
+        self.raw_insert(0, text).expect("the start is in range");
+        (self.read_only, self.modified) = (read_only, modified);
+    }
+
     /// Applies `edits` as `diff` makes them, past read-only. A marker at an edit's end keeps
     /// the text after it, so one at a line's start stays on that line when lines go in above.
     pub fn replace(&mut self, edits: &[(Range<usize>, String)]) -> Result<(), Error> {
@@ -573,9 +582,7 @@ pub fn revert(
     old: &Rope,
     file: Result<Option<(Vec<u8>, u64)>, String>,
 ) -> Result<Revert, String> {
-    let (bytes, hash) = file?.ok_or_else(|| format!("File {} no longer exists", path.display()))?;
-    let (new, crlf, bom) =
-        decode(&bytes).map_err(|reason| format!("{}: {reason}", path.display()))?;
+    let (new, crlf, bom, hash) = disk_text(path, file)?;
     let edits = diff(&old.to_string(), &new);
     Ok(Revert {
         edits,
@@ -583,6 +590,34 @@ pub fn revert(
         bom,
         hash,
     })
+}
+
+/// The file at `path` decoded from its read, with its line ending, BOM and hash, or why not.
+fn disk_text(
+    path: &Path,
+    file: Result<Option<(Vec<u8>, u64)>, String>,
+) -> Result<(String, bool, bool, u64), String> {
+    let (bytes, hash) = file?.ok_or_else(|| format!("File {} no longer exists", path.display()))?;
+    let (text, crlf, bom) =
+        decode(&bytes).map_err(|reason| format!("{}: {reason}", path.display()))?;
+    Ok((text, crlf, bom, hash))
+}
+
+/// A unified diff from the file at `path`, given its read as for `revert`, to `text`, the text
+/// of the buffer `name`; empty when they don't differ. Diffing is slow, so services call this.
+pub fn unified_diff(
+    path: &Path,
+    name: &str,
+    text: &Rope,
+    file: Result<Option<(Vec<u8>, u64)>, String>,
+) -> Result<String, String> {
+    let (disk, ..) = disk_text(path, file)?;
+    let text = text.to_string();
+    let diff = similar::TextDiff::from_lines(&disk, &text);
+    // `similar` writes the header only before a hunk, so no differences give "".
+    Ok((diff.unified_diff())
+        .header(&path.display().to_string(), name)
+        .to_string())
 }
 
 /// The changed lines between `old` and `new`, in order: each old char range with its new text.
@@ -1051,6 +1086,34 @@ mod tests {
         b.read_only = false;
         b.undo();
         assert_eq!(b.text().to_string(), "a\nb\n");
+    }
+
+    #[test]
+    fn unified_diff_runs_from_the_file_to_the_buffer() {
+        let path = Path::new("/t/a.txt");
+        let file = |text: &str| Ok(Some((text.as_bytes().to_vec(), 0)));
+        let text = Rope::from_str("a\nb\nc");
+        assert_eq!(
+            unified_diff(path, "a.txt", &text, file("a\r\nB\r\nc\r\n")).unwrap(),
+            "--- /t/a.txt\n+++ a.txt\n@@ -1,3 +1,3 @@\n a\n-B\n-c\n+b\n+c\n\\ No newline at end of file\n"
+        );
+        assert_eq!(
+            unified_diff(path, "a.txt", &text, file("a\nb\nc")),
+            Ok("".into())
+        );
+        let gone = unified_diff(path, "a.txt", &text, Ok(None));
+        assert_eq!(gone.unwrap_err(), "File /t/a.txt no longer exists");
+    }
+
+    #[test]
+    fn set_text_replaces_everything_past_read_only_without_undo() {
+        let (mut buffers, id) = with_text("a\nb\n");
+        let b = buffers.get_mut(id).unwrap();
+        b.read_only = true;
+        b.set_text("x");
+        assert_eq!(b.text().to_string(), "x");
+        assert!(b.read_only && !b.modified());
+        assert_eq!(b.undo(), None);
     }
 
     #[test]

@@ -554,6 +554,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.revert_buffer(args),
         },
         Command {
+            name: "diff-buffer-with-file",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_buffer_with_file(),
+        },
+        Command {
             name: "recover-buffers",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.recover_buffers(args),

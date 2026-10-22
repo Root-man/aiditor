@@ -99,6 +99,12 @@ pub enum Msg {
         tick: u64,
         result: Result<buffer::Revert, String>,
     },
+    /// The file service's answer to `FileOp::Diff`: the unified diff, empty for none, or why
+    /// there is none.
+    Diffed {
+        buffer: BufferId,
+        result: Result<String, String>,
+    },
     /// The file service's answer to `FileOp::ListDir`: the directory's entries, or why it
     /// couldn't be listed.
     Listed {
@@ -252,6 +258,14 @@ pub enum FileOp {
     Revert {
         buffer: BufferId,
         tick: u64,
+        path: PathBuf,
+        text: Rope,
+    },
+    /// Read the file at `path`, diff it against `text`, the text of `buffer` named `name`, with
+    /// `buffer::unified_diff` and send `Msg::Diffed`.
+    Diff {
+        buffer: BufferId,
+        name: String,
         path: PathBuf,
         text: Rope,
     },
@@ -430,6 +444,7 @@ impl Ctx<'_> {
                 tick,
                 result,
             } => self.core.on_reverted(buffer, tick, result),
+            Msg::Diffed { buffer, result } => self.on_diffed(buffer, result),
             Msg::Listed { dir, result } => self.on_listed(dir, result),
             Msg::Opened { path, result } => {
                 match result {
