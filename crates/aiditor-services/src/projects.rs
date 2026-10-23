@@ -40,16 +40,12 @@ pub fn read(dir: &Path) -> Vec<Result<Loaded, String>> {
 /// Each error names the file.
 pub fn write(file: &Path, old: Option<&str>, text: String) -> Result<Loaded, String> {
     let project = check(&text).map_err(|err| format!("{}: {err}", name(file)))?;
-    if old.is_none() {
-        if file.exists() {
-            return Err(format!("{} already exists", file.display()));
-        }
-        if let Some(dir) = file.parent() {
-            fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
-        }
-    }
-    let changed = |err: String| err.replace("not saved", "reload with C-x C-r");
-    files::write(file, text.as_bytes(), old.map(|old| hash(old.as_bytes()))).map_err(changed)?;
+    let expectation = match old {
+        Some(old) => files::WriteExpectation::Update(Some(hash(old.as_bytes()))),
+        None => files::WriteExpectation::Create,
+    };
+    files::write(file, text.as_bytes(), expectation)
+        .map_err(|err| err.describe(file, "reload with C-x C-r"))?;
     Ok(Loaded {
         project,
         file: Some((file.to_owned(), text)),

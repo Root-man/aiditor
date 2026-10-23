@@ -11,6 +11,7 @@ mod builtins;
 pub mod command;
 pub mod display;
 mod editing;
+mod file_index;
 mod frame;
 mod grep;
 #[cfg(test)]
@@ -46,12 +47,12 @@ use ropey::Rope;
 use bindings::HINT_DELAY;
 use buffer::{Buffer, BufferId, Buffers};
 use command::{Args, Command, Prefix};
+use file_index::FileIndex;
 use key::{Key, KeyCode};
 use keymap::{Binding, Keymap};
 use kill_ring::KillRing;
 use minibuffer::Prompts;
 use project::{Entry, Loaded, Project, ProjectId, WriteIntent};
-use project_commands::FileIndex;
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
@@ -114,6 +115,7 @@ pub enum Msg {
     /// The file service's answer to `FileOp::Open`: the file's bytes and hash, `None` when there
     /// is no file, or why it couldn't be read.
     Opened {
+        intent: VisitIntent,
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
     },
@@ -245,6 +247,14 @@ pub enum Effect {
     Quit,
 }
 
+/// The navigation context that issued a command-driven file read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisitIntent {
+    pub request: u64,
+    pub workspace: WorkspaceId,
+    pub window: WindowId,
+}
+
 /// File work for the file service; each sends one reply message.
 pub enum FileOp {
     /// Write `text`, encoded with `crlf` and `bom`, to `path` if the file still hashes to `hash`
@@ -277,7 +287,7 @@ pub enum FileOp {
     /// List the directory and send `Msg::Listed`.
     ListDir(PathBuf),
     /// Read the file and send `Msg::Opened`.
-    Open(PathBuf),
+    Open { intent: VisitIntent, path: PathBuf },
     /// Read the file and send `Msg::Previewed`.
     Preview(PathBuf),
     /// Hash each file and send `Msg::Checked`.
@@ -465,13 +475,11 @@ impl Ctx<'_> {
             } => self.core.on_reverted(buffer, tick, result),
             Msg::Diffed { buffer, result } => self.on_diffed(buffer, result),
             Msg::Listed { dir, result } => self.on_listed(dir, result),
-            Msg::Opened { path, result } => {
-                match result {
-                    Ok(file) => self.core.visit(&path, file, true),
-                    Err(err) => self.core.echo(err),
-                }
-                self.core.grep_jump(&path);
-            }
+            Msg::Opened {
+                intent,
+                path,
+                result,
+            } => self.core.on_opened(intent, path, result),
             Msg::Previewed { path, result } => self.core.on_previewed(path, result),
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
@@ -504,7 +512,7 @@ impl Ctx<'_> {
                 walk,
                 roots,
                 directories,
-            } => self.core.indexed(project, walk, roots, directories),
+            } => self.indexed(project, walk, roots, directories),
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
@@ -650,9 +658,9 @@ pub struct Core {
     projects_dir: Option<PathBuf>,
     /// Each indexed project's files.
     index: HashMap<ProjectId, FileIndex>,
-    /// How many `FileOp::Index` walks were asked for; numbers each one.
-    index_walks: u64,
     grep: grep::ProjectGrep,
+    visits: u64,
+    pending_visit: Option<visiting::PendingVisit>,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -728,8 +736,9 @@ impl Default for Core {
             pending_project_writes: HashMap::new(),
             projects_dir: None,
             index: HashMap::new(),
-            index_walks: 0,
             grep: grep::ProjectGrep::default(),
+            visits: 0,
+            pending_visit: None,
             commands,
             message: None,
             quitting: Vec::new(),

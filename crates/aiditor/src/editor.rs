@@ -459,6 +459,10 @@ mod tests {
         cx.simulate_keystrokes(&strokes.join(" "));
         let got = editor.update(cx, |e, _| e.core.take_recording()).unwrap();
         assert_eq!(got, want);
+        // Release the async receiver before leaving the Tokio runtime.
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -548,6 +552,9 @@ mod tests {
         });
         let message = editor.read_with(cx, |e, _| e.core.message().unwrap().to_owned());
         assert!(message.contains("files = 1, directories = 1; max_watched_files = 0 exceeded"));
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]

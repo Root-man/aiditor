@@ -152,6 +152,7 @@ impl Core {
         if id == self.windows.selected {
             return;
         }
+        self.pending_visit = None;
         let window = self
             .windows
             .others

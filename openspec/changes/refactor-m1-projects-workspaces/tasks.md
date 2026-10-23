@@ -24,23 +24,23 @@ These stages implement one change. Opportunity numbers refer to `proposal.md`; d
 
 ## 4. Bind file visits and grep destinations to intent (#1; D1)
 
-- [ ] 4.1 Add originating workspace/window and request identity to asynchronous visit effects/replies, and migrate every ordinary finder, project finder, project-file and grep caller plus runners; verify a valid completion opens in its issuing context with existing file validation.
-- [ ] 4.2 Invalidate pending visits on the navigation changes listed in the file-visiting delta, retaining ordinary-edit behavior; verify delayed replies across workspace/window switching, returning to the origin, buffer switching, origin deletion and a newer prompt.
-- [ ] 4.3 Attach deferred grep coordinates to the matching visit intent and remove the path-only jump slot; verify a newer visit to the same path retains its own point and a valid grep completion lands on the correct Unicode column.
+- [x] 4.1 Add originating workspace/window and request identity to asynchronous visit effects/replies, and migrate every ordinary finder, project finder, project-file and grep caller plus runners; verify a valid completion opens in its issuing context with existing file validation.
+- [x] 4.2 Invalidate pending visits on the navigation changes listed in the file-visiting delta, retaining ordinary-edit behavior; verify delayed replies across workspace/window switching, returning to the origin, buffer switching, origin deletion and a newer prompt.
+- [x] 4.3 Attach deferred grep coordinates to the matching visit intent and remove the path-only jump slot; verify a newer visit to the same path retains its own point and a valid grep completion lands on the correct Unicode column.
 
 ## 5. Serialize writes and align project-write contracts (#2, #11; D2)
 
-- [ ] 5.1 Add explicit create-only versus checked-update expectations and typed write failures; verify existing-file conflict, create collision, unreadable-file and deleted-file recreation behavior through real services.
-- [ ] 5.2 Put buffer and project disk checks plus writes behind the shared services write gate, keeping encoding/validation outside and avoiding recursive locking; verify concurrent same-file, symlink-alias and hard-link saves preserve one complete winning edit and refuse the conflicting one.
-- [ ] 5.3 Use exclusive unique replacement temporary files with ownership-limited cleanup; verify a pre-existing temp survives, write failures clean only the operation's temp, and permission/link/in-place behavior remains covered.
-- [ ] 5.4 Replace project error-string rewriting with typed boundary formatting and migrate its divergent harness cases; verify deleted project recreation preserves comments, conflicts retain disk content and direct the user to `C-x C-r`, and create-only writes refuse a newly occupied path.
-- [ ] 5.5 Exercise queued saves across save-some, quitting and workspace killing; verify successful saves advance the action, failed saves retain the workspace/editor and edits, and edits made during a save remain modified.
+- [x] 5.1 Add explicit create-only versus checked-update expectations and typed write failures; verify existing-file conflict, create collision, unreadable-file and deleted-file recreation behavior through real services.
+- [x] 5.2 Put buffer and project disk checks plus writes behind the shared services write gate, keeping encoding/validation outside and avoiding recursive locking; verify concurrent same-file, symlink-alias and hard-link saves preserve one complete winning edit and refuse the conflicting one.
+- [x] 5.3 Use exclusive unique replacement temporary files with ownership-limited cleanup; verify a pre-existing temp survives, write failures clean only the operation's temp, and permission/link/in-place behavior remains covered.
+- [x] 5.4 Replace project error-string rewriting with typed boundary formatting and migrate its divergent harness cases; verify deleted project recreation preserves comments, conflicts retain disk content and direct the user to `C-x C-r`, and create-only writes refuse a newly occupied path.
+- [x] 5.5 Exercise queued saves across save-some, quitting and workspace killing; verify successful saves advance the action, failed saves retain the workspace/editor and edits, and edits made during a save remain modified.
 
 ## 6. Encapsulate indexes and coalesce walks (#7, #8; D4)
 
-- [ ] 6.1 Extract index state/transitions into a core module with private readiness, scope, generation, counts, missed paths and announcement state; migrate project/watcher callers and verify existing indexing and watch-limit tests.
-- [ ] 6.2 Keep one active walk and one latest pending refresh per project, forwarding explicit-user announcement intent; verify burst requests, changed queued scopes, released projects, stale replies and one final announcement using controlled delivery.
-- [ ] 6.3 Separate last accepted snapshot/counts from requested scope; verify same-scope re-walks preserve watches and mode lines, changed scopes wait for fresh counts, and partial-root errors retain current reporting behavior.
+- [x] 6.1 Extract index state/transitions into a core module with private readiness, scope, generation, counts, missed paths and announcement state; migrate project/watcher callers and verify existing indexing and watch-limit tests.
+- [x] 6.2 Keep one active walk and one latest pending refresh per project, forwarding explicit-user announcement intent; verify burst requests, changed queued scopes, released projects, stale replies and one final announcement using controlled delivery.
+- [x] 6.3 Separate last accepted snapshot/counts from requested scope; verify same-scope re-walks preserve watches and mode lines, changed scopes wait for fresh counts, and partial-root errors retain current reporting behavior.
 - [ ] 6.4 Replace linear exact/descendant file scans with sorted lookups and preserve missed-path suppression; verify component-boundary cases such as `app`/`app2`, empty directories, ignored visited files and creates/deletes, and compare lookup work on a reproducible event/file fixture.
 - [ ] 6.5 Return kept directories with files from the shared walk and derive counts from that result; verify ignored trees, root inclusion, zero limits, shared roots and directory counts using real filesystem fixtures.
 - [ ] 6.6 Invalidate index filtering and clear missed suppression after relevant ignore-file changes, including excluded ignore files; verify newly included/excluded paths, manual reload of global excludes and the unchanged on-demand policy for unwatched projects.

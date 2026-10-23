@@ -32,7 +32,7 @@ The editor adds a final newline during save. Test expectations retain that behav
 - Native watcher tests require execution outside the filesystem sandbox on this macOS host: six tests timed out inside it; all 11 watcher tests passed outside it. All services tests above ran outside the sandbox.
 - Project reconciliation tests cover rename, invalid/missing/reappearing definitions, duplicate names, file renames, last-workspace cleanup, retained index ownership, selected project across prompts, ad-hoc save identity and superseded write refresh.
 
-## Stop point requested by the user
+## Previous stop point: tasks 1.1–3.3
 
 Stages 1–3 are complete (11/53 tasks). Stop after window-configuration consolidation; stage 4 and later stages are not started. The change is not ready to archive.
 
@@ -41,3 +41,28 @@ Stages 1–3 are complete (11/53 tasks). Stop after window-configuration consoli
 - Behavioral coverage: existing window/display/workspace, marker release, preview cancellation and cross-workspace buffer tests pass; the new switching test preserves selected window, splits, point, mark, mark ring and scroll, and drops an inactive window click. No snapshot updates were required.
 - Stage 4 was not implemented: `FileOp::Open` is still path-based and the deferred grep jump remains unchanged.
 - Linux and manual GUI flows were not run. They remain part of the unfinished whole-change verification, not claims of completion at this stop point.
+
+
+## Tasks 4.1–6.3: implementation and evidence
+
+- Visit reads carry workspace, window and request identity through the shared production runner. Navigation changes permanently invalidate pending reads; ordinary edits preserve them. Deferred grep coordinates belong to that visit. Core tests cover successful ownership, binary validation, errors after cancellation, switching away and back, buffer/window/workspace deletion, new prompts, repeated same-path requests and Unicode grep columns. GPUI and headless already delegate all file operations to `files::run`.
+- Buffer saves and project writes share one services gate around expectation checking and the complete write. Typed create/update expectations distinguish conflicts, occupied paths and I/O failures. Real-service tests cover simultaneous same-path, symlink and hard-link saves; a project write racing a buffer write; a queued create collision; deleted project recreation with comments; unreadable files; permission and link preservation; exclusive temp collisions and ownership-limited cleanup.
+- `tests/boundaries.rs` holds production operations/replies to test two workspace saves and save-some/quit/workspace-kill completion. Successful saves advance the requested action, conflicts preserve edits and the editor/workspace, and later edits remain modified. Save-some is the existing shared confirmation flow, exercised by saving one buffer while declining another and declining exit; no new command was added.
+- Project-write filesystem behavior was removed from the core harness. Its successful replies now prepare only parsed in-memory definitions; conflict tests deliver explicit failures. Core project tests assert prepared/accepted text and unchanged state; disk recreation/conflict/collision assertions run in services. Other filesystem substitutes remain for task 13.1.
+- `file_index.rs` owns readiness, requested and accepted scopes, request generations, one active/one latest queued walk, counts, missed paths and announcements. Controlled-reply tests cover burst requests, newest queued scope/patterns, duplicate/late replies, release, one final announcement, same-scope watch/mode-line continuity, partial errors and changed-scope recovery. A scope changed away and back also waits for fresh counts.
+- The new queued index reply exposed a frontend test teardown race: GPUI could drain a file reply after the test's Tokio runtime guard had dropped. The two tests owning a runtime now release their editor/window and drain GPUI before leaving it. Production runtime handling is unchanged.
+
+### Verification history and limits
+
+- The first full macOS run passed 442 tests before the scope-return regression test was added. A later run exposed the frontend teardown failure above. An intermediate whole-app shutdown attempt then segfaulted in the frontend test and was removed; the normal window-removal teardown passes the isolated binding test. Failed attempts are not counted as passing runs.
+- Native watcher tests timed out in the filesystem sandbox; the same 11 tests passed outside it. Native verification below uses unsandboxed execution.
+- Linux and manual GUI flows were not executed. They remain tasks 7.6, 14.2 and 14.3, not claims of completion here. The process-local write gate does not serialize external programs, and the preserved in-place fallback is not crash-atomic.
+- The requested batch ends at task 6.3: 22/53 complete; task 6.4 is next. Later watcher, preview, configuration, finder, grep and Swiper changes remain pending.
+
+### Final macOS checks for this batch
+
+- `cargo test -p aiditor-core -p aiditor-services --quiet`: 364 core, 48 services, 5 boundary, 1 crash-recovery and 4 file-sync tests passed (422 total).
+- `cargo test -p aiditor --bin aiditor --quiet`: all 21 frontend tests passed after the window teardown correction. Combined final workspace coverage: 443 passed, zero failed.
+- `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`: passed. Cargo reports existing future-incompatibility notices for `block` and `proc-macro-error2`.
+- `cargo tree -p aiditor-core`: no GPUI, Tokio or services dependency; manifest/config scan: no aborting panic profile; `git diff --check`: passed.
+- `openspec validate refactor-m1-projects-workspaces --strict`: passed. Apply progress reports 22/53 complete, 31 remaining, with 6.4 next.

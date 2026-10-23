@@ -4,6 +4,8 @@ use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use aiditor_core::buffer::{encode, hash, revert, unified_diff};
 use aiditor_core::{FileOp, Msg};
@@ -22,7 +24,12 @@ pub fn run(op: FileOp) -> Msg {
             bom,
             hash,
         } => {
-            let result = write(&path, &encode(&text, crlf, bom), hash);
+            let result = write(
+                &path,
+                &encode(&text, crlf, bom),
+                WriteExpectation::Update(hash),
+            )
+            .map_err(|err| err.describe(&path, "not saved"));
             // Not `error!`: the core echoes the failure, and an error log would show it twice.
             match &result {
                 Ok(_) => tracing::info!(path = %path.display(), "saved"),
@@ -63,9 +70,13 @@ pub fn run(op: FileOp) -> Msg {
             let result = list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
             Msg::Listed { dir, result }
         }
-        FileOp::Open(path) => {
+        FileOp::Open { intent, path } => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
-            Msg::Opened { path, result }
+            Msg::Opened {
+                intent,
+                path,
+                result,
+            }
         }
         FileOp::Preview(path) => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
@@ -250,15 +261,70 @@ impl Patterns {
     }
 }
 
-/// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file) or the
-/// file is gone, and returns the new hash.
-pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, String> {
-    let err = |e: io::Error| format!("{}: {e}", path.display());
-    let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
-    // A gone file is written back: nothing on disk is lost.
-    if on_disk.is_some() && on_disk != expected {
-        // `projects::write` rewrites "not saved" in this message.
-        return Err(format!("{} changed on disk; not saved", path.display()));
+/// The disk state a write may replace. Updates allow recreation after deletion.
+#[derive(Clone, Copy, Debug)]
+pub enum WriteExpectation {
+    Create,
+    Update(Option<u64>),
+}
+
+#[derive(Debug)]
+pub enum WriteFailure {
+    Conflict,
+    AlreadyExists,
+    Io(io::Error),
+}
+
+impl WriteFailure {
+    pub(crate) fn describe(&self, path: &Path, conflict_action: &str) -> String {
+        match self {
+            Self::Conflict => format!("{} changed on disk; {conflict_action}", path.display()),
+            Self::AlreadyExists => format!("{} already exists", path.display()),
+            Self::Io(err) => format!("{}: {err}", path.display()),
+        }
+    }
+}
+
+static WRITE_GATE: Mutex<()> = Mutex::new(());
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes the disk check and complete write, including aliases and project files.
+pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u64, WriteFailure> {
+    let err = WriteFailure::Io;
+    let _guard = WRITE_GATE
+        .lock()
+        .map_err(|_| err(io::Error::other("write gate poisoned")))?;
+    match expected {
+        WriteExpectation::Create => {
+            match fs::symlink_metadata(path) {
+                Ok(_) => return Err(WriteFailure::AlreadyExists),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(err(e)),
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(err)?;
+            }
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| {
+                    if e.kind() == ErrorKind::AlreadyExists {
+                        WriteFailure::AlreadyExists
+                    } else {
+                        err(e)
+                    }
+                })?;
+            file.write_all(bytes).map_err(err)?;
+            file.sync_all().map_err(err)?;
+            return Ok(hash(bytes));
+        }
+        WriteExpectation::Update(expected) => {
+            let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
+            if on_disk.is_some() && on_disk != expected {
+                return Err(WriteFailure::Conflict);
+            }
+        }
     }
     // A missing file or a dangling symlink: nothing to keep, and fs::write creates it through the link.
     let Ok(target) = fs::canonicalize(path) else {
@@ -280,10 +346,7 @@ pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, St
 
 /// Writes a temp file beside `target` with `perms` and renames it over `target`.
 fn replace(target: &Path, bytes: &[u8], perms: Permissions) -> io::Result<()> {
-    let name = target.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = target.with_file_name(format!(".{name}.aiditor-{}~", std::process::id()));
-    _ = fs::remove_file(&tmp);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let (tmp, mut file) = create_temp(target, &NEXT_TEMP)?;
     let result = (|| {
         file.write_all(bytes)?;
         file.set_permissions(perms)?;
@@ -296,6 +359,20 @@ fn replace(target: &Path, bytes: &[u8], perms: Permissions) -> io::Result<()> {
     result
 }
 
+fn create_temp(target: &Path, next: &AtomicU64) -> io::Result<(PathBuf, fs::File)> {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    loop {
+        let suffix = next.fetch_add(1, Ordering::Relaxed);
+        let tmp =
+            target.with_file_name(format!(".{name}.aiditor-{}-{suffix}~", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -304,6 +381,127 @@ mod tests {
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
+    }
+
+    #[test]
+    fn write_expectations_distinguish_creation_conflict_recreation_and_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        write(&path, b"first", WriteExpectation::Create).unwrap();
+        assert!(matches!(
+            write(&path, b"second", WriteExpectation::Create),
+            Err(WriteFailure::AlreadyExists)
+        ));
+        assert!(matches!(
+            write(&path, b"second", WriteExpectation::Update(None)),
+            Err(WriteFailure::Conflict)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        fs::remove_file(&path).unwrap();
+        write(
+            &path,
+            b"recreated",
+            WriteExpectation::Update(Some(hash(b"first"))),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"recreated");
+        fs::set_permissions(&path, Permissions::from_mode(0o000)).unwrap();
+        let result = write(
+            &path,
+            b"unreadable",
+            WriteExpectation::Update(Some(hash(b"recreated"))),
+        );
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(result, Err(WriteFailure::Io(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"recreated");
+    }
+
+    #[test]
+    fn concurrent_saves_check_the_winner_through_same_symlink_and_hard_link_paths() {
+        for alias in ["same", "symlink", "hardlink"] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("a");
+            let b = match alias {
+                "same" => a.clone(),
+                _ => dir.path().join("b"),
+            };
+            fs::write(&a, "base").unwrap();
+            match alias {
+                "symlink" => std::os::unix::fs::symlink(&a, &b).unwrap(),
+                "hardlink" => fs::hard_link(&a, &b).unwrap(),
+                _ => {}
+            }
+            let barrier = std::sync::Barrier::new(2);
+            let save = |path: &Path, bytes: &[u8]| {
+                barrier.wait();
+                write(path, bytes, WriteExpectation::Update(Some(hash(b"base"))))
+            };
+            let results = std::thread::scope(|scope| {
+                let first = scope.spawn(|| save(&a, b"first complete edit"));
+                let second = scope.spawn(|| save(&b, b"second complete edit"));
+                [first.join().unwrap(), second.join().unwrap()]
+            });
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|r| matches!(r, Err(WriteFailure::Conflict)))
+                    .count(),
+                1
+            );
+            let winner = if results[0].is_ok() {
+                b"first complete edit".as_slice()
+            } else {
+                b"second complete edit".as_slice()
+            };
+            assert_eq!(fs::read(&a).unwrap(), winner);
+            assert_eq!(fs::read(&b).unwrap(), winner);
+            if alias == "symlink" {
+                assert!(fs::symlink_metadata(&b).unwrap().is_symlink());
+            }
+            if alias == "hardlink" {
+                assert_eq!(
+                    fs::metadata(&a).unwrap().ino(),
+                    fs::metadata(&b).unwrap().ino()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_retries_collisions_and_cleans_only_its_owned_temp_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("file");
+        let occupied = target.with_file_name(format!(".file.aiditor-{}-0~", std::process::id()));
+        fs::write(&occupied, "other operation").unwrap();
+        let (tmp, file) = create_temp(&target, &AtomicU64::new(0)).unwrap();
+        assert_eq!(
+            tmp.file_name().unwrap(),
+            format!(".file.aiditor-{}-1~", std::process::id()).as_str()
+        );
+        drop(file);
+        fs::remove_file(tmp).unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(
+            replace(
+                &target,
+                b"cannot replace directory",
+                Permissions::from_mode(0o600)
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "other operation");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        fs::remove_dir(&target).unwrap();
+        fs::write(&target, "old").unwrap();
+        write(
+            &target,
+            b"new",
+            WriteExpectation::Update(Some(hash(b"old"))),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "other operation");
     }
 
     #[test]
@@ -353,7 +551,14 @@ mod tests {
     fn run_replies_with_path_prefixed_errors() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
-        let Msg::Opened { result, .. } = run(FileOp::Open(missing)) else {
+        let Msg::Opened { result, .. } = run(FileOp::Open {
+            intent: aiditor_core::VisitIntent {
+                request: 1,
+                workspace: Default::default(),
+                window: Default::default(),
+            },
+            path: missing,
+        }) else {
             panic!("not opened");
         };
         assert_eq!(result, Ok(None));
@@ -536,14 +741,17 @@ mod tests {
         fs::write(&path, "old").unwrap();
         let loaded = hash_of(&path);
         fs::write(&path, "theirs").unwrap();
-        let err = write(&path, b"mine", loaded).unwrap_err();
-        assert!(err.ends_with("changed on disk; not saved"), "{err}");
+        let err = write(&path, b"mine", WriteExpectation::Update(loaded)).unwrap_err();
+        assert!(matches!(err, WriteFailure::Conflict));
         assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
         // A file that appeared since it was opened as missing.
-        assert!(write(&path, b"x", None).is_err());
+        assert!(write(&path, b"x", WriteExpectation::Update(None)).is_err());
         // A file gone since it was loaded is written back.
         fs::remove_file(&path).unwrap();
-        assert_eq!(write(&path, b"back", loaded), Ok(hash(b"back")));
+        assert_eq!(
+            write(&path, b"back", WriteExpectation::Update(loaded)).unwrap(),
+            hash(b"back")
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), "back");
     }
 
@@ -558,9 +766,12 @@ mod tests {
     fn writes_a_new_file_and_returns_its_hash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
-        let h = write(&path, b"hi", None).unwrap();
+        let h = write(&path, b"hi", WriteExpectation::Update(None)).unwrap();
         assert_eq!(hash_of(&path), Some(h));
-        assert_eq!(write(&path, b"again", Some(h)), Ok(hash(b"again")));
+        assert_eq!(
+            write(&path, b"again", WriteExpectation::Update(Some(h))).unwrap(),
+            hash(b"again")
+        );
     }
 
     #[test]
@@ -569,7 +780,7 @@ mod tests {
         let path = dir.path().join("a.sh");
         fs::write(&path, "old").unwrap();
         fs::set_permissions(&path, Permissions::from_mode(0o754)).unwrap();
-        write(&path, b"new", hash_of(&path)).unwrap();
+        write(&path, b"new", WriteExpectation::Update(hash_of(&path))).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o754);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
@@ -580,7 +791,7 @@ mod tests {
         let (target, link) = (dir.path().join("t.txt"), dir.path().join("l.txt"));
         fs::write(&target, "old").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        write(&link, b"new", hash_of(&link)).unwrap();
+        write(&link, b"new", WriteExpectation::Update(hash_of(&link))).unwrap();
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
     }
@@ -591,7 +802,7 @@ mod tests {
         let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
         fs::write(&a, "old").unwrap();
         fs::hard_link(&a, &b).unwrap();
-        write(&a, b"new", hash_of(&a)).unwrap();
+        write(&a, b"new", WriteExpectation::Update(hash_of(&a))).unwrap();
         assert_eq!(fs::read_to_string(&b).unwrap(), "new");
     }
 
@@ -601,7 +812,7 @@ mod tests {
         let path = dir.path().join("a.txt");
         fs::write(&path, "old").unwrap();
         fs::set_permissions(dir.path(), Permissions::from_mode(0o555)).unwrap();
-        let result = write(&path, b"new", hash_of(&path));
+        let result = write(&path, b"new", WriteExpectation::Update(hash_of(&path)));
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
         result.unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");

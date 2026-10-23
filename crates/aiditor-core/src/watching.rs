@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use crate::command::Args;
+use crate::file_index::scope;
 use crate::project::{Entry, ProjectId};
-use crate::project_commands::{FileIndex, scope};
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
 
 impl Core {
@@ -12,11 +12,14 @@ impl Core {
     /// roots and patterns counted them without an error, and its `max_watched_files`.
     fn watch_counts(&self, entry: &Entry) -> Option<(usize, usize, usize)> {
         let project = &entry.project;
-        let index = (self.index.get(&entry.id))
-            .filter(|i| project.watch && i.ready && i.scope == Some(scope(project)))?;
-        let files = index.roots.iter().map(|(_, files)| files.len()).sum();
-        let limit = (project.max_watched_files).unwrap_or(self.settings.max_watched_files);
-        Some((files, index.directories, limit))
+        if !project.watch {
+            return None;
+        }
+        let (files, directories) = self.index.get(&entry.id)?.counts(&scope(project))?;
+        let limit = project
+            .max_watched_files
+            .unwrap_or(self.settings.max_watched_files);
+        Some((files, directories, limit))
     }
 
     pub(crate) fn project_watched(&self, entry: &Entry) -> bool {
@@ -77,7 +80,7 @@ impl Ctx<'_> {
                         .core
                         .index
                         .get(&p.id)
-                        .is_none_or(|i| i.scope != Some(scope(&p.project)))
+                        .is_none_or(|i| !i.requested(&scope(&p.project)))
             })
             .filter(|p| self.core.workspaces.iter().any(|w| w.project == p.id))
             .map(|p| p.id)
@@ -151,40 +154,13 @@ impl Ctx<'_> {
             .collect();
         let stale: Vec<ProjectId> = (self.core.index.iter_mut())
             .filter(|(name, _)| watched.contains(*name))
-            .filter_map(|(name, index)| (stale(index, &paths) || rescan).then_some(*name))
+            .filter_map(|(name, index)| (index.stale(&paths) || rescan).then_some(*name))
             .collect();
         for name in stale {
             // A project no longer loaded has nothing to walk.
             _ = self.index_project(name, true);
         }
     }
-}
-
-/// Whether a reported path under one of the index's roots is a file it lacks or a directory
-/// holding none of its files (an empty one changes the directory count), or is gone while it
-/// holds that file or files under it. Such a path starts a walk once, so writes to a file the
-/// walk ignores (a visited `.env`) start none.
-// shortcut: a create or delete re-walks the whole project; update the index per path if large projects lag.
-fn stale(index: &mut FileIndex, paths: &[(PathBuf, Disk)]) -> bool {
-    let mut stale = false;
-    for (path, disk) in paths {
-        for (root, files) in &index.roots {
-            let Ok(rel) = path.strip_prefix(root) else {
-                continue;
-            };
-            stale |= match disk {
-                Disk::File => !files.iter().any(|f| f == rel) && index.missed.insert(path.clone()),
-                Disk::Gone => {
-                    index.missed.remove(path);
-                    files.iter().any(|f| f.starts_with(rel))
-                }
-                Disk::Dir => {
-                    !files.iter().any(|f| f.starts_with(rel)) && index.missed.insert(path.clone())
-                }
-            };
-        }
-    }
-    stale
 }
 
 #[cfg(test)]
@@ -627,11 +603,11 @@ mod tests {
         report(&mut h, &["a/y"]);
         assert_eq!(h.watched.roots, []);
         assert_eq!(h.watched.files, [h.path("a/x")]);
-        let walks = h.core.index_walks;
+        let walks = h.core.index_requests();
         std::fs::write(h.path("a/x"), "changed").unwrap();
         report(&mut h, &["a/x"]);
         assert_eq!(h.text(), "changed");
-        assert_eq!(h.core.index_walks, walks);
+        assert_eq!(h.core.index_requests(), walks);
         std::fs::remove_file(h.path("a/y")).unwrap();
         h.keys("C-x p i p RET");
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
@@ -729,24 +705,27 @@ mod tests {
     #[test]
     fn only_a_directory_without_indexed_files_starts_a_walk() {
         let mut h = indexed();
-        let walks = h.core.index_walks;
+        let walks = h.core.index_requests();
         report(&mut h, &["a"]);
-        assert_eq!(h.core.index_walks, walks);
+        assert_eq!(h.core.index_requests(), walks);
         std::fs::create_dir(h.path("a/empty")).unwrap();
         report(&mut h, &["a/empty"]);
         report(&mut h, &["a/empty"]);
-        assert_eq!(h.core.index_walks, walks + 1);
+        assert_eq!(h.core.index_requests(), walks + 1);
     }
 
     #[test]
     fn a_reload_rewalks_the_indexes_quietly() {
         let mut h = indexed();
-        let walks = h.core.index_walks;
+        let walks = h.core.index_requests();
         h.send(Msg::ProjectsLoaded {
             dir: None,
             projects: Vec::new(),
         });
-        assert_eq!((h.core.index_walks, h.core.message()), (walks + 1, None));
+        assert_eq!(
+            (h.core.index_requests(), h.core.message()),
+            (walks + 1, None)
+        );
         // A saved project edited by hand is walked with its new patterns.
         let mut q = Loaded::ad_hoc("q", &h.path("a"));
         q.file = Some((h.path("q.toml"), String::new()));
@@ -782,16 +761,16 @@ mod tests {
         std::fs::remove_file(h.path("a/x")).unwrap();
         report(&mut h, &["a/x"]);
         assert_eq!(found(&mut h), ["a/y"]);
-        let walks = h.core.index_walks;
+        let walks = h.core.index_requests();
         std::fs::write(h.path("a/y"), "written").unwrap();
         report(&mut h, &["a/y"]);
-        assert_eq!(h.core.index_walks, walks, "a write starts no walk");
+        assert_eq!(h.core.index_requests(), walks, "a write starts no walk");
         // A file the walk ignores (the harness's ignores only `.git`) starts one walk, then none.
         std::fs::create_dir(h.path("a/.git")).unwrap();
         std::fs::write(h.path("a/.git/x"), "").unwrap();
         report(&mut h, &["a/.git/x"]);
         report(&mut h, &["a/.git/x"]);
-        assert_eq!(h.core.index_walks, walks + 1);
+        assert_eq!(h.core.index_requests(), walks + 1);
         assert_eq!(found(&mut h), ["a/y"]);
         // Lost events re-walk every index, quietly.
         h.core.message = None;
@@ -799,7 +778,10 @@ mod tests {
             paths: Vec::new(),
             rescan: true,
         });
-        assert_eq!((h.core.index_walks, h.core.message()), (walks + 2, None));
+        assert_eq!(
+            (h.core.index_requests(), h.core.message()),
+            (walks + 2, None)
+        );
     }
 
     #[test]
@@ -809,12 +791,12 @@ mod tests {
         h.keys("C-x p w p RET C-n RET");
         assert_eq!(h.watched.roots, []);
         assert_eq!(h.watched.files, [h.path("a/x")]);
-        let walks = h.core.index_walks;
+        let walks = h.core.index_requests();
         std::fs::write(h.path("a/y"), "").unwrap();
         std::fs::write(h.path("a/x"), "changed").unwrap();
         report(&mut h, &["a/x", "a/y"]);
         assert_eq!(h.text(), "changed");
-        assert_eq!(h.core.index_walks, walks);
+        assert_eq!(h.core.index_requests(), walks);
         assert_eq!(found(&mut h), ["a/x"]);
         h.keys("C-x p i p RET");
         assert_eq!(found(&mut h), ["a/x", "a/y"]);
@@ -839,17 +821,17 @@ mod tests {
         h.new_workspace("q", "q");
         h.keys("C-x p i q RET");
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
-        let walks = h.core.index_walks;
+        let walks = h.core.index_requests();
         std::fs::write(h.path("a/y"), "").unwrap();
         report(&mut h, &["a/y"]);
-        assert_eq!(h.core.index_walks, walks + 1);
+        assert_eq!(h.core.index_requests(), walks + 1);
         assert_eq!(found(&mut h), ["a/x", "a/y"]);
         std::fs::write(h.path("a/z"), "").unwrap();
         h.send(Msg::FilesChanged {
             paths: Vec::new(),
             rescan: true,
         });
-        assert_eq!(h.core.index_walks, walks + 2);
+        assert_eq!(h.core.index_requests(), walks + 2);
         assert_eq!(found(&mut h), ["a/x", "a/y", "a/z"]);
         h.keys("C-x p p p RET");
         assert_eq!(found(&mut h), ["a/x"]);

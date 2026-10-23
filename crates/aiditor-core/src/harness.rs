@@ -192,24 +192,9 @@ impl Harness {
                         .map_err(|err| format!("{}: {err}", dir.display()));
                     self.send(Msg::Listed { dir, result });
                 }
-                // As `projects::write` does, minus its check of the roots.
                 Effect::File(FileOp::WriteProject {
-                    intent,
-                    path,
-                    old,
-                    text,
+                    intent, path, text, ..
                 }) => {
-                    if std::fs::read_to_string(&path).ok() != old {
-                        let err =
-                            format!("{} changed on disk; reload with C-x C-r", path.display());
-                        self.send(Msg::ProjectWritten {
-                            intent,
-                            result: Err(err),
-                        });
-                        continue;
-                    }
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    std::fs::write(&path, &text).unwrap();
                     let project = crate::project::Project::parse(&text).unwrap();
                     let file = Some((path, text));
                     self.send(Msg::ProjectWritten {
@@ -266,9 +251,13 @@ impl Harness {
                     let result = crate::buffer::unified_diff(&path, &name, &text, read(&path));
                     self.send(Msg::Diffed { buffer, result });
                 }
-                Effect::File(FileOp::Open(path)) => {
+                Effect::File(FileOp::Open { intent, path }) => {
                     let result = read(&path);
-                    self.send(Msg::Opened { path, result });
+                    self.send(Msg::Opened {
+                        intent,
+                        path,
+                        result,
+                    });
                 }
                 Effect::File(FileOp::Preview(path)) => {
                     let result = read(&path);

@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 use crate::buffer::{self, Buffer, BufferId, Buffers};
 use crate::command::Args;
 use crate::workspace::WorkspaceId;
-use crate::{Core, Ctx, Effect, FileOp};
+use crate::{Core, Ctx, Effect, FileOp, VisitIntent};
+
+pub(crate) struct PendingVisit {
+    pub intent: VisitIntent,
+    pub path: PathBuf,
+    pub destination: Option<(usize, usize)>,
+}
 
 impl Ctx<'_> {
     /// Handles the file service's answer to a save of buffer `id` at `tick`, and the quit
@@ -199,9 +205,24 @@ impl Ctx<'_> {
     /// it, or asks the app to read it.
     pub(crate) fn find_file(&mut self, name: &str) -> Result<(), String> {
         let path = self.core.directory().join(name);
+        self.core.pending_visit = None;
         match self.core.buffers.visiting(&path) {
             Some(id) => self.core.switch_to(id),
-            None => self.effects.push(Effect::File(FileOp::Open(path))),
+            None => {
+                self.core.visits += 1;
+                let intent = VisitIntent {
+                    request: self.core.visits,
+                    workspace: self.core.buffers.workspace,
+                    window: self.core.windows.selected,
+                };
+                self.core.pending_visit = Some(PendingVisit {
+                    intent,
+                    path: path.clone(),
+                    destination: None,
+                });
+                self.effects
+                    .push(Effect::File(FileOp::Open { intent, path }));
+            }
         }
         Ok(())
     }
@@ -339,6 +360,35 @@ impl Core {
         buffer.set_saved();
     }
 
+    pub(crate) fn on_opened(
+        &mut self,
+        intent: VisitIntent,
+        path: PathBuf,
+        result: Result<Option<(Vec<u8>, u64)>, String>,
+    ) {
+        let valid = self.pending_visit.as_ref().is_some_and(|pending| {
+            pending.intent == intent
+                && pending.path == path
+                && intent.workspace == self.buffers.workspace
+                && intent.window == self.windows.selected
+        });
+        if !valid {
+            return;
+        }
+        let pending = self.pending_visit.take().expect("validated visit");
+        match result {
+            Ok(file) => {
+                self.visit(&path, file, true);
+                if self.buffers.visiting(&path) == Some(self.windows.window.buffer())
+                    && let Some((line, col)) = pending.destination
+                {
+                    self.goto_line_col(line, col);
+                }
+            }
+            Err(err) => self.echo(err),
+        }
+    }
+
     /// Visits `path` in a new current buffer, given the file's bytes and their hash, or `None`
     /// when there is no file. A binary or non-UTF-8 file opens empty and read-only.
     pub fn open(&mut self, path: &Path, file: Option<(Vec<u8>, u64)>) {
@@ -374,6 +424,7 @@ impl Core {
 
     /// Shows buffer `id` in the selected window, as a jump, and makes it the most recent.
     pub(crate) fn switch_to(&mut self, id: BufferId) {
+        self.pending_visit = None;
         if self.windows.window.buffer() != id {
             self.push_jump();
         }
@@ -384,6 +435,7 @@ impl Core {
     pub(crate) fn show_buffer(&mut self, id: BufferId) {
         self.buffers.raise(id);
         if self.windows.window.buffer() != id {
+            self.pending_visit = None;
             self.windows.window.show(&mut self.buffers, id);
         }
     }
@@ -413,6 +465,9 @@ impl Core {
     /// Kills buffer `id`; windows showing it show the most recent listed buffer left of their
     /// workspace or `*Messages*`, or a new scratch in the current workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
+        if self.windows.window.buffer() == id {
+            self.pending_visit = None;
+        }
         let next = replacement(&self.buffers, id, self.buffers.workspace);
         // Killed first, so a new scratch gets its name.
         _ = self.buffers.kill(id);
@@ -473,6 +528,137 @@ mod tests {
     fn revert(h: &mut Harness, disk: &str) {
         std::fs::write(h.path("a.txt"), disk).unwrap();
         h.keys("M-x revert-buffer RET");
+    }
+
+    fn pending_open(h: &mut Harness, file: &str) -> (crate::VisitIntent, std::path::PathBuf) {
+        h.collect_effects = true;
+        h.call(
+            "find-file",
+            Args {
+                strings: vec![h.path(file).to_string_lossy().into_owned()],
+                ..Args::default()
+            },
+        );
+        std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::Open { intent, path }) => Some((intent, path)),
+                _ => None,
+            })
+            .expect("a visit read")
+    }
+
+    fn opened(intent: crate::VisitIntent, path: std::path::PathBuf, text: &str) -> Msg {
+        Msg::Opened {
+            intent,
+            path,
+            result: Ok(Some((
+                text.as_bytes().to_vec(),
+                crate::buffer::hash(text.as_bytes()),
+            ))),
+        }
+    }
+
+    #[test]
+    fn a_visit_keeps_its_owner_through_ordinary_edits_and_validates_text() {
+        let mut h = Harness::new(&[]);
+        let (intent, path) = pending_open(&mut h, "new.txt");
+        let origin = h.core.windows.window.buffer();
+        h.keys("editing");
+        h.send(opened(intent, path.clone(), "visited"));
+        assert_eq!(h.core.current().file, Some(path));
+        assert_eq!(h.core.current().workspace, Some(intent.workspace));
+        assert_eq!(h.text(), "visited");
+        assert_eq!(
+            h.core.buffers.get(origin).unwrap().text().to_string(),
+            "editing"
+        );
+        let (intent, path) = pending_open(&mut h, "binary");
+        h.send(opened(intent, path, "a\0b"));
+        assert_eq!(h.text(), "visited");
+        assert!(h.core.message().unwrap().ends_with(": binary file"));
+    }
+
+    #[test]
+    fn abandoned_visits_leave_navigation_prompts_and_echo_unchanged() {
+        let changes: [fn(&mut Harness); 7] = [
+            |h| {
+                let origin = h.core.workspace();
+                h.new_workspace("away", "home");
+                h.core.switch_workspace(origin).unwrap();
+            },
+            |h| {
+                h.keys("C-x 2 C-x o C-x o");
+            },
+            |h| {
+                h.keys("C-x 2 C-x 0");
+            },
+            |h| {
+                let origin = h.core.workspace();
+                h.new_workspace("away", "home");
+                h.core.kill_workspace(origin).unwrap();
+            },
+            |h| {
+                h.core.switch_to_name("another");
+                h.core.switch_to_name("*scratch*");
+            },
+            |h| {
+                h.keys("C-x b");
+            },
+            |h| {
+                h.core.kill_buffer(h.core.windows.window.buffer());
+            },
+        ];
+        for change in changes {
+            for error in [false, true] {
+                let mut h = Harness::new(&[]);
+                let (intent, path) = pending_open(&mut h, "late.txt");
+                change(&mut h);
+                h.core.echo("new interaction".into());
+                let before = (
+                    h.core.workspace(),
+                    h.core.windows.selected,
+                    h.text(),
+                    h.point(),
+                    h.core.buffers.recent().count(),
+                );
+                h.send(if error {
+                    Msg::Opened {
+                        intent,
+                        path,
+                        result: Err("obsolete error".into()),
+                    }
+                } else {
+                    opened(intent, path, "late")
+                });
+                assert_eq!(
+                    (
+                        h.core.workspace(),
+                        h.core.windows.selected,
+                        h.text(),
+                        h.point(),
+                        h.core.buffers.recent().count()
+                    ),
+                    before
+                );
+                assert_eq!(h.core.message(), Some("new interaction"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_newer_same_path_visit_owns_its_reply_and_point() {
+        let mut h = Harness::new(&[]);
+        let (first, path) = pending_open(&mut h, "same");
+        h.core.pending_visit.as_mut().unwrap().destination = Some((1, 2));
+        let (second, _) = pending_open(&mut h, "same");
+        h.send(opened(first, path.clone(), "old\n  hit"));
+        assert_eq!(h.text(), "");
+        h.send(opened(second, path.clone(), "new\n  hit"));
+        assert_eq!((h.text(), h.point()), ("new\n  hit".into(), 0));
+        h.keys("C-f");
+        h.send(opened(first, path, "old"));
+        assert_eq!((h.text(), h.point()), ("new\n  hit".into(), 1));
     }
 
     #[test]
@@ -1150,8 +1336,13 @@ mod tests {
         h.keys("RET");
         assert_eq!((name(&h), h.text().as_str()), ("a.txt", "xa"));
         assert_eq!(h.core.buffers.recent().count(), 2);
-        // A read that raced another find of the same file switches too.
+        // An obsolete read leaves the reused buffer intact.
         h.send(Msg::Opened {
+            intent: crate::VisitIntent {
+                request: 0,
+                workspace: h.core.workspace(),
+                window: h.core.windows.selected,
+            },
             path: h.path("d/a.txt"),
             result: Ok(None),
         });

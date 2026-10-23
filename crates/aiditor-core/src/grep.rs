@@ -1,6 +1,6 @@
 //! Project grep: the grep service's hits listed live in the minibuffer, as consult-ripgrep.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::command::{Args, Preview};
@@ -37,9 +37,6 @@ pub(crate) struct ProjectGrep {
     ignore: Vec<String>,
     /// The listed hits with their labels, kept after the prompt closes for its handler.
     hits: Vec<(String, Hit)>,
-    /// The file, line and column to put point at once the file's read arrives.
-    // shortcut: dropped when another buffer is current by then; keep it per window if that bites.
-    jump: Option<(PathBuf, usize, usize)>,
 }
 
 impl ProjectGrep {
@@ -139,16 +136,7 @@ impl Core {
         self.set_items("project-grep", labels, replace);
     }
 
-    /// Puts point at the pending grep jump when `path`, just read, is the current buffer's file.
-    pub(crate) fn grep_jump(&mut self, path: &Path) {
-        if let Some((_, line, col)) = self.grep.jump.take_if(|(p, ..)| p == path)
-            && self.buffers.visiting(path) == Some(self.windows.window.buffer())
-        {
-            self.goto_line_col(line, col);
-        }
-    }
-
-    fn goto_line_col(&mut self, line: usize, col: usize) {
+    pub(crate) fn goto_line_col(&mut self, line: usize, col: usize) {
         let buffer = self.current();
         // A line past the end, the file having changed since, is the end.
         let p = buffer.char_idx(line, col).unwrap_or(buffer.len_chars());
@@ -176,7 +164,11 @@ impl Ctx<'_> {
                     }
                     self.core.goto_line_col(line, col)
                 }
-                false => self.core.grep.jump = Some((path, line, col)),
+                false => {
+                    if let Some(pending) = &mut self.core.pending_visit {
+                        pending.destination = Some((line, col));
+                    }
+                }
             }
             return Ok(());
         }
@@ -234,6 +226,31 @@ mod tests {
     }
 
     const FILES: &[(&str, &str)] = &[("app/a.rs", "needle\n"), ("app/b.rs", "x\n  needle\n")];
+
+    #[test]
+    fn deferred_grep_destination_belongs_to_its_visit_and_uses_character_columns() {
+        let mut h = grepping(&[("app/a.rs", "top\né🙂 needle\n")]);
+        h.keys("C-x p g needle").advance(WAIT);
+        h.collect_effects = true;
+        h.keys("RET");
+        let (intent, path) = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::Open { intent, path }) => Some((intent, path)),
+                _ => None,
+            })
+            .unwrap();
+        let text = "top\né🙂 needle\n";
+        h.send(Msg::Opened {
+            intent,
+            path,
+            result: Ok(Some((
+                text.as_bytes().to_vec(),
+                crate::buffer::hash(text.as_bytes()),
+            ))),
+        });
+        assert_eq!((h.text(), h.point()), (text.into(), 7));
+    }
 
     #[test]
     fn search_move_jump() {

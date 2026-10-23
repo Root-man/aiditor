@@ -1,6 +1,5 @@
 //! The project commands: making, editing, visiting and saving projects.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use toml_edit::DocumentMut;
@@ -9,31 +8,6 @@ use crate::buffer::{file_name, unique};
 use crate::command::Args;
 use crate::project::{Entry, Loaded, Project, ProjectId, Root, WriteIntent, sync};
 use crate::{Core, Ctx, Effect, FileOp};
-
-/// A project's file index: the files under each root, relative to it, from the walk numbered
-/// `walk` once it answers.
-#[derive(Default)]
-pub(crate) struct FileIndex {
-    walk: u64,
-    /// The last answer walked `scope` without an error, so its counts hold for it.
-    pub(crate) ready: bool,
-    /// The roots and ignore patterns of the walk numbered `walk`.
-    pub(crate) scope: Option<Scope>,
-    pub(crate) directories: usize,
-    /// The pending walk was asked for by the user, so its answer is echoed.
-    loud: bool,
-    pub(crate) roots: Vec<(PathBuf, Vec<PathBuf>)>,
-    /// Reported files and directories the index lacked, which already started a walk.
-    pub(crate) missed: BTreeSet<PathBuf>,
-}
-
-/// What a walk covers: a project's root paths and ignore patterns.
-pub(crate) type Scope = (Vec<PathBuf>, Vec<String>);
-
-pub(crate) fn scope(project: &Project) -> Scope {
-    let roots = project.all_roots().map(|r| r.path.clone()).collect();
-    (roots, project.ignore.clone())
-}
 
 impl Core {
     pub fn project_id(&self, name: &str) -> Result<ProjectId, String> {
@@ -105,8 +79,7 @@ impl Core {
     pub(crate) fn release_projects(&mut self) {
         self.projects
             .retain(|p| !p.retained || self.workspaces.iter().any(|w| w.project == p.id));
-        self.index
-            .retain(|id, _| self.projects.iter().any(|p| p.id == *id));
+        self.release_indexes();
     }
 
     /// The loaded projects' names, only the ad-hoc ones' when `ad_hoc`.
@@ -166,55 +139,9 @@ impl Core {
         self.add_project(Loaded::ad_hoc(&name, root))
     }
 
-    /// Takes the file service's answer to `FileOp::Index`, unless a newer walk was asked for.
-    pub(crate) fn indexed(
-        &mut self,
-        project: ProjectId,
-        walk: u64,
-        roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
-        directories: usize,
-    ) {
-        if self.project_at(project).is_err() {
-            return;
-        }
-        let Some(index) = self.index.get_mut(&project).filter(|i| i.walk == walk) else {
-            return;
-        };
-        let loud = std::mem::take(&mut index.loud);
-        let mut errors = String::new();
-        index.roots = (roots.into_iter())
-            .map(|(root, files)| {
-                let files = files.unwrap_or_else(|err| {
-                    errors.push_str(&format!("; {err}"));
-                    Vec::new()
-                });
-                (root, files)
-            })
-            .collect();
-        index.ready = errors.is_empty();
-        index.directories = directories;
-        if !loud {
-            if !errors.is_empty() {
-                tracing::info!(?project, errors, "re-walk after a file change");
-            }
-            return;
-        }
-        let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
-        let s = if n == 1 { "" } else { "s" };
-        self.echo(format!(
-            "Indexed {n} file{s} in {}{errors}",
-            self.project_name(project)
-        ));
-        // An open finder is always the current workspace's, as switching closes the minibuffer.
-        if self.current_workspace().project == project {
-            let files = self.project_files(project);
-            self.add_candidates("project-find-file", files);
-        }
-    }
-
     /// Every indexed file of `project` as `<root name>/<relative path>`, the primary's first.
-    fn project_files(&self, project: ProjectId) -> Vec<String> {
-        let roots = self.index.get(&project).map_or(&[][..], |i| &i.roots);
+    pub(crate) fn project_files(&self, project: ProjectId) -> Vec<String> {
+        let roots = self.index.get(&project).map_or(&[][..], |i| i.roots());
         let names = root_names(roots.iter().map(|(root, _)| root.as_path()));
         (names.iter().zip(roots))
             .flat_map(|(name, (_, files))| {
@@ -226,7 +153,7 @@ impl Core {
     /// The file `text` names in `project`: under the root its first component names, else under
     /// the primary.
     pub(crate) fn project_file(&self, project: ProjectId, text: &str) -> Result<PathBuf, String> {
-        let roots = self.index.get(&project).map_or(&[][..], |i| &i.roots);
+        let roots = self.index.get(&project).map_or(&[][..], |i| i.roots());
         if let Some((head, rest)) = text.split_once('/')
             && let Some(i) = root_names(roots.iter().map(|(root, _)| root.as_path()))
                 .iter()
@@ -446,32 +373,6 @@ impl Ctx<'_> {
         })
     }
 
-    /// Walks every root of the project `name` again, off the core thread; `quiet` echoes
-    /// nothing, unless a walk the user asked for is still pending.
-    pub(crate) fn index_project(&mut self, project: ProjectId, quiet: bool) -> Result<(), String> {
-        let (roots, ignore) = scope(&self.core.projects[self.core.project_at(project)?].project);
-        self.core.index_walks += 1;
-        let walk = self.core.index_walks;
-        let index = self.core.index.entry(project).or_default();
-        index.walk = walk;
-        // The same roots and patterns keep their counts, and their watches, until the answer.
-        let walked = Some((roots.clone(), ignore.clone()));
-        index.ready &= index.scope == walked;
-        index.scope = walked;
-        index.loud |= !quiet;
-        if !quiet {
-            self.core
-                .echo(format!("Indexing {}...", self.core.project_name(project)));
-        }
-        self.effects.push(Effect::File(FileOp::Index {
-            project,
-            walk,
-            roots,
-            ignore,
-        }));
-        Ok(())
-    }
-
     /// Asks for a file in any root of the current workspace's project and visits it, indexing
     /// the project first when it has no index yet.
     pub(crate) fn project_find_file(&mut self, args: Args) -> Result<(), String> {
@@ -482,7 +383,7 @@ impl Ctx<'_> {
         }
         if let Some(index) = self.core.index.get_mut(&project) {
             // No answer yet, as every answer lists the primary: the pending walk fills the list.
-            index.loud |= index.roots.is_empty();
+            index.announce_initial();
         } else {
             self.index_project(project, false)?;
         }
@@ -771,8 +672,17 @@ mod tests {
         }
     }
 
+    fn project_text(h: &Harness, name: &str) -> String {
+        h.core.projects[h.core.project(name).unwrap()]
+            .file
+            .as_ref()
+            .unwrap()
+            .1
+            .clone()
+    }
+
     #[test]
-    fn create_writes_a_file_that_loads_back() {
+    fn create_prepares_a_definition_and_accepts_the_written_reply() {
         let mut h = with(Vec::new());
         let a = h.path("a").display().to_string();
         let tmp = h.dir.path().display().to_string();
@@ -789,7 +699,7 @@ mod tests {
             Some(&*format!("Wrote {}", file.display()))
         );
         let text = format!("name = \"app\"\n\n[primary]\npath = \"{a}\"\n");
-        assert_eq!(h.disk("projects/app.toml"), text, "no empty roots or role");
+        assert_eq!(project_text(&h, "app"), text, "no empty roots or role");
         let p = Project::parse(&text).unwrap();
         assert_eq!(h.core.projects(), [&p]);
         // Typing filters the list; `./` takes the directory typed.
@@ -825,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn edits_rewrite_the_file_and_keep_its_comments() {
+    fn edits_prepare_preserved_comments_and_apply_only_successful_replies() {
         let mut h = with(Vec::new());
         let (a, b) = (
             h.path("a").display().to_string(),
@@ -847,7 +757,7 @@ mod tests {
         call(&mut h, "project-set-role", &["app", &a, "Main"]);
         call(&mut h, "project-set-default-agent", &["app", "claude"]);
         call(&mut h, "project-set-watch", &["app", "false"]);
-        let disk = h.disk("projects/app.toml");
+        let disk = project_text(&h, "app");
         assert!(disk.starts_with("# Mine\n"), "{disk}");
         assert!(disk.contains("watch = false # quiet"), "{disk}");
         let p = Project::parse(&disk).unwrap();
@@ -868,33 +778,36 @@ mod tests {
         assert_eq!(err, Some(format!("{a}/x is inside {a}")));
         let err = call(&mut h, "project-remove-root", &["app", &a]);
         assert_eq!(err, Some(format!("{a} is not an additional root of app")));
-        assert_eq!(h.disk("projects/app.toml"), disk, "refusals write nothing");
-        // A file changed on disk since it was read is left alone, and so is the project.
+        assert_eq!(project_text(&h, "app"), disk, "refusals write nothing");
         let before = project(&h, "app");
-        std::fs::write(h.path("projects/app.toml"), format!("{disk}# theirs\n")).unwrap();
-        let err = call(&mut h, "project-set-role", &["app", &a, "Ours"]).unwrap();
-        assert!(
-            err.ends_with("changed on disk; reload with C-x C-r"),
-            "{err}"
+        h.collect_effects = true;
+        call(&mut h, "project-set-role", &["app", &a, "Ours"]);
+        let intent = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .unwrap();
+        h.send(Msg::ProjectWritten {
+            intent,
+            result: Err("app.toml changed on disk; reload with C-x C-r".into()),
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project app.toml changed on disk; reload with C-x C-r")
         );
-        assert!(err.starts_with("project "), "{err}");
-        assert_eq!(h.disk("projects/app.toml"), format!("{disk}# theirs\n"));
         assert_eq!(project(&h, "app"), before);
-        let err = call(&mut h, "project-set-watch", &["app", "true"]).unwrap();
-        assert!(
-            err.ends_with("changed on disk; reload with C-x C-r"),
-            "{err}"
-        );
-        assert_eq!(project(&h, "app"), before);
-        std::fs::write(h.path("projects/app.toml"), &disk).unwrap();
+        assert_eq!(project_text(&h, "app"), disk);
+        h.collect_effects = false;
         call(&mut h, "project-set-watch", &["app", "true"]);
         assert!(project(&h, "app").watch);
-        assert!(h.disk("projects/app.toml").contains("watch = true # quiet"));
+        assert!(project_text(&h, "app").contains("watch = true # quiet"));
         call(&mut h, "project-remove-root", &["app", &b]);
         call(&mut h, "project-set-default-agent", &["app", ""]);
         let p = project(&h, "app");
         assert_eq!((p.roots.len(), p.default_agent.as_deref()), (0, None));
-        assert_eq!(Project::parse(&h.disk("projects/app.toml")).unwrap(), p);
+        assert_eq!(Project::parse(&project_text(&h, "app")).unwrap(), p);
         call(&mut h, "project-open-file", &["app"]);
         assert_eq!(name(&h), "app.toml");
         let err = call(&mut h, "project-open-file", &["zz"]);
@@ -926,10 +839,7 @@ mod tests {
         assert_eq!(edited.roots[0].role, "Bee");
         assert!(!edited.watch);
         call(&mut h, "project-save", &["tmp"]);
-        assert_eq!(
-            Project::parse(&h.disk("projects/tmp.toml")).unwrap(),
-            edited
-        );
+        assert_eq!(Project::parse(&project_text(&h, "tmp")).unwrap(), edited);
         assert_eq!(
             h.core.projects(),
             [&edited],
@@ -1021,8 +931,8 @@ mod tests {
 
     fn indexed(h: &Harness) -> Vec<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
         h.core.index[&h.core.project_id("tmp").unwrap()]
-            .roots
-            .clone()
+            .roots()
+            .to_vec()
     }
 
     #[test]
@@ -1063,23 +973,6 @@ mod tests {
         assert_eq!(h.core.text(), "hi");
         h.run(pending);
         assert_eq!(h.core.message(), Some("Indexed 2 files in tmp"));
-    }
-
-    #[test]
-    fn index_drops_an_older_walks_answer() {
-        let mut h = indexable(&[]);
-        let first = start_index(&mut h);
-        assert_eq!(h.core.message(), Some("Indexing tmp..."));
-        call(&mut h, "project-index", &["tmp"]);
-        std::fs::write(h.path("a/y"), "").unwrap();
-        h.run(first);
-        assert_eq!(h.core.message(), Some("Indexed 2 files in tmp"));
-        assert_eq!(indexed(&h)[0], (h.path("a"), vec!["x".into()]));
-        // Nor is an answer for a project no longer loaded taken.
-        let pending = start_index(&mut h);
-        h.core.projects.clear();
-        h.run(pending);
-        assert_eq!(h.core.message(), Some("Indexing tmp..."));
     }
 
     /// `indexable` with the current workspace bound to `tmp`.
@@ -1142,7 +1035,7 @@ mod tests {
         h.run(pending);
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
         h.keys("C-g C-x p f");
-        assert_eq!(h.core.index_walks, 1, "no second walk");
+        assert_eq!(h.core.index_requests(), 1, "no second walk");
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
     }
 

@@ -106,6 +106,7 @@ impl Core {
     /// Makes `id` current with `windows` on screen, saving the current workspace's windows.
     // shortcut: an open prompt is cancelled; keep it in its workspace once commands can leave the minibuffer.
     fn show_workspace(&mut self, id: WorkspaceId, windows: Windows) {
+        self.pending_visit = None;
         self.close_minibuffer();
         let old = std::mem::replace(&mut self.windows, windows);
         let current = self.buffers.workspace;
