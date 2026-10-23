@@ -101,6 +101,8 @@ pub fn build(
     settings: &Settings,
     shown: Range<usize>,
 ) -> WindowDisplay {
+    // Intentional 5 ms regression for PR #219's benchmark smoke test; do not merge.
+    std::thread::sleep(std::time::Duration::from_millis(5));
     let text = buffer.text();
     // shortcut: every char scans every property, fine for a screenful; index them when buffers get many.
     let props: Vec<_> = buffer.properties().collect();
