@@ -751,7 +751,42 @@ milestones:
         labels: [terminal]
         design: "#output-floods"
         body: |
-          `portable-pty` running the user's shell as a login shell. Batched reads (up to ~64 KB per message), a bounded channel for backpressure, resize. Break down when M2 starts.
+          `portable-pty` running the user's shell as a login shell. Batched reads (up to ~64 KB per message), one small bounded channel per terminal for backpressure, input, resize and kill.
+        tasks:
+          - key: m2-pty-spawn
+            title: "Spawn the user's shell in a PTY"
+            body: |
+              `Effect::Terminal(TerminalOp::Spawn)` carries a `TerminalId`, cwd, extra env and size. It runs on a blocking thread, because forking takes 10-70 ms, and its success or failure comes back as a message. The default command is `$SHELL` as a login shell (`CommandBuilder::new_default_prog`).
+
+              A reader thread reads up to 64 KB at a time and sends each batch as `Msg::TerminalOutput` on the terminal's own bounded channel, a few batches deep. A foreground task drains that channel into the core, so a flood stalls only its own producer, not other services. A wait thread sends `Msg::TerminalExited` with the real exit status on the same channel. Exit comes from `child.wait()`, not from the end of output, because background jobs can keep the PTY open.
+
+              Env: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=aiditor`, `TERM_PROGRAM_VERSION`; `LANG=en_US.UTF-8` when unset (apps launched from the macOS Dock have none); `SHLVL` removed. Set `IUTF8` on the PTY, which Linux leaves off. The core ignores terminal messages until the emulator epic.
+            acceptance:
+              - "Service tests use `/bin/sh -c` scripts and run on macOS and Linux: output arrives in order, the exit code arrives after it, and a spawn failure is reported"
+              - "A consumer that never drains blocks the producer once the terminal's channel is full, while a file service reply still reaches the core"
+              - "The default command starts `$SHELL` as a login shell (argv0 `-zsh` or `-bash`)"
+              - "`stty -a` in the terminal lists `iutf8`"
+              - "docs/editor.md records per-terminal channels under Output floods, the terminal env, and that bash login shells read `.bash_profile`/`.profile`, not `.bashrc`"
+          - key: m2-pty-input
+            title: "Terminal input and resize"
+            body: |
+              `TerminalOp::Write` hands bytes to a per-terminal writer thread, so a large paste into a program that isn't reading never blocks the UI. `TerminalOp::Resize` sets the PTY's rows and columns.
+            acceptance:
+              - "Bytes written to `cat` echo back"
+              - "After a resize, `stty size` reports the new size"
+              - "Writing `\\x03` interrupts a running `sleep`"
+              - "In canonical mode, Backspace deletes a whole multibyte character"
+              - "A write larger than the PTY buffer, to a program that doesn't read, returns at once"
+            blocked_by: [m2-pty-spawn]
+          - key: m2-pty-kill
+            title: "Kill terminals and leave no shells behind"
+            body: |
+              `TerminalOp::Kill` sends SIGHUP, then SIGTERM, to the shell's process group, and SIGKILL after 100 ms. Dropping the master alone doesn't hang up the shell, because the reader thread holds a duplicate of it. When the app quits, every live terminal is killed before the process exits. Asking before killing a live terminal is the emulator epic's job, since it belongs to terminal buffers.
+            acceptance:
+              - "After Kill, the shell and its foreground job (`sleep 1000`) are gone"
+              - "A shell that traps SIGHUP and SIGTERM is gone after the SIGKILL"
+              - "Quitting the app leaves no shell processes behind"
+            blocked_by: [m2-pty-spawn]
       - key: m2-emulator
         title: "Terminal buffers: emulator in the core"
         labels: [terminal, frontend]
