@@ -251,7 +251,7 @@ mod tests {
     };
 
     fn prop(h: &mut Harness, range: std::ops::Range<usize>, prop: Prop) {
-        let id = h.core.window.buffer();
+        let id = h.core.windows.window.buffer();
         let buffer = h.core.buffers.get_mut(id).unwrap();
         buffer.add_property(range, prop).unwrap();
     }
@@ -317,7 +317,11 @@ mod tests {
         prop(&mut h, 6..8, Prop::Invisible(String::new()));
         assert_eq!(texts(&mut h, 1), ["bold"]);
         assert_eq!(h.display(1).cursor, Some((0, 4)), "point at the end");
-        h.core.window.set_point(&mut h.core.buffers, 1).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 1)
+            .unwrap();
         assert_eq!(h.display(1).cursor, Some((0, 0)), "point inside markup");
     }
 
@@ -326,9 +330,17 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.keys("abcdef");
         prop(&mut h, 0..3, Prop::Invisible("…".into()));
-        h.core.window.set_point(&mut h.core.buffers, 3).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 3)
+            .unwrap();
         assert_eq!(h.display(1).cursor, Some((0, 1)));
-        h.core.window.set_point(&mut h.core.buffers, 2).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 2)
+            .unwrap();
         assert_eq!(h.display(1).cursor, Some((0, 0)), "inside the fold");
     }
 
@@ -373,17 +385,18 @@ mod tests {
             "no mark, no region"
         );
         h.core
+            .windows
             .window
             .push_mark(&mut h.core.buffers, 0, true)
             .unwrap();
         assert_eq!(spans(&mut h), [("hel".into(), region), ("lo".into(), None)]);
-        h.core.window.set_active(false);
+        h.core.windows.window.set_active(false);
         assert_eq!(
             spans(&mut h),
             [("hello".into(), None)],
             "inactive mark, no region"
         );
-        h.core.window.set_active(true);
+        h.core.windows.window.set_active(true);
         prop(&mut h, 1..5, Prop::Face(RED));
         insta::assert_debug_snapshot!(h.display(1).lines);
     }

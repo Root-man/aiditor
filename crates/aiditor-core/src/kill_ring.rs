@@ -70,7 +70,7 @@ impl Ctx<'_> {
         let region = region.expect("the spec asks for the region");
         let backward = self.core.point() == region.start && !region.is_empty();
         self.kill(region, backward, copy)?;
-        self.core.window.set_active(false);
+        self.core.windows.window.set_active(false);
         Ok(())
     }
 
@@ -114,7 +114,9 @@ impl Ctx<'_> {
         let text = self.core.kills.current_kill(n)?;
         let core = &mut *self.core;
         let start = core.point();
-        core.window.push_mark(&mut core.buffers, start, false)?;
+        core.windows
+            .window
+            .push_mark(&mut core.buffers, start, false)?;
         self.insert_n(&text, 1, false)?;
         if matches!(prefix, Some(Prefix::Universal(_))) {
             self.point_before_yank(start)?;
@@ -143,7 +145,7 @@ impl Ctx<'_> {
     fn point_before_yank(&mut self, start: usize) -> Result<(), String> {
         let core = &mut *self.core;
         let end = core.point();
-        core.window.set_mark(&mut core.buffers, end)?;
+        core.windows.window.set_mark(&mut core.buffers, end)?;
         self.goto(start)
     }
 }
@@ -192,7 +194,11 @@ mod tests {
     /// A buffer holding `text` with point at `p`.
     fn at(text: &str, p: usize) -> Harness {
         let mut h = on(text);
-        h.core.window.set_point(&mut h.core.buffers, p).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, p)
+            .unwrap();
         h
     }
 
@@ -266,13 +272,13 @@ mod tests {
         let mut h = at("abcd", 1);
         h.keys("C-SPC C-f C-f C-w");
         assert_eq!(
-            (h.text().as_str(), h.point(), h.core.window.active()),
+            (h.text().as_str(), h.point(), h.core.windows.window.active()),
             ("ad", 1, false)
         );
         let mut h = at("ab", 0);
         h.keys("C-SPC C-e M-w");
         assert_eq!(
-            (h.core.window.active(), h.clipboard.as_deref()),
+            (h.core.windows.window.active(), h.clipboard.as_deref()),
             (false, Some("ab"))
         );
         h.keys("C-y");

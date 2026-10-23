@@ -9,7 +9,11 @@ use crate::{Core, Ctx};
 pub type Handler = fn(&mut Ctx, Args) -> Result<(), String>;
 
 /// Given the text and every candidate, the indices of those that match, in the order to list them.
-pub type Filter = fn(&str, &[String]) -> Vec<usize>;
+#[derive(Clone, Copy, Debug)]
+pub enum Filter {
+    Items(fn(&str, &[String]) -> Vec<usize>),
+    Swiper,
+}
 
 #[derive(Clone, Copy)]
 pub struct Command {
@@ -23,6 +27,7 @@ pub struct Command {
 pub struct ArgSpec {
     /// Takes the region as a char range.
     pub region: bool,
+    pub project: bool,
     /// Reads the system clipboard, which the app then sends before the key that runs it.
     pub clipboard: bool,
     /// One string per prompt, in order.
@@ -65,6 +70,7 @@ pub struct Args {
     /// The region, lower end first; `Ctx::call` fills it from point and mark when the spec asks.
     pub region: Option<Range<usize>>,
     pub strings: Vec<String>,
+    pub project: Option<crate::project::ProjectId>,
 }
 
 impl Args {

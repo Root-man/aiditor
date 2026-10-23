@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 use crate::buffer::{self, Buffer, BufferId, Buffers};
 use crate::command::Args;
 use crate::workspace::WorkspaceId;
-use crate::{Core, Ctx, Effect, FileOp};
+use crate::{Core, Ctx, Effect, FileOp, VisitIntent};
+
+pub(crate) struct PendingVisit {
+    pub intent: VisitIntent,
+    pub path: PathBuf,
+    pub destination: Option<(usize, usize)>,
+}
 
 impl Ctx<'_> {
     /// Handles the file service's answer to a save of buffer `id` at `tick`, and the quit
@@ -101,7 +107,7 @@ impl Ctx<'_> {
         }
         let buffer = self.core.current();
         self.effects.push(Effect::File(FileOp::Revert {
-            buffer: self.core.window.buffer(),
+            buffer: self.core.windows.window.buffer(),
             tick: buffer.tick(),
             path,
             text: buffer.text().clone(),
@@ -114,7 +120,7 @@ impl Ctx<'_> {
     /// saves after `Keep mine`, and saves at once when there is no conflict.
     pub(crate) fn resolve_conflict(&mut self, command: &str, args: Args) -> Result<(), String> {
         let save = command == "save-buffer";
-        let id = self.core.window.buffer();
+        let id = self.core.windows.window.buffer();
         let buffer = self.core.current_mut();
         let (Some(path), Some(hash)) = (buffer.file.clone(), buffer.conflict) else {
             // An answer arriving after the conflict ended does nothing more.
@@ -158,7 +164,7 @@ impl Ctx<'_> {
         let path =
             (buffer.file.clone()).ok_or("Buffer does not seem to be associated with any file")?;
         self.effects.push(Effect::File(FileOp::Diff {
-            buffer: self.core.window.buffer(),
+            buffer: self.core.windows.window.buffer(),
             name: buffer.name.clone(),
             path,
             text: buffer.text().clone(),
@@ -199,9 +205,24 @@ impl Ctx<'_> {
     /// it, or asks the app to read it.
     pub(crate) fn find_file(&mut self, name: &str) -> Result<(), String> {
         let path = self.core.directory().join(name);
+        self.core.pending_visit = None;
         match self.core.buffers.visiting(&path) {
             Some(id) => self.core.switch_to(id),
-            None => self.effects.push(Effect::File(FileOp::Open(path))),
+            None => {
+                self.core.visits += 1;
+                let intent = VisitIntent {
+                    request: self.core.visits,
+                    workspace: self.core.buffers.workspace,
+                    window: self.core.windows.selected,
+                };
+                self.core.pending_visit = Some(PendingVisit {
+                    intent,
+                    path: path.clone(),
+                    destination: None,
+                });
+                self.effects
+                    .push(Effect::File(FileOp::Open { intent, path }));
+            }
         }
         Ok(())
     }
@@ -318,8 +339,8 @@ impl Core {
         if self.buffers.get(id).is_none_or(|b| b.tick() != tick) {
             return;
         }
-        let point = |core: &Core| match core.window.buffer() == id {
-            true => core.window.point(&core.buffers),
+        let point = |core: &Core| match core.windows.window.buffer() == id {
+            true => core.windows.window.point(&core.buffers),
             false => {
                 let b = core.buffers.get(id).expect("live");
                 b.marker(b.point).unwrap_or(0)
@@ -337,6 +358,35 @@ impl Core {
         (buffer.disk, buffer.crlf, buffer.bom) = (Some(revert.hash), revert.crlf, revert.bom);
         buffer.conflict = None;
         buffer.set_saved();
+    }
+
+    pub(crate) fn on_opened(
+        &mut self,
+        intent: VisitIntent,
+        path: PathBuf,
+        result: Result<Option<(Vec<u8>, u64)>, String>,
+    ) {
+        let valid = self.pending_visit.as_ref().is_some_and(|pending| {
+            pending.intent == intent
+                && pending.path == path
+                && intent.workspace == self.buffers.workspace
+                && intent.window == self.windows.selected
+        });
+        if !valid {
+            return;
+        }
+        let pending = self.pending_visit.take().expect("validated visit");
+        match result {
+            Ok(file) => {
+                self.visit(&path, file, true);
+                if self.buffers.visiting(&path) == Some(self.windows.window.buffer())
+                    && let Some((line, col)) = pending.destination
+                {
+                    self.goto_line_col(line, col);
+                }
+            }
+            Err(err) => self.echo(err),
+        }
     }
 
     /// Visits `path` in a new current buffer, given the file's bytes and their hash, or `None`
@@ -374,7 +424,8 @@ impl Core {
 
     /// Shows buffer `id` in the selected window, as a jump, and makes it the most recent.
     pub(crate) fn switch_to(&mut self, id: BufferId) {
-        if self.window.buffer() != id {
+        self.pending_visit = None;
+        if self.windows.window.buffer() != id {
             self.push_jump();
         }
         self.show_buffer(id);
@@ -383,8 +434,9 @@ impl Core {
     /// Shows buffer `id` in the selected window and makes it the most recent.
     pub(crate) fn show_buffer(&mut self, id: BufferId) {
         self.buffers.raise(id);
-        if self.window.buffer() != id {
-            self.window.show(&mut self.buffers, id);
+        if self.windows.window.buffer() != id {
+            self.pending_visit = None;
+            self.windows.window.show(&mut self.buffers, id);
         }
     }
 
@@ -397,7 +449,7 @@ impl Core {
     /// The names of the current workspace's buffers and `*Messages*` not hidden by a leading
     /// space, most recently shown first, with the current buffer first or last.
     pub(crate) fn buffer_names(&self, current_first: bool) -> Vec<String> {
-        let current = self.window.buffer();
+        let current = self.windows.window.buffer();
         let listed = self
             .buffers
             .recent()
@@ -413,6 +465,9 @@ impl Core {
     /// Kills buffer `id`; windows showing it show the most recent listed buffer left of their
     /// workspace or `*Messages*`, or a new scratch in the current workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
+        if self.windows.window.buffer() == id {
+            self.pending_visit = None;
+        }
         let next = replacement(&self.buffers, id, self.buffers.workspace);
         // Killed first, so a new scratch gets its name.
         _ = self.buffers.kill(id);
@@ -420,22 +475,14 @@ impl Core {
             let name = self.current_workspace().name.clone();
             self.buffers.create_scratch(&name)
         });
-        for window in std::iter::once(&mut self.window).chain(self.others.values_mut()) {
-            if window.buffer() == id {
-                window.show(&mut self.buffers, next);
-            }
-        }
+        self.windows.replace_buffer(&mut self.buffers, id, next);
         for workspace in &mut self.workspaces {
             let Some(windows) = &mut workspace.windows else {
                 continue;
             };
             // Every live workspace keeps its `*scratch*`, so `next` is only a guard.
             let theirs = replacement(&self.buffers, id, workspace.id).unwrap_or(next);
-            for window in windows.windows_mut() {
-                if window.buffer() == id {
-                    window.show(&mut self.buffers, theirs);
-                }
-            }
+            windows.replace_buffer(&mut self.buffers, id, theirs);
         }
     }
 }
@@ -470,13 +517,148 @@ mod tests {
     fn reverting() -> Harness {
         let mut h = Harness::new(&[("a.txt", LINES)]);
         h.open("a.txt");
-        h.core.window.set_point(&mut h.core.buffers, 11).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 11)
+            .unwrap();
         h
     }
 
     fn revert(h: &mut Harness, disk: &str) {
-        std::fs::write(h.path("a.txt"), disk).unwrap();
+        h.prepare_revert("a.txt", Some(disk.as_bytes()));
         h.keys("M-x revert-buffer RET");
+    }
+
+    fn pending_open(h: &mut Harness, file: &str) -> (crate::VisitIntent, std::path::PathBuf) {
+        h.collect_effects = true;
+        h.call(
+            "find-file",
+            Args {
+                strings: vec![h.path(file).to_string_lossy().into_owned()],
+                ..Args::default()
+            },
+        );
+        std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::Open { intent, path }) => Some((intent, path)),
+                _ => None,
+            })
+            .expect("a visit read")
+    }
+
+    fn opened(intent: crate::VisitIntent, path: std::path::PathBuf, text: &str) -> Msg {
+        Msg::Opened {
+            intent,
+            path,
+            result: Ok(Some((
+                text.as_bytes().to_vec(),
+                crate::buffer::hash(text.as_bytes()),
+            ))),
+        }
+    }
+
+    #[test]
+    fn a_visit_keeps_its_owner_through_ordinary_edits_and_validates_text() {
+        let mut h = Harness::new(&[]);
+        let (intent, path) = pending_open(&mut h, "new.txt");
+        let origin = h.core.windows.window.buffer();
+        h.keys("editing");
+        h.send(opened(intent, path.clone(), "visited"));
+        assert_eq!(h.core.current().file, Some(path));
+        assert_eq!(h.core.current().workspace, Some(intent.workspace));
+        assert_eq!(h.text(), "visited");
+        assert_eq!(
+            h.core.buffers.get(origin).unwrap().text().to_string(),
+            "editing"
+        );
+        let (intent, path) = pending_open(&mut h, "binary");
+        h.send(opened(intent, path, "a\0b"));
+        assert_eq!(h.text(), "visited");
+        assert!(h.core.message().unwrap().ends_with(": binary file"));
+    }
+
+    #[test]
+    fn abandoned_visits_leave_navigation_prompts_and_echo_unchanged() {
+        let changes: [fn(&mut Harness); 7] = [
+            |h| {
+                let origin = h.core.workspace();
+                h.new_workspace("away", "home");
+                h.core.switch_workspace(origin).unwrap();
+            },
+            |h| {
+                h.keys("C-x 2 C-x o C-x o");
+            },
+            |h| {
+                h.keys("C-x 2 C-x 0");
+            },
+            |h| {
+                let origin = h.core.workspace();
+                h.new_workspace("away", "home");
+                h.core.kill_workspace(origin).unwrap();
+            },
+            |h| {
+                h.core.switch_to_name("another");
+                h.core.switch_to_name("*scratch*");
+            },
+            |h| {
+                h.keys("C-x b");
+            },
+            |h| {
+                h.core.kill_buffer(h.core.windows.window.buffer());
+            },
+        ];
+        for change in changes {
+            for error in [false, true] {
+                let mut h = Harness::new(&[]);
+                let (intent, path) = pending_open(&mut h, "late.txt");
+                change(&mut h);
+                h.core.echo("new interaction".into());
+                let before = (
+                    h.core.workspace(),
+                    h.core.windows.selected,
+                    h.text(),
+                    h.point(),
+                    h.core.buffers.recent().count(),
+                );
+                h.send(if error {
+                    Msg::Opened {
+                        intent,
+                        path,
+                        result: Err("obsolete error".into()),
+                    }
+                } else {
+                    opened(intent, path, "late")
+                });
+                assert_eq!(
+                    (
+                        h.core.workspace(),
+                        h.core.windows.selected,
+                        h.text(),
+                        h.point(),
+                        h.core.buffers.recent().count()
+                    ),
+                    before
+                );
+                assert_eq!(h.core.message(), Some("new interaction"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_newer_same_path_visit_owns_its_reply_and_point() {
+        let mut h = Harness::new(&[]);
+        let (first, path) = pending_open(&mut h, "same");
+        h.core.pending_visit.as_mut().unwrap().destination = Some((1, 2));
+        let (second, _) = pending_open(&mut h, "same");
+        h.send(opened(first, path.clone(), "old\n  hit"));
+        assert_eq!(h.text(), "");
+        h.send(opened(second, path.clone(), "new\n  hit"));
+        assert_eq!((h.text(), h.point()), ("new\n  hit".into(), 0));
+        h.keys("C-f");
+        h.send(opened(first, path, "old"));
+        assert_eq!((h.text(), h.point()), ("new\n  hit".into(), 1));
     }
 
     #[test]
@@ -493,21 +675,37 @@ mod tests {
     #[test]
     fn a_revert_keeps_the_mark_and_other_windows_on_their_lines() {
         let mut h = reverting();
-        h.core.window.set_mark(&mut h.core.buffers, 14).unwrap();
+        h.core
+            .windows
+            .window
+            .set_mark(&mut h.core.buffers, 14)
+            .unwrap();
         h.keys("C-x 2");
-        let other = *h.core.others.keys().next().unwrap();
-        let w = &h.core.others[&other];
+        let other = *h.core.windows.others.keys().next().unwrap();
+        let w = &h.core.windows.others[&other];
         w.set_point(&mut h.core.buffers, 16).unwrap();
         revert(&mut h, &LINES[2..]);
-        assert_eq!(h.core.window.mark(&h.core.buffers), Some(12), "on h");
-        assert_eq!(h.core.others[&other].point(&h.core.buffers), 14, "on i");
+        assert_eq!(
+            h.core.windows.window.mark(&h.core.buffers),
+            Some(12),
+            "on h"
+        );
+        assert_eq!(
+            h.core.windows.others[&other].point(&h.core.buffers),
+            14,
+            "on i"
+        );
         assert_eq!(h.point(), 9, "still at column 1 of f");
     }
 
     #[test]
     fn point_in_a_changed_line_goes_to_its_replacement() {
         let mut h = reverting();
-        h.core.window.set_point(&mut h.core.buffers, 5).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 5)
+            .unwrap();
         revert(&mut h, &LINES.replace("c\n", "ccc\n"));
         assert_eq!(h.point(), 4);
     }
@@ -522,8 +720,13 @@ mod tests {
         assert!(!h.core.current().modified());
         h.keys("C-/");
         assert_eq!(h.text(), LINES.replace("f\n", "fx\n"));
+        h.save_reply(LINES);
         h.keys("C-/ C-x C-s");
-        assert_eq!(h.disk("a.txt"), LINES, "the revert took the disk's hash");
+        assert_eq!(
+            h.submitted("a.txt"),
+            LINES,
+            "the revert took the disk's hash"
+        );
     }
 
     #[test]
@@ -537,7 +740,7 @@ mod tests {
     #[test]
     fn a_revert_of_edited_text_is_dropped() {
         let mut h = reverting();
-        std::fs::write(h.path("a.txt"), "z\n").unwrap();
+        h.prepare_revert("a.txt", Some(b"z\n"));
         let mut ctx = h.ctx();
         ctx.call("revert-buffer", Args::default());
         let effects = ctx.effects;
@@ -549,7 +752,7 @@ mod tests {
         let mut ctx = h.ctx();
         ctx.call("revert-buffer", Args::default());
         let effects = ctx.effects;
-        let id = h.core.window.buffer();
+        let id = h.core.windows.window.buffer();
         h.core.kill_buffer(id);
         h.run(effects);
         assert!(h.core.buffers.get(id).is_none());
@@ -586,7 +789,7 @@ mod tests {
         let no_file = "Buffer does not seem to be associated with any file";
         assert_eq!(h.core.message(), Some(no_file));
         let mut h = reverting();
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.prepare_revert("a.txt", None);
         h.keys("M-x revert-buffer RET");
         let gone = format!("File {} no longer exists", h.path("a.txt").display());
         assert_eq!(h.core.message(), Some(gone.as_str()));
@@ -604,7 +807,7 @@ mod tests {
 
     /// The buffer names the windows show, the selected one first.
     fn shown(h: &Harness) -> Vec<String> {
-        let ws = std::iter::once(&h.core.window).chain(h.core.others.values());
+        let ws = std::iter::once(&h.core.windows.window).chain(h.core.windows.others.values());
         let names = ws.map(|w| h.core.buffers.get(w.buffer()).unwrap().name.clone());
         names.collect()
     }
@@ -613,12 +816,14 @@ mod tests {
     fn diff_buffer_with_file_shows_the_disk_against_the_buffer_in_another_window() {
         let mut h = Harness::new(&[("a.txt", LINES)]);
         h.open("a.txt");
-        h.keys("C-n C-n C-n C-n e M-x diff-buffer-with-file RET");
+        h.keys("C-n C-n C-n C-n e");
         let diff = format!(
             "--- {}\n+++ a.txt\n@@ -2,7 +2,7 @@\n b\n c\n d\n-e\n+ee\n f\n g\n h\n",
             h.path("a.txt").display()
         );
-        assert_eq!(diff_text(&h), Some(diff));
+        h.diffs.insert(h.path("a.txt"), Ok(diff.clone()));
+        h.keys("M-x diff-buffer-with-file RET");
+        assert_eq!(diff_text(&h), Some(diff.clone()));
         assert_eq!(shown(&h), ["a.txt", "*Diff*"]);
         let buffer = h.core.current();
         assert!(buffer.modified() && h.text() == LINES.replace("e\n", "ee\n"));
@@ -629,6 +834,8 @@ mod tests {
         h.keys("C-/");
         assert_eq!(h.core.message(), Some("No further undo information"));
         // A second run refills the same buffer in the same window.
+        h.diffs
+            .insert(h.path("a.txt"), Ok(diff.replace("+ee\n", "+\n")));
         h.keys("C-x o C-a C-k M-x diff-buffer-with-file RET");
         let diff = diff_text(&h).unwrap();
         assert!(diff.ends_with(" d\n-e\n+\n f\n g\n h\n"), "{diff}");
@@ -648,14 +855,24 @@ mod tests {
         let no_file = "Buffer does not seem to be associated with any file";
         assert_eq!(h.core.message(), Some(no_file));
         let mut h = reverting();
+        h.diffs.insert(h.path("a.txt"), Ok(String::new()));
         h.keys("M-x diff-buffer-with-file RET");
         assert_eq!(h.core.message(), Some("No differences"));
         assert_eq!(shown(&h), ["a.txt"]);
-        std::fs::write(h.path("a.txt"), "a\0").unwrap();
+        h.diffs.insert(
+            h.path("a.txt"),
+            Err(format!("{}: binary file", h.path("a.txt").display())),
+        );
         h.keys("M-x diff-buffer-with-file RET");
         let binary = format!("{}: binary file", h.path("a.txt").display());
         assert_eq!(h.core.message(), Some(binary.as_str()));
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.diffs.insert(
+            h.path("a.txt"),
+            Err(format!(
+                "File {} no longer exists",
+                h.path("a.txt").display()
+            )),
+        );
         h.keys("M-x diff-buffer-with-file RET");
         let gone = format!("File {} no longer exists", h.path("a.txt").display());
         assert_eq!(h.core.message(), Some(gone.as_str()));
@@ -665,20 +882,28 @@ mod tests {
     #[test]
     fn a_diff_for_a_killed_buffer_or_another_workspace_is_dropped() {
         let mut h = reverting();
+        h.diffs.insert(
+            h.path("a.txt"),
+            Ok("--- file\n+++ buffer\n-old\n+new\n".into()),
+        );
         h.keys("x");
         let mut ctx = h.ctx();
         ctx.call("diff-buffer-with-file", Args::default());
         let effects = ctx.effects;
-        let id = h.core.window.buffer();
+        let id = h.core.windows.window.buffer();
         h.core.kill_buffer(id);
         h.run(effects);
         assert!(h.core.buffers.find("*Diff*").is_none());
         let mut h = reverting();
+        h.diffs.insert(
+            h.path("a.txt"),
+            Ok("--- file\n+++ buffer\n-old\n+new\n".into()),
+        );
         h.keys("x");
         let mut ctx = h.ctx();
         ctx.call("diff-buffer-with-file", Args::default());
         let effects = ctx.effects;
-        h.core.new_workspace("w", "home");
+        h.new_workspace("w", "home");
         h.run(effects);
         assert!(h.core.buffers.find("*Diff*").is_none());
     }
@@ -693,9 +918,10 @@ mod tests {
         assert_eq!(h.point(), 0);
         h.keys("<right> X");
         assert!(h.core.current().modified());
-        assert_eq!(h.disk("a.txt"), "hello");
+        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"hello")));
+        h.save_reply("hXello\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "hXello\n");
+        assert_eq!(h.submitted("a.txt"), "hXello\n");
         assert_eq!(h.text(), "hXello\n");
         assert_eq!(h.point(), 2);
         assert!(!h.core.current().modified());
@@ -709,9 +935,12 @@ mod tests {
     fn refuses_to_save_over_a_file_changed_on_disk() {
         let mut h = Harness::new(&[("a.txt", "old\n")]);
         h.open("a.txt");
-        std::fs::write(h.path("a.txt"), "theirs\n").unwrap();
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("a.txt").display()
+        )));
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "theirs\n");
+        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"old\n")));
         assert!(h.core.current().modified());
         assert!(
             h.core
@@ -721,9 +950,13 @@ mod tests {
         );
         // A file that appeared after it was opened as missing.
         h.open("new.txt");
-        std::fs::write(h.path("new.txt"), "theirs").unwrap();
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("new.txt").display()
+        )));
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("new.txt"), "theirs");
+        assert!(h.core.current().modified());
+        assert_eq!(h.core.current().disk, None);
     }
 
     #[test]
@@ -732,11 +965,20 @@ mod tests {
         h.open("a.txt");
         assert_eq!(h.text(), "a\nb\n");
         assert_eq!(h.display(5).mode_line, "-- a.txt (DOS)  1:0");
+        h.save_reply("\u{feff}xa\r\nb\r\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "\u{feff}xa\r\nb\r\n");
+        assert_eq!(
+            h.core.current().disk,
+            Some(crate::buffer::hash("\u{feff}xa\r\nb\r\n".as_bytes()))
+        );
+        assert!(h.core.current().crlf && h.core.current().bom);
         // The saved hash is the next save's base.
+        h.save_reply("\u{feff}xya\r\nb\r\n");
         h.keys("y C-x C-s");
-        assert_eq!(h.disk("a.txt"), "\u{feff}xya\r\nb\r\n");
+        assert_eq!(
+            h.core.current().disk,
+            Some(crate::buffer::hash("\u{feff}xya\r\nb\r\n".as_bytes()))
+        );
     }
 
     #[test]
@@ -748,18 +990,20 @@ mod tests {
         ctx.call("save-buffer", Args::default());
         let effects = ctx.effects;
         h.keys("y");
+        h.save_reply("x\n");
         h.run(effects);
-        assert_eq!(h.disk("a.txt"), "x\n");
+        assert_eq!(h.submitted("a.txt"), "x\n");
         assert!(h.core.current().modified());
+        h.save_reply("xy\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xy\n");
+        assert_eq!(h.submitted("a.txt"), "xy\n");
     }
 
     #[test]
     fn binary_and_non_utf8_files_open_empty_and_read_only() {
         for (name, bytes) in [("a.bin", &b"a\0b"[..]), ("l1.txt", b"caf\xe9")] {
             let mut h = Harness::new(&[]);
-            std::fs::write(h.path(name), bytes).unwrap();
+            h.read_reply(name, Some(bytes));
             h.open(name);
             assert_eq!(h.text(), "");
             assert!(h.core.message().unwrap().contains(", opened read-only"));
@@ -767,7 +1011,7 @@ mod tests {
             h.keys("x");
             assert_eq!(h.core.message(), Some("Buffer is read-only"));
             h.keys("C-x C-s");
-            assert_eq!(std::fs::read(h.path(name)).unwrap(), bytes);
+            assert!(h.core.current().read_only);
         }
     }
 
@@ -776,15 +1020,17 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.open("new.txt");
         assert_eq!(h.text(), "");
-        assert!(!h.path("new.txt").exists());
+        assert_eq!(h.core.current().disk, None);
+        h.save_reply("hi\n");
         h.keys("hi C-x C-s");
-        assert_eq!(h.disk("new.txt"), "hi\n");
+        assert_eq!(h.submitted("new.txt"), "hi\n");
     }
 
     #[test]
     fn failed_save_keeps_the_buffer_modified() {
         let mut h = Harness::new(&[]);
         h.open("no/such/dir/a.txt");
+        h.saves.push_back(Err("No such file or directory".into()));
         h.keys("x C-x C-s");
         assert!(h.core.current().modified());
         assert_eq!(h.text(), "x\n");
@@ -817,7 +1063,7 @@ mod tests {
         let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
         h.open("a").open("b");
         let shown = |h: &Harness| {
-            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+            let id = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
             h.core.buffers.get(id).unwrap().name.clone()
         };
         h.keys("C-x b");
@@ -844,7 +1090,7 @@ mod tests {
         let mut h = Harness::new(&[("x", "1")]);
         h.open("x");
         let main = h.core.workspace();
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         h.keys("C-x k x RET");
         assert_eq!(h.core.message(), Some("No such buffer x"));
         h.keys("C-x b");
@@ -886,15 +1132,15 @@ mod tests {
         let mut h = Harness::new(&[("a", "1")]);
         h.open("a");
         h.keys("C-x 4 b RET");
-        let leaves = h.core.tree.leaves();
-        assert_eq!((leaves.len(), h.core.selected), (2, leaves[1]));
+        let leaves = h.core.windows.tree.leaves();
+        assert_eq!((leaves.len(), h.core.windows.selected), (2, leaves[1]));
         assert_eq!(name(&h), "*scratch*<main>");
-        let upper = h.core.others[&leaves[0]].buffer();
+        let upper = h.core.windows.others[&leaves[0]].buffer();
         assert_eq!(h.core.buffers.get(upper).unwrap().name, "a");
         // With two windows it uses the next one rather than splitting again.
         h.keys("C-x 4 b RET");
         assert_eq!(
-            (h.core.tree.leaves().len(), h.core.selected),
+            (h.core.windows.tree.leaves().len(), h.core.windows.selected),
             (2, leaves[0])
         );
     }
@@ -910,7 +1156,7 @@ mod tests {
             (name(&h), h.core.buffers.find("a")),
             ("*scratch*<main>", None)
         );
-        let other = h.core.others[&WindowId(1)].buffer();
+        let other = h.core.windows.others[&WindowId(1)].buffer();
         assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*<main>");
         h.keys("C-x k nope RET");
         assert_eq!(h.core.message(), Some("No such buffer nope"));
@@ -967,6 +1213,8 @@ mod tests {
                 format!("Save file {}? ", path.display())
             );
         };
+        h.save_reply("y2\n");
+        h.save_reply("x1\n");
         prompt(&mut h, "b");
         assert_eq!(listed(&mut h).0, ["Yes", "No"]);
         h.keys("RET");
@@ -974,7 +1222,7 @@ mod tests {
         // Lowercase text still picks a candidate.
         h.keys("y RET");
         assert_eq!(
-            (h.disk("a").as_str(), h.disk("b").as_str()),
+            (h.submitted("a").as_str(), h.submitted("b").as_str()),
             ("x1\n", "y2\n")
         );
         assert!(h.quit);
@@ -1000,6 +1248,7 @@ mod tests {
     #[test]
     fn declining_keeps_the_editor_open_unless_confirmed() {
         let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
+        h.save_reply("x1\n");
         h.open("a").keys("x").open("b").keys("y C-x C-c no RET RET");
         assert_eq!(
             h.core.minibuffer().unwrap().prompt,
@@ -1009,24 +1258,27 @@ mod tests {
         h.keys("RET");
         // The answered `Yes` is still saved; the declined buffer is left alone.
         assert!(!h.quit && h.core.minibuffer().is_none());
-        assert_eq!((h.disk("a").as_str(), h.disk("b").as_str()), ("x1\n", "2"));
+        assert_eq!(h.writes, [(h.path("a"), "x1\n".into())]);
         assert!(h.core.current().modified());
         h.keys("C-x C-c no RET yes RET");
         assert!(h.quit);
-        assert_eq!(h.disk("b"), "2");
+        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"2")));
     }
 
     #[test]
     fn a_failed_save_cancels_the_quit() {
         let mut h = Harness::new(&[("a", "1")]);
         h.open("a").keys("x");
-        std::fs::write(h.path("a"), "theirs").unwrap();
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("a").display()
+        )));
         h.keys("C-x C-c RET");
         let msg = format!("{} changed on disk; not saved", h.path("a").display());
         assert_eq!(h.core.message(), Some(msg.as_str()));
         assert!(!h.quit);
         // A later save that succeeds does not quit.
-        std::fs::write(h.path("a"), "1").unwrap();
+        h.save_reply("x1\n");
         h.keys("C-x C-s");
         assert!(!h.quit);
     }
@@ -1036,6 +1288,7 @@ mod tests {
         let mut h = Harness::new(&[("a", "1")]);
         h.open("a").keys("x");
         h.send(Msg::Quit);
+        h.save_reply("x1\n");
         assert!(h.core.minibuffer().is_some() && !h.quit);
         h.keys("RET");
         assert!(h.quit);
@@ -1044,6 +1297,13 @@ mod tests {
     /// A harness visiting `d/a.txt`, with `d` holding `a.txt`, `b.txt` and `sub/c.txt`.
     fn in_dir() -> Harness {
         let mut h = Harness::new(&[("d/a.txt", "a"), ("d/b.txt", "hi"), ("d/sub/c.txt", "")]);
+        h.listing("d", &["a.txt", "b.txt", "sub/"]);
+        h.listing("d/sub", &["c.txt"]);
+        h.read_reply("d/bt", None);
+        h.reads.insert(
+            h.path("d/"),
+            Err(format!("{}: Is a directory", h.path("d/").display())),
+        );
         h.open("d/a.txt");
         h
     }
@@ -1083,9 +1343,9 @@ mod tests {
     #[test]
     fn find_file_previews_the_selected_file_but_not_a_directory() {
         let mut h = in_dir();
-        std::fs::write(h.path("d/bin"), b"a\0b").unwrap();
+        h.read_reply("d/bin", Some(b"a\0b".as_ref()));
         let shown = |h: &Harness| {
-            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+            let id = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
             h.core.buffers.get(id).unwrap().text().to_string()
         };
         h.keys("C-x C-f b.txt");
@@ -1111,9 +1371,10 @@ mod tests {
         // M-RET keeps a new name that fuzzy-matches b.txt.
         h.keys("C-x C-f bt M-RET");
         assert_eq!((name(&h), h.text().as_str()), ("bt", ""));
-        assert!(!h.path("d/bt").exists());
+        assert_eq!(h.core.current().disk, None);
+        h.save_reply("x\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("d/bt"), "x\n");
+        assert_eq!(h.submitted("d/bt"), "x\n");
     }
 
     #[test]
@@ -1138,8 +1399,13 @@ mod tests {
         h.keys("RET");
         assert_eq!((name(&h), h.text().as_str()), ("a.txt", "xa"));
         assert_eq!(h.core.buffers.recent().count(), 2);
-        // A read that raced another find of the same file switches too.
+        // An obsolete read leaves the reused buffer intact.
         h.send(Msg::Opened {
+            intent: crate::VisitIntent {
+                request: 0,
+                workspace: h.core.workspace(),
+                window: h.core.windows.selected,
+            },
             path: h.path("d/a.txt"),
             result: Ok(None),
         });
@@ -1152,7 +1418,7 @@ mod tests {
     #[test]
     fn find_file_refuses_binary_files_and_directories() {
         let mut h = in_dir();
-        std::fs::write(h.path("d/bin"), b"a\0b").unwrap();
+        h.read_reply("d/bin", Some(b"a\0b".as_ref()));
         h.keys("C-x C-f bin M-RET");
         assert_eq!(name(&h), "a.txt");
         let msg = format!("{}: binary file", h.path("d/bin").display());
@@ -1176,6 +1442,9 @@ mod tests {
             .chain([("d/a.txt", "")])
             .collect();
         let mut h = Harness::new(&files);
+        h.listing("d", &["a.txt", "five/", "ten/"]);
+        h.listing("d/ten", &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+        h.listing("d/five", &["0", "1", "2", "3", "4"]);
         h.open("d/a.txt");
         h.keys("C-x C-f ten/");
         let mb = h.core.minibuffer().unwrap();
@@ -1196,6 +1465,13 @@ mod tests {
     #[test]
     fn a_listing_error_shows_and_a_late_listing_is_dropped() {
         let mut h = in_dir();
+        h.listings.insert(
+            h.path("d/nope/"),
+            Err(format!(
+                "{}: missing directory",
+                h.path("d/nope/").display()
+            )),
+        );
         h.keys("C-x C-f nope/");
         assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/nope/")));
         assert_eq!(listed(&mut h).0, Vec::<String>::new());

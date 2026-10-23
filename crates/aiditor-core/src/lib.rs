@@ -9,8 +9,10 @@ mod bindings;
 pub mod buffer;
 mod builtins;
 pub mod command;
+pub mod configuration;
 pub mod display;
 mod editing;
+mod file_index;
 mod frame;
 mod grep;
 #[cfg(test)]
@@ -39,6 +41,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
@@ -46,16 +49,16 @@ use ropey::Rope;
 use bindings::HINT_DELAY;
 use buffer::{Buffer, BufferId, Buffers};
 use command::{Args, Command, Prefix};
+use file_index::FileIndex;
 use key::{Key, KeyCode};
 use keymap::{Binding, Keymap};
 use kill_ring::KillRing;
 use minibuffer::Prompts;
-use project::{Loaded, Project};
-use project_commands::FileIndex;
+use project::{Entry, Loaded, Project, ProjectId, WriteIntent};
 use settings::Settings;
 use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
-use workspace::{Workspace, WorkspaceId};
+use workspace::{Windows, Workspace, WorkspaceId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
@@ -114,30 +117,33 @@ pub enum Msg {
     /// The file service's answer to `FileOp::Open`: the file's bytes and hash, `None` when there
     /// is no file, or why it couldn't be read.
     Opened {
+        intent: VisitIntent,
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
     },
-    /// The file service's answer to `FileOp::Preview`, as to `FileOp::Open`.
+    /// Prepared preview text, owned by one selection in one prompt session.
     Previewed {
-        path: PathBuf,
-        result: Result<Option<(Vec<u8>, u64)>, String>,
+        request: PreviewRequest,
+        result: Result<Option<Rope>, String>,
     },
     /// The file service's answer to `FileOp::Index`: each root with its files, relative and
     /// sorted, or why it couldn't be walked.
     Indexed {
-        project: String,
+        project: ProjectId,
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
-        directories: usize,
+        directories: Vec<PathBuf>,
     },
     /// The watcher's debounced report: the paths that may have changed and what each is now, and
-    /// whether events were lost, so every visited file needs checking.
+    /// whether events were lost or directory coverage needs recovery, so every visited file needs checking.
     FilesChanged {
         paths: Vec<(PathBuf, Disk)>,
         rescan: bool,
     },
     /// The file service's answer to `FileOp::Check`: each readable file's hash, `None` when gone.
     Checked(Vec<(PathBuf, Option<u64>)>),
+    /// A watch registration failure or recovery, shown in the echo area and Messages.
+    WatchStatus(String),
     /// The grep service's hits for search `search`, in batches as they are found, or why the
     /// pattern is invalid; `done` on its last message. A cancelled search sends nothing more.
     Grepped {
@@ -147,6 +153,10 @@ pub enum Msg {
     },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
+    ConfigurationLoaded {
+        request: u64,
+        bundle: configuration::Bundle,
+    },
     /// The user's keymap file, the same way.
     KeymapLoaded(Result<Option<String>, String>),
     /// Every project file in the projects directory `dir`, parsed and checked, or why it was
@@ -157,7 +167,10 @@ pub enum Msg {
     },
     /// The file service's answer to `FileOp::WriteProject`: the project as written, or why it
     /// wasn't, the error starting with the file's name.
-    ProjectWritten(Result<Loaded, String>),
+    ProjectWritten {
+        intent: WriteIntent,
+        result: Result<Loaded, String>,
+    },
     /// The prefix hint's delay passed with the prefix still pending.
     Hint,
     /// The system clipboard's text, sent before a key `Core::wants_clipboard` accepts.
@@ -170,6 +183,13 @@ pub enum Msg {
     AutoSave,
     /// Recovery files an earlier session left, found at launch: offer each one.
     Recover(Vec<Recovered>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewRequest {
+    pub session: u64,
+    pub revision: u64,
+    pub path: PathBuf,
 }
 
 /// A recovery file read back: what `RecoveryOp::AutoSave` wrote, plus the visited file as it is now.
@@ -200,6 +220,8 @@ pub enum Disk {
 pub struct WatchSet {
     pub roots: Vec<(PathBuf, Vec<String>)>,
     pub files: Vec<PathBuf>,
+    /// Shared accepted snapshots, so input handling does not copy every directory.
+    pub directories: Vec<Arc<[PathBuf]>>,
 }
 
 /// A line matching a grep search.
@@ -233,13 +255,20 @@ pub enum Effect {
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
-    /// Read the user's settings, keymap and project files and send `Msg::SettingsLoaded`,
-    /// `Msg::KeymapLoaded` and `Msg::ProjectsLoaded`.
-    LoadSettings,
+    /// Read one configuration bundle and send `Msg::ConfigurationLoaded`.
+    LoadConfiguration { request: u64 },
     /// Put this text on the system clipboard.
     SetClipboard(String),
     /// Quit the app.
     Quit,
+}
+
+/// The navigation context that issued a command-driven file read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisitIntent {
+    pub request: u64,
+    pub workspace: WorkspaceId,
+    pub window: WindowId,
 }
 
 /// File work for the file service; each sends one reply message.
@@ -274,15 +303,15 @@ pub enum FileOp {
     /// List the directory and send `Msg::Listed`.
     ListDir(PathBuf),
     /// Read the file and send `Msg::Opened`.
-    Open(PathBuf),
+    Open { intent: VisitIntent, path: PathBuf },
     /// Read the file and send `Msg::Previewed`.
-    Preview(PathBuf),
+    Preview(PreviewRequest),
     /// Hash each file and send `Msg::Checked`.
     Check(Vec<PathBuf>),
     /// Walk every root of `project`, leaving out what its `ignore` patterns match, and send
     /// `Msg::Indexed` with `walk`.
     Index {
-        project: String,
+        project: ProjectId,
         walk: u64,
         roots: Vec<PathBuf>,
         ignore: Vec<String>,
@@ -290,6 +319,7 @@ pub enum FileOp {
     /// Write the project file `text` to `path` if it is a valid project and the file is still
     /// `old` (`None`: no file, making the directory), then send `Msg::ProjectWritten`.
     WriteProject {
+        intent: WriteIntent,
         path: PathBuf,
         old: Option<String>,
         text: String,
@@ -351,13 +381,16 @@ impl Ctx<'_> {
     /// Runs the command `name` with `args`, filling the region from point and mark if the
     /// command needs it; any error goes to the message line.
     pub fn call(&mut self, name: &str, args: Args) {
-        let (buffer, tick) = (self.core.window.buffer(), self.core.current().tick());
+        let (buffer, tick) = (
+            self.core.windows.window.buffer(),
+            self.core.current().tick(),
+        );
         if let Err(err) = self.try_call(name, args) {
             self.core.echo(err);
         }
         // A command that changes the buffer deactivates the mark, as in Emacs.
-        if self.core.window.buffer() == buffer && self.core.current().tick() != tick {
-            self.core.window.set_active(false);
+        if self.core.windows.window.buffer() == buffer && self.core.current().tick() != tick {
+            self.core.windows.window.set_active(false);
         }
     }
 
@@ -369,12 +402,19 @@ impl Ctx<'_> {
             .ok_or_else(|| format!("No command named {name}"))?;
         if command.spec.region && args.region.is_none() {
             let core = &*self.core;
-            let point = core.window.point(&core.buffers);
+            let point = core.windows.window.point(&core.buffers);
             let mark = core
+                .windows
                 .window
                 .mark(&core.buffers)
                 .ok_or("The mark is not set now, so there is no region")?;
             args.region = Some(point.min(mark)..point.max(mark));
+        }
+        if command.spec.project
+            && args.project.is_none()
+            && let Some(name) = args.strings.first()
+        {
+            args.project = Some(self.core.project_id(name)?);
         }
         if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
             return self.read_string(command, args, prompt.into(), None);
@@ -420,10 +460,10 @@ impl Ctx<'_> {
             }
             // A window deleted since the frontend last drew is gone; drop its mouse events.
             Msg::Scroll { window, .. } | Msg::Click { window, .. }
-                if !self.core.tree.leaves().contains(&window) => {}
+                if !self.core.windows.tree.leaves().contains(&window) => {}
             // At an end the wheel just stops, without C-v's message.
             Msg::Scroll { window, lines } => {
-                let selected = self.core.selected;
+                let selected = self.core.windows.selected;
                 self.core.select(window);
                 _ = self.scroll_lines(lines);
                 self.core.select(selected);
@@ -451,14 +491,17 @@ impl Ctx<'_> {
             } => self.core.on_reverted(buffer, tick, result),
             Msg::Diffed { buffer, result } => self.on_diffed(buffer, result),
             Msg::Listed { dir, result } => self.on_listed(dir, result),
-            Msg::Opened { path, result } => {
-                match result {
-                    Ok(file) => self.core.visit(&path, file, true),
-                    Err(err) => self.core.echo(err),
-                }
-                self.core.grep_jump(&path);
+            Msg::Opened {
+                intent,
+                path,
+                result,
+            } => self.core.on_opened(intent, path, result),
+            Msg::Previewed { request, result } => {
+                self.core.on_previewed(request, result, &mut self.effects)
             }
-            Msg::Previewed { path, result } => self.core.on_previewed(path, result),
+            Msg::ConfigurationLoaded { request, bundle } => {
+                self.configuration_loaded(request, bundle)
+            }
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
                     Ok(settings) => self.core.settings = settings,
@@ -478,30 +521,28 @@ impl Ctx<'_> {
             }
             Msg::ProjectsLoaded { dir, projects } => {
                 self.core.projects_dir = dir;
-                // Ad-hoc projects stay, since workspaces are bound to them.
-                self.core.projects.retain(|p| p.file.is_none());
-                for project in projects {
-                    match project {
-                        Ok(project) => self.core.projects.push(project),
-                        Err(err) => self.core.report(format!("project {err}")),
-                    }
-                }
-                // A hand edit may have changed roots or ignore patterns; a project gone fails to walk.
-                let indexed: Vec<String> = self.core.index.keys().cloned().collect();
-                for name in indexed {
-                    _ = self.index_project(&name, true);
+                self.core.reconcile_projects(projects);
+                let indexed: Vec<_> = self.core.index.keys().copied().collect();
+                for id in indexed {
+                    self.core
+                        .index
+                        .get_mut(&id)
+                        .expect("indexed project")
+                        .refresh_filtering();
+                    _ = self.index_project(id, true);
                 }
             }
-            Msg::ProjectWritten(result) => self.core.project_written(result),
+            Msg::ProjectWritten { intent, result } => self.project_written(intent, result),
             Msg::Indexed {
                 project,
                 walk,
                 roots,
                 directories,
-            } => self.core.indexed(project, walk, roots, directories),
+            } => self.indexed(project, walk, roots, directories),
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
+            Msg::WatchStatus(message) => self.core.report(message),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
@@ -531,7 +572,7 @@ impl Ctx<'_> {
             core.timers.cancel(id);
         }
         core.hint_shown = false;
-        let point = core.window.point(&core.buffers);
+        let point = core.windows.window.point(&core.buffers);
         // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
         let self_insert = matches!(key.code, KeyCode::Char(_))
             && !key.ctrl
@@ -539,7 +580,7 @@ impl Ctx<'_> {
             && core.pending.is_empty();
         if !(self_insert && (1..20).contains(&core.self_inserts)) {
             core.buffers
-                .get_mut(core.window.buffer())
+                .get_mut(core.windows.window.buffer())
                 .expect("current buffer is live")
                 .undo_boundary(point);
             core.self_inserts = 0;
@@ -595,12 +636,7 @@ impl Ctx<'_> {
 
 pub struct Core {
     buffers: Buffers,
-    /// The selected window, showing the current buffer.
-    window: Window,
-    selected: WindowId,
-    /// Every window but the selected one.
-    others: HashMap<WindowId, Window>,
-    tree: Tree,
+    windows: Windows,
     /// Every workspace, in creation order; `buffers.workspace` is the current one.
     workspaces: Vec<Workspace>,
     /// The id the next new workspace gets.
@@ -641,14 +677,18 @@ pub struct Core {
     recenter: usize,
     kills: KillRing,
     settings: Settings,
-    projects: Vec<Loaded>,
+    projects: Vec<Entry>,
+    next_project: u64,
+    project_writes: u64,
+    reload: configuration::Reload,
+    pending_project_writes: HashMap<ProjectId, WriteIntent>,
     /// Where new project files go; `None` without a config dir.
     projects_dir: Option<PathBuf>,
-    /// Each indexed project's files, by project name.
-    index: HashMap<String, FileIndex>,
-    /// How many `FileOp::Index` walks were asked for; numbers each one.
-    index_walks: u64,
+    /// Each indexed project's files.
+    index: HashMap<ProjectId, FileIndex>,
     grep: grep::ProjectGrep,
+    visits: u64,
+    pending_visit: Option<visiting::PendingVisit>,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -666,7 +706,8 @@ pub struct Core {
     recovered: Vec<Recovered>,
     /// The watch set last sent to the watcher.
     watching: WatchSet,
-    watch_refusals: BTreeMap<String, (usize, usize, usize)>,
+    watch_refresh: bool,
+    watch_refusals: BTreeMap<ProjectId, (usize, usize, usize)>,
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
     focused: BufferId,
@@ -690,11 +731,13 @@ impl Default for Core {
         }
         let mut core = Core {
             buffers,
-            window,
-            selected: WindowId(0),
-            others: HashMap::new(),
-            tree: Tree::Leaf(WindowId(0)),
-            workspaces: vec![Workspace::new(WorkspaceId::default(), &name, &name)],
+            windows: Windows {
+                window,
+                selected: WindowId(0),
+                others: HashMap::new(),
+                tree: Tree::Leaf(WindowId(0)),
+            },
+            workspaces: vec![Workspace::new(WorkspaceId::default(), &name, ProjectId(0))],
             next_workspace: 1,
             shown: 0,
             frame_size: (0., 0., 0.),
@@ -716,11 +759,16 @@ impl Default for Core {
             recenter: 0,
             kills: KillRing::default(),
             settings: Settings::default(),
-            projects: vec![Loaded::ad_hoc(&name, &home)],
+            projects: vec![Entry::new(ProjectId(0), Loaded::ad_hoc(&name, &home))],
+            next_project: 1,
+            project_writes: 0,
+            reload: configuration::Reload::default(),
+            pending_project_writes: HashMap::new(),
             projects_dir: None,
             index: HashMap::new(),
-            index_walks: 0,
             grep: grep::ProjectGrep::default(),
+            visits: 0,
+            pending_visit: None,
             commands,
             message: None,
             quitting: Vec::new(),
@@ -730,6 +778,7 @@ impl Default for Core {
             autosave_max: None,
             recovered: Vec::new(),
             watching: WatchSet::default(),
+            watch_refresh: false,
             watch_refusals: BTreeMap::new(),
             focused: scratch,
         };
@@ -804,13 +853,13 @@ impl Core {
 
     pub fn current(&self) -> &Buffer {
         self.buffers
-            .get(self.window.buffer())
+            .get(self.windows.window.buffer())
             .expect("current buffer is live")
     }
 
     fn current_mut(&mut self) -> &mut Buffer {
         self.buffers
-            .get_mut(self.window.buffer())
+            .get_mut(self.windows.window.buffer())
             .expect("current buffer is live")
     }
 
@@ -850,7 +899,7 @@ impl Core {
 
     /// Point as a char offset into the buffer.
     pub fn point(&self) -> usize {
-        self.window.point(&self.buffers)
+        self.windows.window.point(&self.buffers)
     }
 }
 
@@ -927,11 +976,15 @@ mod tests {
         };
         h.call("test-cmd", given.clone());
         assert_eq!(h.core.message(), Some(format!("{given:?}").as_str()));
-        h.core.window.set_mark(&mut h.core.buffers, 1).unwrap();
+        h.core
+            .windows
+            .window
+            .set_mark(&mut h.core.buffers, 1)
+            .unwrap();
         h.call("test-cmd", Args::default());
         assert_eq!(
             h.core.message(),
-            Some("Args { prefix: None, region: Some(1..4), strings: [] }")
+            Some("Args { prefix: None, region: Some(1..4), strings: [], project: None }")
         );
     }
 

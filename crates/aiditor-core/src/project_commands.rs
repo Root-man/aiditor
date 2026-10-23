@@ -1,41 +1,87 @@
 //! The project commands: making, editing, visiting and saving projects.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use toml_edit::DocumentMut;
 
 use crate::buffer::{file_name, unique};
 use crate::command::Args;
-use crate::project::{Loaded, Project, Root, sync};
+use crate::project::{Entry, Loaded, Project, ProjectId, Root, WriteIntent, sync};
 use crate::{Core, Ctx, Effect, FileOp};
 
-/// A project's file index: the files under each root, relative to it, from the walk numbered
-/// `walk` once it answers.
-#[derive(Default)]
-pub(crate) struct FileIndex {
-    walk: u64,
-    /// The last answer walked `scope` without an error, so its counts hold for it.
-    pub(crate) ready: bool,
-    /// The roots and ignore patterns of the walk numbered `walk`.
-    pub(crate) scope: Option<Scope>,
-    pub(crate) directories: usize,
-    /// The pending walk was asked for by the user, so its answer is echoed.
-    loud: bool,
-    pub(crate) roots: Vec<(PathBuf, Vec<PathBuf>)>,
-    /// Reported files and directories the index lacked, which already started a walk.
-    pub(crate) missed: BTreeSet<PathBuf>,
-}
-
-/// What a walk covers: a project's root paths and ignore patterns.
-pub(crate) type Scope = (Vec<PathBuf>, Vec<String>);
-
-pub(crate) fn scope(project: &Project) -> Scope {
-    let roots = project.all_roots().map(|r| r.path.clone()).collect();
-    (roots, project.ignore.clone())
-}
-
 impl Core {
+    pub fn project_id(&self, name: &str) -> Result<ProjectId, String> {
+        self.project(name).map(|i| self.projects[i].id)
+    }
+
+    pub fn project_name(&self, id: ProjectId) -> &str {
+        &self.projects[self.project_at(id).expect("workspace project is live")]
+            .project
+            .name
+    }
+
+    pub(crate) fn project_at(&self, id: ProjectId) -> Result<usize, String> {
+        self.projects
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| "Project is no longer loaded".into())
+    }
+
+    pub(crate) fn add_project(&mut self, loaded: Loaded) -> ProjectId {
+        let id = ProjectId(self.next_project);
+        self.next_project += 1;
+        self.projects.push(Entry::new(id, loaded));
+        id
+    }
+
+    pub(crate) fn reconcile_projects(&mut self, loaded: Vec<Result<Loaded, String>>) {
+        let mut old = std::mem::take(&mut self.projects);
+        let mut valid = Vec::new();
+        for result in loaded {
+            match result {
+                Ok(loaded) => valid.push(loaded),
+                Err(err) => self.report(format!("project {err}")),
+            }
+        }
+        valid.sort_by(|a, b| {
+            a.file
+                .as_ref()
+                .map(|f| &f.0)
+                .cmp(&b.file.as_ref().map(|f| &f.0))
+        });
+        let mut saved = Vec::new();
+        for entry in old.drain(..) {
+            if entry.file.is_none() {
+                self.projects.push(entry);
+            } else {
+                saved.push(entry);
+            }
+        }
+        for loaded in valid {
+            let at = saved
+                .iter()
+                .position(|p| p.file.as_ref().map(|f| &f.0) == loaded.file.as_ref().map(|f| &f.0));
+            if let Some(at) = at {
+                let mut entry = saved.remove(at);
+                entry.replace(loaded);
+                self.projects.push(entry);
+            } else {
+                self.add_project(loaded);
+            }
+        }
+        for mut entry in saved {
+            entry.retained = true;
+            self.projects.push(entry);
+        }
+        self.release_projects();
+    }
+
+    pub(crate) fn release_projects(&mut self) {
+        self.projects
+            .retain(|p| !p.retained || self.workspaces.iter().any(|w| w.project == p.id));
+        self.release_indexes();
+    }
+
     /// The loaded projects' names, only the ad-hoc ones' when `ad_hoc`.
     pub(crate) fn project_names(&self, ad_hoc: bool) -> Vec<String> {
         (self.projects.iter())
@@ -52,10 +98,17 @@ impl Core {
             .ok_or_else(|| format!("No project named {name}"))
     }
 
+    pub(crate) fn project_arg(&self, args: &Args) -> Result<usize, String> {
+        match args.project {
+            Some(id) => self.project_at(id),
+            None => self.project(args.strings.first().ok_or("No project selected")?),
+        }
+    }
+
     /// The root paths of the project named by the first string, without the primary unless
     /// `primary`.
     pub(crate) fn root_paths(&self, args: &Args, primary: bool) -> Vec<String> {
-        let Ok(i) = self.project(&args.strings[0]) else {
+        let Ok(i) = self.project_arg(args) else {
             return Vec::new();
         };
         (self.projects[i].project.all_roots())
@@ -72,93 +125,23 @@ impl Core {
 
     /// The name of the project for `path`: the first saved project with a root containing it,
     /// else the ad-hoc project whose primary is `root`, else a new ad-hoc project at `root`.
-    pub(crate) fn project_for(&mut self, path: &Path, root: &Path) -> String {
+    pub(crate) fn project_for(&mut self, path: &Path, root: &Path) -> ProjectId {
         let saved = (self.projects.iter())
             .find(|p| p.file.is_some() && p.project.all_roots().any(|r| path.starts_with(&r.path)));
         // Ad-hoc projects match only exactly, or the `$HOME` one would take every folder.
         let ad_hoc =
             || (self.projects.iter()).find(|p| p.file.is_none() && p.project.primary.path == root);
         if let Some(found) = saved.or_else(ad_hoc) {
-            return found.project.name.clone();
+            return found.id;
         }
         let taken = |name: &str| self.projects.iter().any(|p| p.project.name == name);
         let name = unique(&file_name(root), taken);
-        self.projects.push(Loaded::ad_hoc(&name, root));
-        name
-    }
-
-    /// Takes the file service's answer to `FileOp::WriteProject`: the project replaces the one
-    /// with its file, or else the ad-hoc one with its name.
-    pub(crate) fn project_written(&mut self, result: Result<Loaded, String>) {
-        let loaded = match result {
-            Ok(loaded) => loaded,
-            Err(err) => return self.echo(format!("project {err}")),
-        };
-        let path = loaded
-            .file
-            .as_ref()
-            .expect("a written project has a file")
-            .0
-            .clone();
-        let file =
-            (self.projects.iter()).position(|p| p.file.as_ref().is_some_and(|f| f.0 == path));
-        let ad_hoc = || {
-            (self.projects.iter())
-                .position(|p| p.file.is_none() && p.project.name == loaded.project.name)
-        };
-        match file.or_else(ad_hoc) {
-            Some(i) => self.projects[i] = loaded,
-            None => self.projects.push(loaded),
-        }
-        self.echo(format!("Wrote {}", path.display()));
-    }
-
-    /// Takes the file service's answer to `FileOp::Index`, unless a newer walk was asked for.
-    pub(crate) fn indexed(
-        &mut self,
-        project: String,
-        walk: u64,
-        roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
-        directories: usize,
-    ) {
-        if self.project(&project).is_err() {
-            return;
-        }
-        let Some(index) = self.index.get_mut(&project).filter(|i| i.walk == walk) else {
-            return;
-        };
-        let loud = std::mem::take(&mut index.loud);
-        let mut errors = String::new();
-        index.roots = (roots.into_iter())
-            .map(|(root, files)| {
-                let files = files.unwrap_or_else(|err| {
-                    errors.push_str(&format!("; {err}"));
-                    Vec::new()
-                });
-                (root, files)
-            })
-            .collect();
-        index.ready = errors.is_empty();
-        index.directories = directories;
-        if !loud {
-            if !errors.is_empty() {
-                tracing::info!(project, errors, "re-walk after a file change");
-            }
-            return;
-        }
-        let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
-        let s = if n == 1 { "" } else { "s" };
-        self.echo(format!("Indexed {n} file{s} in {project}{errors}"));
-        // An open finder is always the current workspace's, as switching closes the minibuffer.
-        if self.current_workspace().project == project {
-            let files = self.project_files(&project);
-            self.add_candidates("project-find-file", files);
-        }
+        self.add_project(Loaded::ad_hoc(&name, root))
     }
 
     /// Every indexed file of `project` as `<root name>/<relative path>`, the primary's first.
-    fn project_files(&self, project: &str) -> Vec<String> {
-        let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
+    pub(crate) fn project_files(&self, project: ProjectId) -> Vec<String> {
+        let roots = self.index.get(&project).map_or(&[][..], |i| i.roots());
         let names = root_names(roots.iter().map(|(root, _)| root.as_path()));
         (names.iter().zip(roots))
             .flat_map(|(name, (_, files))| {
@@ -167,19 +150,62 @@ impl Core {
             .collect()
     }
 
-    /// The file `text` names in `project`: under the root its first component names, else under
-    /// the primary.
-    pub(crate) fn project_file(&self, project: &str, text: &str) -> Result<PathBuf, String> {
-        let roots = self.index.get(project).map_or(&[][..], |i| &i.roots);
-        if let Some((head, rest)) = text.split_once('/')
-            && let Some(i) = root_names(roots.iter().map(|(root, _)| root.as_path()))
-                .iter()
-                .position(|n| n == head)
-        {
-            return Ok(roots[i].0.join(rest));
+    pub(crate) fn finder(&self, project: ProjectId) -> Result<Finder, String> {
+        let roots: Vec<_> = self.projects[self.project_at(project)?]
+            .project
+            .all_roots()
+            .map(|r| r.path.clone())
+            .collect();
+        let waiting = self
+            .index
+            .get(&project)
+            .is_none_or(|index| !index.roots().iter().map(|(p, _)| p).eq(roots.iter()));
+        let names = root_names(roots.iter().map(PathBuf::as_path));
+        Ok(Finder {
+            project,
+            roots,
+            names,
+            waiting,
+        })
+    }
+
+    pub(crate) fn fill_project_finder(&mut self, project: ProjectId) {
+        let Some(finder) = self
+            .prompts
+            .minibuffer
+            .as_mut()
+            .and_then(|mb| mb.finder.as_mut())
+        else {
+            return;
+        };
+        if finder.project != project || !finder.waiting {
+            return;
         }
-        let primary = &self.projects[self.project(project)?].project.primary.path;
-        Ok(primary.join(text))
+        let roots = self.index[&project].roots();
+        if !roots.iter().map(|(p, _)| p).eq(finder.roots.iter()) {
+            return;
+        }
+        finder.waiting = false;
+        let files = self.project_files(project);
+        self.add_candidates("project-find-file", files);
+    }
+}
+
+pub(crate) struct Finder {
+    project: ProjectId,
+    roots: Vec<PathBuf>,
+    names: Vec<String>,
+    waiting: bool,
+}
+
+impl Finder {
+    pub(crate) fn path(&self, text: &str) -> PathBuf {
+        if let Some((head, rest)) = text.split_once('/')
+            && let Some(i) = self.names.iter().position(|n| n == head)
+        {
+            return self.roots[i].join(rest);
+        }
+        self.roots[0].join(text)
     }
 }
 
@@ -194,6 +220,64 @@ pub(crate) fn root_names<'a>(roots: impl IntoIterator<Item = &'a Path>) -> Vec<S
 }
 
 impl Ctx<'_> {
+    fn project_write_intent(&mut self, project: Option<ProjectId>) -> WriteIntent {
+        let core = &mut self.core;
+        let project = project.unwrap_or_else(|| {
+            let id = ProjectId(core.next_project);
+            core.next_project += 1;
+            id
+        });
+        let revision = core
+            .project_at(project)
+            .map_or(0, |i| core.projects[i].revision);
+        core.project_writes += 1;
+        let intent = WriteIntent {
+            project,
+            revision,
+            request: core.project_writes,
+        };
+        core.pending_project_writes.insert(project, intent);
+        intent
+    }
+
+    pub(crate) fn project_written(&mut self, intent: WriteIntent, result: Result<Loaded, String>) {
+        let core = &mut self.core;
+        let at = core.project_at(intent.project).ok();
+        let current = core.pending_project_writes.get(&intent.project) == Some(&intent);
+        if current {
+            core.pending_project_writes.remove(&intent.project);
+        }
+        let loaded = match result {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                if current {
+                    core.echo(format!("project {err}"));
+                }
+                return;
+            }
+        };
+        core.reload.project_revision += 1;
+        if !current
+            || at.map_or(intent.revision != 0, |i| {
+                core.projects[i].revision != intent.revision
+            })
+        {
+            self.reload_configuration();
+            return;
+        }
+        let path = loaded
+            .file
+            .as_ref()
+            .expect("written project has a file")
+            .0
+            .clone();
+        match at {
+            Some(i) => core.projects[i].replace(loaded),
+            None => core.projects.push(Entry::new(intent.project, loaded)),
+        }
+        core.echo(format!("Wrote {}", path.display()));
+    }
+
     pub(crate) fn create_project(&mut self, name: &str, primary: &str) -> Result<(), String> {
         if self.core.project(name).is_ok() {
             return Err(format!("Project {name} already exists"));
@@ -210,26 +294,31 @@ impl Ctx<'_> {
             },
             roots: Vec::new(),
         };
-        self.write_new_project(&project)
+        self.write_new_project(&project, None)
     }
 
-    pub(crate) fn save_project(&mut self, name: &str) -> Result<(), String> {
-        let loaded = &self.core.projects[self.core.project(name)?];
+    pub(crate) fn save_project(&mut self, args: &Args) -> Result<(), String> {
+        let loaded = &self.core.projects[self.core.project_arg(args)?];
+        let name = &loaded.project.name;
         if let Some((path, _)) = &loaded.file {
             return Err(format!("{name} is already saved in {}", path.display()));
         }
         let project = loaded.project.clone();
-        self.write_new_project(&project)
+        self.write_new_project(&project, Some(loaded.id))
     }
 
     /// Writes `project` to a new `<name>.toml` in the projects directory.
-    fn write_new_project(&mut self, project: &Project) -> Result<(), String> {
+    fn write_new_project(
+        &mut self,
+        project: &Project,
+        id: Option<ProjectId>,
+    ) -> Result<(), String> {
         project.check()?;
         let name = &project.name;
         if name.contains('/') || name.starts_with('.') {
             return Err(format!("{name} can't be a file name"));
         }
-        let taken = |p: &Loaded| p.file.is_some() && p.project.name == *name;
+        let taken = |p: &Entry| p.file.is_some() && p.project.name == *name;
         if self.core.projects.iter().any(taken) {
             return Err(format!("Project {name} already exists"));
         }
@@ -240,7 +329,9 @@ impl Ctx<'_> {
             .ok_or("No config directory")?;
         let path = dir.join(format!("{name}.toml"));
         let text = toml::to_string(project).map_err(|err| err.to_string())?;
+        let intent = self.project_write_intent(id);
         self.effects.push(Effect::File(FileOp::WriteProject {
+            intent,
             path,
             old: None,
             text,
@@ -252,23 +343,27 @@ impl Ctx<'_> {
     /// memory while it is ad-hoc, else by rewriting its file in place.
     fn edit_project(
         &mut self,
-        name: &str,
+        args: &Args,
         edit: impl FnOnce(&mut Project) -> Result<(), String>,
     ) -> Result<(), String> {
-        let i = self.core.project(name)?;
+        let i = self.core.project_arg(args)?;
         let loaded = &mut self.core.projects[i];
         let mut project = loaded.project.clone();
         edit(&mut project)?;
         project.check()?;
         let Some((path, old)) = &loaded.file else {
             loaded.project = project;
+            loaded.revision += 1;
             return Ok(());
         };
         let mut doc: DocumentMut = old.parse().map_err(|err| format!("{err}"))?;
         sync(&mut doc, &project);
+        let (id, path, old) = (loaded.id, path.clone(), old.clone());
+        let intent = self.project_write_intent(Some(id));
         self.effects.push(Effect::File(FileOp::WriteProject {
-            path: path.clone(),
-            old: Some(old.clone()),
+            intent,
+            path,
+            old: Some(old),
             text: doc.to_string(),
         }));
         Ok(())
@@ -277,7 +372,7 @@ impl Ctx<'_> {
     pub(crate) fn add_root(&mut self, args: &Args) -> Result<(), String> {
         let path = self.core.root_path(&args.strings[1]);
         let role = args.strings[2].clone();
-        self.edit_project(&args.strings[0], |p| {
+        self.edit_project(args, |p| {
             p.roots.push(Root { path, role });
             Ok(())
         })
@@ -285,7 +380,7 @@ impl Ctx<'_> {
 
     pub(crate) fn remove_root(&mut self, args: &Args) -> Result<(), String> {
         let (name, path) = (&args.strings[0], self.core.root_path(&args.strings[1]));
-        self.edit_project(name, |p| {
+        self.edit_project(args, |p| {
             let i = (p.roots.iter().position(|r| r.path == path))
                 .ok_or_else(|| format!("{} is not an additional root of {name}", path.display()))?;
             p.roots.remove(i);
@@ -295,7 +390,7 @@ impl Ctx<'_> {
 
     pub(crate) fn set_role(&mut self, args: &Args) -> Result<(), String> {
         let (name, path) = (&args.strings[0], self.core.root_path(&args.strings[1]));
-        self.edit_project(name, |p| {
+        self.edit_project(args, |p| {
             let root = (std::iter::once(&mut p.primary).chain(&mut p.roots))
                 .find(|r| r.path == path)
                 .ok_or_else(|| format!("{} is not a root of {name}", path.display()))?;
@@ -306,7 +401,7 @@ impl Ctx<'_> {
 
     pub(crate) fn set_default_agent(&mut self, args: &Args) -> Result<(), String> {
         let agent = &args.strings[1];
-        self.edit_project(&args.strings[0], |p| {
+        self.edit_project(args, |p| {
             p.default_agent = (!agent.is_empty()).then(|| agent.clone());
             Ok(())
         })
@@ -316,60 +411,49 @@ impl Ctx<'_> {
         let watch = args.strings[1]
             .parse::<bool>()
             .map_err(|_| "Watch must be true or false".to_string())?;
-        self.edit_project(&args.strings[0], |p| {
+        self.edit_project(args, |p| {
             p.watch = watch;
             Ok(())
         })
     }
 
-    /// Walks every root of the project `name` again, off the core thread; `quiet` echoes
-    /// nothing, unless a walk the user asked for is still pending.
-    pub(crate) fn index_project(&mut self, name: &str, quiet: bool) -> Result<(), String> {
-        let (roots, ignore) = scope(&self.core.projects[self.core.project(name)?].project);
-        self.core.index_walks += 1;
-        let walk = self.core.index_walks;
-        let index = self.core.index.entry(name.into()).or_default();
-        index.walk = walk;
-        // The same roots and patterns keep their counts, and their watches, until the answer.
-        let walked = Some((roots.clone(), ignore.clone()));
-        index.ready &= index.scope == walked;
-        index.scope = walked;
-        index.loud |= !quiet;
-        if !quiet {
-            self.core.echo(format!("Indexing {name}..."));
-        }
-        self.effects.push(Effect::File(FileOp::Index {
-            project: name.into(),
-            walk,
-            roots,
-            ignore,
-        }));
-        Ok(())
-    }
-
     /// Asks for a file in any root of the current workspace's project and visits it, indexing
     /// the project first when it has no index yet.
     pub(crate) fn project_find_file(&mut self, args: Args) -> Result<(), String> {
-        let project = self.core.current_workspace().project.clone();
+        let project = self.core.current_workspace().project;
         if let Some(text) = args.strings.first() {
-            let path = self.core.project_file(&project, text)?;
+            let path = self.core.finder(project)?.path(text);
             return self.find_file(&path.to_string_lossy());
         }
         if let Some(index) = self.core.index.get_mut(&project) {
             // No answer yet, as every answer lists the primary: the pending walk fills the list.
-            index.loud |= index.roots.is_empty();
+            index.announce_initial();
         } else {
-            self.index_project(&project, false)?;
+            self.index_project(project, false)?;
         }
-        let files = self.core.project_files(&project);
+        let finder = self.core.finder(project)?;
+        let files = if finder.waiting {
+            Vec::new()
+        } else {
+            self.core.project_files(project)
+        };
         let choices: Vec<&str> = files.iter().map(String::as_str).collect();
         let command = self.core.commands["project-find-file"];
-        let prompt = format!("Find file in {project}: ");
-        self.read_string(command, args, prompt, Some(&choices))
+        let prompt = format!("Find file in {}: ", self.core.project_name(project));
+        self.read_string(command, args, prompt, Some(&choices))?;
+        self.core
+            .prompts
+            .minibuffer
+            .as_mut()
+            .expect("opened finder")
+            .finder = Some(finder);
+        Ok(())
     }
 
-    pub(crate) fn open_project_file(&mut self, name: &str) -> Result<(), String> {
-        match self.core.projects[self.core.project(name)?].file.clone() {
+    pub(crate) fn open_project_file(&mut self, args: &Args) -> Result<(), String> {
+        let loaded = &self.core.projects[self.core.project_arg(args)?];
+        let name = &loaded.project.name;
+        match loaded.file.clone() {
             Some((path, _)) => self.find_file(&path.to_string_lossy()),
             None => Err(format!("{name} has no file; save it with project-save")),
         }
@@ -383,9 +467,261 @@ mod tests {
     use crate::harness::{Harness, name};
     use crate::project::{Loaded, Project, Root};
 
+    fn saved(h: &Harness, file: &str, name: &str) -> Loaded {
+        let mut loaded = Loaded::ad_hoc(name, &h.path(name));
+        loaded.project.watch = false;
+        loaded.file = Some((h.path(file), toml::to_string(&loaded.project).unwrap()));
+        loaded
+    }
+
+    #[test]
+    fn reload_reconciles_paths_and_retains_bound_definitions_until_the_last_workspace_dies() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        let old = saved(&h, "b.toml", "old");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(old.clone())],
+        });
+        let project = h.core.project_id("old").unwrap();
+        let workspace = h.new_workspace("task", "old");
+        h.keys("text C-a C-SPC C-e C-x 2");
+        let point = h.point();
+        let renamed = saved(&h, "b.toml", "new");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(renamed.clone())],
+        });
+        assert_eq!(h.core.project_id("new").unwrap(), project);
+        assert_eq!(h.core.current_workspace().name, "task");
+        assert_eq!(h.core.current_workspace().project, project);
+        assert_eq!((h.text(), h.point()), ("text".into(), point));
+        assert_eq!(h.core.current().name, "*scratch*<task>");
+        assert_eq!(h.core.frame().windows.len(), 2);
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Err("b.toml: invalid".into())],
+        });
+        let entry = &h.core.projects[h.core.project_at(project).unwrap()];
+        assert_eq!(entry.file, renamed.file);
+        assert_eq!(entry.project, renamed.project);
+        assert_eq!(h.core.message(), Some("project b.toml: invalid"));
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![],
+        });
+        assert_eq!(h.core.project_id("new").unwrap(), project);
+        let second = h.new_workspace("second", "new");
+        h.core.kill_workspace(workspace).unwrap();
+        assert_eq!(h.core.project_id("new").unwrap(), project);
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(old)],
+        });
+        assert_eq!(h.core.project_id("old").unwrap(), project);
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![],
+        });
+        h.core.index.entry(project).or_default();
+        h.core.kill_workspace(second).unwrap();
+        assert_eq!(h.core.project_names(false), ["home"]);
+        assert_eq!(h.core.index.len(), 0);
+    }
+
+    #[test]
+    fn duplicate_names_and_file_renames_do_not_redirect_existing_owners() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        let b = saved(&h, "b.toml", "same");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(b.clone())],
+        });
+        let b_id = h.core.project_id("same").unwrap();
+        h.new_workspace("bound", "same");
+        h.core.index.entry(b_id).or_default();
+        let a = saved(&h, "a.toml", "same");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(b), Ok(a.clone())],
+        });
+        let a_id = h.core.project_id("same").unwrap();
+        assert_eq!(
+            h.core.projects[h.core.project_at(a_id).unwrap()].file,
+            a.file
+        );
+        assert_eq!(h.core.current_workspace().project, b_id);
+        assert!(h.core.index.contains_key(&b_id));
+        let moved = saved(&h, "moved.toml", "same");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(moved.clone())],
+        });
+        assert_eq!(h.core.current_workspace().project, b_id);
+        assert_eq!(
+            h.core.projects[h
+                .core
+                .project_at(h.core.project_id("same").unwrap())
+                .unwrap()]
+            .file,
+            moved.file
+        );
+        assert!(h.core.projects[h.core.project_at(b_id).unwrap()].retained);
+    }
+
+    #[test]
+    fn a_project_selected_before_reload_keeps_its_identity_for_the_next_prompt() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        let b = saved(&h, "b.toml", "same");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(b)],
+        });
+        let selected = h.core.project_id("same").unwrap();
+        h.keys("C-x p d same RET");
+        let renamed = saved(&h, "b.toml", "renamed");
+        let duplicate = saved(&h, "a.toml", "same");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(duplicate), Ok(renamed)],
+        });
+        h.keys("claude RET");
+        let (intent, text) = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject { intent, text, .. }) => {
+                    Some((intent, text))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(intent.project, selected);
+        let parsed = Project::parse(&text).unwrap();
+        assert_eq!(parsed.name, "renamed");
+        assert_eq!(parsed.default_agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn saving_an_ad_hoc_project_keeps_its_workspaces_and_index() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        h.core.projects_dir = Some(h.path("projects"));
+        let id = h.core.project_id("home").unwrap();
+        h.new_workspace("second", "home");
+        h.core.index.entry(id).or_default();
+        h.keys("C-x p s home RET");
+        let (intent, path, text) = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject {
+                    intent, path, text, ..
+                }) => Some((intent, path, text)),
+                _ => None,
+            })
+            .unwrap();
+        let project = Project::parse(&text).unwrap();
+        h.send(Msg::ProjectWritten {
+            intent,
+            result: Ok(Loaded {
+                project,
+                file: Some((path.clone(), text)),
+            }),
+        });
+        assert!(h.core.workspaces.iter().all(|w| w.project == id));
+        assert!(h.core.index.contains_key(&id));
+        assert_eq!(
+            h.core.projects[h.core.project_at(id).unwrap()]
+                .file
+                .as_ref()
+                .unwrap()
+                .0,
+            path
+        );
+    }
+
+    #[test]
+    fn a_current_write_error_is_reported_after_reload_changes_the_revision() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        let old = saved(&h, "p.toml", "p");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(old)],
+        });
+        let id = h.core.project_id("p").unwrap();
+        h.keys("C-x p d p RET claude RET");
+        let intent = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .unwrap();
+        let latest = saved(&h, "p.toml", "latest");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(latest.clone())],
+        });
+        h.send(Msg::ProjectWritten {
+            intent,
+            result: Err("p.toml changed on disk; reload projects and retry".into()),
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project p.toml changed on disk; reload projects and retry")
+        );
+        assert_eq!(
+            h.core.projects[h.core.project_at(id).unwrap()].project,
+            latest.project
+        );
+    }
+
+    #[test]
+    fn a_superseded_write_requests_a_reload_without_replacing_the_new_definition() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        let old = saved(&h, "p.toml", "p");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(old.clone())],
+        });
+        let id = h.core.project_id("p").unwrap();
+        h.keys("C-x p d p RET claude RET");
+        let intent = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .unwrap();
+        let latest = saved(&h, "p.toml", "latest");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(latest.clone())],
+        });
+        h.send(Msg::ProjectWritten {
+            intent,
+            result: Ok(old),
+        });
+        assert_eq!(
+            h.core.projects[h.core.project_at(id).unwrap()].project,
+            latest.project
+        );
+        assert!(
+            h.effects
+                .iter()
+                .any(|e| matches!(e, crate::Effect::LoadConfiguration { .. }))
+        );
+    }
+
     /// A harness with directories `a` and `b`, projects going to `projects/` and `loaded` loaded.
     fn with(loaded: Vec<Loaded>) -> Harness {
         let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
+        h.listing("", &["a/", "b/"]);
+        h.listing("a", &["x"]);
+        h.listing("b", &["x"]);
         // Without the launch `$HOME` project, so the lists hold only the test's.
         h.core.projects.clear();
         let dir = Some(h.path("projects"));
@@ -432,11 +768,20 @@ mod tests {
         }
     }
 
+    fn project_text(h: &Harness, name: &str) -> String {
+        h.core.projects[h.core.project(name).unwrap()]
+            .file
+            .as_ref()
+            .unwrap()
+            .1
+            .clone()
+    }
+
     #[test]
-    fn create_writes_a_file_that_loads_back() {
+    fn create_prepares_a_definition_and_accepts_the_written_reply() {
         let mut h = with(Vec::new());
         let a = h.path("a").display().to_string();
-        let tmp = h.dir.path().display().to_string();
+        let tmp = h.dir.as_path().display().to_string();
         // Only directories are listed, the typed one first, and RET takes the selected one.
         h.keys(&format!("C-x p c app RET C-a C-k {tmp}/"));
         assert_eq!(
@@ -450,7 +795,7 @@ mod tests {
             Some(&*format!("Wrote {}", file.display()))
         );
         let text = format!("name = \"app\"\n\n[primary]\npath = \"{a}\"\n");
-        assert_eq!(h.disk("projects/app.toml"), text, "no empty roots or role");
+        assert_eq!(project_text(&h, "app"), text, "no empty roots or role");
         let p = Project::parse(&text).unwrap();
         assert_eq!(h.core.projects(), [&p]);
         // Typing filters the list; `./` takes the directory typed.
@@ -486,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn edits_rewrite_the_file_and_keep_its_comments() {
+    fn edits_prepare_preserved_comments_and_apply_only_successful_replies() {
         let mut h = with(Vec::new());
         let (a, b) = (
             h.path("a").display().to_string(),
@@ -494,8 +839,7 @@ mod tests {
         );
         let text =
             format!("# Mine\nname = \"app\"\nwatch = true # quiet\n\n[primary]\npath = \"{a}\"\n");
-        std::fs::create_dir(h.path("projects")).unwrap();
-        std::fs::write(h.path("projects/app.toml"), &text).unwrap();
+        h.read_reply("projects/app.toml", Some(text.as_bytes()));
         let loaded = Loaded {
             project: Project::parse(&text).unwrap(),
             file: Some((h.path("projects/app.toml"), text)),
@@ -508,7 +852,7 @@ mod tests {
         call(&mut h, "project-set-role", &["app", &a, "Main"]);
         call(&mut h, "project-set-default-agent", &["app", "claude"]);
         call(&mut h, "project-set-watch", &["app", "false"]);
-        let disk = h.disk("projects/app.toml");
+        let disk = project_text(&h, "app");
         assert!(disk.starts_with("# Mine\n"), "{disk}");
         assert!(disk.contains("watch = false # quiet"), "{disk}");
         let p = Project::parse(&disk).unwrap();
@@ -529,33 +873,36 @@ mod tests {
         assert_eq!(err, Some(format!("{a}/x is inside {a}")));
         let err = call(&mut h, "project-remove-root", &["app", &a]);
         assert_eq!(err, Some(format!("{a} is not an additional root of app")));
-        assert_eq!(h.disk("projects/app.toml"), disk, "refusals write nothing");
-        // A file changed on disk since it was read is left alone, and so is the project.
+        assert_eq!(project_text(&h, "app"), disk, "refusals write nothing");
         let before = project(&h, "app");
-        std::fs::write(h.path("projects/app.toml"), format!("{disk}# theirs\n")).unwrap();
-        let err = call(&mut h, "project-set-role", &["app", &a, "Ours"]).unwrap();
-        assert!(
-            err.ends_with("changed on disk; reload with C-x C-r"),
-            "{err}"
+        h.collect_effects = true;
+        call(&mut h, "project-set-role", &["app", &a, "Ours"]);
+        let intent = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .unwrap();
+        h.send(Msg::ProjectWritten {
+            intent,
+            result: Err("app.toml changed on disk; reload with C-x C-r".into()),
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project app.toml changed on disk; reload with C-x C-r")
         );
-        assert!(err.starts_with("project "), "{err}");
-        assert_eq!(h.disk("projects/app.toml"), format!("{disk}# theirs\n"));
         assert_eq!(project(&h, "app"), before);
-        let err = call(&mut h, "project-set-watch", &["app", "true"]).unwrap();
-        assert!(
-            err.ends_with("changed on disk; reload with C-x C-r"),
-            "{err}"
-        );
-        assert_eq!(project(&h, "app"), before);
-        std::fs::write(h.path("projects/app.toml"), &disk).unwrap();
+        assert_eq!(project_text(&h, "app"), disk);
+        h.collect_effects = false;
         call(&mut h, "project-set-watch", &["app", "true"]);
         assert!(project(&h, "app").watch);
-        assert!(h.disk("projects/app.toml").contains("watch = true # quiet"));
+        assert!(project_text(&h, "app").contains("watch = true # quiet"));
         call(&mut h, "project-remove-root", &["app", &b]);
         call(&mut h, "project-set-default-agent", &["app", ""]);
         let p = project(&h, "app");
         assert_eq!((p.roots.len(), p.default_agent.as_deref()), (0, None));
-        assert_eq!(Project::parse(&h.disk("projects/app.toml")).unwrap(), p);
+        assert_eq!(Project::parse(&project_text(&h, "app")).unwrap(), p);
         call(&mut h, "project-open-file", &["app"]);
         assert_eq!(name(&h), "app.toml");
         let err = call(&mut h, "project-open-file", &["zz"]);
@@ -579,18 +926,12 @@ mod tests {
             err.as_deref(),
             Some("tmp has no file; save it with project-save")
         );
-        assert!(
-            !h.path("projects").exists(),
-            "nothing written before a save"
-        );
+        assert_eq!(h.core.projects[h.core.project("tmp").unwrap()].file, None);
         let edited = project(&h, "tmp");
         assert_eq!(edited.roots[0].role, "Bee");
         assert!(!edited.watch);
         call(&mut h, "project-save", &["tmp"]);
-        assert_eq!(
-            Project::parse(&h.disk("projects/tmp.toml")).unwrap(),
-            edited
-        );
+        assert_eq!(Project::parse(&project_text(&h, "tmp")).unwrap(), edited);
         assert_eq!(
             h.core.projects(),
             [&edited],
@@ -603,7 +944,7 @@ mod tests {
     #[test]
     fn watch_prompt_selects_the_current_value_and_rejects_other_text() {
         let mut h = with(Vec::new());
-        h.core.projects.push(ad_hoc(&h));
+        h.core.add_project(ad_hoc(&h));
         h.keys("C-x p w tmp RET");
         assert_eq!(h.core.minibuffer().unwrap().prompt, "Watch: ");
         assert_eq!(
@@ -655,6 +996,8 @@ mod tests {
     /// The `tmp` project from `ad_hoc` with `b` and `roots` as additional roots.
     fn indexable(roots: &[&str]) -> Harness {
         let mut h = with(Vec::new());
+        h.index_reply("a", &["x"], &["a"]);
+        h.index_reply("b", &["x"], &["b"]);
         let mut loaded = ad_hoc(&h);
         for root in ["b"].iter().chain(roots) {
             loaded.project.roots.push(Root {
@@ -662,7 +1005,7 @@ mod tests {
                 role: String::new(),
             });
         }
-        h.core.projects.push(loaded);
+        h.core.add_project(loaded);
         h
     }
 
@@ -681,15 +1024,15 @@ mod tests {
     }
 
     fn indexed(h: &Harness) -> Vec<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
-        h.core.index["tmp"].roots.clone()
+        h.core.index[&h.core.project_id("tmp").unwrap()]
+            .roots()
+            .to_vec()
     }
 
     #[test]
     fn index_holds_each_roots_files_and_counts_them() {
         let mut h = indexable(&[]);
-        std::fs::create_dir_all(h.path("a/.git")).unwrap();
-        std::fs::write(h.path("a/.git/config"), "").unwrap();
-        std::fs::write(h.path("a/.env"), "").unwrap();
+        h.index_reply("a", &[".env", "x"], &["a"]);
         h.keys("C-x p i tmp RET");
         assert_eq!(h.core.message(), Some("Indexed 3 files in tmp"));
         assert_eq!(
@@ -704,6 +1047,10 @@ mod tests {
     #[test]
     fn index_names_a_root_it_could_not_walk() {
         let mut h = indexable(&["gone"]);
+        h.indexes.insert(
+            h.path("gone"),
+            Err(format!("{}: missing root", h.path("gone").display())),
+        );
         call(&mut h, "project-index", &["tmp"]);
         let gone = h.path("gone").display().to_string();
         let msg = h.core.message().unwrap();
@@ -724,27 +1071,10 @@ mod tests {
         assert_eq!(h.core.message(), Some("Indexed 2 files in tmp"));
     }
 
-    #[test]
-    fn index_drops_an_older_walks_answer() {
-        let mut h = indexable(&[]);
-        let first = start_index(&mut h);
-        assert_eq!(h.core.message(), Some("Indexing tmp..."));
-        call(&mut h, "project-index", &["tmp"]);
-        std::fs::write(h.path("a/y"), "").unwrap();
-        h.run(first);
-        assert_eq!(h.core.message(), Some("Indexed 2 files in tmp"));
-        assert_eq!(indexed(&h)[0], (h.path("a"), vec!["x".into()]));
-        // Nor is an answer for a project no longer loaded taken.
-        let pending = start_index(&mut h);
-        h.core.projects.clear();
-        h.run(pending);
-        assert_eq!(h.core.message(), Some("Indexing tmp..."));
-    }
-
     /// `indexable` with the current workspace bound to `tmp`.
     fn findable(roots: &[&str]) -> Harness {
         let mut h = indexable(roots);
-        h.core.workspaces[0].project = "tmp".into();
+        h.core.workspaces[0].project = h.core.project_id("tmp").unwrap();
         h
     }
 
@@ -771,8 +1101,8 @@ mod tests {
     #[test]
     fn a_repeated_root_name_gets_a_number() {
         let mut h = findable(&["q/a"]);
-        std::fs::create_dir_all(h.path("q/a")).unwrap();
-        std::fs::write(h.path("q/a/y"), "").unwrap();
+        h.read_reply("q/a/y", Some(b""));
+        h.index_reply("q/a", &["y"], &["q/a"]);
         h.keys("C-x p f");
         assert_eq!(candidates(&mut h), ["a/x", "b/x", "a<2>/y"]);
         h.keys("C-g");
@@ -783,6 +1113,8 @@ mod tests {
     #[test]
     fn a_typed_name_is_visited_under_its_root_or_the_primary() {
         let mut h = findable(&[]);
+        h.read_reply("b/new.rs", None);
+        h.read_reply("a/notes.md", None);
         h.keys("C-x p f b/new.rs M-RET");
         assert_eq!(visited(&h), Some(h.path("b/new.rs")));
         assert_eq!(h.text(), "");
@@ -801,20 +1133,156 @@ mod tests {
         h.run(pending);
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
         h.keys("C-g C-x p f");
-        assert_eq!(h.core.index_walks, 1, "no second walk");
+        assert_eq!(h.core.index_requests(), 1, "no second walk");
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
+    }
+
+    #[test]
+    fn typed_root_prefixes_resolve_while_the_first_index_is_held() {
+        for (typed, expected) in [("b/new.rs", "b/new.rs"), ("a<2>/new.rs", "q/a/new.rs")] {
+            let mut h = findable(&["q/a"]);
+            h.collect_effects = true;
+            h.keys("C-x p f");
+            assert_eq!(candidates(&mut h), Vec::<String>::new());
+            h.keys(&format!("{typed} M-RET"));
+            let paths: Vec<_> = h
+                .effects
+                .iter()
+                .filter_map(|e| match e {
+                    crate::Effect::File(crate::FileOp::Open { path, .. }) => Some(path.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(paths, [h.path(expected)]);
+        }
+    }
+
+    fn saved_finder() -> (Harness, Loaded) {
+        let mut h = Harness::new(&[("old/lib/x", "old"), ("new/lib/x", "new")]);
+        h.index_reply("old/lib", &["x"], &["old/lib"]);
+        h.index_reply("new/lib", &["x"], &["new/lib"]);
+        h.read_reply("old/lib/new.rs", None);
+        let mut loaded = Loaded::ad_hoc("p", &h.path("old/lib"));
+        loaded.project.watch = false;
+        loaded.file = Some((h.path("p.toml"), String::new()));
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded.clone())],
+        });
+        h.new_workspace("p", "p");
+        (h, loaded)
+    }
+
+    #[test]
+    fn finder_preview_candidates_and_typed_paths_keep_their_original_mapping() {
+        for accept in ["RET", "lib/new.rs M-RET"] {
+            let (mut h, mut loaded) = saved_finder();
+            h.keys("C-x p f");
+            assert_eq!(candidates(&mut h), ["lib/x"]);
+            loaded.project.primary.path = h.path("new/lib");
+            h.send(Msg::ProjectsLoaded {
+                dir: None,
+                projects: vec![Ok(loaded)],
+            });
+            assert_eq!(candidates(&mut h), ["lib/x"]);
+            h.keys("zzz C-a C-k");
+            let origin = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
+            assert_eq!(
+                h.core.buffers.get(origin).unwrap().text().to_string(),
+                "old"
+            );
+            h.keys(accept);
+            let file = if accept == "RET" { "x" } else { "new.rs" };
+            assert_eq!(visited(&h), Some(h.path(&format!("old/lib/{file}"))));
+            h.keys("C-x p f RET");
+            assert_eq!(visited(&h), Some(h.path("new/lib/x")));
+        }
+    }
+
+    #[test]
+    fn incompatible_initial_results_stay_out_and_reopened_finders_use_current_roots() {
+        let (mut h, mut loaded) = saved_finder();
+        h.collect_effects = true;
+        h.keys("C-x p f");
+        let take_walk = |h: &mut Harness| {
+            std::mem::take(&mut h.effects)
+                .into_iter()
+                .find_map(|e| match e {
+                    crate::Effect::File(crate::FileOp::Index {
+                        project,
+                        walk,
+                        roots,
+                        ..
+                    }) => Some((project, walk, roots)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let answer = |(project, walk, roots): (_, _, Vec<std::path::PathBuf>)| Msg::Indexed {
+            project,
+            walk,
+            roots: roots
+                .into_iter()
+                .map(|root| (root, Ok(vec!["x".into()])))
+                .collect(),
+            directories: Vec::new(),
+        };
+        let initial = take_walk(&mut h);
+        loaded.project.primary.path = h.path("new/lib");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded)],
+        });
+        h.send(answer(initial));
+        let latest = take_walk(&mut h);
+        h.send(answer(latest));
+        assert_eq!(candidates(&mut h), Vec::<String>::new());
+        h.keys("lib/new.rs M-RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("old/lib/new.rs"))));
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), ["lib/x"]);
+        h.keys("RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("new/lib/x"))));
+    }
+
+    #[test]
+    fn duplicate_labels_survive_reordering_and_a_reopened_finder_waits_for_compatible_files() {
+        let (mut h, mut loaded) = saved_finder();
+        loaded.project.roots.push(Root {
+            path: h.path("new/lib"),
+            role: String::new(),
+        });
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded.clone())],
+        });
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), ["lib/x", "lib<2>/x"]);
+        h.collect_effects = true;
+        std::mem::swap(&mut loaded.project.primary, &mut loaded.project.roots[0]);
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded)],
+        });
+        h.keys("lib<2>/new.rs M-RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("new/lib/new.rs"))));
+        h.effects.clear();
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), Vec::<String>::new());
+        h.keys("lib<2>/new.rs M-RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("old/lib/new.rs"))));
     }
 
     /// The name of the buffer the first window shows while the minibuffer is open.
     fn shown(h: &Harness) -> String {
-        let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+        let id = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
         h.core.buffers.get(id).unwrap().name.clone()
     }
 
     #[test]
     fn the_finder_previews_files_in_a_hidden_buffer() {
         let mut h = findable(&[]);
-        std::fs::write(h.path("b/x"), "bee").unwrap();
+        h.read_reply("b/x", Some("bee".as_ref()));
         h.keys("C-x p f C-n");
         assert_eq!(shown(&h), " x");
         let peek = h.core.buffers.visiting(&h.path("b/x")).unwrap();
@@ -844,12 +1312,56 @@ mod tests {
     }
 
     #[test]
+    fn accepting_a_prepared_preview_reads_the_file_afresh() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f");
+        let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
+        h.read_reply("a/x", Some("changed after preview".as_ref()));
+        h.keys("RET");
+        assert_eq!(h.text(), "changed after preview");
+        assert_ne!(h.core.windows.window.buffer(), peek);
+        assert!(!h.core.current().read_only);
+    }
+
+    #[test]
+    fn click_and_workspace_switch_release_prepared_previews() {
+        for switch in [false, true] {
+            let mut h = findable(&[]);
+            h.keys("origin C-f");
+            let main = h.core.workspace();
+            let other = h.new_workspace("other", "tmp");
+            h.core.switch_workspace(main).unwrap();
+            let original = h.core.windows.window.buffer();
+            let window = h.core.windows.selected;
+            h.keys("C-x p f");
+            let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
+            if switch {
+                h.core.switch_workspace(other).unwrap();
+                h.core.switch_workspace(main).unwrap();
+            } else {
+                h.send(Msg::Click {
+                    window,
+                    line: 0,
+                    col: 0,
+                });
+            }
+            assert_eq!(h.core.windows.window.buffer(), original);
+            assert_eq!(h.text(), "origin");
+            assert!(h.core.buffers.get(peek).is_none());
+        }
+    }
+
+    #[test]
     fn a_read_no_longer_awaited_is_dropped() {
         let mut h = findable(&[]);
         h.keys("C-x p f");
-        let result = Ok(Some((b"late".to_vec(), 0)));
+        let result = Ok(Some(crate::buffer::prepare_preview(b"late").unwrap()));
         h.send(Msg::Previewed {
-            path: h.path("b/x"),
+            request: crate::PreviewRequest {
+                session: 0,
+                revision: 0,
+                path: h.path("b/x"),
+            },
             result,
         });
         assert_eq!(shown(&h), " x");

@@ -130,7 +130,7 @@ mod tests {
         h.open("a.txt");
         h.keys("C-x a C-x C-x b");
         assert_eq!(h.text(), "b");
-        assert_eq!(h.disk("a.txt"), "");
+        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"")));
     }
 
     #[test]
@@ -140,7 +140,7 @@ mod tests {
         h.keys("C-x C-r");
         assert_eq!(h.core.settings().font_size, 18.0);
         assert_eq!(h.core.message(), None);
-        std::fs::write(h.path("settings.toml"), "font_size = \"big\"").unwrap();
+        h.read_reply("settings.toml", Some("font_size = \"big\"".as_ref()));
         h.keys("C-x C-r");
         assert_eq!(h.core.settings().font_size, 18.0);
         assert!(h.core.message().unwrap().starts_with("settings: "));
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(h.text(), "");
         h.keys("C-x u");
         assert_eq!(h.text(), "ab");
-        std::fs::remove_file(h.path("keymap.toml")).unwrap();
+        h.read_reply("keymap.toml", None);
         h.keys("C-x C-r C-x u");
         assert_eq!(h.text(), "");
         assert_eq!(h.core.message(), None);
@@ -168,7 +168,10 @@ mod tests {
         echo_commands(&mut h, "C-c z");
         h.keys("C-x C-r C-c a");
         assert_eq!(h.core.message(), Some("one"));
-        std::fs::write(h.path("keymap.toml"), "[global]\n\"C-c a\" = \"two\"").unwrap();
+        h.read_reply(
+            "keymap.toml",
+            Some("[global]\n\"C-c a\" = \"two\"".as_ref()),
+        );
         h.keys("C-x C-r C-c a");
         assert_eq!(h.core.message(), Some("two"));
     }
@@ -196,7 +199,7 @@ mod tests {
         let mut h = Harness::new(&[("keymap.toml", "[global]\n\"C-c a\" = \"one\"")]);
         echo_commands(&mut h, "C-c z");
         h.keys("C-x C-r");
-        std::fs::write(h.path("keymap.toml"), "[global").unwrap();
+        h.read_reply("keymap.toml", Some("[global".as_ref()));
         h.keys("C-x C-r");
         assert!(h.core.message().unwrap().starts_with("keymap: "));
         h.keys("C-c a");
@@ -277,8 +280,9 @@ mod tests {
         echo_commands(&mut h, "C-c a");
         bind_mode(&mut h, "test-mode", "C-x a", "two");
         buffer(&mut h).minor_modes.push("test-mode");
+        h.save_reply("x\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "x\n");
+        assert_eq!(h.submitted("a.txt"), "x\n");
         h.keys("C-x a");
         assert_eq!(h.core.message(), Some("two"));
     }
@@ -387,7 +391,7 @@ mod tests {
         assert_eq!(h.core.message(), Some("Quit"));
         h.keys("C-r");
         assert_eq!(h.core.message(), Some("C-r is undefined"));
-        assert_eq!(h.disk("a.txt"), "");
+        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"")));
         h.keys("C-g");
         assert_eq!(h.core.message(), Some("Quit"));
     }

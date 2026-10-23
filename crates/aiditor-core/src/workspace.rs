@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::buffer::{BufferId, MarkerId, scratch_name, unique};
 use crate::command::Args;
+use crate::project::ProjectId;
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx};
 
@@ -16,8 +17,8 @@ pub struct WorkspaceId(u64);
 pub struct Workspace {
     pub id: WorkspaceId,
     pub name: String,
-    /// The name of the project it is bound to.
-    pub project: String,
+    /// The project it is bound to.
+    pub project: ProjectId,
     /// When it was last shown, counting shows; the highest is the most recent.
     pub(crate) shown: u64,
     /// Its window configuration while another workspace is current; `None` while it is current.
@@ -28,27 +29,37 @@ pub struct Workspace {
     pub(crate) forward: Vec<(BufferId, MarkerId)>,
 }
 
-/// A window configuration, saved while its workspace is not current; the current one lives in
-/// `Core`'s fields of the same names.
+/// The active or saved window configuration of a workspace.
 pub(crate) struct Windows {
-    window: Window,
-    selected: WindowId,
-    others: HashMap<WindowId, Window>,
-    tree: Tree,
+    pub(crate) window: Window,
+    pub(crate) selected: WindowId,
+    pub(crate) others: HashMap<WindowId, Window>,
+    pub(crate) tree: Tree,
 }
 
 impl Windows {
     pub(crate) fn windows_mut(&mut self) -> impl Iterator<Item = &mut Window> {
         std::iter::once(&mut self.window).chain(self.others.values_mut())
     }
+
+    pub(crate) fn replace_buffer(
+        &mut self,
+        buffers: &mut crate::buffer::Buffers,
+        killed: BufferId,
+        replacement: BufferId,
+    ) {
+        for window in self.windows_mut().filter(|w| w.buffer() == killed) {
+            window.show(buffers, replacement);
+        }
+    }
 }
 
 impl Workspace {
-    pub(crate) fn new(id: WorkspaceId, name: &str, project: &str) -> Self {
+    pub(crate) fn new(id: WorkspaceId, name: &str, project: ProjectId) -> Self {
         Workspace {
             id,
             name: name.into(),
-            project: project.into(),
+            project,
             shown: 0,
             windows: None,
             back: Vec::new(),
@@ -61,7 +72,7 @@ impl Core {
     /// Makes a workspace bound to `project` current, named `name` or `name<2>`, ... when that is
     /// taken, showing its new `*scratch*<name>` in a single window; the workspace that was current
     /// keeps its windows.
-    pub fn new_workspace(&mut self, name: &str, project: &str) -> WorkspaceId {
+    pub fn new_workspace(&mut self, name: &str, project: ProjectId) -> WorkspaceId {
         let id = WorkspaceId(self.next_workspace);
         self.next_workspace += 1;
         let name = unique(name, |n| self.workspaces.iter().any(|w| w.name == n));
@@ -95,13 +106,9 @@ impl Core {
     /// Makes `id` current with `windows` on screen, saving the current workspace's windows.
     // shortcut: an open prompt is cancelled; keep it in its workspace once commands can leave the minibuffer.
     fn show_workspace(&mut self, id: WorkspaceId, windows: Windows) {
+        self.pending_visit = None;
         self.close_minibuffer();
-        let old = Windows {
-            window: std::mem::replace(&mut self.window, windows.window),
-            selected: std::mem::replace(&mut self.selected, windows.selected),
-            others: std::mem::replace(&mut self.others, windows.others),
-            tree: std::mem::replace(&mut self.tree, windows.tree),
-        };
+        let old = std::mem::replace(&mut self.windows, windows);
         let current = self.buffers.workspace;
         let current = (self.workspaces.iter_mut().find(|w| w.id == current))
             .expect("the current workspace is live");
@@ -111,7 +118,7 @@ impl Core {
         let new = (self.workspaces.iter_mut().find(|w| w.id == id)).expect("shown is live");
         new.shown = shown;
         self.buffers.workspace = id;
-        self.buffers.raise(self.window.buffer());
+        self.buffers.raise(self.windows.window.buffer());
     }
 
     /// Kills workspace `id`, its windows and every buffer it owns; killing the current one makes
@@ -145,6 +152,7 @@ impl Core {
         for buffer in owned {
             self.kill_buffer(buffer);
         }
+        self.release_projects();
         Ok(())
     }
 
@@ -153,10 +161,11 @@ impl Core {
     pub fn launch(&mut self, path: &Path, root: &Path) {
         assert_eq!(self.workspaces.len(), 1, "only the launch workspace exists");
         let home = &self.workspaces[0].project;
-        (self.projects).retain(|p| p.file.is_some() || p.project.name != *home);
+        (self.projects).retain(|p| p.file.is_some() || p.id != *home);
         let project = self.project_for(path, root);
-        self.workspaces[0].project = project.clone();
-        (self.rename_workspace(&project)).expect("the sole workspace's new name is free");
+        self.workspaces[0].project = project;
+        let name = self.project_name(project).to_string();
+        (self.rename_workspace(&name)).expect("the sole workspace's new name is free");
     }
 
     pub(crate) fn current_workspace(&self) -> &Workspace {
@@ -188,16 +197,17 @@ impl Core {
 
     /// Makes a new workspace for the project `project`, named `name`, or after the project when
     /// `name` is blank.
-    pub(crate) fn workspace_for(&mut self, project: &str, name: &str) -> Result<(), String> {
-        self.project(project)?;
+    pub(crate) fn workspace_for(&mut self, id: ProjectId, name: &str) -> Result<(), String> {
+        self.project_at(id)?;
+        let project = self.project_name(id).to_string();
         if name.trim().is_empty() {
-            self.new_workspace(project, project);
+            self.new_workspace(&project, id);
             return Ok(());
         }
         if self.workspaces.iter().any(|w| w.name == name) {
             return Err(format!("Workspace {name} already exists"));
         }
-        self.new_workspace(name, project);
+        self.new_workspace(name, id);
         Ok(())
     }
 
@@ -242,20 +252,21 @@ impl Core {
         let list: Vec<String> = (self.workspaces.iter())
             .map(|w| {
                 let mark = if w.id == current { "*" } else { "" };
-                format!("{mark}{} ({})", w.name, w.project)
+                format!("{mark}{} ({})", w.name, self.project_name(w.project))
             })
             .collect();
         self.echo(list.join("  "));
     }
 
     /// Shows the project `name`'s most recently shown workspace, or a new one when it has none.
-    pub(crate) fn switch_project(&mut self, name: &str) -> Result<(), String> {
+    pub(crate) fn switch_project(&mut self, project: ProjectId) -> Result<(), String> {
+        self.project_at(project)?;
         let latest = (self.workspaces.iter())
-            .filter(|w| w.project == name)
+            .filter(|w| w.project == project)
             .max_by_key(|w| w.shown);
         match latest.map(|w| w.id) {
             Some(id) => self.switch_workspace(id),
-            None => self.workspace_for(name, ""),
+            None => self.workspace_for(project, ""),
         }
     }
 }
@@ -317,7 +328,10 @@ mod tests {
         let core = crate::Core::default();
         let (w, home) = (&core.workspaces()[0], &core.projects()[0]);
         assert_eq!(core.workspaces().len(), 1);
-        assert_eq!((&w.name, &w.project), (&home.name, &home.name));
+        assert_eq!(
+            (&w.name, core.project_name(w.project)),
+            (&home.name, home.name.as_str())
+        );
         assert_eq!(Some(home.primary.path.clone()), std::env::home_dir());
         assert_eq!(core.current().name, format!("*scratch*<{}>", home.name));
         let mut h = Harness::new(&[]);
@@ -330,10 +344,10 @@ mod tests {
     #[test]
     fn a_new_workspace_is_current_with_its_own_scratch() {
         let mut h = Harness::new(&[]);
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         assert!(h.core.current().unkillable);
         assert_eq!(h.core.workspace(), w);
-        assert_eq!(h.core.workspaces()[1].project, "p");
+        assert_eq!(h.core.project_name(h.core.workspaces()[1].project), "p");
         assert_eq!((name(&h), h.text()), ("*scratch*<w>", String::new()));
         assert_eq!(h.core.current().workspace, Some(w));
     }
@@ -342,12 +356,16 @@ mod tests {
     fn a_file_open_in_another_workspace_gets_a_second_buffer() {
         let mut h = Harness::new(&[("a.txt", "abc")]);
         h.open("a.txt");
-        let first = h.core.window.buffer();
+        let first = h.core.windows.window.buffer();
         h.open("a.txt");
-        assert_eq!(h.core.window.buffer(), first, "reused in one workspace");
-        let w = h.core.new_workspace("w", "p");
+        assert_eq!(
+            h.core.windows.window.buffer(),
+            first,
+            "reused in one workspace"
+        );
+        let w = h.new_workspace("w", "p");
         h.open("a.txt");
-        assert_ne!(h.core.window.buffer(), first);
+        assert_ne!(h.core.windows.window.buffer(), first);
         assert_eq!(
             (name(&h), h.core.current().workspace),
             ("a.txt<2>", Some(w))
@@ -358,7 +376,7 @@ mod tests {
     fn killing_a_buffer_never_shows_another_workspace_s_buffer() {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
         h.open("a.txt");
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         // a.txt is more recent than w's scratch.
         show(&mut h, "a.txt");
         h.open("b.txt").keys("C-x k RET");
@@ -373,9 +391,9 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
         let default = h.core.workspace();
         h.open("a.txt").keys("x");
-        let a = h.core.new_workspace("a", "p");
+        let a = h.new_workspace("a", "p");
         h.open("a.txt").open("b.txt").keys("y C-g");
-        let b = h.core.new_workspace("b", "q");
+        let b = h.new_workspace("b", "q");
         h.open("b.txt");
         let (kept, messages) = (owned(&h, Some(b)), owned(&h, None));
         let kept_default = owned(&h, Some(default));
@@ -397,14 +415,14 @@ mod tests {
     fn killing_the_current_workspace_selects_its_neighbour() {
         let mut h = Harness::new(&[]);
         let default = h.core.workspace();
-        let a = h.core.new_workspace("a", "p");
-        let b = h.core.new_workspace("b", "p");
+        let a = h.new_workspace("a", "p");
+        let b = h.new_workspace("b", "p");
         h.core.kill_workspace(b).unwrap();
         assert_eq!(
             (h.core.workspace(), h.core.current().workspace),
             (a, Some(a))
         );
-        let c = h.core.new_workspace("c", "p");
+        let c = h.new_workspace("c", "p");
         h.core.kill_workspace(a).unwrap();
         assert_eq!(
             h.core.workspace(),
@@ -431,13 +449,13 @@ mod tests {
     /// Each shown window's buffer name and point in tree order, and the selected one's index.
     fn layout(h: &Harness) -> (Vec<(String, usize)>, usize) {
         let core = &h.core;
-        let leaves = core.tree.leaves();
+        let leaves = core.windows.tree.leaves();
         let shown = leaves.iter().map(|id| {
-            let window = core.others.get(id).unwrap_or(&core.window);
+            let window = core.windows.others.get(id).unwrap_or(&core.windows.window);
             let buffer = core.buffers.get(window.buffer()).unwrap();
             (buffer.name.clone(), window.point(&core.buffers))
         });
-        let selected = leaves.iter().position(|&id| id == core.selected);
+        let selected = leaves.iter().position(|&id| id == core.windows.selected);
         (shown.collect(), selected.unwrap())
     }
 
@@ -453,7 +471,7 @@ mod tests {
         h.open("b.txt").keys("C-f");
         let before = layout(&h);
         assert_eq!(before, (vec![("a.txt".into(), 2), ("b.txt".into(), 1)], 1));
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         assert_eq!(
             layout(&h),
             one("*scratch*<w>"),
@@ -467,11 +485,45 @@ mod tests {
     }
 
     #[test]
+    fn switching_preserves_marks_rings_scroll_and_ignores_an_inactive_window_click() {
+        let mut h = Harness::new(&[("a", "zero\none\ntwo\nthree\nfour\n")]);
+        h.open("a").keys("C-x 2 C-x o");
+        let origin = h.core.workspace();
+        let selected = h.core.windows.selected;
+        let window = &mut h.core.windows.window;
+        window.push_mark(&mut h.core.buffers, 1, true).unwrap();
+        window.push_mark(&mut h.core.buffers, 4, true).unwrap();
+        window.set_point(&mut h.core.buffers, 9).unwrap();
+        window.set_top(1);
+        assert_eq!(window.scroll(&h.core.buffers, 3), 1);
+        let left = window.hscroll(20, 5);
+        let other = h.new_workspace("other", "home");
+        h.send(Msg::Click {
+            window: selected,
+            line: 0,
+            col: 0,
+        });
+        assert_eq!(h.core.workspace(), other);
+        assert_eq!(name(&h), "*scratch*<other>");
+        h.core.switch_workspace(origin).unwrap();
+        assert_eq!(h.core.windows.selected, selected);
+        assert_eq!(h.core.windows.tree.leaves().len(), 2);
+        let window = &mut h.core.windows.window;
+        assert_eq!(window.point(&h.core.buffers), 9);
+        assert_eq!(window.mark(&h.core.buffers), Some(4));
+        assert!(window.active());
+        assert_eq!(window.scroll(&h.core.buffers, 3), 1);
+        assert_eq!(window.left(), left);
+        window.pop_mark();
+        assert_eq!(window.mark(&h.core.buffers), Some(1));
+    }
+
+    #[test]
     fn window_changes_stay_in_their_workspace() {
         let mut h = Harness::new(&[]);
         let default = h.core.workspace();
         h.keys("C-x 2");
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         h.keys("C-x 3 C-x 3");
         h.core.switch_workspace(default).unwrap();
         assert_eq!(layout(&h).0.len(), 2);
@@ -487,7 +539,7 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "abc")]);
         let default = h.core.workspace();
         h.open("a.txt").keys("C-e");
-        h.core.new_workspace("w", "p");
+        h.new_workspace("w", "p");
         show(&mut h, "a.txt");
         h.keys("C-a X Y");
         h.core.switch_workspace(default).unwrap();
@@ -499,7 +551,7 @@ mod tests {
         let mut h = Harness::new(&[]);
         let default = h.core.workspace();
         h.keys("C-x 2");
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         ask(&mut h, &["Text: "]);
         h.keys("C-c p a b");
         h.core.switch_workspace(default).unwrap();
@@ -519,7 +571,7 @@ mod tests {
     fn killing_the_current_workspace_shows_the_neighbour_s_windows() {
         let mut h = Harness::new(&[]);
         h.keys("C-x 3");
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         h.keys("C-x 2");
         h.core.kill_workspace(w).unwrap();
         assert_eq!(layout(&h), (vec![("*scratch*<main>".into(), 0); 2], 0));
@@ -534,7 +586,7 @@ mod tests {
     fn a_killed_buffer_is_replaced_in_a_workspace_that_is_not_current() {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
         let default = h.core.workspace();
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         h.open("a.txt");
         h.core.switch_workspace(default).unwrap();
         show(&mut h, "a.txt");
@@ -546,10 +598,10 @@ mod tests {
         h.open("b.txt").keys("C-x 2");
         h.core.switch_workspace(w).unwrap();
         h.open("b.txt");
-        let b = h.core.window.buffer();
+        let b = h.core.windows.window.buffer();
         h.core.switch_workspace(default).unwrap();
         show(&mut h, "b.txt<2>");
-        h.core.new_workspace("x", "p");
+        h.new_workspace("x", "p");
         h.core.kill_workspace(w).unwrap();
         assert!(h.core.buffers.get(b).is_none());
         h.core.switch_workspace(default).unwrap();
@@ -582,7 +634,7 @@ mod tests {
     fn current(h: &Harness) -> (&str, &str) {
         let id = h.core.workspace();
         let w = h.core.workspaces().iter().find(|w| w.id == id).unwrap();
-        (w.name.as_str(), w.project.as_str())
+        (w.name.as_str(), h.core.project_name(w.project))
     }
 
     fn project_names(h: &Harness) -> Vec<&str> {
@@ -595,7 +647,7 @@ mod tests {
         let file = h.path("lib/x");
         h.core.launch(&file, &h.path("lib"));
         assert_eq!((names(&h), current(&h)), (vec!["app"], ("app", "app")));
-        assert_eq!(project_names(&h), ["app", "one", "two"], "no $HOME project");
+        assert_eq!(project_names(&h), ["one", "two", "app"], "no $HOME project");
     }
 
     #[test]
@@ -606,7 +658,10 @@ mod tests {
         assert_eq!(current(&h), ("repo", "repo"));
         let repo = h.core.projects()[3];
         assert_eq!((&repo.name, &repo.primary.path), (&"repo".into(), &root));
-        assert!(!h.path("projects").exists(), "nothing written");
+        assert_eq!(
+            h.core.projects[h.core.project(current(&h).1).unwrap()].file,
+            None
+        );
         // A taken name gets `<2>`, and an ad-hoc project at the root is reused.
         let mut h = projects();
         h.core.launch(&h.path("x/one/f"), &h.path("x/one"));
@@ -614,7 +669,7 @@ mod tests {
         let mut h = projects();
         h.core.launch(&h.path("one/f"), &h.path("one"));
         assert_eq!(current(&h).1, "one");
-        assert_eq!(project_names(&h), ["app", "one", "two"]);
+        assert_eq!(project_names(&h), ["one", "two", "app"]);
     }
 
     #[test]
@@ -648,7 +703,7 @@ mod tests {
         h.keys("C-x t 2 two RET mine RET");
         assert_eq!(h.core.message(), Some("Workspace mine already exists"));
         assert_eq!(names(&h).len(), 4);
-        h.keys("C-x t 2 zz M-RET RET");
+        h.keys("C-x t 2 zz M-RET");
         assert_eq!(h.core.message(), Some("No project named zz"));
         assert_eq!(names(&h).len(), 4);
     }
@@ -740,8 +795,9 @@ mod tests {
         h.keys("C-x t 0");
         let prompt = format!("Save file {}? ", h.path("f.txt").display());
         assert_eq!(h.core.minibuffer().unwrap().prompt, prompt);
+        h.save_reply("x\n");
         h.keys("RET");
-        assert_eq!(h.disk("f.txt"), "x\n");
+        assert_eq!(h.submitted("f.txt"), "x\n");
         assert_eq!(names(&h).len(), 1, "killed once saved");
     }
 
@@ -755,20 +811,25 @@ mod tests {
         assert_eq!((names(&h).len(), h.text()), (2, "x".into()));
         h.keys("C-x t k RET no RET yes RET");
         assert_eq!(names(&h).len(), 1);
-        assert_eq!(h.disk("f.txt"), "", "unchanged on disk");
+        assert_eq!(h.writes, Vec::<(std::path::PathBuf, String)>::new());
     }
 
     #[test]
     fn a_failed_save_keeps_the_workspace() {
         let mut h = modified();
-        std::fs::write(h.path("f.txt"), "theirs").unwrap();
+        h.read_reply("f.txt", Some(b"theirs"));
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("f.txt").display()
+        )));
         h.keys("C-x t 0 RET");
         let err = format!("{} changed on disk; not saved", h.path("f.txt").display());
         assert_eq!(h.core.message(), Some(err.as_str()));
         assert_eq!(names(&h).len(), 2);
         // The cancelled kill doesn't come back with a later save.
+        h.save_reply("x\n");
         h.keys("C-x C-s Keep SPC mine RET");
-        assert_eq!(h.disk("f.txt"), "x\n");
+        assert_eq!(h.submitted("f.txt"), "x\n");
         assert_eq!(names(&h).len(), 2);
     }
 
@@ -801,7 +862,10 @@ mod tests {
         let project = (h.core.projects().into_iter()).find(|p| p.name == "new");
         let project = project.unwrap().clone();
         assert_eq!(project.primary.path, new);
-        assert!(!h.path("projects").exists(), "nothing written");
+        assert_eq!(
+            h.core.projects[h.core.project(current(&h).1).unwrap()].file,
+            None
+        );
         h.send(Msg::ProjectsLoaded {
             dir: Some(h.path("projects")),
             projects: Vec::new(),
@@ -814,7 +878,7 @@ mod tests {
         let mut h = projects();
         h.core.launch(&h.path("lib/src"), &h.path("lib/src"));
         assert_eq!(current(&h), ("app", "app"));
-        assert_eq!(project_names(&h), ["app", "one", "two"]);
+        assert_eq!(project_names(&h), ["one", "two", "app"]);
     }
 
     #[test]

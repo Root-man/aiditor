@@ -1,9 +1,11 @@
 //! Swiper: the buffer's matching lines listed in the minibuffer, as ivy's `swiper`.
 
+use std::borrow::Cow;
+use std::ops::Range;
+
 use regex::{Regex, RegexBuilder};
 use ropey::Rope;
 
-use crate::buffer::Buffer;
 use crate::command::{Args, Preview};
 use crate::{Core, Ctx};
 
@@ -13,18 +15,65 @@ fn lines(text: &Rope) -> usize {
     n - usize::from(text.line(n - 1).len_chars() == 0)
 }
 
-/// Every line of the current buffer after its number, padded to the largest one's width.
-pub(crate) fn candidates(core: &Core, _: &Args) -> Vec<String> {
-    let text = core.current().text();
-    let n = lines(text);
-    let width = n.to_string().len();
-    let lines = text.lines().take(n).enumerate();
-    lines
-        .map(|(i, line)| {
-            let line = line.to_string();
-            format!("{:<width$} {}", i + 1, line.trim_end_matches('\n'))
-        })
-        .collect()
+pub(crate) struct Search {
+    snapshot: String,
+    lines: Vec<Range<usize>>,
+    positive: Option<Regex>,
+    negative: Vec<Regex>,
+}
+
+impl Search {
+    pub(crate) fn new(text: &Rope) -> Self {
+        let snapshot = text.to_string();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (end, _) in snapshot.match_indices('\n') {
+            lines.push(start..end);
+            start = end + 1;
+        }
+        if start < snapshot.len() {
+            lines.push(start..snapshot.len());
+        }
+        Self {
+            snapshot,
+            lines,
+            positive: None,
+            negative: Vec::new(),
+        }
+    }
+
+    pub(crate) fn filter(&mut self, text: &str) -> Vec<usize> {
+        (self.positive, self.negative) = regexes(text);
+        // shortcut: each query scans all lines on the core thread; move scans off-thread if measured input latency warrants it.
+        self.lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let content = &self.snapshot[line.clone()];
+                (self.positive.as_ref().is_none_or(|r| r.is_match(content))
+                    && !self.negative.iter().any(|r| r.is_match(content)))
+                .then_some(i)
+            })
+            .collect()
+    }
+
+    pub(crate) fn candidate(&self, line: usize) -> String {
+        let width = self.lines.len().to_string().len();
+        let content = &self.snapshot[self.lines[line].clone()];
+        format!("{:<width$} {}", line + 1, content)
+    }
+
+    fn target(&self, text: &Rope, line: usize) -> Option<usize> {
+        let content = Cow::<str>::from(text.get_line(line)?);
+        let start = text.line_to_char(line);
+        let content = content.trim_end_matches('\n');
+        let end = self
+            .positive
+            .as_ref()
+            .and_then(|r| r.find(content))
+            .map_or(0, |m| m.end());
+        Some(start + content[..end].chars().count())
+    }
 }
 
 /// The line index a candidate shows.
@@ -74,41 +123,11 @@ fn regexes(text: &str) -> (Option<Regex>, Vec<Regex>) {
     (positive, negative)
 }
 
-/// The indices of the candidates whose line matches `text`, in buffer order.
-// shortcut: every line is matched on each change of the text, on the core thread; chunk it or move it off the thread if large buffers lag.
-pub(crate) fn filter(text: &str, candidates: &[String]) -> Vec<usize> {
-    let (positive, negative) = regexes(text);
-    let width = candidates.len().to_string().len();
-    let lines = candidates
-        .iter()
-        .map(|c| c.get(width + 1..).unwrap_or_default());
-    lines
-        .enumerate()
-        .filter(|(_, line)| {
-            positive.as_ref().is_none_or(|r| r.is_match(line))
-                && !negative.iter().any(|r| r.is_match(line))
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
 /// The line at point, selected when the list opens.
 pub(crate) fn preselect(core: &Core, _: &Args) -> usize {
     let buffer = core.current();
     let (line, _) = buffer.line_col(core.point()).unwrap_or_default();
     line.min(lines(buffer.text()).saturating_sub(1))
-}
-
-/// The end of `text`'s first match on `line`, else the line's start.
-fn target(buffer: &Buffer, line: usize, text: &str) -> Option<usize> {
-    let start = buffer.char_idx(line, 0).ok()?;
-    let content = buffer.text().line(line).to_string();
-    let content = content.trim_end_matches('\n');
-    let end = regexes(text)
-        .0
-        .and_then(|r| r.find(content))
-        .map_or(0, |m| m.end());
-    Some(start + content[..end].chars().count())
 }
 
 /// The selected line's match in the window the search started from; with no text, the starting
@@ -121,7 +140,10 @@ pub(crate) fn preview(core: &Core, candidate: &str) -> Option<Preview> {
     if text.is_empty() && buffer.line_col(point).ok()?.0 == line {
         return Some(Preview::Point(point));
     }
-    target(buffer, line, &text).map(Preview::Point)
+    core.prompts
+        .swiper()?
+        .target(buffer.text(), line)
+        .map(Preview::Point)
 }
 
 impl Ctx<'_> {
@@ -131,13 +153,20 @@ impl Ctx<'_> {
         let line = line_number(candidate).ok_or("No candidates")?;
         let core = &mut *self.core;
         let start = core.point();
-        let p = target(core.current(), line, &core.prompts.last_text).ok_or("No candidates")?;
+        let p = core
+            .prompts
+            .accepted_swiper
+            .as_ref()
+            .and_then(|search| search.target(core.current().text(), line))
+            .ok_or("No candidates")?;
         if p != start {
             core.push_jump();
         }
-        core.window.jump(&mut core.buffers, p)?;
-        if p != start && !core.window.active() {
-            core.window.push_mark(&mut core.buffers, start, false)?;
+        core.windows.window.jump(&mut core.buffers, p)?;
+        if p != start && !core.windows.window.active() {
+            core.windows
+                .window
+                .push_mark(&mut core.buffers, start, false)?;
             core.echo("Mark saved where search started".into());
         }
         Ok(())
@@ -148,6 +177,138 @@ impl Ctx<'_> {
 mod tests {
     use crate::Msg;
     use crate::harness::{Harness, line_start, mark, on};
+
+    #[test]
+    #[ignore = "manual reproducible Swiper baseline; prints timings"]
+    fn prompt_and_query_baseline() {
+        use crate::{Core, key::parse_keys};
+        use std::time::{Duration, Instant};
+
+        let queries = [
+            "needle",
+            "needle !skip",
+            "NEEDLE",
+            "alpha value",
+            "(",
+            "needle\\ value",
+        ];
+        let median = |mut samples: Vec<Duration>| {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1000.
+        };
+        for lines in [1_000, 100_000] {
+            let fixture: String = (0..lines)
+                .map(|i| {
+                    let kind = if i % 5 == 0 { "skip" } else { "keep" };
+                    format!("{i:06} alpha needle value {kind} été\n")
+                })
+                .collect();
+            let mut opening = Vec::new();
+            let mut changes = vec![Vec::new(); queries.len()];
+            for _ in 0..7 {
+                let mut core = Core::default();
+                core.open(
+                    std::path::Path::new("/swiper-baseline.txt"),
+                    Some((fixture.as_bytes().to_vec(), 0)),
+                );
+                let start = Instant::now();
+                std::hint::black_box(core.handle(start, Msg::Key(parse_keys("C-s").unwrap()[0])));
+                opening.push(start.elapsed());
+                assert_eq!(
+                    core.frame().minibuffer.unwrap().count,
+                    format!("1/{lines} ")
+                );
+                let mut previous = 0;
+                for (i, query) in queries.iter().enumerate() {
+                    let start = Instant::now();
+                    std::hint::black_box(core.handle(
+                        start,
+                        Msg::Insert {
+                            text: (*query).into(),
+                            replace: Some(0..previous),
+                        },
+                    ));
+                    changes[i].push(start.elapsed());
+                    previous = query.encode_utf16().count();
+                    assert_eq!(core.text(), *query);
+                    if i == 0 {
+                        assert_eq!(
+                            core.frame().minibuffer.unwrap().count,
+                            format!("1/{lines} ")
+                        );
+                    }
+                }
+            }
+            println!(
+                "Swiper: lines={lines} bytes={} debug_assertions={} samples=7 open_median_ms={:.3}",
+                fixture.len(),
+                cfg!(debug_assertions),
+                median(opening)
+            );
+            for (query, samples) in queries.iter().zip(changes) {
+                println!("  query={query:?} median_ms={:.3}", median(samples));
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_lines_keep_blank_lines_and_non_lf_separators() {
+        let mut h = on("é\r\u{85}\u{2028}z\n\nlast");
+        h.keys("C-s");
+        assert_eq!(listed(&mut h).0, ["1 é\r\u{85}\u{2028}z", "2 ", "3 last"]);
+        h.keys("z RET");
+        assert_eq!(h.point(), 5);
+    }
+
+    #[test]
+    fn chunk_spanning_lines_keep_unicode_matches_and_final_line_order() {
+        let long = format!("{}é🙂 needle", "x".repeat(4000));
+        let mut h = on(&format!("first\n{long}\nlast needle"));
+        h.keys("C-s needle");
+        assert_eq!(
+            listed(&mut h).0,
+            [format!("2 {long}"), "3 last needle".into()]
+        );
+        let expected = 6 + long.chars().count();
+        assert_eq!(origin_point(&h), expected);
+        h.keys("RET");
+        assert_eq!(h.point(), expected);
+        h.keys("C-s last RET");
+        assert_eq!(h.point(), expected + 1 + 4);
+    }
+
+    #[test]
+    fn preview_and_acceptance_follow_live_text_after_a_revert() {
+        for replacement in ["prefix\n  needle\n", "gone"] {
+            let mut h = on("a\nneedle\n");
+            let buffer = h.core.windows.window.buffer();
+            let tick = h.core.current().tick();
+            let result = crate::buffer::revert(
+                &h.path("a.txt"),
+                h.core.current().text(),
+                Ok(Some((
+                    replacement.as_bytes().to_vec(),
+                    crate::buffer::hash(replacement.as_bytes()),
+                ))),
+            );
+            h.keys("C-s needle");
+            h.send(Msg::Reverted {
+                buffer,
+                tick,
+                result,
+            });
+            if replacement == "gone" {
+                h.keys("RET");
+                assert_eq!(h.core.message(), Some("No candidates"));
+                assert_eq!(h.text(), "gone");
+            } else {
+                assert_eq!(origin_point(&h), 15);
+                h.keys("RET");
+                assert_eq!(h.point(), 15);
+                assert_eq!(h.text(), replacement);
+            }
+        }
+    }
 
     /// The listed candidates and the count before the prompt.
     fn listed(h: &mut Harness) -> (Vec<String>, String) {
@@ -164,7 +325,7 @@ mod tests {
 
     /// The point of the window the search was started from.
     fn origin_point(h: &Harness) -> usize {
-        h.core.others[&h.core.tree.leaves()[0]].point(&h.core.buffers)
+        h.core.windows.others[&h.core.windows.tree.leaves()[0]].point(&h.core.buffers)
     }
 
     #[test]
@@ -264,8 +425,9 @@ mod tests {
         let start = line_start(&h, 102);
         h.keys("C-s l100$");
         let top = |h: &mut Harness| {
-            let id = h.core.tree.leaves()[0];
+            let id = h.core.windows.tree.leaves()[0];
             h.core
+                .windows
                 .others
                 .get_mut(&id)
                 .unwrap()
@@ -276,7 +438,7 @@ mod tests {
         assert_eq!(origin_point(&h), start + 4);
         assert_eq!(top(&mut h), 90, "in view keeps the scroll");
         h.keys("C-g");
-        let window = &mut h.core.window;
+        let window = &mut h.core.windows.window;
         assert_eq!(
             window.scroll(&h.core.buffers, 20),
             0,

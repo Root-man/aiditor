@@ -9,7 +9,7 @@ const JUMPS_MAX: usize = 100;
 impl Core {
     /// Records the selected window's position as one a jump leaves, emptying the forward list.
     pub(crate) fn push_jump(&mut self) {
-        let (id, point) = (self.window.buffer(), self.point());
+        let (id, point) = (self.windows.window.buffer(), self.point());
         let current = self.workspace();
         let ws = (self.workspaces.iter_mut().find(|w| w.id == current)).expect("current is live");
         let buffer = self.buffers.get_mut(id).expect("window buffer is live");
@@ -26,7 +26,7 @@ impl Core {
     /// Goes to the newest position on the back list, or the forward list when `forward`, that is
     /// live and not where point is, putting point's position on the other list.
     pub(crate) fn xref_go(&mut self, forward: bool) -> Result<(), String> {
-        let (id, point) = (self.window.buffer(), self.point());
+        let (id, point) = (self.windows.window.buffer(), self.point());
         let current = self.workspace();
         let ws = (self.workspaces.iter_mut().find(|w| w.id == current)).expect("current is live");
         let (from, to) = match forward {
@@ -52,7 +52,7 @@ impl Core {
         let marker = buffer.add_marker(point, InsertionType::Stay);
         to.push((id, marker.expect("point is in the buffer")));
         self.show_buffer(b);
-        Ok(self.window.jump(&mut self.buffers, p)?)
+        Ok(self.windows.window.jump(&mut self.buffers, p)?)
     }
 }
 
@@ -121,7 +121,11 @@ mod tests {
         );
         let (b, oldest) = h.core.current_workspace().back[0];
         for p in 1..=100 {
-            h.core.window.set_point(&mut h.core.buffers, p).unwrap();
+            h.core
+                .windows
+                .window
+                .set_point(&mut h.core.buffers, p)
+                .unwrap();
             h.core.push_jump();
         }
         let back = back(&h);
@@ -172,6 +176,10 @@ mod tests {
     #[test]
     fn back_after_a_grep_jump_returns_and_forward_goes_again() {
         let mut h = grepping(&[("app/a.rs", "needle\n"), ("app/b.rs", "x\n  needle\n")]);
+        h.grep_reply(&[
+            ("app", "a.rs", 0, 0, "needle"),
+            ("app", "b.rs", 1, 2, "  needle"),
+        ]);
         h.keys("C-f C-x p g needle").advance(WAIT).keys("C-n RET");
         let hit = line_start(&h, 1) + 2;
         assert_eq!(at(&h), pos("b.rs", hit));
@@ -187,6 +195,7 @@ mod tests {
     fn a_grep_hit_in_the_current_buffer_records_once() {
         let mut h = grepping(&[("app/a.rs", "x\nneedle\n")]);
         let before = back(&h).len();
+        h.grep_reply(&[("app", "a.rs", 1, 0, "needle")]);
         h.keys("C-x p g needle").advance(WAIT).keys("RET");
         assert_eq!(h.point(), 2);
         assert_eq!(back(&h).len(), before + 1);
@@ -225,13 +234,17 @@ mod tests {
         let mut h = on(&text.join("\n"));
         h.display(5);
         let far = line_start(&h, 30);
-        h.core.window.set_point(&mut h.core.buffers, far).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, far)
+            .unwrap();
         h.core.push_jump();
         h.keys("M-<");
         h.display(5);
         h.keys("M-,");
         assert_eq!(h.point(), far);
-        assert_eq!(h.core.window.scroll(&h.core.buffers, 5), 28);
+        assert_eq!(h.core.windows.window.scroll(&h.core.buffers, 5), 28);
     }
 
     #[test]
@@ -259,7 +272,7 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "a"), ("b.txt", "b")]);
         h.open("a.txt").open("b.txt");
         let one = h.core.workspace();
-        h.core.new_workspace("two", "home");
+        h.new_workspace("two", "home");
         h.keys("M-,");
         assert_eq!(h.core.message(), Some("At start of xref history"));
         h.core.switch_workspace(one).unwrap();
@@ -270,7 +283,7 @@ mod tests {
     #[test]
     fn killing_a_workspace_drops_its_markers() {
         let mut h = Harness::new(&[("a.txt", "a")]);
-        let two = h.core.new_workspace("two", "home");
+        let two = h.new_workspace("two", "home");
         h.send(Msg::Log("hi".into())).keys("C-x b *Messages* RET");
         h.open("a.txt");
         let (b, m) = *h.core.current_workspace().back.last().unwrap();

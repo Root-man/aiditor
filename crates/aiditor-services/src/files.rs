@@ -4,8 +4,10 @@ use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use aiditor_core::buffer::{encode, hash, revert, unified_diff};
+use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
 use aiditor_core::{FileOp, Msg};
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -22,7 +24,12 @@ pub fn run(op: FileOp) -> Msg {
             bom,
             hash,
         } => {
-            let result = write(&path, &encode(&text, crlf, bom), hash);
+            let result = write(
+                &path,
+                &encode(&text, crlf, bom),
+                WriteExpectation::Update(hash),
+            )
+            .map_err(|err| err.describe(&path, "not saved"));
             // Not `error!`: the core echoes the failure, and an error log would show it twice.
             match &result {
                 Ok(_) => tracing::info!(path = %path.display(), "saved"),
@@ -63,13 +70,22 @@ pub fn run(op: FileOp) -> Msg {
             let result = list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
             Msg::Listed { dir, result }
         }
-        FileOp::Open(path) => {
+        FileOp::Open { intent, path } => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
-            Msg::Opened { path, result }
+            Msg::Opened {
+                intent,
+                path,
+                result,
+            }
         }
-        FileOp::Preview(path) => {
-            let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
-            Msg::Previewed { path, result }
+        FileOp::Preview(request) => {
+            let result = match fs::read(&request.path) {
+                Ok(bytes) => prepare_preview(&bytes).map(Some).map_err(str::to_string),
+                Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(err.to_string()),
+            }
+            .map_err(|err| format!("{}: {err}", request.path.display()));
+            Msg::Previewed { request, result }
         }
         FileOp::Check(paths) => {
             let files = (paths.into_iter())
@@ -90,16 +106,17 @@ pub fn run(op: FileOp) -> Msg {
             ignore,
         } => {
             let patterns = Patterns::lenient(&ignore);
-            let mut directories = 0;
+            let mut directories = Vec::new();
             let roots = (roots.into_iter())
                 .map(|root| {
-                    let files = inventory(&root, &patterns).map(|(files, count)| {
-                        directories += count;
+                    let files = inventory(&root, &patterns).map(|(files, dirs)| {
+                        directories.extend(dirs);
                         files
                     });
                     (root, files)
                 })
                 .collect();
+            directories.sort();
             Msg::Indexed {
                 project,
                 walk,
@@ -107,9 +124,15 @@ pub fn run(op: FileOp) -> Msg {
                 directories,
             }
         }
-        FileOp::WriteProject { path, old, text } => {
-            Msg::ProjectWritten(crate::projects::write(&path, old.as_deref(), text))
-        }
+        FileOp::WriteProject {
+            intent,
+            path,
+            old,
+            text,
+        } => Msg::ProjectWritten {
+            intent,
+            result: crate::projects::write(&path, old.as_deref(), text),
+        },
     }
 }
 
@@ -151,20 +174,25 @@ pub fn index(root: &Path, patterns: &Patterns) -> Result<Vec<PathBuf>, String> {
     inventory(root, patterns).map(|(files, _)| files)
 }
 
-fn inventory(root: &Path, patterns: &Patterns) -> Result<(Vec<PathBuf>, usize), String> {
+pub(crate) fn inventory(
+    root: &Path,
+    patterns: &Patterns,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     fs::read_dir(root).map_err(|err| format!("{}: {err}", root.display()))?;
     let mut files = Vec::new();
-    let mut directories = 0;
+    let mut directories = Vec::new();
     for entry in walker(root, root, patterns).build().flatten() {
         let Some(kind) = entry.file_type() else {
             continue;
         };
         if kind.is_dir() {
-            directories += 1;
+            directories.push(entry.path().to_path_buf());
         } else if kind.is_file() || kind.is_symlink() && entry.path().is_file() {
             files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
         }
     }
+    files.sort();
+    directories.sort();
     Ok((files, directories))
 }
 
@@ -244,15 +272,72 @@ impl Patterns {
     }
 }
 
-/// Writes `bytes` to `path` if its content still hashes to `expected` (`None`: no file) or the
-/// file is gone, and returns the new hash.
-pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, String> {
-    let err = |e: io::Error| format!("{}: {e}", path.display());
-    let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
-    // A gone file is written back: nothing on disk is lost.
-    if on_disk.is_some() && on_disk != expected {
-        // `projects::write` rewrites "not saved" in this message.
-        return Err(format!("{} changed on disk; not saved", path.display()));
+/// The disk state a write may replace. Updates allow recreation after deletion.
+#[derive(Clone, Copy, Debug)]
+pub enum WriteExpectation {
+    Create,
+    Update(Option<u64>),
+}
+
+#[derive(Debug)]
+pub enum WriteFailure {
+    Conflict,
+    AlreadyExists,
+    Io(io::Error),
+}
+
+impl WriteFailure {
+    pub(crate) fn describe(&self, path: &Path, conflict_action: &str) -> String {
+        match self {
+            Self::Conflict => format!("{} changed on disk; {conflict_action}", path.display()),
+            Self::AlreadyExists => format!("{} already exists", path.display()),
+            Self::Io(err) => format!("{}: {err}", path.display()),
+        }
+    }
+}
+
+static WRITE_GATE: Mutex<()> = Mutex::new(());
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes the disk check and complete write, including aliases and project files.
+pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u64, WriteFailure> {
+    let err = WriteFailure::Io;
+    let _guard = WRITE_GATE
+        .lock()
+        .map_err(|_| err(io::Error::other("write gate poisoned")))?;
+    match expected {
+        WriteExpectation::Create => {
+            match fs::symlink_metadata(path) {
+                Ok(_) => return Err(WriteFailure::AlreadyExists),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(err(e)),
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(err)?;
+            }
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| {
+                    if e.kind() == ErrorKind::AlreadyExists {
+                        WriteFailure::AlreadyExists
+                    } else {
+                        err(e)
+                    }
+                })?;
+            if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                _ = fs::remove_file(path);
+                return Err(err(e));
+            }
+            return Ok(hash(bytes));
+        }
+        WriteExpectation::Update(expected) => {
+            let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
+            if on_disk.is_some() && on_disk != expected {
+                return Err(WriteFailure::Conflict);
+            }
+        }
     }
     // A missing file or a dangling symlink: nothing to keep, and fs::write creates it through the link.
     let Ok(target) = fs::canonicalize(path) else {
@@ -274,10 +359,7 @@ pub fn write(path: &Path, bytes: &[u8], expected: Option<u64>) -> Result<u64, St
 
 /// Writes a temp file beside `target` with `perms` and renames it over `target`.
 fn replace(target: &Path, bytes: &[u8], perms: Permissions) -> io::Result<()> {
-    let name = target.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = target.with_file_name(format!(".{name}.aiditor-{}~", std::process::id()));
-    _ = fs::remove_file(&tmp);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let (tmp, mut file) = create_temp(target, &NEXT_TEMP)?;
     let result = (|| {
         file.write_all(bytes)?;
         file.set_permissions(perms)?;
@@ -290,6 +372,20 @@ fn replace(target: &Path, bytes: &[u8], perms: Permissions) -> io::Result<()> {
     result
 }
 
+fn create_temp(target: &Path, next: &AtomicU64) -> io::Result<(PathBuf, fs::File)> {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    loop {
+        let suffix = next.fetch_add(1, Ordering::Relaxed);
+        let tmp =
+            target.with_file_name(format!(".{name}.aiditor-{}-{suffix}~", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -298,6 +394,155 @@ mod tests {
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
+    }
+
+    #[test]
+    fn a_failed_create_can_be_retried() {
+        const CHILD: &str = "AIDITOR_TEST_FILE_SIZE_LIMIT";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new("sh")
+                .args(["-c", "trap '' XFSZ; ulimit -f 1; exec \"$@\"", "file-limit"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "files::tests::a_failed_create_can_be_retried",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        assert!(matches!(
+            write(&path, &[b'x'; 64 * 1024], WriteExpectation::Create),
+            Err(WriteFailure::Io(_))
+        ));
+        write(&path, b"retry", WriteExpectation::Create).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"retry");
+    }
+
+    #[test]
+    fn write_expectations_distinguish_creation_conflict_recreation_and_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        write(&path, b"first", WriteExpectation::Create).unwrap();
+        assert!(matches!(
+            write(&path, b"second", WriteExpectation::Create),
+            Err(WriteFailure::AlreadyExists)
+        ));
+        assert!(matches!(
+            write(&path, b"second", WriteExpectation::Update(None)),
+            Err(WriteFailure::Conflict)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        fs::remove_file(&path).unwrap();
+        write(
+            &path,
+            b"recreated",
+            WriteExpectation::Update(Some(hash(b"first"))),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"recreated");
+        fs::set_permissions(&path, Permissions::from_mode(0o000)).unwrap();
+        let result = write(
+            &path,
+            b"unreadable",
+            WriteExpectation::Update(Some(hash(b"recreated"))),
+        );
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(result, Err(WriteFailure::Io(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"recreated");
+    }
+
+    #[test]
+    fn concurrent_saves_check_the_winner_through_same_symlink_and_hard_link_paths() {
+        for alias in ["same", "symlink", "hardlink"] {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("a");
+            let b = match alias {
+                "same" => a.clone(),
+                _ => dir.path().join("b"),
+            };
+            fs::write(&a, "base").unwrap();
+            match alias {
+                "symlink" => std::os::unix::fs::symlink(&a, &b).unwrap(),
+                "hardlink" => fs::hard_link(&a, &b).unwrap(),
+                _ => {}
+            }
+            let barrier = std::sync::Barrier::new(2);
+            let save = |path: &Path, bytes: &[u8]| {
+                barrier.wait();
+                write(path, bytes, WriteExpectation::Update(Some(hash(b"base"))))
+            };
+            let results = std::thread::scope(|scope| {
+                let first = scope.spawn(|| save(&a, b"first complete edit"));
+                let second = scope.spawn(|| save(&b, b"second complete edit"));
+                [first.join().unwrap(), second.join().unwrap()]
+            });
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|r| matches!(r, Err(WriteFailure::Conflict)))
+                    .count(),
+                1
+            );
+            let winner = if results[0].is_ok() {
+                b"first complete edit".as_slice()
+            } else {
+                b"second complete edit".as_slice()
+            };
+            assert_eq!(fs::read(&a).unwrap(), winner);
+            assert_eq!(fs::read(&b).unwrap(), winner);
+            if alias == "symlink" {
+                assert!(fs::symlink_metadata(&b).unwrap().is_symlink());
+            }
+            if alias == "hardlink" {
+                assert_eq!(
+                    fs::metadata(&a).unwrap().ino(),
+                    fs::metadata(&b).unwrap().ino()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_retries_collisions_and_cleans_only_its_owned_temp_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("file");
+        let occupied = target.with_file_name(format!(".file.aiditor-{}-0~", std::process::id()));
+        fs::write(&occupied, "other operation").unwrap();
+        let (tmp, file) = create_temp(&target, &AtomicU64::new(0)).unwrap();
+        assert_eq!(
+            tmp.file_name().unwrap(),
+            format!(".file.aiditor-{}-1~", std::process::id()).as_str()
+        );
+        drop(file);
+        fs::remove_file(tmp).unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(
+            replace(
+                &target,
+                b"cannot replace directory",
+                Permissions::from_mode(0o600)
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "other operation");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        fs::remove_dir(&target).unwrap();
+        fs::write(&target, "old").unwrap();
+        write(
+            &target,
+            b"new",
+            WriteExpectation::Update(Some(hash(b"old"))),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "other operation");
     }
 
     #[test]
@@ -347,16 +592,27 @@ mod tests {
     fn run_replies_with_path_prefixed_errors() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
-        let Msg::Opened { result, .. } = run(FileOp::Open(missing)) else {
+        let Msg::Opened { result, .. } = run(FileOp::Open {
+            intent: aiditor_core::VisitIntent {
+                request: 1,
+                workspace: Default::default(),
+                window: Default::default(),
+            },
+            path: missing,
+        }) else {
             panic!("not opened");
         };
         assert_eq!(result, Ok(None));
         let file = dir.path().join("f");
         fs::write(&file, "").unwrap();
-        let Msg::Previewed { result, .. } = run(FileOp::Preview(file.clone())) else {
+        let Msg::Previewed { result, .. } = run(FileOp::Preview(aiditor_core::PreviewRequest {
+            session: 1,
+            revision: 1,
+            path: file.clone(),
+        })) else {
             panic!("not previewed");
         };
-        assert_eq!(result.unwrap().unwrap().0, b"");
+        assert_eq!(result.unwrap().unwrap().to_string(), "");
         let Msg::Listed { result, .. } = run(FileOp::ListDir(file.clone())) else {
             panic!("not listed");
         };
@@ -469,12 +725,22 @@ mod tests {
         let patterns = Patterns::new(&["other/".into(), ".ignore".into()]).unwrap();
         assert_eq!(
             inventory(root, &patterns).unwrap(),
-            (vec![PathBuf::from("kept/a")], 4)
+            (
+                vec![PathBuf::from("kept/a")],
+                ["", "kept", "kept/empty", "kept/empty/nested"]
+                    .map(|p| root.join(p))
+                    .to_vec()
+            )
         );
         let patterns = Patterns::new(&["*".into(), "!kept/".into()]).unwrap();
         assert_eq!(
             inventory(root, &patterns).unwrap(),
-            (vec![PathBuf::from("kept/a")], 4)
+            (
+                vec![PathBuf::from("kept/a")],
+                ["", "kept", "kept/empty", "kept/empty/nested"]
+                    .map(|p| root.join(p))
+                    .to_vec()
+            )
         );
     }
 
@@ -491,7 +757,7 @@ mod tests {
     fn index_reports_a_missing_root_by_path() {
         let gone = tempfile::tempdir().unwrap().path().join("gone");
         let msg = run(FileOp::Index {
-            project: "p".into(),
+            project: aiditor_core::project::ProjectId::default(),
             walk: 3,
             roots: vec![gone.clone()],
             ignore: Vec::new(),
@@ -505,7 +771,10 @@ mod tests {
         else {
             panic!("not indexed");
         };
-        assert_eq!((&*project, walk, roots.len()), ("p", 3, 1));
+        assert_eq!(
+            (project, walk, roots.len()),
+            (aiditor_core::project::ProjectId::default(), 3, 1)
+        );
         let err = roots[0].1.clone().unwrap_err();
         assert!(err.starts_with(&format!("{}: ", gone.display())), "{err}");
     }
@@ -527,14 +796,17 @@ mod tests {
         fs::write(&path, "old").unwrap();
         let loaded = hash_of(&path);
         fs::write(&path, "theirs").unwrap();
-        let err = write(&path, b"mine", loaded).unwrap_err();
-        assert!(err.ends_with("changed on disk; not saved"), "{err}");
+        let err = write(&path, b"mine", WriteExpectation::Update(loaded)).unwrap_err();
+        assert!(matches!(err, WriteFailure::Conflict));
         assert_eq!(fs::read_to_string(&path).unwrap(), "theirs");
         // A file that appeared since it was opened as missing.
-        assert!(write(&path, b"x", None).is_err());
+        assert!(write(&path, b"x", WriteExpectation::Update(None)).is_err());
         // A file gone since it was loaded is written back.
         fs::remove_file(&path).unwrap();
-        assert_eq!(write(&path, b"back", loaded), Ok(hash(b"back")));
+        assert_eq!(
+            write(&path, b"back", WriteExpectation::Update(loaded)).unwrap(),
+            hash(b"back")
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), "back");
     }
 
@@ -549,9 +821,12 @@ mod tests {
     fn writes_a_new_file_and_returns_its_hash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt");
-        let h = write(&path, b"hi", None).unwrap();
+        let h = write(&path, b"hi", WriteExpectation::Update(None)).unwrap();
         assert_eq!(hash_of(&path), Some(h));
-        assert_eq!(write(&path, b"again", Some(h)), Ok(hash(b"again")));
+        assert_eq!(
+            write(&path, b"again", WriteExpectation::Update(Some(h))).unwrap(),
+            hash(b"again")
+        );
     }
 
     #[test]
@@ -560,7 +835,7 @@ mod tests {
         let path = dir.path().join("a.sh");
         fs::write(&path, "old").unwrap();
         fs::set_permissions(&path, Permissions::from_mode(0o754)).unwrap();
-        write(&path, b"new", hash_of(&path)).unwrap();
+        write(&path, b"new", WriteExpectation::Update(hash_of(&path))).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o754);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
@@ -571,7 +846,7 @@ mod tests {
         let (target, link) = (dir.path().join("t.txt"), dir.path().join("l.txt"));
         fs::write(&target, "old").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        write(&link, b"new", hash_of(&link)).unwrap();
+        write(&link, b"new", WriteExpectation::Update(hash_of(&link))).unwrap();
         assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
     }
@@ -582,7 +857,7 @@ mod tests {
         let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
         fs::write(&a, "old").unwrap();
         fs::hard_link(&a, &b).unwrap();
-        write(&a, b"new", hash_of(&a)).unwrap();
+        write(&a, b"new", WriteExpectation::Update(hash_of(&a))).unwrap();
         assert_eq!(fs::read_to_string(&b).unwrap(), "new");
     }
 
@@ -592,7 +867,7 @@ mod tests {
         let path = dir.path().join("a.txt");
         fs::write(&path, "old").unwrap();
         fs::set_permissions(dir.path(), Permissions::from_mode(0o555)).unwrap();
-        let result = write(&path, b"new", hash_of(&path));
+        let result = write(&path, b"new", WriteExpectation::Update(hash_of(&path)));
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
         result.unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");

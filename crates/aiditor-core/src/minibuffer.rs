@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 
-use crate::buffer::{BufferId, decode, file_name};
-use crate::command::{Args, Command, Preview};
+use crate::buffer::{BufferId, file_name};
+use crate::command::{Args, Command, Filter, Preview};
 use crate::frame::window_display;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
-use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, display};
+use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, PreviewRequest, display};
 
 /// How many answers each prompt's history keeps, Emacs's `history-length`.
 const HISTORY_MAX: usize = 100;
@@ -29,6 +29,8 @@ const MINIBUFFER: WindowId = WindowId(usize::MAX);
 
 /// A prompt waiting in the minibuffer for the command that asked.
 pub(crate) struct Minibuffer {
+    session: u64,
+    pub(crate) finder: Option<crate::project_commands::Finder>,
     command: &'static str,
     /// The args so far; the answer becomes the next string.
     args: Args,
@@ -48,7 +50,7 @@ pub(crate) struct Minibuffer {
     /// What was last previewed; `None` before any and with no selection.
     previewed: Option<Preview>,
     /// The file whose read for a preview is awaited.
-    reading: Option<PathBuf>,
+    reading: Option<PreviewRequest>,
     /// The hidden buffer a previewed file was read into, killed on closing.
     peek: Option<BufferId>,
 }
@@ -75,6 +77,7 @@ struct Completion {
 
 /// A command's candidates matched by its spec's `filter`.
 struct Filtered {
+    swiper: Option<crate::swiper::Search>,
     items: Vec<String>,
     notes: Vec<String>,
     /// The indices of the matching items, in the filter's order.
@@ -83,9 +86,22 @@ struct Filtered {
     anchor: usize,
 }
 
+impl Filtered {
+    fn candidate(&self, index: usize) -> String {
+        match &self.swiper {
+            Some(search) => search.candidate(index),
+            None => self.items[index].clone(),
+        }
+    }
+}
+
 /// The open prompt, each prompt's history and the completion matcher.
 #[derive(Default)]
 pub(crate) struct Prompts {
+    sessions: u64,
+    preview_revision: u64,
+    active_preview: Option<PreviewRequest>,
+    pending_preview: Option<PreviewRequest>,
     /// The prompt being answered, while the minibuffer is open.
     pub(crate) minibuffer: Option<Minibuffer>,
     /// Each prompt's answers, newest first.
@@ -94,11 +110,21 @@ pub(crate) struct Prompts {
     pub(crate) matcher: Option<Nucleo<(String, String)>>,
     /// The timer that polls the matcher again while it is still matching.
     repoll: Option<TimerId>,
-    /// The text of the last minibuffer closed, as ivy's `ivy-text` outlives the read.
-    pub(crate) last_text: String,
+    pub(crate) accepted_swiper: Option<crate::swiper::Search>,
 }
 
 impl Prompts {
+    pub(crate) fn swiper(&self) -> Option<&crate::swiper::Search> {
+        self.minibuffer
+            .as_ref()?
+            .completion
+            .as_ref()?
+            .filtered
+            .as_ref()?
+            .swiper
+            .as_ref()
+    }
+
     /// Whether the open prompt completes directories only.
     fn directories(&self, commands: &HashMap<&'static str, Command>) -> bool {
         self.minibuffer.as_ref().is_some_and(|mb| {
@@ -153,7 +179,7 @@ impl Prompts {
         let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
         if let Some(f) = &completion.filtered {
             let last = f.matched.len().checked_sub(1)?;
-            return Some(f.items[f.matched[completion.selected.min(last)]].clone());
+            return Some(f.candidate(f.matched[completion.selected.min(last)]));
         }
         let snapshot = self.matcher.as_ref()?.snapshot();
         let last = snapshot.matched_item_count().checked_sub(1)?;
@@ -242,9 +268,17 @@ impl Ctx<'_> {
             // A filtering prompt lists even no candidates, so it still requires a match.
             (Some(filter), None) => {
                 let items = candidates.take().unwrap_or_default();
+                let mut swiper = matches!(filter, Filter::Swiper)
+                    .then(|| crate::swiper::Search::new(core.current().text()));
+                let matched = match (&mut swiper, filter) {
+                    (Some(search), _) => search.filter(""),
+                    (_, Filter::Items(filter)) => filter("", &items),
+                    _ => unreachable!(),
+                };
                 Some(Filtered {
+                    swiper,
                     notes: items.iter().map(|c| note(core, c)).collect(),
-                    matched: filter("", &items),
+                    matched,
                     items,
                     anchor: 0,
                 })
@@ -292,12 +326,15 @@ impl Ctx<'_> {
         // So a keymap named after the command binds keys at its prompts, as ivy's `:keymap`.
         buffer.minor_modes.push(command.name);
         let window = Window::new(&mut core.buffers, id);
-        core.others.insert(MINIBUFFER, window);
+        core.windows.others.insert(MINIBUFFER, window);
+        core.prompts.sessions += 1;
         core.prompts.minibuffer = Some(Minibuffer {
+            session: core.prompts.sessions,
+            finder: None,
             command: command.name,
             args,
             prompt,
-            from: core.selected,
+            from: core.windows.selected,
             index: 0,
             input: String::new(),
             completion,
@@ -340,7 +377,17 @@ impl Ctx<'_> {
             return self.set_text(dir);
         }
         let text = selected.unwrap_or_else(|| self.core.text());
-        let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
+        let text = match self
+            .core
+            .prompts
+            .minibuffer
+            .as_ref()
+            .and_then(|mb| mb.finder.as_ref())
+        {
+            Some(finder) => finder.path(&text).to_string_lossy().into_owned(),
+            None => text,
+        };
+        let mut mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
         // A filtering prompt's typed text was remembered on closing.
         if mb.history && !filtered {
             self.core.prompts.remember(&mb.prompt, text.clone());
@@ -348,7 +395,13 @@ impl Ctx<'_> {
         let mut args = mb.args;
         args.strings.push(text);
         self.core.this_command = Some(mb.command);
+        self.core.prompts.accepted_swiper = mb
+            .completion
+            .as_mut()
+            .and_then(|c| c.filtered.as_mut())
+            .and_then(|f| f.swiper.take());
         self.call(mb.command, args);
+        self.core.prompts.accepted_swiper = None;
         Ok(())
     }
 
@@ -404,7 +457,7 @@ impl Ctx<'_> {
 
     /// Fails with `err` while the minibuffer is selected.
     pub(crate) fn outside_minibuffer(&self, err: &str) -> Result<(), String> {
-        match self.core.selected == MINIBUFFER {
+        match self.core.windows.selected == MINIBUFFER {
             true => Err(err.into()),
             false => Ok(()),
         }
@@ -438,8 +491,11 @@ impl Core {
                 if let Some(last) = f.matched.len().checked_sub(1) {
                     f.anchor = f.matched[completion.selected.min(last)];
                 }
-                let filter = self.commands[mb.command].spec.filter;
-                f.matched = filter.expect("filtered by the spec")(&text, &f.items);
+                f.matched = match (&mut f.swiper, self.commands[mb.command].spec.filter) {
+                    (Some(search), _) => search.filter(&text),
+                    (_, Some(Filter::Items(filter))) => filter(&text, &f.items),
+                    _ => unreachable!("filtered by the spec"),
+                };
                 // ivy's swiper rule: the selected item if it still matches, else the next one.
                 let next = f.matched.iter().position(|&i| i >= f.anchor);
                 let next = next.unwrap_or(f.matched.len().saturating_sub(1));
@@ -527,7 +583,7 @@ impl Core {
                     let rows = range(f.matched.len());
                     let items = f.matched[rows.clone()].iter();
                     (candidates, annotations) = items
-                        .map(|&i| (f.items[i].clone(), f.notes[i].clone()))
+                        .map(|&i| (f.candidate(i), f.notes.get(i).cloned().unwrap_or_default()))
                         .unzip();
                     (f.matched.len(), rows)
                 }
@@ -553,7 +609,7 @@ impl Core {
         let (width, _, cell_width) = self.frame_size;
         let cols =
             ((width / cell_width) as usize).saturating_sub(count.len() + prompt.chars().count());
-        let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
+        let (window, buffers, settings) = (&mut self.windows.window, &self.buffers, &self.settings);
         let display = window_display(window, buffers, settings, height, cols);
         Some(display::Minibuffer {
             count,
@@ -607,16 +663,19 @@ impl Core {
                     None => {
                         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
                         mb.previewed = shown;
-                        if mb.reading.as_ref() != Some(&path) {
-                            mb.reading = Some(path.clone());
-                            effects.push(Effect::File(FileOp::Preview(path)));
-                        }
+                        self.request_preview(path, effects);
                         return;
                     }
                 }
             }
             None => (None, None),
         };
+        self.prompts.pending_preview = None;
+        self.prompts
+            .minibuffer
+            .as_mut()
+            .expect("previewing")
+            .reading = None;
         if let (Some(id), Some(p)) = (id, at) {
             self.preview_at(id, p);
             let mb = self.prompts.minibuffer.as_mut().expect("checked above");
@@ -626,45 +685,78 @@ impl Core {
         self.unpreview();
         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
         mb.previewed = shown;
-        let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+        let from =
+            (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
         if let Some(id) = id.filter(|&id| id != from.buffer()) {
             // Swapped out whole, so its point, mark, ring and scroll stay as markers until restored.
             mb.saved = Some(std::mem::replace(from, Window::new(&mut self.buffers, id)));
         }
     }
 
-    /// Takes the file service's answer to `FileOp::Preview` when it is the awaited read: the
-    /// file replaces the last one read in the hidden peek buffer, and the next `preview` shows
-    /// it. A file that can't be shown leaves the window as it was.
-    // shortcut: whole files are read however large; add consult's size limit if previews feel slow.
+    fn request_preview(&mut self, path: PathBuf, effects: &mut Effects) {
+        let prompts = &mut self.prompts;
+        let mb = prompts.minibuffer.as_mut().expect("previewing");
+        let reusable = prompts
+            .active_preview
+            .iter()
+            .chain(prompts.pending_preview.iter())
+            .find(|r| r.session == mb.session && r.path == path)
+            .cloned();
+        let request = reusable.unwrap_or_else(|| {
+            prompts.preview_revision += 1;
+            PreviewRequest {
+                session: mb.session,
+                revision: prompts.preview_revision,
+                path,
+            }
+        });
+        mb.reading = Some(request.clone());
+        if prompts.active_preview.is_none() {
+            prompts.active_preview = Some(request.clone());
+            effects.push(Effect::File(FileOp::Preview(request)));
+        } else if prompts.active_preview.as_ref() == Some(&request) {
+            prompts.pending_preview = None;
+        } else {
+            prompts.pending_preview = Some(request);
+        }
+    }
+
     pub(crate) fn on_previewed(
         &mut self,
-        path: PathBuf,
-        result: Result<Option<(Vec<u8>, u64)>, String>,
+        request: PreviewRequest,
+        result: Result<Option<ropey::Rope>, String>,
+        effects: &mut Effects,
     ) {
-        let awaited =
-            (self.prompts.minibuffer.as_ref()).is_some_and(|mb| mb.reading == Some(path.clone()));
-        if !awaited {
+        if self.prompts.active_preview.as_ref() != Some(&request) {
             return;
         }
-        self.unpreview();
-        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-        mb.reading = None;
-        if let Some(old) = mb.peek.take() {
-            _ = self.buffers.kill(old);
+        self.prompts.active_preview = None;
+        if self
+            .prompts
+            .minibuffer
+            .as_ref()
+            .is_some_and(|mb| mb.reading.as_ref() == Some(&request))
+        {
+            self.unpreview();
+            let mb = self.prompts.minibuffer.as_mut().expect("previewing");
+            mb.reading = None;
+            if let Some(old) = mb.peek.take() {
+                _ = self.buffers.kill(old);
+            }
+            if let Ok(Some(text)) = result {
+                let id = self.buffers.create_for_prepared_file(&request.path, text);
+                self.buffers
+                    .rename(id, &format!(" {}", file_name(&request.path)));
+                self.buffers.get_mut(id).expect("just created").read_only = true;
+                let mb = self.prompts.minibuffer.as_mut().expect("previewing");
+                mb.peek = Some(id);
+                mb.previewed = None;
+            }
         }
-        let Ok(Some((bytes, _))) = result else {
-            return;
-        };
-        let Ok((text, ..)) = decode(&bytes) else {
-            return;
-        };
-        let id = self.buffers.create_for_file(&path, &text);
-        self.buffers.rename(id, &format!(" {}", file_name(&path)));
-        self.buffers.get_mut(id).expect("just created").read_only = true;
-        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-        mb.peek = Some(id);
-        mb.previewed = None;
+        if let Some(next) = self.prompts.pending_preview.take() {
+            self.prompts.active_preview = Some(next.clone());
+            effects.push(Effect::File(FileOp::Preview(next)));
+        }
     }
 
     /// Adds `candidates` to the open minibuffer's list when `command` opened it completing.
@@ -710,10 +802,11 @@ impl Core {
     // shortcut: releasing the stand-in leaves `id`'s remembered point at the preview; save and restore it if reopened buffers start in odd places.
     fn preview_at(&mut self, id: BufferId, p: usize) {
         let mb = self.prompts.minibuffer.as_ref().expect("previewing");
-        if mb.saved.is_none() || self.others[&mb.from].buffer() != id {
+        if mb.saved.is_none() || self.windows.others[&mb.from].buffer() != id {
             self.unpreview();
             let mb = self.prompts.minibuffer.as_mut().expect("previewing");
-            let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+            let from =
+                (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
             // A copy, so another buffer's stand-in keeps the rows it centers in.
             let mut stand_in = from.split(&mut self.buffers);
             if stand_in.buffer() != id {
@@ -722,7 +815,8 @@ impl Core {
             mb.saved = Some(std::mem::replace(from, stand_in));
         }
         let mb = self.prompts.minibuffer.as_ref().expect("previewing");
-        let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+        let from =
+            (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
         if let Err(err) = from.jump(&mut self.buffers, p) {
             tracing::debug!(%err, "preview outside the buffer");
         }
@@ -731,7 +825,9 @@ impl Core {
     /// The window the open minibuffer was opened from, as it was before any preview.
     pub(crate) fn origin(&self) -> Option<&Window> {
         let mb = self.prompts.minibuffer.as_ref()?;
-        mb.saved.as_ref().or_else(|| self.others.get(&mb.from))
+        mb.saved
+            .as_ref()
+            .or_else(|| self.windows.others.get(&mb.from))
     }
 
     /// Puts back the window a preview stands in for.
@@ -740,7 +836,8 @@ impl Core {
             return;
         };
         if let Some(saved) = mb.saved.take() {
-            let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+            let from =
+                (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
             std::mem::replace(from, saved).release(&mut self.buffers);
         }
     }
@@ -750,11 +847,13 @@ impl Core {
     pub(crate) fn close_minibuffer(&mut self) -> Option<Minibuffer> {
         self.unpreview();
         let mb = self.prompts.minibuffer.take()?;
+        self.prompts.pending_preview = None;
         if let Some(peek) = mb.peek {
             _ = self.buffers.kill(peek);
         }
         self.select(mb.from);
-        let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
+        let window =
+            (self.windows.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
         let buffer = self
             .buffers
             .get(window.buffer())
@@ -764,7 +863,6 @@ impl Core {
         if mb.history && mb.completion.as_ref().is_some_and(|c| c.filtered.is_some()) {
             self.prompts.remember(&mb.prompt, text.clone());
         }
-        self.prompts.last_text = text;
         _ = self.buffers.kill(window.buffer());
         Some(mb)
     }
@@ -789,6 +887,110 @@ mod tests {
     use crate::minibuffer::HISTORY_MAX;
     use crate::window::WindowId;
 
+    fn pending_previews() -> Harness {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(fruit),
+                preview: Some(|_, candidate| {
+                    Some(Preview::File(std::path::Path::new("/").join(candidate)))
+                }),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        h.keys("C-c p");
+        h
+    }
+
+    fn reads(h: &mut Harness) -> Vec<crate::PreviewRequest> {
+        std::mem::take(&mut h.effects)
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::Effect::File(crate::FileOp::Preview(r)) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn answer_preview(h: &mut Harness, request: crate::PreviewRequest, text: &str) {
+        h.send(Msg::Previewed {
+            request,
+            result: Ok(Some(
+                crate::buffer::prepare_preview(text.as_bytes()).unwrap(),
+            )),
+        });
+    }
+
+    #[test]
+    fn preview_reads_coalesce_to_the_latest_selection_and_input_keeps_working() {
+        let mut h = pending_previews();
+        let first = reads(&mut h).pop().unwrap();
+        h.keys("C-n C-n");
+        assert_eq!(
+            h.core.prompts.selected_candidate().as_deref(),
+            Some("cherry")
+        );
+        assert_eq!(reads(&mut h).len(), 0);
+        answer_preview(&mut h, first, "obsolete apple");
+        let next = reads(&mut h);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].path, std::path::Path::new("/cherry"));
+        assert_eq!(h.core.prompts.minibuffer.as_ref().unwrap().peek, None);
+        answer_preview(&mut h, next[0].clone(), "fresh cherry");
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "fresh cherry"
+        );
+        h.keys("C-g typed");
+        assert_eq!(h.text(), "typed");
+        assert_eq!(reads(&mut h).len(), 0);
+    }
+
+    #[test]
+    fn reopened_same_path_has_its_own_request_and_closed_queues_do_not_run() {
+        let mut h = pending_previews();
+        let old = reads(&mut h).pop().unwrap();
+        h.keys("C-n C-g C-c p");
+        assert_eq!(reads(&mut h).len(), 0);
+        answer_preview(&mut h, old.clone(), "old session");
+        let current = reads(&mut h).pop().unwrap();
+        assert_eq!(current.path, old.path);
+        assert!(current.session > old.session);
+        assert_eq!(h.core.prompts.minibuffer.as_ref().unwrap().peek, None);
+        answer_preview(&mut h, old, "duplicate old session");
+        answer_preview(&mut h, current, "current session");
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "current session"
+        );
+        h.keys("C-n C-n");
+        let active = reads(&mut h).pop().unwrap();
+        h.keys("C-g");
+        answer_preview(&mut h, active, "closed");
+        assert_eq!(reads(&mut h).len(), 0);
+        assert_eq!(h.text(), "");
+    }
+
+    #[test]
+    fn returning_to_an_active_file_reuses_its_read() {
+        let mut h = pending_previews();
+        let first = reads(&mut h).pop().unwrap();
+        h.keys("C-n C-p");
+        answer_preview(&mut h, first, "apple");
+        assert_eq!(reads(&mut h).len(), 0);
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "apple"
+        );
+    }
+
     #[test]
     fn a_key_script_answers_a_prompt() {
         let mut h = on("text");
@@ -799,7 +1001,10 @@ mod tests {
         h.keys("RET");
         let got = h.core.message().unwrap().to_string();
         assert!(
-            got.ends_with(&format!("strings: {} }}", strings(&["hello"]))),
+            got.ends_with(&format!(
+                "strings: {}, project: None }}",
+                strings(&["hello"])
+            )),
             "{got}"
         );
         assert!(h.core.minibuffer().is_none());
@@ -821,7 +1026,7 @@ mod tests {
             h.core.message(),
             Some(
                 format!(
-                    "Args {{ prefix: Some(Number(3)), region: None, strings: {} }}",
+                    "Args {{ prefix: Some(Number(3)), region: None, strings: {}, project: None }}",
                     strings(&["a", "b"])
                 )
                 .as_str()
@@ -1068,7 +1273,7 @@ mod tests {
     /// The frame's windows and the selected window's point, mark, active mark and mark ring.
     fn windows(h: &mut Harness) -> String {
         let frame = h.frame(800., 600.).windows;
-        let (w, b) = (&h.core.window, &h.core.buffers);
+        let (w, b) = (&h.core.windows.window, &h.core.buffers);
         format!(
             "{:?}",
             (frame, w.point(b), w.mark(b), w.active(), w.ring(b))
@@ -1092,8 +1297,8 @@ mod tests {
         let [apple, banana] = ["apple", "banana"].map(|n| h.core.buffers.create(n));
         h.keys("C-x 2 C-SPC M-f C-SPC C-u 40 C-n C-SPC M-f C-SPC C-f C-SPC C-f");
         let before = windows(&mut h);
-        let (file, point) = (h.core.window.buffer(), h.point());
-        let shown = |h: &Harness| h.core.others[&WindowId(0)].buffer();
+        let (file, point) = (h.core.windows.window.buffer(), h.point());
+        let shown = |h: &Harness| h.core.windows.others[&WindowId(0)].buffer();
         h.keys("C-c p");
         assert_eq!(shown(&h), apple, "the first match shows at once");
         h.keys("C-n");
@@ -1102,7 +1307,10 @@ mod tests {
         assert_eq!(shown(&h), file, "cherry has no buffer");
         h.keys("C-p zzz");
         assert_eq!(shown(&h), file, "no match");
-        assert_eq!(h.core.others[&WindowId(0)].point(&h.core.buffers), point);
+        assert_eq!(
+            h.core.windows.others[&WindowId(0)].point(&h.core.buffers),
+            point
+        );
         h.keys("C-g");
         assert_eq!(windows(&mut h), before);
         assert_eq!(
@@ -1123,16 +1331,16 @@ mod tests {
             col: 0,
         });
         assert_eq!(shown(&h), file, "a click restores");
-        let (main, w) = (h.core.workspace(), h.core.new_workspace("w", "p"));
+        let (main, w) = (h.core.workspace(), h.new_workspace("w", "p"));
         h.core.switch_workspace(main).unwrap();
         // The click selected window 1, so the prompt opens from it.
-        let before = h.core.window.buffer();
+        let before = h.core.windows.window.buffer();
         h.keys("C-c p C-n");
-        assert_ne!(h.core.others[&WindowId(1)].buffer(), before);
+        assert_ne!(h.core.windows.others[&WindowId(1)].buffer(), before);
         h.core.switch_workspace(w).unwrap();
         h.core.switch_workspace(main).unwrap();
         assert_eq!(
-            h.core.window.buffer(),
+            h.core.windows.window.buffer(),
             before,
             "a workspace switch restores"
         );
@@ -1157,9 +1365,9 @@ mod tests {
             });
             bind_mode(&mut h, "global", "C-c p", "test-cmd");
             let apple = h.core.buffers.create("apple");
-            let file = h.core.window.buffer();
+            let file = h.core.windows.window.buffer();
             h.keys(if previews { "C-c p" } else { "C-c p x RET" });
-            let shown = h.core.others[&WindowId(0)].buffer();
+            let shown = h.core.windows.others[&WindowId(0)].buffer();
             assert_eq!(shown, if previews { apple } else { file }, "{prompts:?}");
         }
     }

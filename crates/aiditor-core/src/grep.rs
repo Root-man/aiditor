@@ -1,6 +1,6 @@
 //! Project grep: the grep service's hits listed live in the minibuffer, as consult-ripgrep.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::command::{Args, Preview};
@@ -37,9 +37,6 @@ pub(crate) struct ProjectGrep {
     ignore: Vec<String>,
     /// The listed hits with their labels, kept after the prompt closes for its handler.
     hits: Vec<(String, Hit)>,
-    /// The file, line and column to put point at once the file's read arrives.
-    // shortcut: dropped when another buffer is current by then; keep it per window if that bites.
-    jump: Option<(PathBuf, usize, usize)>,
 }
 
 impl ProjectGrep {
@@ -139,20 +136,11 @@ impl Core {
         self.set_items("project-grep", labels, replace);
     }
 
-    /// Puts point at the pending grep jump when `path`, just read, is the current buffer's file.
-    pub(crate) fn grep_jump(&mut self, path: &Path) {
-        if let Some((_, line, col)) = self.grep.jump.take_if(|(p, ..)| p == path)
-            && self.buffers.visiting(path) == Some(self.window.buffer())
-        {
-            self.goto_line_col(line, col);
-        }
-    }
-
-    fn goto_line_col(&mut self, line: usize, col: usize) {
+    pub(crate) fn goto_line_col(&mut self, line: usize, col: usize) {
         let buffer = self.current();
         // A line past the end, the file having changed since, is the end.
         let p = buffer.char_idx(line, col).unwrap_or(buffer.len_chars());
-        if let Err(err) = self.window.jump(&mut self.buffers, p) {
+        if let Err(err) = self.windows.window.jump(&mut self.buffers, p) {
             tracing::debug!(%err, "grep jump outside the buffer");
         }
     }
@@ -165,23 +153,27 @@ impl Ctx<'_> {
         if let Some(label) = args.strings.first() {
             let hit = self.core.grep.hit(label).ok_or("No match")?;
             let (path, line, col) = (hit.root.join(&hit.path), hit.line, hit.col);
-            let from = self.core.window.buffer();
+            let from = self.core.windows.window.buffer();
             self.find_file(&path.to_string_lossy())?;
             // A visited file is switched to at once; another jumps once read.
-            match self.core.buffers.visiting(&path) == Some(self.core.window.buffer()) {
+            match self.core.buffers.visiting(&path) == Some(self.core.windows.window.buffer()) {
                 true => {
                     // Switching to another buffer recorded the jump already.
-                    if self.core.window.buffer() == from {
+                    if self.core.windows.window.buffer() == from {
                         self.core.push_jump();
                     }
                     self.core.goto_line_col(line, col)
                 }
-                false => self.core.grep.jump = Some((path, line, col)),
+                false => {
+                    if let Some(pending) = &mut self.core.pending_visit {
+                        pending.destination = Some((line, col));
+                    }
+                }
             }
             return Ok(());
         }
-        let project = self.core.current_workspace().project.clone();
-        let loaded = &self.core.projects[self.core.project(&project)?].project;
+        let project = self.core.current_workspace().project;
+        let loaded = &self.core.projects[self.core.project_at(project)?].project;
         let roots: Vec<PathBuf> = loaded.all_roots().map(|root| root.path.clone()).collect();
         let ignore = loaded.ignore.clone();
         let names = root_names(roots.iter().map(PathBuf::as_path));
@@ -192,7 +184,7 @@ impl Ctx<'_> {
             ..ProjectGrep::default()
         };
         let command = self.core.commands["project-grep"];
-        self.read_string(command, args, format!("Grep in {project}: "), None)
+        self.read_string(command, args, format!("Grep in {}: ", loaded.name), None)
     }
 }
 
@@ -207,8 +199,9 @@ mod tests {
     const WAIT: Duration = Duration::from_millis(200);
 
     /// The current workspace's project at `app`, with `lib` as a second root.
-    fn grepping(files: &[(&str, &str)]) -> Harness {
+    fn grepping(files: &[(&str, &str)], hits: &[(&str, &str, usize, usize, &str)]) -> Harness {
         let mut h = Harness::new(files);
+        h.grep_reply(hits);
         let (app, lib) = (h.path("app"), h.path("lib"));
         let project = &mut h.core.projects[0].project;
         project.primary.path = app;
@@ -228,21 +221,56 @@ mod tests {
 
     /// The window the prompt was opened from: its file and point.
     fn origin(h: &Harness) -> (Option<std::path::PathBuf>, usize) {
-        let window = &h.core.others[&h.core.tree.leaves()[0]];
+        let window = &h.core.windows.others[&h.core.windows.tree.leaves()[0]];
         let buffer = h.core.buffers.get(window.buffer()).unwrap();
         (buffer.file.clone(), window.point(&h.core.buffers))
     }
 
+    const HITS: &[(&str, &str, usize, usize, &str)] = &[
+        ("app", "a.rs", 0, 0, "needle"),
+        ("app", "b.rs", 1, 2, "  needle"),
+    ];
+
     const FILES: &[(&str, &str)] = &[("app/a.rs", "needle\n"), ("app/b.rs", "x\n  needle\n")];
 
     #[test]
+    fn deferred_grep_destination_belongs_to_its_visit_and_uses_character_columns() {
+        let mut h = grepping(
+            &[("app/a.rs", "top\né🙂 needle\n")],
+            &[("app", "a.rs", 1, 3, "é🙂 needle")],
+        );
+        h.keys("C-x p g needle").advance(WAIT);
+        h.collect_effects = true;
+        h.keys("RET");
+        let (intent, path) = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::Open { intent, path }) => Some((intent, path)),
+                _ => None,
+            })
+            .unwrap();
+        let text = "top\né🙂 needle\n";
+        h.send(Msg::Opened {
+            intent,
+            path,
+            result: Ok(Some((
+                text.as_bytes().to_vec(),
+                crate::buffer::hash(text.as_bytes()),
+            ))),
+        });
+        assert_eq!((h.text(), h.point()), (text.into(), 7));
+    }
+
+    #[test]
     fn search_move_jump() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT).keys("C-n RET");
         assert_eq!(h.core.current().file, Some(h.path("app/b.rs")));
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         assert!(h.core.prompts.minibuffer.is_none());
         // A visited file is switched to at once.
+        h.grep_reply(HITS);
+        h.grep_reply(HITS);
         h.keys("C-x p g needle").advance(WAIT).keys("C-n RET");
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         h.keys("C-x p g needle").advance(WAIT).keys("RET");
@@ -254,7 +282,7 @@ mod tests {
 
     #[test]
     fn opening_and_history() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g");
         assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
         assert_eq!(listed(&mut h), Vec::<String>::new());
@@ -266,7 +294,7 @@ mod tests {
 
     #[test]
     fn searches_wait_for_a_pause_and_three_chars() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g nee").advance(WAIT / 2);
         assert_eq!(h.greps, []);
         h.keys("d").advance(WAIT / 2);
@@ -285,7 +313,13 @@ mod tests {
             ("app/src/a.rs", "\n\nlet needle = 1;\n"),
             ("lib/n", "Needle\n"),
         ];
-        let mut h = grepping(&files);
+        let mut h = grepping(
+            &files,
+            &[
+                ("app", "src/a.rs", 2, 4, "let needle = 1;"),
+                ("lib", "n", 0, 0, "Needle"),
+            ],
+        );
         h.keys("C-x p g needle").advance(WAIT);
         assert_eq!(
             listed(&mut h),
@@ -295,9 +329,9 @@ mod tests {
 
     #[test]
     fn old_hits_stay_until_the_new_search_answers() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT);
-        h.grep_paused = true;
+        h.hits.clear();
         h.keys("s").advance(WAIT);
         assert_eq!(h.greps.last(), Some(&Some("needles".into())));
         assert_eq!(listed(&mut h).len(), 2);
@@ -332,7 +366,9 @@ mod tests {
 
     #[test]
     fn an_invalid_pattern_shows_its_error() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
+        h.hits
+            .push_back(Err("regex parse error\nerror: unclosed group".into()));
         h.keys("C-x p g needle")
             .advance(WAIT)
             .keys("DEL DEL DEL DEL (")
@@ -343,8 +379,8 @@ mod tests {
 
     #[test]
     fn leaving_cancels_a_running_search() {
-        let mut h = grepping(FILES);
-        h.grep_paused = true;
+        let mut h = grepping(FILES, HITS);
+        h.hits.clear();
         h.keys("C-x p g needle").advance(WAIT).keys("C-g");
         assert_eq!(h.greps, [Some("needle".into()), None]);
     }
@@ -357,14 +393,17 @@ mod tests {
                 i => format!("l{i}\n"),
             })
             .collect();
-        let mut h = grepping(&[("app/long.rs", &long), ("start.txt", "one\ntwo\n")]);
+        let mut h = grepping(
+            &[("app/long.rs", &long), ("start.txt", "one\ntwo\n")],
+            &[("app", "long.rs", 150, 2, "  needle")],
+        );
         h.open("start.txt");
         h.display(20);
         h.keys("C-n C-f C-x p g needle").advance(WAIT);
         let at: usize = long.lines().take(150).map(|l| l.len() + 1).sum();
         assert_eq!(origin(&h), (Some(h.path("app/long.rs")), at + 2));
-        let id = h.core.tree.leaves()[0];
-        let window = h.core.others.get_mut(&id).unwrap();
+        let id = h.core.windows.tree.leaves()[0];
+        let window = h.core.windows.others.get_mut(&id).unwrap();
         assert_eq!(
             window.scroll(&h.core.buffers, 20),
             140,
@@ -373,12 +412,12 @@ mod tests {
         h.keys("C-g");
         assert_eq!(h.core.current().file, Some(h.path("start.txt")));
         assert_eq!(h.point(), 5);
-        assert_eq!(h.core.window.scroll(&h.core.buffers, 20), 0);
+        assert_eq!(h.core.windows.window.scroll(&h.core.buffers, 20), 0);
     }
 
     #[test]
     fn the_selected_hit_is_previewed() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT);
         assert_eq!(origin(&h), (Some(h.path("app/a.rs")), 0));
         h.keys("C-n");
@@ -387,6 +426,26 @@ mod tests {
             h.core.prompts.minibuffer.is_some(),
             "the minibuffer stays selected"
         );
+        h.keys("C-g");
+        assert_eq!((h.core.current().file.clone(), h.point()), (None, 0));
+    }
+
+    #[test]
+    fn same_file_hits_reuse_prepared_text_and_follow_the_selected_position() {
+        let mut h = grepping(
+            &[("app/a.rs", "needle\nété needle\n")],
+            &[
+                ("app", "a.rs", 0, 0, "needle"),
+                ("app", "a.rs", 1, 4, "été needle"),
+            ],
+        );
+        h.keys("C-x p g needle").advance(WAIT);
+        let path = h.path("app/a.rs");
+        let first = h.core.buffers.visiting(&path).unwrap();
+        assert_eq!(origin(&h), (Some(path.clone()), 0));
+        h.keys("C-n");
+        assert_eq!(h.core.buffers.visiting(&path), Some(first));
+        assert_eq!(origin(&h), (Some(path), 11));
         h.keys("C-g");
         assert_eq!((h.core.current().file.clone(), h.point()), (None, 0));
     }

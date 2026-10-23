@@ -1,25 +1,23 @@
 //! Headless core driven by key scripts and a fake clock, for tests.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use tempfile::TempDir;
-
-use regex::RegexBuilder;
-
 use crate::{
-    Core, Ctx, Effect, Effects, FileOp, GrepOp, GrepSearch, Hit, Msg, RecoveryOp, WatchSet,
-    buffer::{BufferId, encode, hash},
+    Core, Ctx, Effect, Effects, FileOp, GrepOp, Hit, Msg, RecoveryOp, WatchSet,
+    buffer::{BufferId, hash},
     command::{ArgSpec, Args, Command},
     display::{FrameDisplay, WindowDisplay},
     key::{Key, KeyCode, parse_keys},
     timer::TimerId,
 };
 
+type ReadReply = Result<Option<(Vec<u8>, u64)>, String>;
+
 pub struct Harness {
     pub core: Core,
-    pub dir: TempDir,
+    pub dir: PathBuf,
     /// The fake clock; only `advance` moves it.
     pub now: Instant,
     /// The fake system clipboard.
@@ -32,27 +30,31 @@ pub struct Harness {
     pub deleted: Vec<PathBuf>,
     /// Each grep search's pattern, and `None` for each cancel, in order.
     pub greps: Vec<Option<String>>,
-    /// Leaves grep searches unanswered, for tests that answer them by hand.
-    pub grep_paused: bool,
+    pub reads: HashMap<PathBuf, ReadReply>,
+    pub listings: HashMap<PathBuf, Result<Vec<String>, String>>,
+    pub indexes: HashMap<PathBuf, Result<Vec<PathBuf>, String>>,
+    pub directories: HashMap<PathBuf, Vec<PathBuf>>,
+    pub checks: HashMap<PathBuf, Option<u64>>,
+    pub saves: std::collections::VecDeque<Result<u64, String>>,
+    pub writes: Vec<(PathBuf, String)>,
+    pub reverts: HashMap<BufferId, Result<crate::buffer::Revert, String>>,
+    pub diffs: HashMap<PathBuf, Result<String, String>>,
+    pub hits: std::collections::VecDeque<Result<Vec<Hit>, String>>,
     /// What the core last asked the watcher to watch.
     pub watched: WatchSet,
+    pub collect_effects: bool,
+    pub effects: Effects,
 }
 
 impl Harness {
-    /// A core plus a temp dir holding `files` as (relative path, contents).
+    /// A core with prepared read replies for (relative path, contents), without disk I/O.
     pub fn new(files: &[(&str, &str)]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        for (name, contents) in files {
-            let path = dir.path().join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, contents).unwrap();
-        }
+        let dir = PathBuf::from("/aiditor-test");
         let mut core = Core::default();
         // Named the same whatever `$HOME` is, so scratch names, titles and snapshots don't vary.
         core.rename_workspace("main").unwrap();
         core.projects[0].project.name = "home".into();
-        core.workspaces[0].project = "home".into();
-        Harness {
+        let mut harness = Harness {
             core,
             dir,
             now: Instant::now(),
@@ -61,16 +63,81 @@ impl Harness {
             recovery: HashMap::new(),
             deleted: Vec::new(),
             greps: Vec::new(),
-            grep_paused: false,
+            reads: HashMap::new(),
+            listings: HashMap::new(),
+            indexes: HashMap::new(),
+            directories: HashMap::new(),
+            checks: HashMap::new(),
+            saves: std::collections::VecDeque::new(),
+            writes: Vec::new(),
+            reverts: HashMap::new(),
+            diffs: HashMap::new(),
+            hits: std::collections::VecDeque::new(),
             watched: WatchSet::default(),
+            collect_effects: false,
+            effects: Vec::new(),
+        };
+        for (name, text) in files {
+            harness.read_reply(name, Some(text.as_bytes()));
         }
+        harness
+    }
+
+    pub fn read_reply(&mut self, name: &str, bytes: Option<&[u8]>) {
+        let path = self.path(name);
+        self.checks.insert(path.clone(), bytes.map(hash));
+        self.reads
+            .insert(path, Ok(bytes.map(|b| (b.to_vec(), hash(b)))));
+    }
+
+    pub fn listing(&mut self, dir: &str, names: &[&str]) {
+        self.listings.insert(
+            self.path(dir),
+            Ok(names.iter().map(|s| s.to_string()).collect()),
+        );
+    }
+
+    pub fn index_reply(&mut self, root: &str, files: &[&str], directories: &[&str]) {
+        self.indexes.insert(
+            self.path(root),
+            Ok(files.iter().map(PathBuf::from).collect()),
+        );
+        self.directories.insert(
+            self.path(root),
+            directories.iter().map(|d| self.path(d)).collect(),
+        );
+    }
+
+    pub fn save_reply(&mut self, text: &str) {
+        self.saves.push_back(Ok(hash(text.as_bytes())));
+    }
+
+    pub fn grep_reply(&mut self, hits: &[(&str, &str, usize, usize, &str)]) {
+        self.hits.push_back(Ok(hits
+            .iter()
+            .map(|(root, path, line, col, text)| Hit {
+                root: self.path(root),
+                path: (*path).into(),
+                line: *line,
+                col: *col,
+                text: (*text).into(),
+            })
+            .collect()));
+    }
+
+    pub fn new_workspace(&mut self, name: &str, project: &str) -> crate::workspace::WorkspaceId {
+        let project = self.core.project_id(project).unwrap_or_else(|_| {
+            self.core
+                .add_project(crate::project::Loaded::ad_hoc(project, self.dir.as_path()))
+        });
+        self.core.new_workspace(name, project)
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
-        self.dir.path().join(name)
+        self.dir.as_path().join(name)
     }
 
-    /// Feeds a `kbd`-style script such as `"hello C-x C-s"`, carrying out effects as the app does.
+    /// Feeds a `kbd`-style script such as `"hello C-x C-s"`, delivering configured replies.
     /// Plain chars arrive as typed text, the way the platform's text input sends them.
     pub fn keys(&mut self, script: &str) -> &mut Self {
         for key in parse_keys(script).unwrap() {
@@ -94,7 +161,7 @@ impl Harness {
         self
     }
 
-    /// Sends `msg` to the core, carrying out its effects as the app does.
+    /// Sends `msg`, delivering configured replies and collecting unanswered effects.
     pub fn send(&mut self, msg: Msg) -> &mut Self {
         let effects = self.core.handle(self.now, msg);
         self.run(effects);
@@ -116,7 +183,7 @@ impl Harness {
         self.run(effects);
     }
 
-    /// Calls the command `name` with `args`, carrying out its effects as the app does.
+    /// Calls `name` with `args`, delivering configured replies.
     pub fn call(&mut self, name: &str, args: Args) -> &mut Self {
         let mut ctx = self.ctx();
         ctx.call(name, args);
@@ -127,6 +194,10 @@ impl Harness {
     }
 
     pub(crate) fn run(&mut self, effects: Effects) {
+        if self.collect_effects {
+            self.effects.extend(effects);
+            return;
+        }
         // File replies arrive after the entire effect batch in the app.
         for effect in &effects {
             if let Effect::Watch(set) = effect {
@@ -135,131 +206,111 @@ impl Harness {
         }
         for effect in effects {
             match effect {
-                // As the file service does, minus its atomic write.
-                Effect::File(FileOp::Save {
-                    buffer,
-                    tick,
-                    path,
-                    text,
-                    crlf,
-                    bom,
-                    hash: expected,
-                }) => {
-                    let bytes = encode(&text, crlf, bom);
-                    let on_disk = std::fs::read(&path).ok().map(|b| hash(&b));
-                    // A gone file is written back.
-                    let result = match on_disk.is_none() || on_disk == expected {
-                        false => Err(format!("{} changed on disk; not saved", path.display())),
-                        true => std::fs::write(&path, &bytes)
-                            .map(|()| hash(&bytes))
-                            .map_err(|err| format!("{}: {err}", path.display())),
-                    };
-                    let msg = Msg::Saved {
-                        buffer,
-                        tick,
-                        result,
-                    };
-                    self.send(msg);
-                }
-                // As `files::list` does; the core can't depend on the services crate.
-                Effect::File(FileOp::ListDir(dir)) => {
-                    let result = std::fs::read_dir(&dir)
-                        .map(|entries| {
-                            let mut names: Vec<String> = (entries.flatten())
-                                .map(|e| {
-                                    let slash = if e.path().is_dir() { "/" } else { "" };
-                                    format!("{}{slash}", e.file_name().to_string_lossy())
+                Effect::File(op) => {
+                    let reply = match &op {
+                        FileOp::Save {
+                            buffer,
+                            tick,
+                            path,
+                            text,
+                            ..
+                        } => {
+                            self.writes.push((path.clone(), text.to_string()));
+                            self.saves.pop_front().map(|result| Msg::Saved {
+                                buffer: *buffer,
+                                tick: *tick,
+                                result,
+                            })
+                        }
+                        FileOp::ListDir(dir) => {
+                            self.listings.get(dir).cloned().map(|result| Msg::Listed {
+                                dir: dir.clone(),
+                                result,
+                            })
+                        }
+                        FileOp::WriteProject {
+                            intent, path, text, ..
+                        } => Some(Msg::ProjectWritten {
+                            intent: *intent,
+                            result: Ok(crate::project::Loaded {
+                                project: crate::project::Project::parse(text).unwrap(),
+                                file: Some((path.clone(), text.clone())),
+                            }),
+                        }),
+                        FileOp::Index {
+                            project,
+                            walk,
+                            roots,
+                            ..
+                        } => roots
+                            .iter()
+                            .map(|root| {
+                                self.indexes
+                                    .get(root)
+                                    .cloned()
+                                    .map(|result| (root.clone(), result))
+                            })
+                            .collect::<Option<Vec<_>>>()
+                            .map(|roots| Msg::Indexed {
+                                project: *project,
+                                walk: *walk,
+                                directories: roots
+                                    .iter()
+                                    .flat_map(|(root, _)| {
+                                        self.directories.get(root).into_iter().flatten().cloned()
+                                    })
+                                    .collect(),
+                                roots,
+                            }),
+                        FileOp::Revert { buffer, tick, .. } => self
+                            .reverts
+                            .get(buffer)
+                            .cloned()
+                            .map(|result| Msg::Reverted {
+                                buffer: *buffer,
+                                tick: *tick,
+                                result,
+                            }),
+                        FileOp::Diff { buffer, path, .. } => {
+                            self.diffs.get(path).cloned().map(|result| Msg::Diffed {
+                                buffer: *buffer,
+                                result,
+                            })
+                        }
+                        FileOp::Open { intent, path } => {
+                            self.reads.get(path).cloned().map(|result| Msg::Opened {
+                                intent: *intent,
+                                path: path.clone(),
+                                result,
+                            })
+                        }
+                        FileOp::Preview(request) => {
+                            self.reads
+                                .get(&request.path)
+                                .cloned()
+                                .map(|read| Msg::Previewed {
+                                    request: request.clone(),
+                                    result: read.and_then(|file| {
+                                        file.map(|(bytes, _)| {
+                                            crate::buffer::prepare_preview(&bytes)
+                                                .map_err(str::to_string)
+                                        })
+                                        .transpose()
+                                    }),
                                 })
-                                .collect();
-                            names.sort();
-                            names
-                        })
-                        .map_err(|err| format!("{}: {err}", dir.display()));
-                    self.send(Msg::Listed { dir, result });
-                }
-                // As `projects::write` does, minus its check of the roots.
-                Effect::File(FileOp::WriteProject { path, old, text }) => {
-                    if std::fs::read_to_string(&path).ok() != old {
-                        let err =
-                            format!("{} changed on disk; reload with C-x C-r", path.display());
-                        self.send(Msg::ProjectWritten(Err(err)));
-                        continue;
+                        }
+                        FileOp::Check(paths) => paths
+                            .iter()
+                            .map(|path| self.checks.get(path).map(|hash| (path.clone(), *hash)))
+                            .collect::<Option<Vec<_>>>()
+                            .map(Msg::Checked),
+                    };
+                    match reply {
+                        Some(reply) => {
+                            self.send(reply);
+                        }
+                        None => self.effects.push(Effect::File(op)),
                     }
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    std::fs::write(&path, &text).unwrap();
-                    let project = crate::project::Project::parse(&text).unwrap();
-                    let file = Some((path, text));
-                    self.send(Msg::ProjectWritten(Ok(crate::project::Loaded {
-                        project,
-                        file,
-                    })));
-                }
-                // As `files::index` does, minus the ignore files and patterns.
-                Effect::File(FileOp::Index {
-                    project,
-                    walk,
-                    roots,
-                    ..
-                }) => {
-                    let mut directories = 0;
-                    let roots = (roots.into_iter())
-                        .map(|root| {
-                            let mut files = Vec::new();
-                            let result = walk_files(&root, &root, &mut files, &mut directories)
-                                .map(|()| {
-                                    files.sort();
-                                    files
-                                })
-                                .map_err(|err| format!("{}: {err}", root.display()));
-                            (root, result)
-                        })
-                        .collect();
-                    self.send(Msg::Indexed {
-                        project,
-                        walk,
-                        roots,
-                        directories,
-                    });
-                }
-                Effect::File(FileOp::Revert {
-                    buffer,
-                    tick,
-                    path,
-                    text,
-                }) => {
-                    let result = crate::buffer::revert(&path, &text, read(&path));
-                    self.send(Msg::Reverted {
-                        buffer,
-                        tick,
-                        result,
-                    });
-                }
-                Effect::File(FileOp::Diff {
-                    buffer,
-                    name,
-                    path,
-                    text,
-                }) => {
-                    let result = crate::buffer::unified_diff(&path, &name, &text, read(&path));
-                    self.send(Msg::Diffed { buffer, result });
-                }
-                Effect::File(FileOp::Open(path)) => {
-                    let result = read(&path);
-                    self.send(Msg::Opened { path, result });
-                }
-                Effect::File(FileOp::Preview(path)) => {
-                    let result = read(&path);
-                    self.send(Msg::Previewed { path, result });
-                }
-                // As `files::run` does.
-                Effect::File(FileOp::Check(paths)) => {
-                    let files = (paths.into_iter())
-                        .map(|path| {
-                            let hash = std::fs::read(&path).ok().map(|b| hash(&b));
-                            (path, hash)
-                        })
-                        .collect();
-                    self.send(Msg::Checked(files));
                 }
                 Effect::Watch(_) => {}
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
@@ -280,8 +331,7 @@ impl Harness {
                 Effect::Recovery(RecoveryOp::DeleteRecovery(file)) => self.deleted.push(file),
                 Effect::Grep(GrepOp::Search(op)) => {
                     self.greps.push(Some(op.pattern.clone()));
-                    if !self.grep_paused {
-                        let hits = grep(&op);
+                    if let Some(hits) = self.hits.pop_front() {
                         self.send(Msg::Grepped {
                             search: op.id,
                             hits,
@@ -290,79 +340,110 @@ impl Harness {
                     }
                 }
                 Effect::Grep(GrepOp::Cancel) => self.greps.push(None),
-                Effect::LoadSettings => {
-                    let text = std::fs::read_to_string(self.path("settings.toml")).ok();
-                    self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
-                    let text = std::fs::read_to_string(self.path("keymap.toml")).ok();
-                    self.core.handle(self.now, Msg::KeymapLoaded(Ok(text)));
-                }
-            }
-        }
-    }
-
-    /// Visits `name` in the temp dir, reading it as the app does; a missing file is empty.
-    pub fn open(&mut self, name: &str) -> &mut Self {
-        let path = self.path(name);
-        let file = std::fs::read(&path).ok().map(|b| (hash(&b), b));
-        self.core.open(&path, file.map(|(h, b)| (b, h)));
-        self
-    }
-
-    pub fn disk(&self, name: &str) -> String {
-        std::fs::read_to_string(self.path(name)).unwrap()
-    }
-}
-
-/// Adds the files under `dir`, relative to `root`, skipping `.git`.
-fn walk_files(
-    root: &Path,
-    dir: &Path,
-    files: &mut Vec<PathBuf>,
-    directories: &mut usize,
-) -> std::io::Result<()> {
-    *directories += 1;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !entry.file_type()?.is_dir() {
-            files.push(path.strip_prefix(root).unwrap().to_path_buf());
-        } else if !path.ends_with(".git") {
-            walk_files(root, &path, files, directories)?;
-        }
-    }
-    Ok(())
-}
-
-/// The hits for `op` in one batch, as the grep service finds them in the files `walk_files` lists.
-fn grep(op: &GrepSearch) -> Result<Vec<Hit>, String> {
-    // Smart case: case is ignored while the pattern has no upper-case letter.
-    let fold = op.pattern == op.pattern.to_lowercase();
-    let regex = (RegexBuilder::new(&op.pattern)
-        .case_insensitive(fold)
-        .build())
-    .map_err(|err| err.to_string())?;
-    let mut hits = Vec::new();
-    for root in &op.roots {
-        let mut files = Vec::new();
-        _ = walk_files(root, root, &mut files, &mut 0);
-        files.sort();
-        for path in files {
-            let text = std::fs::read_to_string(root.join(&path)).unwrap_or_default();
-            for (line, text) in text.lines().enumerate() {
-                if let Some(m) = regex.find(text) {
-                    hits.push(Hit {
-                        root: root.clone(),
-                        path: path.clone(),
-                        line,
-                        col: text[..m.start()].chars().count(),
-                        text: text.into(),
+                Effect::LoadConfiguration { request } => {
+                    let settings = self.fixture_text("settings.toml");
+                    let keymap = self.fixture_text("keymap.toml");
+                    self.send(Msg::ConfigurationLoaded {
+                        request,
+                        bundle: crate::configuration::Bundle {
+                            settings: Ok(settings),
+                            keymap: Ok(keymap),
+                            projects_dir: self.core.projects_dir.clone(),
+                            projects: Vec::new(),
+                        },
                     });
                 }
             }
         }
     }
-    hits.truncate(op.limit);
-    Ok(hits)
+
+    /// Visits prepared fixture bytes without filesystem work.
+    pub fn open(&mut self, name: &str) -> &mut Self {
+        let path = self.path(name);
+        let file = self.reads.get(&path).cloned().unwrap_or(Ok(None)).unwrap();
+        self.core.open(&path, file);
+        self
+    }
+
+    pub fn submitted(&self, name: &str) -> String {
+        self.writes
+            .iter()
+            .rev()
+            .find(|(path, _)| *path == self.path(name))
+            .expect("a save was requested")
+            .1
+            .clone()
+    }
+
+    pub fn prepare_revert(&mut self, name: &str, bytes: Option<&[u8]>) {
+        let path = self.path(name);
+        let read = Ok(bytes.map(|b| (b.to_vec(), hash(b))));
+        for (id, buffer) in self
+            .core
+            .buffers
+            .recent()
+            .filter(|(_, b)| b.file.as_ref() == Some(&path))
+        {
+            self.reverts.insert(
+                id,
+                crate::buffer::revert(&path, buffer.text(), read.clone()),
+            );
+        }
+    }
+
+    pub fn fixture_text(&self, name: &str) -> Option<String> {
+        self.reads
+            .get(&self.path(name))
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.as_ref())
+            .map(|(bytes, _)| String::from_utf8(bytes.clone()).unwrap())
+    }
+}
+
+#[test]
+fn collected_saves_can_be_answered_in_reverse_order_across_workspaces() {
+    let mut h = Harness::new(&[]);
+    h.collect_effects = true;
+    let first = h.core.workspace();
+    let path = h.path("held.txt");
+    h.core
+        .open(&path, Some((b"original".to_vec(), hash(b"original"))));
+    h.keys("first SPC C-x C-s");
+    let first_buffer = h.core.windows.window.buffer();
+    let second = h.new_workspace("second", "home");
+    h.core
+        .open(&path, Some((b"original".to_vec(), hash(b"original"))));
+    h.keys("second SPC C-x C-s");
+    let second_buffer = h.core.windows.window.buffer();
+    let replies: Vec<_> = std::mem::take(&mut h.effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::File(FileOp::Save {
+                buffer, tick, text, ..
+            }) => Some(Msg::Saved {
+                buffer,
+                tick,
+                result: Ok(hash(text.to_string().as_bytes())),
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 2);
+    for reply in replies.into_iter().rev() {
+        h.send(reply);
+    }
+    assert_eq!(h.core.workspace(), second);
+    assert_eq!(h.text(), "second original\n");
+    assert_eq!(
+        h.core.buffers.get(second_buffer).unwrap().disk,
+        Some(hash(b"second original\n"))
+    );
+    h.core.switch_workspace(first).unwrap();
+    assert_eq!(h.text(), "first original\n");
+    assert_eq!(
+        h.core.buffers.get(first_buffer).unwrap().disk,
+        Some(hash(b"first original\n"))
+    );
 }
 
 impl Harness {
@@ -456,7 +537,10 @@ pub(crate) fn twenty_lines() -> Harness {
 
 /// The mark and whether it is active.
 pub(crate) fn mark(h: &Harness) -> (Option<usize>, bool) {
-    (h.core.window.mark(&h.core.buffers), h.core.window.active())
+    (
+        h.core.windows.window.mark(&h.core.buffers),
+        h.core.windows.window.active(),
+    )
 }
 
 pub(crate) fn bind_mode(h: &mut Harness, mode: &'static str, keys: &str, command: &'static str) {
@@ -465,7 +549,7 @@ pub(crate) fn bind_mode(h: &mut Harness, mode: &'static str, keys: &str, command
 }
 
 pub(crate) fn buffer(h: &mut Harness) -> &mut crate::buffer::Buffer {
-    let id = h.core.window.buffer();
+    let id = h.core.windows.window.buffer();
     h.core.buffers.get_mut(id).unwrap()
 }
 
@@ -481,14 +565,17 @@ pub(crate) fn insert_cmd(h: &mut Harness) {
                 core.this_command(),
                 core.last_command()
             ));
-            let point = core.window.point(&core.buffers);
-            let id = core.window.buffer();
+            let point = core.windows.window.point(&core.buffers);
+            let id = core.windows.window.buffer();
             core.buffers
                 .get_mut(id)
                 .unwrap()
                 .insert(point, "hi")
                 .unwrap();
-            core.window.set_point(&mut core.buffers, point + 2).unwrap();
+            core.windows
+                .window
+                .set_point(&mut core.buffers, point + 2)
+                .unwrap();
             Ok(())
         },
     });
@@ -536,16 +623,4 @@ pub(crate) fn listed(h: &mut Harness) -> (Vec<String>, Option<usize>) {
 
 pub(crate) fn name(h: &Harness) -> &str {
     h.core.current().name.as_str()
-}
-
-/// Reads `path` as the file service does: its bytes and hash, `None` when there is no file.
-fn read(path: &Path) -> Result<Option<(Vec<u8>, u64)>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let h = hash(&bytes);
-            Ok(Some((bytes, h)))
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(format!("{}: {err}", path.display())),
-    }
 }

@@ -1,8 +1,8 @@
 //! The built-in commands.
 
+use crate::Core;
 use crate::command::{ArgSpec, Args, Command, Prefix, Preview};
 use crate::key::{Key, KeyCode};
-use crate::{Core, Effect};
 
 /// Completes the first prompt over the projects' names and leaves the others free.
 fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
@@ -64,7 +64,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "minibuffer-directory-delete-char",
             spec: ArgSpec::default(),
             handler: |ctx, args| match ctx.core.component_start() {
-                Some(start) if args.prefix.is_none() && !ctx.core.window.active() => {
+                Some(start) if args.prefix.is_none() && !ctx.core.windows.window.active() => {
                     ctx.delete_to(start)
                 }
                 _ => ctx.delete_char(args.prefix.is_none(), args.count().saturating_neg()),
@@ -242,15 +242,17 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "project-save",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Save project: "],
                 completion: Some(|core, _| core.project_names(true)),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.save_project(&args.strings[0]),
+            handler: |ctx, args| ctx.save_project(&args),
         },
         Command {
             name: "project-add-root",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: ", "Add root: ", "Role: "],
                 completion: Some(projects_then_free),
                 files: Some(1),
@@ -262,6 +264,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "project-remove-root",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: ", "Remove root: "],
                 completion: Some(|core, args| match args.strings.len() {
                     0 => core.project_names(false),
@@ -274,6 +277,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "project-set-role",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: ", "Root: ", "Role: "],
                 completion: Some(|core, args| match args.strings.len() {
                     0 => core.project_names(false),
@@ -287,6 +291,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "project-set-default-agent",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: ", "Default agent: "],
                 completion: Some(projects_then_free),
                 ..ArgSpec::default()
@@ -296,15 +301,15 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "project-set-watch",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: ", "Watch: "],
                 completion: Some(|core, args| match args.strings.len() {
                     0 => core.project_names(false),
                     _ => vec!["true".into(), "false".into()],
                 }),
                 preselect: Some(|core, args| {
-                    args.strings
-                        .first()
-                        .and_then(|name| core.project(name).ok())
+                    core.project_arg(args)
+                        .ok()
                         .map_or(0, |i| usize::from(!core.projects[i].project.watch))
                 }),
                 ..ArgSpec::default()
@@ -314,37 +319,43 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "project-open-file",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: "],
                 completion: Some(projects_then_free),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.open_project_file(&args.strings[0]),
+            handler: |ctx, args| ctx.open_project_file(&args),
         },
         Command {
             name: "project-switch",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Switch to project: "],
                 completion: Some(projects_then_free),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.core.switch_project(&args.strings[0]),
+            handler: |ctx, args| {
+                ctx.core
+                    .switch_project(args.project.expect("project argument"))
+            },
         },
         Command {
             name: "project-index",
             spec: ArgSpec {
+                project: true,
                 prompts: &["Project: "],
                 completion: Some(projects_then_free),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.index_project(&args.strings[0], false),
+            handler: |ctx, args| ctx.index_project(args.project.expect("project argument"), false),
         },
         Command {
             name: "project-find-file",
             // Asks its own question, so it can start indexing before the prompt opens.
             spec: ArgSpec {
                 preview: Some(|core, c| {
-                    let project = &core.current_workspace().project;
-                    core.project_file(project, c).ok().map(Preview::File)
+                    let finder = core.prompts.minibuffer.as_ref()?.finder.as_ref()?;
+                    Some(Preview::File(finder.path(c)))
                 }),
                 ..ArgSpec::default()
             },
@@ -354,7 +365,9 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-grep",
             // Asks its own question, which names the project; the hits are matched already.
             spec: ArgSpec {
-                filter: Some(|_, items| (0..items.len()).collect()),
+                filter: Some(crate::command::Filter::Items(|_, items| {
+                    (0..items.len()).collect()
+                })),
                 preview: Some(crate::grep::preview),
                 ..ArgSpec::default()
             },
@@ -363,11 +376,15 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "workspace-new",
             spec: ArgSpec {
+                project: true,
                 prompts: &["New workspace for project: ", "Workspace name: "],
                 completion: Some(projects_then_free),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.core.workspace_for(&args.strings[0], &args.strings[1]),
+            handler: |ctx, args| {
+                ctx.core
+                    .workspace_for(args.project.expect("project argument"), &args.strings[1])
+            },
         },
         Command {
             name: "workspace-switch",
@@ -426,7 +443,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "reload-settings",
             spec: ArgSpec::default(),
             handler: |ctx, _| {
-                ctx.effects.push(Effect::LoadSettings);
+                ctx.reload_configuration();
                 Ok(())
             },
         },
@@ -549,7 +566,7 @@ pub(crate) fn builtins() -> Vec<Command> {
                 ..ArgSpec::default()
             },
             handler: |ctx, args| {
-                if ctx.core.tree.leaves().len() == 1 {
+                if ctx.core.windows.tree.leaves().len() == 1 {
                     ctx.split_window(false)?;
                 }
                 ctx.other_window(1)?;
@@ -627,8 +644,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "swiper",
             spec: ArgSpec {
                 prompts: &["Swiper: "],
-                completion: Some(crate::swiper::candidates),
-                filter: Some(crate::swiper::filter),
+                filter: Some(crate::command::Filter::Swiper),
                 preselect: Some(crate::swiper::preselect),
                 preview: Some(crate::swiper::preview),
                 ..ArgSpec::default()
@@ -692,7 +708,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "keyboard-quit",
             spec: ArgSpec::default(),
             handler: |ctx, _| {
-                ctx.core.window.set_active(false);
+                ctx.core.windows.window.set_active(false);
                 ctx.core.echo("Quit".into());
                 Ok(())
             },
@@ -709,13 +725,14 @@ mod tests {
     fn builtins_are_callable_by_name() {
         let mut h = Harness::new(&[("a.txt", ""), ("settings.toml", "font_size = 18")]);
         h.open("a.txt");
+        h.save_reply("ab\n");
         h.keys("ab");
         h.call("undo", Args::default());
         assert_eq!(h.text(), "");
         h.call("undo-redo", Args::default());
         assert_eq!(h.text(), "ab");
         h.call("save-buffer", Args::default());
-        assert_eq!(h.disk("a.txt"), "ab\n");
+        assert_eq!(h.submitted("a.txt"), "ab\n");
         h.call("reload-settings", Args::default());
         assert_eq!(h.core.settings().font_size, 18.0);
     }

@@ -1,10 +1,10 @@
 use std::ffi::OsString;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use aiditor_core::{Core, Msg};
-use aiditor_services::{files, projects, recovery};
+use aiditor_services::configuration::{read_config, read_projects};
+use aiditor_services::{files, recovery};
 use gpui::{App, Application, WindowOptions, prelude::*};
 use tokio::sync::mpsc;
 use tracing_subscriber::prelude::*;
@@ -22,25 +22,6 @@ const FONT: &str = if cfg!(target_os = "macos") {
 } else {
     "Noto Sans Mono"
 };
-
-/// The text of the config file `name`; `None` when there is no file or no config dir.
-fn read_config(dir: Option<&Path>, name: &str) -> Result<Option<String>, String> {
-    let Some(path) = dir.map(|dir| dir.join(name)) else {
-        return Ok(None);
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(text)),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(format!("{}: {err}", path.display())),
-    }
-}
-
-/// The project files in the config dir's `projects/`, for the core.
-fn read_projects(dir: Option<&Path>) -> Msg {
-    let dir = dir.map(|dir| dir.join("projects"));
-    let projects = dir.as_deref().map_or_else(Vec::new, projects::read);
-    Msg::ProjectsLoaded { dir, projects }
-}
 
 const USAGE: &str = "usage: aiditor [--config-dir DIR] [--debug] [FILE | FOLDER]";
 

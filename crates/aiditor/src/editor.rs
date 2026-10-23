@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{files, grep, recovery, watcher};
+use aiditor_services::{configuration, files, grep, recovery, watcher};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
     Point, ScrollWheelEvent, Task, Window, div, font, prelude::*, px, rgb,
@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::element::{FrameElement, Painted, block, echo_line, text_run};
 use crate::input::to_key;
-use crate::{Args, FONT, read_config, read_projects};
+use crate::{Args, FONT};
 
 pub(crate) struct Editor {
     pub(crate) core: Core,
@@ -138,12 +138,12 @@ impl Editor {
                     }
                     cx.quit()
                 }
-                Effect::LoadSettings => {
+                Effect::LoadConfiguration { request } => {
                     let dir = self.config_dir.clone();
-                    let read = |name| read_config(dir.as_deref(), name);
-                    self.handle(Msg::SettingsLoaded(read("settings.toml")), cx);
-                    self.handle(Msg::KeymapLoaded(read("keymap.toml")), cx);
-                    self.handle(read_projects(dir.as_deref()), cx);
+                    let tx = self.tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        _ = tx.blocking_send(configuration::load(dir.as_deref(), request));
+                    });
                 }
             }
         }
@@ -459,6 +459,10 @@ mod tests {
         cx.simulate_keystrokes(&strokes.join(" "));
         let got = editor.update(cx, |e, _| e.core.take_recording()).unwrap();
         assert_eq!(got, want);
+        // Release the async receiver before leaving the Tokio runtime.
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -478,7 +482,21 @@ mod tests {
         let shown = cx.window_title().unwrap();
         assert!(shown.starts_with("t.txt | "), "{shown}");
         editor.update(cx, |e, cx| {
-            e.core.new_workspace("w2", "other");
+            let project =
+                aiditor_core::project::Project::parse("name = 'other'\n[primary]\npath = '/other'")
+                    .unwrap();
+            e.core.handle(
+                Instant::now(),
+                Msg::ProjectsLoaded {
+                    dir: None,
+                    projects: vec![Ok(aiditor_core::project::Loaded {
+                        project,
+                        file: None,
+                    })],
+                },
+            );
+            e.core
+                .new_workspace("w2", e.core.project_id("other").unwrap());
             cx.notify();
         });
         cx.run_until_parked();
@@ -534,10 +552,15 @@ mod tests {
         });
         let message = editor.read_with(cx, |e, _| e.core.message().unwrap().to_owned());
         assert!(message.contains("files = 1, directories = 1; max_watched_files = 0 exceeded"));
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]
     fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
             config_dir: Some(dir.path().to_owned()),
@@ -560,7 +583,21 @@ mod tests {
             dir.path().display()
         );
         std::fs::write(projects.join("p.toml"), text).unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "font_size = 18").unwrap();
         cx.simulate_keystrokes("ctrl-x ctrl-r");
+        cx.simulate_input("typing");
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "typing");
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if editor.read_with(cx, |e, _| e.core.settings().font_size == 18.) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.settings().font_size),
+            18.
+        );
         let names = editor.read_with(cx, |e, _| {
             e.core
                 .projects()
@@ -569,6 +606,178 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(names[1..], ["p"], "after the launch `$HOME` project");
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn integrated_finders_visits_saves_and_directory_recovery(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(root.join("sub").join(name), format!("needle {name}\n")).unwrap();
+        }
+        let mut core = Core::default();
+        core.launch(&root, &root);
+        let first = core.workspace();
+        let project = core.project_id("repo").unwrap();
+        let second = core.new_workspace("second", project);
+        core.switch_workspace(first).unwrap();
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            Editor::new(
+                core,
+                Args::default(),
+                aiditor_services::channel(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.focus(&editor.read(cx).focus));
+        let wait = |cx: &mut VisualTestContext, label: &str, done: fn(&mut Core) -> bool| {
+            for _ in 0..1000 {
+                cx.executor().advance_clock(Duration::from_millis(20));
+                cx.run_until_parked();
+                if editor.update(cx, |e, cx| {
+                    e.handle(Msg::Tick, cx);
+                    done(&mut e.core)
+                }) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("{label}: {:?}", editor.update(cx, |e, _| e.core.frame()));
+        };
+        let hold = || {
+            let (started, ready) = std::sync::mpsc::channel();
+            let (release, held) = std::sync::mpsc::channel();
+            runtime.spawn_blocking(move || {
+                started.send(()).unwrap();
+                _ = held.recv();
+            });
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            release
+        };
+        wait(cx, "initial index", |core| {
+            !core.watch_set().roots.is_empty()
+        });
+        let release = hold();
+        cx.simulate_keystrokes("ctrl-x p f");
+        wait(cx, "finder candidates", |core| {
+            core.frame()
+                .minibuffer
+                .is_some_and(|m| m.candidates.len() == 3)
+        });
+        cx.simulate_keystrokes("ctrl-n ctrl-n");
+        assert_eq!(
+            editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().selected),
+            Some(2)
+        );
+        release.send(()).unwrap();
+        wait(cx, "latest finder preview", |core| {
+            core.frame().windows[0].display.mode_line.contains(" c ")
+        });
+        cx.simulate_keystrokes("enter");
+        wait(cx, "ordinary visit", |core| {
+            core.current()
+                .file
+                .as_ref()
+                .is_some_and(|p| p.ends_with("sub/c"))
+        });
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "needle c\n");
+
+        let release = hold();
+        cx.simulate_keystrokes("ctrl-x p f");
+        wait(cx, "second finder", |core| {
+            core.frame()
+                .minibuffer
+                .is_some_and(|m| m.candidates.len() == 3)
+        });
+        cx.simulate_keystrokes("enter ctrl-x t o");
+        cx.simulate_input("other workspace");
+        release.send(()).unwrap();
+        runtime.block_on(runtime.spawn_blocking(|| {})).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |e, _| (e.core.workspace(), e.core.text())),
+            (second, "other workspace".into())
+        );
+        editor.update(cx, |e, cx| {
+            e.core.switch_workspace(first).unwrap();
+            e.handle(Msg::Tick, cx);
+        });
+        cx.simulate_keystrokes("ctrl-x p g");
+        cx.simulate_input("needle");
+        wait(cx, "grep hits", |core| {
+            core.frame()
+                .minibuffer
+                .is_some_and(|m| m.candidates.len() == 3)
+        });
+        cx.simulate_keystrokes("ctrl-n ctrl-n enter");
+        wait(cx, "accepted grep hit", |core| {
+            core.current()
+                .file
+                .as_ref()
+                .is_some_and(|p| p.ends_with("sub/c"))
+                && core.point() == 0
+        });
+
+        for _ in 0..50 {
+            std::fs::write(root.join("sub/c"), "ready\n").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            cx.run_until_parked();
+            if editor.read_with(cx, |e, _| e.core.text() == "ready\n") {
+                break;
+            }
+        }
+        wait(cx, "native watcher ready", |core| core.text() == "ready\n");
+
+        std::fs::rename(root.join("sub"), dir.path().join("old-sub")).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/c"), "replacement\n").unwrap();
+        wait(cx, "replacement directory", |core| {
+            core.text() == "replacement\n"
+        });
+        std::fs::write(root.join("sub/c"), "later\n").unwrap();
+        wait(cx, "later notification", |core| core.text() == "later\n");
+
+        editor.update(cx, |e, cx| {
+            e.core.switch_workspace(second).unwrap();
+            let path = root.join("sub/c");
+            e.core.open(&path, files::read(&path).unwrap());
+            e.core.switch_workspace(first).unwrap();
+            e.handle(Msg::Tick, cx);
+        });
+        let release = hold();
+        cx.simulate_input("first ");
+        cx.simulate_keystrokes("ctrl-x ctrl-s ctrl-x t o");
+        cx.simulate_input("second ");
+        cx.simulate_keystrokes("ctrl-x ctrl-s");
+        release.send(()).unwrap();
+        wait(cx, "conflicting save replies", |core| {
+            core.current().conflict.is_some()
+        });
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub/c")).unwrap(),
+            "first later\n"
+        );
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "second later\n");
+        assert!(editor.read_with(cx, |e, _| e.core.current().modified()));
+        editor.update(cx, |e, _| e.core.switch_workspace(first).unwrap());
+        assert_eq!(
+            editor.read_with(cx, |e, _| (e.core.text(), e.core.current().modified())),
+            ("first later\n".into(), false)
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]
