@@ -246,18 +246,6 @@ impl Core {
         Ok(())
     }
 
-    /// Shows every workspace and its project in the echo area, the current one marked `*`.
-    pub(crate) fn list_workspaces(&mut self) {
-        let current = self.workspace();
-        let list: Vec<String> = (self.workspaces.iter())
-            .map(|w| {
-                let mark = if w.id == current { "*" } else { "" };
-                format!("{mark}{} ({})", w.name, self.project_name(w.project))
-            })
-            .collect();
-        self.echo(list.join("  "));
-    }
-
     /// Shows the project `name`'s most recently shown workspace, or a new one when it has none.
     pub(crate) fn switch_project(&mut self, project: ProjectId) -> Result<(), String> {
         self.project_at(project)?;
@@ -709,6 +697,81 @@ mod tests {
     }
 
     #[test]
+    fn new_workspace_defaults_to_the_active_project_but_can_select_another() {
+        let mut h = projects();
+        h.keys("C-x t 2 two RET existing RET C-x t 2");
+        assert_eq!(h.core.prompts.selected_candidate().as_deref(), Some("two"));
+        h.keys("RET task RET");
+        assert_eq!(current(&h), ("task", "two"));
+        h.keys("C-x t 2 one RET RET");
+        assert_eq!(current(&h), ("one", "one"));
+        h.keys("C-x t 2 RET RET");
+        assert_eq!(current(&h), ("one<2>", "one"));
+    }
+
+    #[test]
+    fn new_workspace_accepts_the_selected_project_identity_even_with_equal_names() {
+        let mut h = Harness::new(&[]);
+        let first = h.core.add_project(Loaded::ad_hoc("app", &h.path("first")));
+        let second = h.core.add_project(Loaded::ad_hoc("app", &h.path("second")));
+        h.core.new_workspace("second", second);
+        h.keys("C-x t 2 RET task RET");
+        assert_eq!(h.core.current_workspace().project, second);
+        h.keys("C-x t 2 app C-n RET other RET");
+        assert_eq!(
+            h.core.current_workspace().project,
+            second,
+            "filtered matches retain identity"
+        );
+        h.keys("C-x t 2 app RET first RET");
+        assert_eq!(h.core.current_workspace().project, first);
+    }
+
+    #[test]
+    fn new_workspace_cancellation_keeps_the_workspace_and_layout() {
+        let mut h = projects();
+        h.keys("text C-x 2");
+        let workspace = h.core.workspace();
+        let selected = h.core.windows.selected;
+        for keys in ["C-x t 2 C-g", "C-x t 2 RET C-g"] {
+            h.keys(keys);
+            assert_eq!(h.core.workspace(), workspace);
+            assert_eq!(h.core.windows.selected, selected);
+            assert_eq!(h.core.windows.tree.leaves().len(), 2);
+            assert_eq!(h.text(), "text");
+        }
+    }
+
+    #[test]
+    fn new_workspace_keeps_the_selected_identity_across_reload_or_reports_its_removal() {
+        for remove in [false, true] {
+            let mut h = projects();
+            let selected = h.core.project_id("app").unwrap();
+            h.keys("C-x t 2 app RET");
+            let count = h.core.workspaces.len();
+            let projects = if remove {
+                vec![]
+            } else {
+                let mut loaded = Loaded::ad_hoc("renamed", &h.path("app"));
+                loaded.file = Some((h.path("projects/app.toml"), String::new()));
+                vec![Ok(loaded)]
+            };
+            h.send(Msg::ProjectsLoaded {
+                dir: Some(h.path("projects")),
+                projects,
+            });
+            h.keys("task RET");
+            if remove {
+                assert_eq!(h.core.workspaces.len(), count);
+                assert_eq!(h.core.message(), Some("Project is no longer loaded"));
+            } else {
+                assert_eq!(h.core.current_workspace().project, selected);
+                assert_eq!(current(&h), ("task", "renamed"));
+            }
+        }
+    }
+
+    #[test]
     fn switch_lists_the_others_most_recent_first_and_ret_goes_back() {
         let mut h = projects();
         let launch = names(&h)[0].to_string();
@@ -756,7 +819,10 @@ mod tests {
         h.keys("C-x t 2 one RET RET C-x t r a RET C-x t 2 two RET RET C-x t r b RET");
         h.core.kill_workspace(h.core.workspaces()[0].id).unwrap();
         h.keys("C-x t l");
-        assert_eq!(h.core.message(), Some("a (one)  *b (two)"));
+        assert_eq!(
+            h.text(),
+            "Workspaces — RET switch, n/p move, q quit\n\none\n└── a\n    └── *scratch*<a>\ntwo\n└── * b\n    └── *scratch*<b>"
+        );
     }
 
     /// The harness of `projects` with a second workspace `two`, current, visiting a modified

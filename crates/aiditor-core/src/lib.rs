@@ -34,6 +34,7 @@ mod visiting;
 mod watching;
 pub mod window;
 pub mod workspace;
+mod workspace_list;
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;

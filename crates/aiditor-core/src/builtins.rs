@@ -379,6 +379,16 @@ pub(crate) fn builtins() -> Vec<Command> {
                 project: true,
                 prompts: &["New workspace for project: ", "Workspace name: "],
                 completion: Some(projects_then_free),
+                preselect: Some(|core, args| {
+                    if args.strings.is_empty() {
+                        core.projects
+                            .iter()
+                            .position(|p| p.id == core.current_workspace().project)
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    }
+                }),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| {
@@ -434,10 +444,27 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "workspace-list",
             spec: ArgSpec::default(),
-            handler: |ctx, _| {
-                ctx.core.list_workspaces();
-                Ok(())
-            },
+            handler: |ctx, _| ctx.list_workspaces(),
+        },
+        Command {
+            name: "workspace-list-next",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.workspace_list_move(true),
+        },
+        Command {
+            name: "workspace-list-previous",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.workspace_list_move(false),
+        },
+        Command {
+            name: "workspace-list-visit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.workspace_list_visit(),
+        },
+        Command {
+            name: "workspace-list-quit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.workspace_list_quit(),
         },
         Command {
             name: "reload-settings",
