@@ -35,7 +35,6 @@ Every root of every project bound to a live workspace SHALL be watched when its 
 - **WHEN** a directory holding a file is moved into a watched root, and a file in it is written later
 - **THEN** reports name the moved-in file and, later, the written one
 
-
 #### Scenario: Unwatched project with an open file
 - **GIVEN** a project with `watch = false` and a clean buffer visiting one of its files
 - **WHEN** another program rewrites that file
@@ -106,7 +105,7 @@ The watcher SHALL apply each project's `ignore` patterns to that project's roots
 - **THEN** reports name the file in `notes/` only, and on Linux only the root and `notes/` (with its subdirectories) are watched
 
 ### Requirement: Project watches have a filtered size limit
-Before adding project root watches, the editor SHALL count files and kept directories, including each root, after all index ignore filters across every project root. If either count exceeds the effective `max_watched_files`, it SHALL contribute no root watches, show `[unwatched]`, refresh its index only on demand or reload, and keep visited files watched through their parent directories. The echo area and `*Messages*` SHALL explain the project, counts, limit and setting name. An unchanged refusal SHALL NOT be reported on every message. Index results and reloads SHALL reevaluate eligibility.
+Before adding project root watches, the editor SHALL count files and kept directories, including each root, after all index ignore filters across every project root. If either count exceeds the effective `max_watched_files`, it SHALL contribute no root watches, show `[unwatched]`, refresh its index only on demand or reload, and keep visited files watched through their parent directories. The echo area and `*Messages*` SHALL explain the project, counts, limit and setting name. An unchanged refusal SHALL NOT be reported on every message. Index results and reloads SHALL reevaluate eligibility. A re-walk of the same roots and ignore patterns SHALL keep the previous counts, and so the root watches and mode line, until it answers; changed roots or patterns SHALL leave the project unwatched until their walk answers.
 
 #### Scenario: Threshold and explanation
 - **GIVEN** a project with two kept files and one directory, and limit one
@@ -132,3 +131,8 @@ Before adding project root watches, the editor SHALL count files and kept direct
 - **GIVEN** an eligible project gains files over its limit
 - **WHEN** a watcher-triggered reindex finishes
 - **THEN** root watches stop, visited buffers still revert, and a manual reindex after reducing the files can resume root watching
+
+#### Scenario: An edit or reload keeps the watches
+- **GIVEN** a watched project, or one refused over its limit
+- **WHEN** a role edit or `C-x C-r` re-walks its unchanged roots and patterns
+- **THEN** its root watches and mode line stay as they were throughout, and an unchanged refusal is not reported again

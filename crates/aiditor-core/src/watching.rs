@@ -4,26 +4,22 @@ use std::path::PathBuf;
 
 use crate::command::Args;
 use crate::project::Project;
-use crate::project_commands::FileIndex;
+use crate::project_commands::{FileIndex, scope};
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
 
 impl Core {
+    /// A project with `watch = true`: its kept files and directories, as a walk of its current
+    /// roots and patterns counted them without an error, and its `max_watched_files`.
+    fn watch_counts(&self, project: &Project) -> Option<(usize, usize, usize)> {
+        let index = (self.index.get(&project.name))
+            .filter(|i| project.watch && i.ready && i.scope == Some(scope(project)))?;
+        let files = index.roots.iter().map(|(_, files)| files.len()).sum();
+        let limit = (project.max_watched_files).unwrap_or(self.settings.max_watched_files);
+        Some((files, index.directories, limit))
+    }
+
     pub(crate) fn project_watched(&self, project: &Project) -> bool {
-        project.watch
-            && self.index.get(&project.name).is_some_and(|index| {
-                let limit = project
-                    .max_watched_files
-                    .unwrap_or(self.settings.max_watched_files);
-                index.ready
-                    && index.project.as_ref() == Some(project)
-                    && index.directories <= limit
-                    && index
-                        .roots
-                        .iter()
-                        .map(|(_, files)| files.len())
-                        .sum::<usize>()
-                        <= limit
-            })
+        (self.watch_counts(project)).is_some_and(|(files, dirs, limit)| files.max(dirs) <= limit)
     }
 
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
@@ -49,26 +45,9 @@ impl Core {
     /// Sends the watch set when it changed since last sent.
     pub(crate) fn watch(&mut self, effects: &mut Effects) {
         let refusals: std::collections::BTreeMap<_, _> = (self.projects.iter())
-            .filter(|p| {
-                p.project.watch && self.workspaces.iter().any(|w| w.project == p.project.name)
-            })
-            .filter_map(|p| {
-                let index = self
-                    .index
-                    .get(&p.project.name)
-                    .filter(|i| i.ready && i.project.as_ref() == Some(&p.project))?;
-                let files = index
-                    .roots
-                    .iter()
-                    .map(|(_, files)| files.len())
-                    .sum::<usize>();
-                let limit = p
-                    .project
-                    .max_watched_files
-                    .unwrap_or(self.settings.max_watched_files);
-                (files > limit || index.directories > limit)
-                    .then(|| (p.project.name.clone(), (files, index.directories, limit)))
-            })
+            .filter(|p| self.workspaces.iter().any(|w| w.project == p.project.name))
+            .filter_map(|p| Some((p.project.name.clone(), self.watch_counts(&p.project)?)))
+            .filter(|(_, (files, dirs, limit))| files.max(dirs) > limit)
             .collect();
         for (name, &(files, directories, limit)) in &refusals {
             if self.watch_refusals.get(name) != Some(&(files, directories, limit)) {
@@ -96,7 +75,7 @@ impl Ctx<'_> {
                         .core
                         .index
                         .get(&p.project.name)
-                        .is_none_or(|i| i.project.as_ref() != Some(&p.project))
+                        .is_none_or(|i| i.scope != Some(scope(&p.project)))
             })
             .filter(|p| {
                 self.core
@@ -184,9 +163,10 @@ impl Ctx<'_> {
     }
 }
 
-/// Whether a reported path under one of the index's roots is a file it lacks, or is gone while
-/// it holds that file or files under it. A file the index lacks starts a walk once, so writes
-/// to a file the walk ignores (a visited `.env`) start none.
+/// Whether a reported path under one of the index's roots is a file it lacks or a directory
+/// holding none of its files (an empty one changes the directory count), or is gone while it
+/// holds that file or files under it. Such a path starts a walk once, so writes to a file the
+/// walk ignores (a visited `.env`) start none.
 // shortcut: a create or delete re-walks the whole project; update the index per path if large projects lag.
 fn stale(index: &mut FileIndex, paths: &[(PathBuf, Disk)]) -> bool {
     let mut stale = false;
@@ -201,7 +181,9 @@ fn stale(index: &mut FileIndex, paths: &[(PathBuf, Disk)]) -> bool {
                     index.missed.remove(path);
                     files.iter().any(|f| f.starts_with(rel))
                 }
-                Disk::Dir => index.missed.insert(path.clone()),
+                Disk::Dir => {
+                    !files.iter().any(|f| f.starts_with(rel)) && index.missed.insert(path.clone())
+                }
             };
         }
     }
@@ -213,6 +195,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::buffer::hash;
+    use crate::command::Args;
     use crate::harness::{Harness, name};
     use crate::project::{Loaded, Project, Root};
     use crate::{Disk, Effect, FileOp, Msg};
@@ -707,6 +690,58 @@ mod tests {
             "max_watched_files = 1".into(),
         ))));
         assert_eq!(empty.watched.roots, [(empty.path(""), vec![])]);
+    }
+
+    #[test]
+    fn edits_and_reloads_keep_root_watches_while_rewalking() {
+        let mut h = indexed();
+        let strings = vec!["p".into(), h.path("a").display().to_string(), "Main".into()];
+        let mut ctx = h.ctx();
+        ctx.call(
+            "project-set-role",
+            Args {
+                strings,
+                ..Args::default()
+            },
+        );
+        let reload = Msg::ProjectsLoaded {
+            dir: None,
+            projects: Vec::new(),
+        };
+        for msg in [Msg::Tick, reload] {
+            let effects = h.core.handle(h.now, msg);
+            assert!(!effects.iter().any(|e| matches!(e, Effect::Watch(_))));
+            assert!(
+                !h.frame(800., 600.).windows[0]
+                    .display
+                    .mode_line
+                    .contains("[unwatched]")
+            );
+            h.run(effects);
+            assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
+        }
+        // An unchanged refusal is not reported again by a reload's re-walk.
+        h.core.settings.max_watched_files = 0;
+        h.send(Msg::Tick);
+        assert!(h.core.message().unwrap().contains("max_watched_files = 0"));
+        h.core.message = None;
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: Vec::new(),
+        });
+        assert_eq!((h.core.message(), &h.watched.roots[..]), (None, &[][..]));
+    }
+
+    #[test]
+    fn only_a_directory_without_indexed_files_starts_a_walk() {
+        let mut h = indexed();
+        let walks = h.core.index_walks;
+        report(&mut h, &["a"]);
+        assert_eq!(h.core.index_walks, walks);
+        std::fs::create_dir(h.path("a/empty")).unwrap();
+        report(&mut h, &["a/empty"]);
+        report(&mut h, &["a/empty"]);
+        assert_eq!(h.core.index_walks, walks + 1);
     }
 
     #[test]

@@ -15,14 +15,24 @@ use crate::{Core, Ctx, Effect, FileOp};
 #[derive(Default)]
 pub(crate) struct FileIndex {
     walk: u64,
+    /// The last answer walked `scope` without an error, so its counts hold for it.
     pub(crate) ready: bool,
-    pub(crate) project: Option<Project>,
+    /// The roots and ignore patterns of the walk numbered `walk`.
+    pub(crate) scope: Option<Scope>,
     pub(crate) directories: usize,
     /// The pending walk was asked for by the user, so its answer is echoed.
     loud: bool,
     pub(crate) roots: Vec<(PathBuf, Vec<PathBuf>)>,
-    /// Reported files the index lacked, which already started a walk.
+    /// Reported files and directories the index lacked, which already started a walk.
     pub(crate) missed: BTreeSet<PathBuf>,
+}
+
+/// What a walk covers: a project's root paths and ignore patterns.
+pub(crate) type Scope = (Vec<PathBuf>, Vec<String>);
+
+pub(crate) fn scope(project: &Project) -> Scope {
+    let roots = project.all_roots().map(|r| r.path.clone()).collect();
+    (roots, project.ignore.clone())
 }
 
 impl Core {
@@ -96,9 +106,6 @@ impl Core {
             (self.projects.iter())
                 .position(|p| p.file.is_none() && p.project.name == loaded.project.name)
         };
-        if let Some(index) = self.index.get_mut(&loaded.project.name) {
-            index.project = None;
-        }
         match file.or_else(ad_hoc) {
             Some(i) => self.projects[i] = loaded,
             None => self.projects.push(loaded),
@@ -255,9 +262,6 @@ impl Ctx<'_> {
         project.check()?;
         let Some((path, old)) = &loaded.file else {
             loaded.project = project;
-            if let Some(index) = self.core.index.get_mut(name) {
-                index.project = None;
-            }
             return Ok(());
         };
         let mut doc: DocumentMut = old.parse().map_err(|err| format!("{err}"))?;
@@ -321,18 +325,15 @@ impl Ctx<'_> {
     /// Walks every root of the project `name` again, off the core thread; `quiet` echoes
     /// nothing, unless a walk the user asked for is still pending.
     pub(crate) fn index_project(&mut self, name: &str, quiet: bool) -> Result<(), String> {
-        let project = &self.core.projects[self.core.project(name)?].project;
-        let roots = project.all_roots().map(|r| r.path.clone()).collect();
-        let ignore = project.ignore.clone();
-        let project = project.clone();
+        let (roots, ignore) = scope(&self.core.projects[self.core.project(name)?].project);
         self.core.index_walks += 1;
         let walk = self.core.index_walks;
         let index = self.core.index.entry(name.into()).or_default();
         index.walk = walk;
-        if index.project.as_ref() != Some(&project) {
-            index.ready = false;
-        }
-        index.project = Some(project);
+        // The same roots and patterns keep their counts, and their watches, until the answer.
+        let walked = Some((roots.clone(), ignore.clone()));
+        index.ready &= index.scope == walked;
+        index.scope = walked;
         index.loud |= !quiet;
         if !quiet {
             self.core.echo(format!("Indexing {name}..."));
@@ -355,7 +356,8 @@ impl Ctx<'_> {
             return self.find_file(&path.to_string_lossy());
         }
         if let Some(index) = self.core.index.get_mut(&project) {
-            index.loud |= !index.ready;
+            // No answer yet, as every answer lists the primary: the pending walk fills the list.
+            index.loud |= index.roots.is_empty();
         } else {
             self.index_project(&project, false)?;
         }
