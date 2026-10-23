@@ -118,7 +118,11 @@ impl Core {
                 let cols = (rect.width / cell_width) as usize;
                 let (buffers, settings) = (&self.buffers, &self.settings);
                 let mut display = window_display(window, buffers, settings, rect.height, cols);
-                if unwatched {
+                if unwatched
+                    && buffers
+                        .get(window.buffer())
+                        .is_some_and(|buffer| buffer.file.is_some())
+                {
                     display.mode_line.push_str(" [unwatched]");
                 }
                 display::FrameWindow {
@@ -305,15 +309,34 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "abc")]);
         h.keys("x C-x 2");
         h.open("a.txt");
-        let names: Vec<_> = (h.frame(80., 100.).windows.iter())
-            .map(|w| w.display.mode_line.clone())
-            .collect();
+        for _ in 0..2 {
+            let names: Vec<_> = (h.frame(80., 100.).windows.iter())
+                .map(|w| w.display.mode_line.clone())
+                .collect();
+            assert_eq!(
+                names,
+                ["-- a.txt  1:0 [unwatched]", "** *scratch*<main>  1:1"]
+            );
+            h.keys("C-x o");
+        }
+    }
+
+    #[test]
+    fn fileless_buffers_show_ordinary_mode_lines_in_unwatched_projects() {
+        let mut h = Harness::new(&[]);
         assert_eq!(
-            names,
-            [
-                "-- a.txt  1:0 [unwatched]",
-                "** *scratch*<main>  1:1 [unwatched]"
-            ]
+            h.frame(800., 600.).windows[0].display.mode_line,
+            "-- *scratch*<main>  1:0"
+        );
+        h.keys("C-x t l M-<");
+        assert_eq!(
+            h.frame(800., 600.).windows[0].display.mode_line,
+            "%% *Workspaces*  1:0"
+        );
+        h.keys("q M-z C-x b *Messages* RET M-<");
+        assert_eq!(
+            h.frame(800., 600.).windows[0].display.mode_line,
+            "%% *Messages*  1:0"
         );
     }
 
@@ -323,6 +346,7 @@ mod tests {
         h.index_reply("other", &["x"], &["other"]);
         h.index_reply("", &["other/x"], &["", "other"]);
         h.core.projects[0].project.primary.path = h.path("");
+        h.open("other/x");
         let lines = |h: &mut Harness| {
             h.frame(800., 600.)
                 .windows
@@ -330,19 +354,20 @@ mod tests {
                 .map(|w| w.display.mode_line)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
+        assert_eq!(lines(&mut h), ["-- x  1:0 [unwatched]"]);
         h.keys("C-x p w home RET C-p RET");
-        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0"]);
+        assert_eq!(lines(&mut h), ["-- x  1:0"]);
         h.keys("C-x p w home RET C-n RET M-x");
-        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
+        assert_eq!(lines(&mut h), ["-- x  1:0 [unwatched]"]);
         h.keys("C-g");
         h.core
             .add_project(crate::project::Loaded::ad_hoc("other", &h.path("other")));
         h.new_workspace("other", "other");
+        h.open("other/x");
         h.send(crate::Msg::Tick);
-        assert_eq!(lines(&mut h), ["-- *scratch*<other>  1:0"]);
+        assert_eq!(lines(&mut h), ["-- x<2>  1:0"]);
         h.keys("C-x p p home RET");
-        assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
+        assert_eq!(lines(&mut h), ["-- x  1:0 [unwatched]"]);
     }
 
     #[test]

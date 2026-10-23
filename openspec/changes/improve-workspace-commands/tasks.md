@@ -22,10 +22,17 @@
 
 - [x] 4.1 Update `docs/editor.md` configuration and workspace command descriptions with completion feedback, current-project default, tree layout, workspace-only activation, snapshot refresh and dismissal semantics; verify descriptions agree with both delta specs and remove the obsolete echo-only description.
 - [x] 4.2 Run `cargo fmt --all -- --check`, `cargo test -p aiditor-core` and `cargo test -p aiditor-services` to verify formatting and integration with existing project reload, command, minibuffer and buffer lifecycle behavior; resolve regressions introduced by this change.
-- [ ] 4.3 Smoke-test on macOS and Linux: successful/failed reload feedback, default/alternate project creation, a multi-project tree long enough to scroll, workspace-only navigation and activation, and dismissal. Record platform results and any unavailable platform explicitly; this check does not close the separate M1 gate in #85.
+- [x] 4.3 Smoke-test on macOS and Linux: successful/failed reload feedback, default/alternate project creation, a multi-project tree long enough to scroll, workspace-only navigation and activation, and dismissal. Record platform results and any unavailable platform explicitly; this check does not close the separate M1 gate in #85.
+
+## 5. Fileless buffer mode lines
+
+- [x] 5.1 Gate `[unwatched]` on the displayed buffer's file association in `Core::frame`; update frame, watch and index tests to cover mixed file/scratch splits, fileless temporary buffers, and retained file-backed eligibility labels.
+- [x] 5.2 Update `docs/editor.md` to restrict the label to file-backed windows; run core tests, formatting, lint and strict OpenSpec validation for this follow-up.
 
 ## Verification record (2026-10-23)
 
 Core tests: 399 passed, one existing ignored test. Services: 79 passed across unit, headless and integration targets, run outside the sandbox with piped output for native watcher and file-size-limit tests. Formatting, all-target Clippy with warnings denied, diff whitespace checks and strict OpenSpec validation passed. Initial service failures were resolved by the test execution environment, without service code changes.
 
-Task 4.3 remains pending: no manual native UI smoke test was performed on macOS or Linux. This session runs on macOS with native desktop control unavailable and has no Linux UI session. Core display tests cover scrolling and workspace-only activation, but do not replace the manual platform check.
+Task 4.3 accepted by the user on 2026-10-23: “Manual UI test is ok.” Platform-specific results were not supplied; this records user acceptance, not agent-executed macOS/Linux testing. The separate M1 gate in #85 remains outside this change.
+
+Follow-up: the user requested committing the existing work and applying the fileless-buffer label correction. The existing work was committed as `0e8aea9`; tasks 5.1–5.2 are implemented separately. Core tests now pass 400 tests with one existing ignored test. Formatting, all-target Clippy with warnings denied, diff whitespace checks and strict OpenSpec validation pass. Services tests were not rerun for this display-only follow-up. The manual UI task was subsequently accepted by the user as recorded above.

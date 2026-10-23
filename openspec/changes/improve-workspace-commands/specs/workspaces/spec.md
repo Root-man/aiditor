@@ -72,6 +72,24 @@ The list SHALL be an on-demand snapshot, refreshed whenever `workspace-list` is 
 
 ## ADDED Requirements
 
+### Requirement: Watch labels apply only to file-backed buffers
+An ordinary window displaying a buffer without an associated file SHALL omit the project's `[unwatched]` mode-line label. This includes scratch, `*Messages*`, temporary workspace lists and other fileless buffers. Windows displaying file-backed buffers SHALL retain the existing project eligibility label, including disabled watching, exceeded watch limits and pending eligibility counts. Each window SHALL use its own displayed buffer's file association. This display rule narrows the project watch label's scope without changing project watch eligibility or visited-file watching.
+
+#### Scenario: Scratch and a file share a split
+- **GIVEN** an unwatched project's workspace displays scratch and a file-backed buffer in separate windows
+- **WHEN** the frame is rendered
+- **THEN** scratch has its ordinary mode line and the file-backed window includes `[unwatched]`, regardless of which window is selected
+
+#### Scenario: Temporary and global fileless buffers
+- **GIVEN** the active workspace's project is unwatched
+- **WHEN** a window displays `*Workspaces*` or `*Messages*`
+- **THEN** it shows the buffer's ordinary mode line without the project watch label
+
+#### Scenario: File-backed labels follow eligibility
+- **GIVEN** a file-backed buffer is displayed in an unwatched project's workspace
+- **WHEN** the project becomes eligible for root watching
+- **THEN** the mode line returns to its ordinary form, and `[unwatched]` appears again if eligibility is lost
+
 ### Requirement: Only workspace rows activate in the workspace list
 In the workspace list, `n`/`p`, `C-n`/`C-p` and the down/up arrows SHALL move selection among workspace rows, skipping project headings and buffer rows and stopping at the first or last workspace. `RET` on a workspace row SHALL dismiss the invoking list and switch to that workspace using its existing window configuration. Choosing the current workspace SHALL simply dismiss the list. Project and buffer rows SHALL be informational: `RET` on either SHALL keep the current workspace and list visible and report `Select a workspace row`. Navigation from such a row SHALL select the next or previous workspace in the requested direction, clamping to an end workspace when necessary. `q` or `C-g` SHALL dismiss the list and return to an ordinary buffer in the invoking workspace. Dismissal SHALL use normal buffer-kill replacement behavior. The list SHALL NOT provide project activation, individual buffer activation or destructive workspace actions.
 

@@ -596,6 +596,7 @@ mod tests {
     #[test]
     fn startup_waits_for_counts_and_project_limit_overrides_settings() {
         let mut h = Harness::new(&[("a/x", ""), ("a/y", "")]);
+        h.open("a/x");
         h.index_reply("a", &["x", "y"], &["a"]);
         let mut project = Loaded::ad_hoc("p", &h.path("a"));
         project.project.max_watched_files = Some(2);
@@ -733,6 +734,8 @@ mod tests {
     #[test]
     fn edits_and_reloads_keep_root_watches_while_rewalking() {
         let mut h = indexed();
+        h.open("a/x");
+        h.send(Msg::Tick);
         let strings = vec!["p".into(), h.path("a").display().to_string(), "Main".into()];
         let mut ctx = h.ctx();
         ctx.call(

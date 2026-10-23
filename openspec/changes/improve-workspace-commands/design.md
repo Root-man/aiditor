@@ -65,6 +65,12 @@ For that first prompt, retain each project candidate's `ProjectId` alongside its
 
 Preselecting a name without retaining identity is insufficient for duplicate names. Skipping the project prompt would prevent the explicitly requested choice of another project.
 
+### 5. Restrict the watch label to file-backed buffers
+
+`Core::frame` currently appends `[unwatched]` to every ordinary window when the active workspace's project is ineligible for root watching. Retain that project-level eligibility calculation and gate the suffix on each displayed buffer's `file.is_some()`. Use the buffer's file association, not its name or mode, so scratch, messages, workspace lists and other fileless buffers all receive ordinary mode lines. File-backed buffers retain the existing label for disabled watching, exceeded limits and pending eligibility counts. This is a display-only change; file watches and project indexing keep their existing behavior.
+
+Update frame expectations and make watch/index tests that assert the label display a file-backed buffer, preserving their original eligibility coverage. Cover a split containing both a file and scratch, temporary buffers, and switching between watched and unwatched projects.
+
 ## Risks / Trade-offs
 
 - A list can become stale while another window changes workspaces or buffers → refresh on each invocation and validate workspace IDs on activation. Automatic refresh is outside this change.
@@ -83,7 +89,8 @@ Preselecting a name without retaining identity is insufficient for duplicate nam
 - [x] Add the local keymap and focused core tests; update the old echo-output test rather than retaining conflicting expectations.
 - [x] Update the configuration and workspace command descriptions in `docs/editor.md` during implementation.
 - [x] Leave service effects, GPUI rendering, config formats, exports and dependencies unchanged unless a concrete implementation need is established.
+- [x] Gate `[unwatched]` per displayed buffer in `frame.rs`, update affected tests, and document fileless mode lines in `docs/editor.md`.
 
 ## Migration Plan
 
-No migration is required. Existing command names and global keys remain. Implement and test the three behaviors, update documentation, and run a manual UI smoke check on macOS and Linux. Reverting the change restores the prior commands without touching user data. The full M1 gate in #85 remains separate.
+No migration is required. Existing command names and global keys remain. Implement and test the command behaviors and fileless mode-line correction, update documentation, and run a manual UI smoke check on macOS and Linux. Reverting the change restores the prior commands without touching user data. The full M1 gate in #85 remains separate.
