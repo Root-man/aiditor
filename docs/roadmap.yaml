@@ -1052,6 +1052,49 @@ milestones:
         body: |
           VS Code's user and workspace settings, for aiditor: a project file can override any setting of `settings.toml` and any binding of `keymap.toml`, in `[settings]` and `[keymap.<keymap>]` tables. The project layer applies over the user files entry by entry, as the user keymap applies over the bundled one, while a workspace of that project is current; switching workspace switches the layer, and `C-x C-r` reloads it. Bad entries are reported as in the global files. Project-only keys such as `watch` and `max_watched_files` (#191, #192) stay as they are; per-project indent width becomes an ordinary override. Unbinding a key needs "Named keymap prefixes, remappable as a whole" or its own unbind support. Break down when M5 starts.
         blocked_by: [m5-decide-settings]
+      - key: m5-workspace-presentation
+        title: "Workspace presentation"
+        labels: [frontend, project]
+        design: "#workspaces"
+        body: |
+          Keep the current project and workspace visible across buffer splits and in fullscreen mode. The initial scope is a thin workspace modeline showing only those two names; additional content can be considered later.
+        tasks:
+          - key: m5-workspace-modeline
+            title: "Add a thin frame-wide workspace modeline"
+            body: |
+              The native window title currently shows `filename | workspace | project`. In macOS fullscreen mode the title bar is hidden, so workspace and project context is no longer persistently visible. Adding both names to every buffer's mode line would repeat the same information across splits.
+
+              Add a **workspace modeline**: a thin, single-row bar at the top of the editor content, spanning the whole frame above all buffer windows. Show only the current project and workspace, for example `Project aiditor › Workspace watcher-fix`. Keep filenames and buffer-specific state in the existing buffer mode lines, and retain the native window title.
+
+              The workspace modeline is visible in both windowed and fullscreen modes. Keep its height comparable to an ordinary buffer mode line, with minimal padding and no toolbar-sized controls. Additional information can be considered later; this issue only covers project and workspace names and does not require an extension framework, tabs or switching controls.
+
+              ## Behavioral acceptance criteria
+
+              ### Visible frame-wide context
+              - **Given** a workspace with one or several split buffer windows
+              - **When** the frame is displayed in windowed or fullscreen mode
+              - **Then** one workspace modeline appears above all splits and shows the current project and workspace.
+
+              ### Context follows the workspace
+              - **Given** the workspace modeline is visible
+              - **When** the user switches workspaces, renames the current workspace, or reloads a changed project name
+              - **Then** it displays the current names.
+
+              ### Stable context during editing and commands
+              - **Given** several buffers in the current workspace
+              - **When** the user changes the selected buffer or split, opens a temporary buffer, or uses the minibuffer
+              - **Then** the workspace modeline continues to show the current project and workspace in the same position.
+
+              ### Narrow frames and long names
+              - **Given** project or workspace names exceed the available width
+              - **When** the frame is rendered or resized
+              - **Then** the bar remains one row high, with predictable truncation that retains a visible portion of both names and does not overlap buffer content.
+            acceptance:
+              - "One frame-wide workspace modeline, outside the buffer split tree."
+              - "Thin, single-row presentation consistent with the editor's font and theme."
+              - "Content limited to project and workspace; existing buffer mode lines and native title retained."
+              - "Works on macOS and Linux; macOS fullscreen checked explicitly."
+              - "Display behavior covered by tests and documented in `docs/editor.md`."
       - key: m5-dashboard
         title: "Welcome dashboard"
         labels: [frontend, project]
