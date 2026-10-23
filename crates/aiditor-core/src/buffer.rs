@@ -122,6 +122,7 @@ impl Buffers {
             history: History::default(),
             major_mode: "fundamental-mode",
             minor_modes: Vec::new(),
+            workspace_rows: Vec::new(),
             point: MarkerId(0),
         })
     }
@@ -262,6 +263,7 @@ pub struct Buffer {
     pub major_mode: &'static str,
     /// Names the minor modes' keymaps in `Core`, highest priority first.
     pub minor_modes: Vec<&'static str>,
+    pub(crate) workspace_rows: Vec<(usize, WorkspaceId)>,
     /// The point of the last window that stopped showing this buffer, where the next one starts.
     pub point: MarkerId,
 }

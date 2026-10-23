@@ -11,6 +11,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use crate::buffer::{BufferId, file_name};
 use crate::command::{Args, Command, Filter, Preview};
 use crate::frame::window_display;
+use crate::project::ProjectId;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
 use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, PreviewRequest, display};
@@ -107,7 +108,7 @@ pub(crate) struct Prompts {
     /// Each prompt's answers, newest first.
     history: HashMap<String, Vec<String>>,
     /// The fuzzy matcher for completion, made on first use.
-    pub(crate) matcher: Option<Nucleo<(String, String)>>,
+    pub(crate) matcher: Option<Nucleo<(String, String, Option<ProjectId>)>>,
     /// The timer that polls the matcher again while it is still matching.
     repoll: Option<TimerId>,
     pub(crate) accepted_swiper: Option<crate::swiper::Search>,
@@ -229,7 +230,7 @@ impl Ctx<'_> {
                     .into_iter()
                     .filter(|n| !directories || n.ends_with('/'));
                 for name in here.into_iter().chain(names) {
-                    injector.push((name, String::new()), |(c, _), cols| {
+                    injector.push((name, String::new(), None), |(c, _, _), cols| {
                         cols[0] = c.as_str().into()
                     });
                 }
@@ -296,9 +297,13 @@ impl Ctx<'_> {
             matcher.restart(true);
             (matcher.pattern).reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
             let injector = matcher.injector();
-            for c in candidates.into_iter().flatten() {
+            for (index, c) in candidates.into_iter().flatten().enumerate() {
                 let note = note(core, &c);
-                injector.push((c, note), |(c, _), cols| cols[0] = c.as_str().into());
+                let project = (command.name == "workspace-new" && args.strings.is_empty())
+                    .then(|| core.projects[index].id);
+                injector.push((c, note, project), |(c, _, _), cols| {
+                    cols[0] = c.as_str().into()
+                });
             }
         }
         let completion = (matching || filtered.is_some()).then(|| {
@@ -367,6 +372,17 @@ impl Ctx<'_> {
             .as_ref()
             .and_then(|mb| mb.completion.as_ref());
         let filtered = completion.is_some_and(|c| c.filtered.is_some());
+        let project = selected
+            .as_ref()
+            .filter(|_| core.prompts.command() == Some("workspace-new"))
+            .and_then(|_| {
+                let snapshot = core.prompts.matcher.as_ref()?.snapshot();
+                let last = snapshot.matched_item_count().checked_sub(1)?;
+                snapshot
+                    .get_matched_item((completion?.selected as u32).min(last))?
+                    .data
+                    .2
+            });
         if filtered && selected.is_none() {
             return Err("Match required".into());
         }
@@ -393,6 +409,9 @@ impl Ctx<'_> {
             self.core.prompts.remember(&mb.prompt, text.clone());
         }
         let mut args = mb.args;
+        if let Some(project) = project {
+            args.project = Some(project);
+        }
         args.strings.push(text);
         self.core.this_command = Some(mb.command);
         self.core.prompts.accepted_swiper = mb
@@ -593,7 +612,9 @@ impl Core {
                     let matched = snapshot.matched_item_count() as usize;
                     let rows = range(matched);
                     let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
-                    (candidates, annotations) = items.map(|item| item.data.clone()).unzip();
+                    (candidates, annotations) = items
+                        .map(|item| (item.data.0.clone(), item.data.1.clone()))
+                        .unzip();
                     (matched, rows)
                 }
                 (None, None) => (0, 0..0),
@@ -768,7 +789,7 @@ impl Core {
         };
         let injector = matcher.injector();
         for c in candidates {
-            injector.push((c, String::new()), |(c, _), cols| {
+            injector.push((c, String::new(), None), |(c, _, _), cols| {
                 cols[0] = c.as_str().into()
             });
         }

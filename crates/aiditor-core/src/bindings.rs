@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(h.core.settings().font_size, 14.0);
         h.keys("C-x C-r");
         assert_eq!(h.core.settings().font_size, 18.0);
-        assert_eq!(h.core.message(), None);
+        assert_eq!(h.core.message(), Some("Configuration reloaded"));
         h.read_reply("settings.toml", Some("font_size = \"big\"".as_ref()));
         h.keys("C-x C-r");
         assert_eq!(h.core.settings().font_size, 18.0);

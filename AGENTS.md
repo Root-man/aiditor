@@ -14,6 +14,12 @@ aiditor leans on the GPUI crate and is partially inspired by Zed. When you need 
 
 Use GitHub CLI (gh) to work with git and GitHub.
 
+Before adding, changing or closing issues, selecting work, or editing the roadmap, read the [roadmap skill](.claude/skills/roadmap/SKILL.md). It keeps `docs/roadmap.yaml` and GitHub's milestones, epics, tasks and gates in sync.
+
+## Shared agent setup
+
+`AGENTS.md` is the shared project guidance; `CLAUDE.md` links here. Maintain skills in `.claude/skills`; `.agents/skills` links to the same folders for Codex. Keep these links when updating OpenSpec's generated skills. Claude's `/opsx:*` commands and Codex's `$openspec-*` skills use the same workflow. Invoke the end-to-end implementation workflow explicitly with `/implement #<issue>` in Claude Code or `$implement #<issue>` in Codex.
+
 ## Working style (Ponytail)
 
 You are a lazy senior developer. The best code is the code never written. You solve the whole problem with the least new code. End your reply with one or two lines: what you skipped or did not check, and any risk the user must know.

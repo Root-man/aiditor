@@ -101,6 +101,17 @@
 "s-c" = "kill-ring-save"
 "s-v" = "yank"
 
+[workspace-list-mode]
+"n" = "workspace-list-next"
+"p" = "workspace-list-previous"
+"C-n" = "workspace-list-next"
+"C-p" = "workspace-list-previous"
+"<down>" = "workspace-list-next"
+"<up>" = "workspace-list-previous"
+"RET" = "workspace-list-visit"
+"q" = "workspace-list-quit"
+"C-g" = "workspace-list-quit"
+
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
 "C-g" = "abort-minibuffers"

@@ -401,6 +401,7 @@ mod tests {
     #[test]
     fn same_scope_refreshes_preserve_snapshot_counts_watches_and_mode_lines() {
         let (mut h, project) = setup();
+        h.open("old");
         let first = walks(&mut h).pop().unwrap();
         h.send(answer(&first, &["old"], 2));
         let accepted = h.core.watch_set();
@@ -430,6 +431,7 @@ mod tests {
     #[test]
     fn changed_scopes_wait_for_fresh_counts_and_partial_errors_keep_reporting() {
         let (mut h, project) = setup();
+        h.open("old");
         let first = walks(&mut h).pop().unwrap();
         h.send(answer(&first, &["old"], 1));
         let at = h.core.project_at(project).unwrap();
