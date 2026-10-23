@@ -40,7 +40,7 @@
 
 ## 4. Checks
 
-- [ ] 4.1 Verify that `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and the rest of `.github/workflows/ci.yml` pass. The terminal tests must pass on macOS here and on Linux in CI.
-  Prior verification (before the no-sleep flood regression): [GitHub Actions run 39961592738](https://github.com/Root-man/aiditor/actions/runs/39961592738) passed on Linux and macOS for implementation commit `c10af6e`, including formatting, clippy, architecture checks and both complete workspace test suites. The existing file-size-limit test was excluded only from the local macOS run with user approval; CI ran it unchanged.
+- [x] 4.1 Verify that `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and the rest of `.github/workflows/ci.yml` pass. The terminal tests must pass on macOS here and on Linux in CI.
+  Verification: [GitHub Actions run 39977466536](https://github.com/Root-man/aiditor/actions/runs/39977466536) passed on Linux and macOS for implementation commit `16722b4`, including formatting, clippy, architecture checks and both complete workspace test suites. The synchronized slow-receiver regression and ready-reader deadline test passed on macOS; Linux also passed the no-sleep background flood regression. The file-size-limit test was excluded only locally with user approval; CI ran it unchanged.
 
 - [x] 4.2 Run `openspec validate spawn-shell-in-pty --strict` and verify it passes.
