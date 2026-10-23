@@ -484,3 +484,187 @@ fn input_and_resize_for_an_unknown_terminal_are_ignored() {
     };
     assert!(terminals.run(resize).is_none());
 }
+
+/// The numbers after the last `label ` in `output`.
+fn pids_after(output: &str, label: &str) -> Vec<libc::pid_t> {
+    let (_, rest) = output.rsplit_once(label).expect("labelled pids");
+    rest.split_whitespace()
+        .map_while(|word| word.parse().ok())
+        .collect()
+}
+
+async fn gone(pid: libc::pid_t) {
+    timeout(Duration::from_secs(5), async {
+        // Signal 0 only checks the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("process {pid} still exists"));
+}
+
+/// Drains `rx` until the exit message, which must come from a signal.
+async fn killed(rx: &mut Receiver<Msg>) {
+    loop {
+        match next(rx).await.expect("terminal closed before exit") {
+            Msg::TerminalSpawned { .. } | Msg::TerminalOutput { .. } => {}
+            Msg::TerminalExited { signal, .. } => return assert!(signal.is_some()),
+            msg => panic!("unexpected {msg:?}"),
+        }
+    }
+}
+
+fn kill(terminals: &mut Terminals, id: TerminalId) {
+    assert!(terminals.run(TerminalOp::Kill { id }).is_none());
+}
+
+#[tokio::test]
+async fn kill_ends_the_shell_and_its_foreground_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let bash = ["bash", "--norc", "--noprofile", "-i"];
+    let command = Some(bash.map(Into::into).to_vec());
+    let mut rx = spawn(&mut terminals, dir.path(), command, vec![]);
+    started(&mut rx).await;
+    // `fg` makes the job the foreground process group, apart from the shell's.
+    write(&mut terminals, b"sleep 1000 & echo pids $$ $! ; fg\n");
+    let output = output_until(&mut rx, "sleep 1000\r\n").await;
+    let pids = pids_after(&output, "pids ");
+    assert_eq!(pids.len(), 2, "{output:?}");
+    kill(&mut terminals, ID);
+    killed(&mut rx).await;
+    for pid in pids {
+        gone(pid).await;
+    }
+}
+
+#[tokio::test]
+async fn kill_ends_a_shell_that_ignores_hangup_and_term() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let script = sh("trap '' HUP TERM; echo \"pid $$ \"; while :; do sleep 1; done");
+    let mut rx = spawn(&mut terminals, dir.path(), script, vec![]);
+    started(&mut rx).await;
+    let pid = pids_after(&output_until(&mut rx, " \r\n").await, "pid ")[0];
+    kill(&mut terminals, ID);
+    killed(&mut rx).await;
+    gone(pid).await;
+    let resize = TerminalOp::Resize {
+        id: ID,
+        rows: 30,
+        cols: 100,
+    };
+    assert!(terminals.run(resize).is_none());
+}
+
+#[tokio::test]
+async fn kill_ends_a_foreground_job_that_outlives_its_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let bash = ["bash", "--norc", "--noprofile", "-i"];
+    let mut rx = spawn(
+        &mut terminals,
+        dir.path(),
+        Some(bash.map(Into::into).to_vec()),
+        vec![],
+    );
+    started(&mut rx).await;
+    // Ignored signals stay ignored across exec, so the shell dies of SIGHUP and the job doesn't.
+    write(
+        &mut terminals,
+        b"sh -c \"trap '' HUP TERM; exec sleep 1000.3\"\n",
+    );
+    timeout(Duration::from_secs(5), async {
+        while !std::process::Command::new("pgrep")
+            .args(["-xf", "sleep 1000.3"])
+            .status()
+            .unwrap()
+            .success()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the job started");
+    kill(&mut terminals, ID);
+    killed(&mut rx).await;
+    none_running("sleep 1000.3").await;
+}
+
+/// Waits until no process has exactly `args` as its command line.
+async fn none_running(args: &str) {
+    timeout(Duration::from_secs(5), async {
+        while std::process::Command::new("pgrep")
+            .args(["-xf", args])
+            .status()
+            .unwrap()
+            .success()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{args} still running"));
+}
+
+#[tokio::test]
+async fn kill_right_after_spawn_ends_the_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let command = Some(vec!["sleep".into(), "1000.1".into()]);
+    let mut rx = spawn(&mut terminals, dir.path(), command, vec![]);
+    kill(&mut terminals, ID);
+    killed(&mut rx).await;
+    none_running("sleep 1000.1").await;
+}
+
+#[tokio::test]
+async fn kill_all_right_after_spawn_ends_the_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let command = Some(vec!["sleep".into(), "1000.2".into()]);
+    let _rx = spawn(&mut terminals, dir.path(), command, vec![]);
+    terminals.kill_all();
+    none_running("sleep 1000.2").await;
+}
+
+#[tokio::test]
+async fn kill_all_leaves_no_shells() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let mut pids = Vec::new();
+    for (id, script) in [
+        (TerminalId(1), "echo \"pid $$ \"; sleep 1000"),
+        (
+            TerminalId(2),
+            "trap '' HUP TERM; echo \"pid $$ \"; sleep 1000",
+        ),
+    ] {
+        let spawn = TerminalOp::Spawn {
+            id,
+            command: sh(script),
+            cwd: dir.path().into(),
+            env: vec![],
+            rows: 24,
+            cols: 80,
+        };
+        let mut rx = terminals.run(spawn).unwrap();
+        let started = Msg::TerminalSpawned { id, result: Ok(()) };
+        assert_eq!(next(&mut rx).await, Some(started));
+        pids.push(pids_after(&output_until(&mut rx, " \r\n").await, "pid ")[0]);
+        // Kept open, so the terminal's reader doesn't stop at a dropped receiver.
+        std::mem::forget(rx);
+    }
+    let start = Instant::now();
+    terminals.kill_all();
+    assert!(start.elapsed() >= Duration::from_millis(100));
+    for pid in pids {
+        gone(pid).await;
+    }
+}
+
+#[test]
+fn kill_of_an_unknown_terminal_is_ignored() {
+    kill(&mut Terminals::default(), ID);
+}
