@@ -42,6 +42,7 @@ impl Driver {
     fn run(&mut self, effects: aiditor_core::Effects) {
         for effect in effects {
             match effect {
+                Effect::Terminal(_) => {}
                 Effect::File(op) if self.hold_files => self.files.push_back(op),
                 Effect::File(op) => self.replies.push_back(files::run(op)),
                 Effect::Grep(GrepOp::Search(op)) => {

@@ -52,15 +52,19 @@ Four 64 KB batches cap a terminal's in-flight memory at 256 KB, on top of the ke
 ### Threads, not the blocking pool
 Each terminal runs on `std::thread`s:
 
-1. **Spawn thread.** It sets `IUTF8`, spawns the child, drops the slave and sends `TerminalSpawned`. On success it starts the reader, then becomes the wait thread.
-2. **Reader thread.** It reads into a 64 KB buffer and sends each read with `blocking_send`. It ends at EOF or an error, or when the channel is closed.
+1. **Spawn thread.** It sets `IUTF8`, spawns the child, drops the slave and sends `TerminalSpawned`. On success it starts the reader, then waits for the child and sends its status to the reader on a private channel.
+2. **Reader thread.** It polls the PTY with a 100 ms timeout, reads into a 64 KB buffer and sends each read with `blocking_send`. It is the sole sender of output and exit messages. EOF, including Linux `EIO`, ends output; if the child has not exited yet, it waits for the real status before sending exit.
 
 Tokio's blocking pool is for finite work, and these threads live as long as the terminal. #215 adds a third thread, the writer.
 
 ### Exit after output
-The reader and wait threads send independently, so `Exited` could overtake the last output batch. After `child.wait()` returns, the wait thread waits up to 100 ms for the reader to signal EOF (a `std::sync::mpsc` or a `Condvar`), then sends `Exited`. In the usual case the reader hits EOF as soon as the child's last slave fd closes, so `Exited` comes after all output. A background job holding the PTY open costs a 100 ms delay; its output keeps flowing after `Exited`, and the core will accept that.
+The reader owns the terminal's sender. When the wait thread supplies the child's exit status, the reader keeps draining output until EOF or it has spent 100 ms polling for more PTY input. Time blocked sending output does not consume that grace, so a slow core cannot let exit overtake buffered output. Output and exit use the same sender, preserving their order. A background job can keep writing after the exit message on Linux; its writes do not restart the grace. macOS revokes the slave when the session leader exits, so the continued-background-output regression runs only on Linux.
 
-Alternative: send `Exited` from the reader at EOF. Rejected: a background job would delay the exit indefinitely, which the issue rules out.
+Polling bounds idle reads to 100 ms so a background job holding the PTY open cannot delay the exit status. If EOF arrives before the status, the reader waits for the wait thread. Linux `EIO` is EOF (`portable-pty` already normalizes it; the service handles it explicitly too).
+
+Alternatives rejected:
+- Let the wait thread send `Exited` after a fixed wall-clock grace: a full channel lets exit overtake output on Linux.
+- Drain a `FIONREAD` snapshot: Linux's readable-byte count can omit bytes still moving through the PTY buffers; the large-output slow-receiver regression catches this.
 
 ### Environment
 A pure function `terminal_env(base: impl Iterator<(OsString, OsString)>, extra) -> Vec<…>` computes the variables the shell gets. It applies the editor's base env and the extra variables, then sets `TERM`, `COLORTERM`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION = env!("CARGO_PKG_VERSION")`, adds `LANG` if it is unset and removes `SHLVL`. The spawn applies the result to the `CommandBuilder` (`env_remove("SHLVL")` plus `env`). Unit tests call the function with a base that has no `LANG`, because Rust 2024 makes `remove_var` unsafe and the test process's env can't be changed safely.
@@ -78,7 +82,7 @@ The spawn thread fails the spawn when `cwd` is not a directory, before calling `
 
 ## Risks / Trade-offs
 
-- [The 100 ms grace is a guess] → Output already in the kernel buffer when the child exits is read in microseconds. Only a background job holding the PTY waits the full grace.
+- [Exit reporting uses a 100 ms polling grace] → Backpressure does not consume it. Background output continues after exit; its writes do not restart the grace.
 - [Linux may drop the PTY's buffered output when the slave closes] → Kernels since 4.x return the remaining data before `EIO`. The "output then exit" test runs on Linux CI and would catch a regression.
 - [macOS `stty -a` might not print `iutf8`] → Check on the first macOS run. If it doesn't, assert the flag with `tcgetattr` on the master instead.
 - [Shells are not killed yet] → Until #216, a spawned terminal outlives its use. Nothing in the app spawns one before then, and service tests run scripts that exit.

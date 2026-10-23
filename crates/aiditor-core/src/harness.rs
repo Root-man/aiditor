@@ -206,6 +206,7 @@ impl Harness {
         }
         for effect in effects {
             match effect {
+                Effect::Terminal(_) => {}
                 Effect::File(op) => {
                     let reply = match &op {
                         FileOp::Save {

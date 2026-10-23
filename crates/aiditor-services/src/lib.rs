@@ -5,12 +5,13 @@ pub mod files;
 pub mod grep;
 pub mod projects;
 pub mod recovery;
+pub mod terminal;
 pub mod watcher;
 
 use aiditor_core::Msg;
 use tokio::sync::mpsc;
 
-/// The channel every service sends results on. Bounded, so a core that falls behind slows services down.
+/// The shared service channel; terminals use their own bounded channels.
 pub fn channel() -> (mpsc::Sender<Msg>, mpsc::Receiver<Msg>) {
     mpsc::channel(256)
 }

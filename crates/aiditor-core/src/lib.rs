@@ -152,6 +152,22 @@ pub enum Msg {
         hits: Result<Vec<Hit>, String>,
         done: bool,
     },
+    /// The terminal service's spawn answer: started, or why not.
+    TerminalSpawned {
+        id: TerminalId,
+        result: Result<(), String>,
+    },
+    /// The terminal service's next batch of raw output, at most 64 KB.
+    TerminalOutput {
+        id: TerminalId,
+        bytes: Vec<u8>,
+    },
+    /// The terminal service's child exit status, after its buffered output.
+    TerminalExited {
+        id: TerminalId,
+        code: u32,
+        signal: Option<String>,
+    },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
     ConfigurationLoaded {
@@ -252,6 +268,8 @@ pub enum Effect {
     File(FileOp),
     /// A project grep, answered with `Msg::Grepped` batches.
     Grep(GrepOp),
+    /// A terminal spawn, answered with started, output and exit messages.
+    Terminal(TerminalOp),
     /// Watch this set from now on, answered with `Msg::FilesChanged` reports.
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
@@ -324,6 +342,23 @@ pub enum FileOp {
         path: PathBuf,
         old: Option<String>,
         text: String,
+    },
+}
+
+/// A terminal identity chosen by the core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalId(pub u64);
+
+/// Work for the terminal service.
+pub enum TerminalOp {
+    /// Start a command, or the login shell, answered with `Msg::TerminalSpawned`.
+    Spawn {
+        id: TerminalId,
+        command: Option<Vec<String>>,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+        rows: u16,
+        cols: u16,
     },
 }
 
@@ -443,6 +478,9 @@ impl Ctx<'_> {
 
     fn dispatch(&mut self, msg: Msg) {
         match msg {
+            Msg::TerminalSpawned { .. }
+            | Msg::TerminalOutput { .. }
+            | Msg::TerminalExited { .. } => {}
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.

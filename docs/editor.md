@@ -294,7 +294,7 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 ## Subsystems
 
-**Terminal.** Built on `alacritty_terminal` for VT emulation and `portable-pty` for the PTY. A workspace usually holds several shells. Each terminal has two modes, as in vterm: *char mode* sends almost every key to the shell (only an escape prefix stays with the editor), *copy mode* turns the scrollback into a read-only buffer where Emacs motion, search and kill work. Shell-integration escape codes (OSC 133 prompt marks, OSC 7 cwd) give jump-to-prompt and per-command output capture.
+**Terminal.** Built on `alacritty_terminal` for VT emulation and `portable-pty` for the PTY. The PTY service spawns off the UI thread with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=aiditor` and `TERM_PROGRAM_VERSION` set to the editor version. It inherits the editor's environment with extra variables on top, defaults `LANG` to `en_US.UTF-8` when unset, removes `SHLVL`, and sets the PTY's `IUTF8` input flag on macOS and Linux for UTF-8 canonical-mode erase. The terminal variables override extra variables. A workspace usually holds several shells. Each terminal has two modes, as in vterm: *char mode* sends almost every key to the shell (only an escape prefix stays with the editor), *copy mode* turns the scrollback into a read-only buffer where Emacs motion, search and kill work. Shell-integration escape codes (OSC 133 prompt marks, OSC 7 cwd) give jump-to-prompt and per-command output capture.
 
 **`$EDITOR` in terminals.** Git runs in terminal buffers, so `git commit` and `git rebase -i` launch `$EDITOR`. Terminal buffers set `EDITOR` and `VISUAL` to a small client command, like `emacsclient`, that opens the file in a buffer in the terminal's workspace and blocks until you finish or abort the edit. The mechanism is to be decided (likely a Unix socket the editor listens on).
 
@@ -303,7 +303,7 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 - **Launched from a shell** (`aiditor .`): use the inherited environment as is.
 - **Otherwise:** capture the environment once per project, on first use, by running the user's shell as an interactive login shell in the project's primary repo: `$SHELL -l -i -c '<print a marker>; env -0'`. Read only what follows the marker (shell profiles sometimes print text), give up after a few seconds, and fall back to the app's own environment with a note in the Messages buffer. Running it in the project's directory also picks up direnv and per-directory version managers. A command re-captures it after you change your shell setup.
 - **Overrides.** The agent registry and the project file can set extra `env` on top.
-- Terminal buffers start the user's shell as a login shell, which loads the profile itself; the captured environment matters most for agent processes and formatter commands.
+- Terminal buffers start the user's shell as a login shell, which loads the profile itself (bash reads `.bash_profile`, falling back to `.bash_login` or `.profile`, rather than `.bashrc`); the captured environment matters most for agent processes and formatter commands.
 
 **Language support.** Tree-sitter for highlighting, folding and structural motion in Elixir, Rust, JS/TS and Markdown. LSP comes after the MVP, one server per root and language.
 
@@ -344,7 +344,7 @@ A build or a `cat` of a large file can produce megabytes per second of terminal 
 
 - **One redraw per frame at most.** A change marks the view dirty; GPUI renders once per frame.
 - **Batched reads.** The PTY reader reads whatever is available (up to about 64 KB) and sends one message per batch.
-- **Bounded channels.** If the core falls behind, the reader stops reading, the kernel's PTY buffer fills, and the program producing the output blocks. That is the usual terminal flow control, and it caps memory.
+- **Bounded channels.** Each terminal has its own channel, four batches deep, separate from the shared service channel. If the core falls behind, only that terminal's reader stops reading, its kernel PTY buffer fills, and its producing program blocks; other terminals and service replies keep flowing. That is the usual terminal flow control, and it caps memory.
 
 Agent streams need nothing more than that: ACP updates are small and slow compared with PTY output. Re-render only the message being streamed, not the whole transcript.
 
