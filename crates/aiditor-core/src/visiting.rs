@@ -101,7 +101,7 @@ impl Ctx<'_> {
         }
         let buffer = self.core.current();
         self.effects.push(Effect::File(FileOp::Revert {
-            buffer: self.core.window.buffer(),
+            buffer: self.core.windows.window.buffer(),
             tick: buffer.tick(),
             path,
             text: buffer.text().clone(),
@@ -114,7 +114,7 @@ impl Ctx<'_> {
     /// saves after `Keep mine`, and saves at once when there is no conflict.
     pub(crate) fn resolve_conflict(&mut self, command: &str, args: Args) -> Result<(), String> {
         let save = command == "save-buffer";
-        let id = self.core.window.buffer();
+        let id = self.core.windows.window.buffer();
         let buffer = self.core.current_mut();
         let (Some(path), Some(hash)) = (buffer.file.clone(), buffer.conflict) else {
             // An answer arriving after the conflict ended does nothing more.
@@ -158,7 +158,7 @@ impl Ctx<'_> {
         let path =
             (buffer.file.clone()).ok_or("Buffer does not seem to be associated with any file")?;
         self.effects.push(Effect::File(FileOp::Diff {
-            buffer: self.core.window.buffer(),
+            buffer: self.core.windows.window.buffer(),
             name: buffer.name.clone(),
             path,
             text: buffer.text().clone(),
@@ -318,8 +318,8 @@ impl Core {
         if self.buffers.get(id).is_none_or(|b| b.tick() != tick) {
             return;
         }
-        let point = |core: &Core| match core.window.buffer() == id {
-            true => core.window.point(&core.buffers),
+        let point = |core: &Core| match core.windows.window.buffer() == id {
+            true => core.windows.window.point(&core.buffers),
             false => {
                 let b = core.buffers.get(id).expect("live");
                 b.marker(b.point).unwrap_or(0)
@@ -374,7 +374,7 @@ impl Core {
 
     /// Shows buffer `id` in the selected window, as a jump, and makes it the most recent.
     pub(crate) fn switch_to(&mut self, id: BufferId) {
-        if self.window.buffer() != id {
+        if self.windows.window.buffer() != id {
             self.push_jump();
         }
         self.show_buffer(id);
@@ -383,8 +383,8 @@ impl Core {
     /// Shows buffer `id` in the selected window and makes it the most recent.
     pub(crate) fn show_buffer(&mut self, id: BufferId) {
         self.buffers.raise(id);
-        if self.window.buffer() != id {
-            self.window.show(&mut self.buffers, id);
+        if self.windows.window.buffer() != id {
+            self.windows.window.show(&mut self.buffers, id);
         }
     }
 
@@ -397,7 +397,7 @@ impl Core {
     /// The names of the current workspace's buffers and `*Messages*` not hidden by a leading
     /// space, most recently shown first, with the current buffer first or last.
     pub(crate) fn buffer_names(&self, current_first: bool) -> Vec<String> {
-        let current = self.window.buffer();
+        let current = self.windows.window.buffer();
         let listed = self
             .buffers
             .recent()
@@ -420,22 +420,14 @@ impl Core {
             let name = self.current_workspace().name.clone();
             self.buffers.create_scratch(&name)
         });
-        for window in std::iter::once(&mut self.window).chain(self.others.values_mut()) {
-            if window.buffer() == id {
-                window.show(&mut self.buffers, next);
-            }
-        }
+        self.windows.replace_buffer(&mut self.buffers, id, next);
         for workspace in &mut self.workspaces {
             let Some(windows) = &mut workspace.windows else {
                 continue;
             };
             // Every live workspace keeps its `*scratch*`, so `next` is only a guard.
             let theirs = replacement(&self.buffers, id, workspace.id).unwrap_or(next);
-            for window in windows.windows_mut() {
-                if window.buffer() == id {
-                    window.show(&mut self.buffers, theirs);
-                }
-            }
+            windows.replace_buffer(&mut self.buffers, id, theirs);
         }
     }
 }
@@ -470,7 +462,11 @@ mod tests {
     fn reverting() -> Harness {
         let mut h = Harness::new(&[("a.txt", LINES)]);
         h.open("a.txt");
-        h.core.window.set_point(&mut h.core.buffers, 11).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 11)
+            .unwrap();
         h
     }
 
@@ -493,21 +489,37 @@ mod tests {
     #[test]
     fn a_revert_keeps_the_mark_and_other_windows_on_their_lines() {
         let mut h = reverting();
-        h.core.window.set_mark(&mut h.core.buffers, 14).unwrap();
+        h.core
+            .windows
+            .window
+            .set_mark(&mut h.core.buffers, 14)
+            .unwrap();
         h.keys("C-x 2");
-        let other = *h.core.others.keys().next().unwrap();
-        let w = &h.core.others[&other];
+        let other = *h.core.windows.others.keys().next().unwrap();
+        let w = &h.core.windows.others[&other];
         w.set_point(&mut h.core.buffers, 16).unwrap();
         revert(&mut h, &LINES[2..]);
-        assert_eq!(h.core.window.mark(&h.core.buffers), Some(12), "on h");
-        assert_eq!(h.core.others[&other].point(&h.core.buffers), 14, "on i");
+        assert_eq!(
+            h.core.windows.window.mark(&h.core.buffers),
+            Some(12),
+            "on h"
+        );
+        assert_eq!(
+            h.core.windows.others[&other].point(&h.core.buffers),
+            14,
+            "on i"
+        );
         assert_eq!(h.point(), 9, "still at column 1 of f");
     }
 
     #[test]
     fn point_in_a_changed_line_goes_to_its_replacement() {
         let mut h = reverting();
-        h.core.window.set_point(&mut h.core.buffers, 5).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, 5)
+            .unwrap();
         revert(&mut h, &LINES.replace("c\n", "ccc\n"));
         assert_eq!(h.point(), 4);
     }
@@ -549,7 +561,7 @@ mod tests {
         let mut ctx = h.ctx();
         ctx.call("revert-buffer", Args::default());
         let effects = ctx.effects;
-        let id = h.core.window.buffer();
+        let id = h.core.windows.window.buffer();
         h.core.kill_buffer(id);
         h.run(effects);
         assert!(h.core.buffers.get(id).is_none());
@@ -604,7 +616,7 @@ mod tests {
 
     /// The buffer names the windows show, the selected one first.
     fn shown(h: &Harness) -> Vec<String> {
-        let ws = std::iter::once(&h.core.window).chain(h.core.others.values());
+        let ws = std::iter::once(&h.core.windows.window).chain(h.core.windows.others.values());
         let names = ws.map(|w| h.core.buffers.get(w.buffer()).unwrap().name.clone());
         names.collect()
     }
@@ -669,7 +681,7 @@ mod tests {
         let mut ctx = h.ctx();
         ctx.call("diff-buffer-with-file", Args::default());
         let effects = ctx.effects;
-        let id = h.core.window.buffer();
+        let id = h.core.windows.window.buffer();
         h.core.kill_buffer(id);
         h.run(effects);
         assert!(h.core.buffers.find("*Diff*").is_none());
@@ -678,7 +690,7 @@ mod tests {
         let mut ctx = h.ctx();
         ctx.call("diff-buffer-with-file", Args::default());
         let effects = ctx.effects;
-        h.core.new_workspace("w", "home");
+        h.new_workspace("w", "home");
         h.run(effects);
         assert!(h.core.buffers.find("*Diff*").is_none());
     }
@@ -817,7 +829,7 @@ mod tests {
         let mut h = Harness::new(&[("a", "1"), ("b", "2")]);
         h.open("a").open("b");
         let shown = |h: &Harness| {
-            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+            let id = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
             h.core.buffers.get(id).unwrap().name.clone()
         };
         h.keys("C-x b");
@@ -844,7 +856,7 @@ mod tests {
         let mut h = Harness::new(&[("x", "1")]);
         h.open("x");
         let main = h.core.workspace();
-        let w = h.core.new_workspace("w", "p");
+        let w = h.new_workspace("w", "p");
         h.keys("C-x k x RET");
         assert_eq!(h.core.message(), Some("No such buffer x"));
         h.keys("C-x b");
@@ -886,15 +898,15 @@ mod tests {
         let mut h = Harness::new(&[("a", "1")]);
         h.open("a");
         h.keys("C-x 4 b RET");
-        let leaves = h.core.tree.leaves();
-        assert_eq!((leaves.len(), h.core.selected), (2, leaves[1]));
+        let leaves = h.core.windows.tree.leaves();
+        assert_eq!((leaves.len(), h.core.windows.selected), (2, leaves[1]));
         assert_eq!(name(&h), "*scratch*<main>");
-        let upper = h.core.others[&leaves[0]].buffer();
+        let upper = h.core.windows.others[&leaves[0]].buffer();
         assert_eq!(h.core.buffers.get(upper).unwrap().name, "a");
         // With two windows it uses the next one rather than splitting again.
         h.keys("C-x 4 b RET");
         assert_eq!(
-            (h.core.tree.leaves().len(), h.core.selected),
+            (h.core.windows.tree.leaves().len(), h.core.windows.selected),
             (2, leaves[0])
         );
     }
@@ -910,7 +922,7 @@ mod tests {
             (name(&h), h.core.buffers.find("a")),
             ("*scratch*<main>", None)
         );
-        let other = h.core.others[&WindowId(1)].buffer();
+        let other = h.core.windows.others[&WindowId(1)].buffer();
         assert_eq!(h.core.buffers.get(other).unwrap().name, "*scratch*<main>");
         h.keys("C-x k nope RET");
         assert_eq!(h.core.message(), Some("No such buffer nope"));
@@ -1085,7 +1097,7 @@ mod tests {
         let mut h = in_dir();
         std::fs::write(h.path("d/bin"), b"a\0b").unwrap();
         let shown = |h: &Harness| {
-            let id = h.core.others[&h.core.tree.leaves()[0]].buffer();
+            let id = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
             h.core.buffers.get(id).unwrap().text().to_string()
         };
         h.keys("C-x C-f b.txt");

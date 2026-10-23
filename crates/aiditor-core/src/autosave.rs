@@ -45,7 +45,7 @@ impl Ctx<'_> {
                 let id = match &r.path {
                     Some(path) => {
                         core.visit(path, r.disk, false);
-                        core.window.buffer()
+                        core.windows.window.buffer()
                     }
                     None => match core.buffers.find(&r.name) {
                         Some(id) if !core.buffers.get(id).expect("found").modified() => id,
@@ -53,7 +53,7 @@ impl Ctx<'_> {
                     },
                 };
                 core.switch_to(id);
-                let point = core.window.point(&core.buffers);
+                let point = core.windows.window.point(&core.buffers);
                 let buffer = core.buffers.get_mut(id).expect("just shown");
                 let len = buffer.len_chars();
                 buffer.undo_boundary(point);

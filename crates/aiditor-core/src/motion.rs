@@ -17,17 +17,17 @@ impl Ctx<'_> {
         core.message = None;
         // So the next typed char starts a new undo group.
         core.self_inserts = 0;
-        core.window.set_active(false);
+        core.windows.window.set_active(false);
         core.last_command = Some("mouse-set-point");
         let buffer = core.current();
         // Point's line is drawn scrolled sideways, so its shown columns start at the window's left.
         let point_line = buffer
-            .line_col(core.window.point(&core.buffers))
+            .line_col(core.windows.window.point(&core.buffers))
             .ok()
             .map(|(l, _)| l);
         let col = col
             + if point_line == Some(line) {
-                core.window.left()
+                core.windows.window.left()
             } else {
                 0
             };
@@ -40,7 +40,7 @@ impl Ctx<'_> {
     /// Moves point to `p`, which must be in the buffer.
     pub(crate) fn goto(&mut self, p: usize) -> Result<(), String> {
         let core = &mut *self.core;
-        Ok(core.window.set_point(&mut core.buffers, p)?)
+        Ok(core.windows.window.set_point(&mut core.buffers, p)?)
     }
 
     /// Moves point to `target` clamped to the buffer, reporting an end it ran into.
@@ -135,7 +135,7 @@ impl Ctx<'_> {
     /// Goes to the start, or the end, of the buffer; a number N goes N tenths in from that end,
     /// then to the next line's start.
     pub(crate) fn buffer_end(&mut self, prefix: Option<Prefix>, end: bool) -> Result<(), String> {
-        if !self.core.window.active() && !matches!(prefix, Some(Prefix::Universal(_))) {
+        if !self.core.windows.window.active() && !matches!(prefix, Some(Prefix::Universal(_))) {
             self.push_mark(false)?;
         }
         let buffer = self.core.current();
@@ -153,8 +153,8 @@ impl Ctx<'_> {
     /// Scrolls `n` lines down the buffer, up when negative, keeping point in the window.
     pub(crate) fn scroll_lines(&mut self, n: i64) -> Result<(), String> {
         let core = &mut *self.core;
-        let rows = core.window.rows();
-        let top = core.window.scroll(&core.buffers, rows);
+        let rows = core.windows.window.rows();
+        let top = core.windows.window.scroll(&core.buffers, rows);
         let buffer = core.current();
         let last = buffer.len_lines() as i64 - 1;
         let new = (top as i64).saturating_add(n).clamp(0, last) as usize;
@@ -169,7 +169,7 @@ impl Ctx<'_> {
         let p = buffer
             .char_idx(shown, 0)
             .expect("shown line is in the buffer");
-        core.window.set_top(new);
+        core.windows.window.set_top(new);
         if shown != line {
             self.goto(p)?;
         }
@@ -183,7 +183,7 @@ impl Ctx<'_> {
         prefix: Option<Prefix>,
         sign: i64,
     ) -> Result<(), String> {
-        let page = (self.core.window.rows() as i64 - 2).max(1);
+        let page = (self.core.windows.window.rows() as i64 - 2).max(1);
         let n = match prefix {
             None => page,
             Some(Prefix::Minus) => -page,
@@ -195,7 +195,7 @@ impl Ctx<'_> {
     /// Puts point's line at a row: from the prefix, or middle, top, bottom on repeated calls.
     pub(crate) fn recenter(&mut self, prefix: Option<Prefix>) {
         let core = &mut *self.core;
-        let rows = core.window.rows() as i64;
+        let rows = core.windows.window.rows() as i64;
         // A prefixed call leaves the cycle where it was, as in Emacs.
         let row = match prefix {
             None => {
@@ -213,7 +213,9 @@ impl Ctx<'_> {
             .current()
             .line_col(core.point())
             .expect("point is in the buffer");
-        core.window.set_top(line.saturating_sub(row as usize));
+        core.windows
+            .window
+            .set_top(line.saturating_sub(row as usize));
     }
 }
 
@@ -366,7 +368,7 @@ mod tests {
         h.keys("M-<");
         assert_eq!(h.point(), 0);
         assert_eq!(mark(&h), (Some(5), false));
-        assert_eq!(h.core.window.ring(&h.core.buffers), [2]);
+        assert_eq!(h.core.windows.window.ring(&h.core.buffers), [2]);
         let mut h = on("ab\ncd");
         h.keys("C-f C-f C-SPC M->");
         assert_eq!(
@@ -374,7 +376,7 @@ mod tests {
             (5, (Some(2), true)),
             "an active region keeps its mark"
         );
-        assert_eq!(h.core.window.ring(&h.core.buffers), []);
+        assert_eq!(h.core.windows.window.ring(&h.core.buffers), []);
         let mut h = on(&"123456789\n".repeat(10));
         h.keys("C-u 5 M-<");
         assert_eq!(h.point(), 60);

@@ -478,7 +478,21 @@ mod tests {
         let shown = cx.window_title().unwrap();
         assert!(shown.starts_with("t.txt | "), "{shown}");
         editor.update(cx, |e, cx| {
-            e.core.new_workspace("w2", "other");
+            let project =
+                aiditor_core::project::Project::parse("name = 'other'\n[primary]\npath = '/other'")
+                    .unwrap();
+            e.core.handle(
+                Instant::now(),
+                Msg::ProjectsLoaded {
+                    dir: None,
+                    projects: vec![Ok(aiditor_core::project::Loaded {
+                        project,
+                        file: None,
+                    })],
+                },
+            );
+            e.core
+                .new_workspace("w2", e.core.project_id("other").unwrap());
             cx.notify();
         });
         cx.run_until_parked();

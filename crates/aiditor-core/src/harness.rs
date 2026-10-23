@@ -36,6 +36,8 @@ pub struct Harness {
     pub grep_paused: bool,
     /// What the core last asked the watcher to watch.
     pub watched: WatchSet,
+    pub collect_effects: bool,
+    pub effects: Effects,
 }
 
 impl Harness {
@@ -51,7 +53,6 @@ impl Harness {
         // Named the same whatever `$HOME` is, so scratch names, titles and snapshots don't vary.
         core.rename_workspace("main").unwrap();
         core.projects[0].project.name = "home".into();
-        core.workspaces[0].project = "home".into();
         Harness {
             core,
             dir,
@@ -63,7 +64,17 @@ impl Harness {
             greps: Vec::new(),
             grep_paused: false,
             watched: WatchSet::default(),
+            collect_effects: false,
+            effects: Vec::new(),
         }
+    }
+
+    pub fn new_workspace(&mut self, name: &str, project: &str) -> crate::workspace::WorkspaceId {
+        let project = self.core.project_id(project).unwrap_or_else(|_| {
+            self.core
+                .add_project(crate::project::Loaded::ad_hoc(project, self.dir.path()))
+        });
+        self.core.new_workspace(name, project)
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -127,6 +138,10 @@ impl Harness {
     }
 
     pub(crate) fn run(&mut self, effects: Effects) {
+        if self.collect_effects {
+            self.effects.extend(effects);
+            return;
+        }
         // File replies arrive after the entire effect batch in the app.
         for effect in &effects {
             if let Effect::Watch(set) = effect {
@@ -178,21 +193,29 @@ impl Harness {
                     self.send(Msg::Listed { dir, result });
                 }
                 // As `projects::write` does, minus its check of the roots.
-                Effect::File(FileOp::WriteProject { path, old, text }) => {
+                Effect::File(FileOp::WriteProject {
+                    intent,
+                    path,
+                    old,
+                    text,
+                }) => {
                     if std::fs::read_to_string(&path).ok() != old {
                         let err =
                             format!("{} changed on disk; reload with C-x C-r", path.display());
-                        self.send(Msg::ProjectWritten(Err(err)));
+                        self.send(Msg::ProjectWritten {
+                            intent,
+                            result: Err(err),
+                        });
                         continue;
                     }
                     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                     std::fs::write(&path, &text).unwrap();
                     let project = crate::project::Project::parse(&text).unwrap();
                     let file = Some((path, text));
-                    self.send(Msg::ProjectWritten(Ok(crate::project::Loaded {
-                        project,
-                        file,
-                    })));
+                    self.send(Msg::ProjectWritten {
+                        intent,
+                        result: Ok(crate::project::Loaded { project, file }),
+                    });
                 }
                 // As `files::index` does, minus the ignore files and patterns.
                 Effect::File(FileOp::Index {
@@ -311,6 +334,52 @@ impl Harness {
     pub fn disk(&self, name: &str) -> String {
         std::fs::read_to_string(self.path(name)).unwrap()
     }
+}
+
+#[test]
+fn collected_saves_can_be_answered_in_reverse_order_across_workspaces() {
+    let mut h = Harness::new(&[]);
+    h.collect_effects = true;
+    let first = h.core.workspace();
+    let path = h.path("held.txt");
+    h.core
+        .open(&path, Some((b"original".to_vec(), hash(b"original"))));
+    h.keys("first SPC C-x C-s");
+    let first_buffer = h.core.windows.window.buffer();
+    let second = h.new_workspace("second", "home");
+    h.core
+        .open(&path, Some((b"original".to_vec(), hash(b"original"))));
+    h.keys("second SPC C-x C-s");
+    let second_buffer = h.core.windows.window.buffer();
+    let replies: Vec<_> = std::mem::take(&mut h.effects)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::File(FileOp::Save {
+                buffer, tick, text, ..
+            }) => Some(Msg::Saved {
+                buffer,
+                tick,
+                result: Ok(hash(text.to_string().as_bytes())),
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 2);
+    for reply in replies.into_iter().rev() {
+        h.send(reply);
+    }
+    assert_eq!(h.core.workspace(), second);
+    assert_eq!(h.text(), "second original\n");
+    assert_eq!(
+        h.core.buffers.get(second_buffer).unwrap().disk,
+        Some(hash(b"second original\n"))
+    );
+    h.core.switch_workspace(first).unwrap();
+    assert_eq!(h.text(), "first original\n");
+    assert_eq!(
+        h.core.buffers.get(first_buffer).unwrap().disk,
+        Some(hash(b"first original\n"))
+    );
 }
 
 /// Adds the files under `dir`, relative to `root`, skipping `.git`.
@@ -456,7 +525,10 @@ pub(crate) fn twenty_lines() -> Harness {
 
 /// The mark and whether it is active.
 pub(crate) fn mark(h: &Harness) -> (Option<usize>, bool) {
-    (h.core.window.mark(&h.core.buffers), h.core.window.active())
+    (
+        h.core.windows.window.mark(&h.core.buffers),
+        h.core.windows.window.active(),
+    )
 }
 
 pub(crate) fn bind_mode(h: &mut Harness, mode: &'static str, keys: &str, command: &'static str) {
@@ -465,7 +537,7 @@ pub(crate) fn bind_mode(h: &mut Harness, mode: &'static str, keys: &str, command
 }
 
 pub(crate) fn buffer(h: &mut Harness) -> &mut crate::buffer::Buffer {
-    let id = h.core.window.buffer();
+    let id = h.core.windows.window.buffer();
     h.core.buffers.get_mut(id).unwrap()
 }
 
@@ -481,14 +553,17 @@ pub(crate) fn insert_cmd(h: &mut Harness) {
                 core.this_command(),
                 core.last_command()
             ));
-            let point = core.window.point(&core.buffers);
-            let id = core.window.buffer();
+            let point = core.windows.window.point(&core.buffers);
+            let id = core.windows.window.buffer();
             core.buffers
                 .get_mut(id)
                 .unwrap()
                 .insert(point, "hi")
                 .unwrap();
-            core.window.set_point(&mut core.buffers, point + 2).unwrap();
+            core.windows
+                .window
+                .set_point(&mut core.buffers, point + 2)
+                .unwrap();
             Ok(())
         },
     });

@@ -11,10 +11,10 @@ impl Ctx<'_> {
         }
         let core = &mut *self.core;
         if core.last_command == Some("set-mark-command")
-            && core.window.mark(&core.buffers).is_some()
+            && core.windows.window.mark(&core.buffers).is_some()
         {
-            let active = !core.window.active();
-            core.window.set_active(active);
+            let active = !core.windows.window.active();
+            core.windows.window.set_active(active);
             let what = if active { "activated" } else { "deactivated" };
             core.echo(format!("Mark {what}"));
             return Ok(());
@@ -26,7 +26,9 @@ impl Ctx<'_> {
     pub(crate) fn push_mark(&mut self, activate: bool) -> Result<(), String> {
         let core = &mut *self.core;
         let point = core.point();
-        core.window.push_mark(&mut core.buffers, point, activate)?;
+        core.windows
+            .window
+            .push_mark(&mut core.buffers, point, activate)?;
         core.echo("Mark set".into());
         Ok(())
     }
@@ -35,7 +37,7 @@ impl Ctx<'_> {
     fn pop_to_mark(&mut self) -> Result<(), String> {
         let mark = self.mark()?;
         self.goto(mark)?;
-        self.core.window.pop_mark();
+        self.core.windows.window.pop_mark();
         // So a C-SPC right after sets a new mark rather than toggling, as in Emacs.
         self.core.this_command = Some("pop-to-mark-command");
         Ok(())
@@ -45,14 +47,14 @@ impl Ctx<'_> {
         let mark = self.mark()?;
         let core = &mut *self.core;
         let point = core.point();
-        core.window.set_mark(&mut core.buffers, point)?;
-        core.window.set_active(true);
+        core.windows.window.set_mark(&mut core.buffers, point)?;
+        core.windows.window.set_active(true);
         self.goto(mark)
     }
 
     pub(crate) fn mark(&self) -> Result<usize, String> {
         let core = &*self.core;
-        (core.window.mark(&core.buffers)).ok_or_else(|| "No mark set in this buffer".into())
+        (core.windows.window.mark(&core.buffers)).ok_or_else(|| "No mark set in this buffer".into())
     }
 }
 
@@ -73,7 +75,7 @@ mod tests {
         h.keys("C-f C-SPC");
         assert_eq!(mark(&h), (Some(3), true));
         assert_eq!(
-            h.core.window.ring(&h.core.buffers),
+            h.core.windows.window.ring(&h.core.buffers),
             [0],
             "the old mark is pushed"
         );
@@ -99,7 +101,7 @@ mod tests {
         );
         h.keys("C-f C-SPC C-f C-f C-SPC C-e C-u C-SPC");
         assert_eq!((h.point(), mark(&h)), (3, (Some(1), false)));
-        assert_eq!(h.core.window.ring(&h.core.buffers), [3]);
+        assert_eq!(h.core.windows.window.ring(&h.core.buffers), [3]);
         h.keys("C-SPC");
         assert_eq!(mark(&h), (Some(3), true), "C-SPC after a pop sets the mark");
     }
@@ -123,7 +125,7 @@ mod tests {
         assert_eq!(mark(&h), (Some(0), false));
         assert_eq!(h.display(1).lines[0].spans.len(), 1, "no region shown");
         h.keys("C-x C-x C-/");
-        assert!(!h.core.window.active(), "undo is a change too");
+        assert!(!h.core.windows.window.active(), "undo is a change too");
     }
 
     #[test]
@@ -131,7 +133,10 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.send(Msg::Log("hello".into()))
             .keys("C-x b *Messages* RET C-SPC C-f");
-        assert!(h.core.window.active(), "logging `Mark set` is not an edit");
+        assert!(
+            h.core.windows.window.active(),
+            "logging `Mark set` is not an edit"
+        );
     }
 
     #[test]
@@ -140,7 +145,7 @@ mod tests {
         h.keys("x C-SPC C-SPC C-SPC");
         h.open("a.txt");
         assert_eq!(mark(&h), (None, false));
-        assert_eq!(h.core.window.ring(&h.core.buffers), []);
+        assert_eq!(h.core.windows.window.ring(&h.core.buffers), []);
     }
 
     #[test]

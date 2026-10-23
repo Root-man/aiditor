@@ -12,9 +12,11 @@ impl Ctx<'_> {
         let core = &mut *self.core;
         let id = WindowId(core.next_window);
         core.next_window += 1;
-        let new = core.window.split(&mut core.buffers);
-        core.others.insert(id, new);
-        core.tree.split(core.selected, id, side_by_side);
+        let new = core.windows.window.split(&mut core.buffers);
+        core.windows.others.insert(id, new);
+        core.windows
+            .tree
+            .split(core.windows.selected, id, side_by_side);
         Ok(())
     }
 
@@ -22,20 +24,20 @@ impl Ctx<'_> {
     /// keeps the selection, as Emacs's `display-buffer`; a window already showing it is enough.
     pub(crate) fn display_buffer(&mut self, id: BufferId) {
         let core = &mut *self.core;
-        if std::iter::once(&core.window)
-            .chain(core.others.values())
+        if std::iter::once(&core.windows.window)
+            .chain(core.windows.others.values())
             .any(|w| w.buffer() == id)
         {
             return;
         }
-        if core.tree.leaves().len() == 1 {
+        if core.windows.tree.leaves().len() == 1 {
             self.split_window(false).expect("outside the minibuffer");
         }
         let core = &mut *self.core;
-        let leaves = core.tree.leaves();
-        let at = leaves.iter().position(|&w| w == core.selected);
+        let leaves = core.windows.tree.leaves();
+        let at = leaves.iter().position(|&w| w == core.windows.selected);
         let next = leaves[(at.expect("the selected window is in the tree") + 1) % leaves.len()];
-        let window = core.others.get_mut(&next).expect("a leaf is live");
+        let window = core.windows.others.get_mut(&next).expect("a leaf is live");
         window.show(&mut core.buffers, id);
     }
 
@@ -44,8 +46,8 @@ impl Ctx<'_> {
         // shortcut: Emacs leaves the minibuffer active in another window; allow it once commands can come back to it.
         self.outside_minibuffer("Can't leave the minibuffer")?;
         let core = &mut *self.core;
-        let leaves = core.tree.leaves();
-        let at = leaves.iter().position(|&id| id == core.selected);
+        let leaves = core.windows.tree.leaves();
+        let at = leaves.iter().position(|&id| id == core.windows.selected);
         let at = at.expect("the selected window is in the tree") as i64;
         let next = (at + n.rem_euclid(leaves.len() as i64)) as usize % leaves.len();
         core.select(leaves[next]);
@@ -55,11 +57,12 @@ impl Ctx<'_> {
     /// Deletes the selected window, selecting the sibling that takes its space.
     pub(crate) fn delete_window(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
-        let old = core.selected;
-        let next = (core.tree.remove(old))
+        let old = core.windows.selected;
+        let next = (core.windows.tree.remove(old))
             .ok_or("Attempt to delete minibuffer or sole ordinary window")?;
         core.select(next);
-        core.others
+        core.windows
+            .others
             .remove(&old)
             .expect("deleted window is live")
             .release(&mut core.buffers);
@@ -70,10 +73,10 @@ impl Ctx<'_> {
     pub(crate) fn delete_other_windows(&mut self) -> Result<(), String> {
         self.outside_minibuffer("Can't expand minibuffer to full frame")?;
         let core = &mut *self.core;
-        for (_, window) in core.others.drain() {
+        for (_, window) in core.windows.others.drain() {
             window.release(&mut core.buffers);
         }
-        core.tree = Tree::Leaf(core.selected);
+        core.windows.tree = Tree::Leaf(core.windows.selected);
         Ok(())
     }
 }
@@ -83,15 +86,16 @@ impl Core {
     /// It has no width, so point's line never scrolls sideways.
     #[cfg(test)]
     pub fn display(&mut self, height: f32) -> display::WindowDisplay {
-        let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
+        let (window, buffers, settings) = (&mut self.windows.window, &self.buffers, &self.settings);
         window_display(window, buffers, settings, height, usize::MAX)
     }
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
     pub fn frame(&mut self) -> display::FrameDisplay {
-        let unwatched = self.projects.iter().any(|p| {
-            p.project.name == self.current_workspace().project && !self.project_watched(&p.project)
-        });
+        let unwatched = self
+            .projects
+            .iter()
+            .any(|p| p.id == self.current_workspace().project && !self.project_watched(p));
         let (width, height, cell_width) = self.frame_size;
         let cell = (cell_width, self.settings.line_height());
         let frame = display::Rect {
@@ -100,12 +104,16 @@ impl Core {
             width,
             height,
         };
-        let windows = (self.tree.layout(frame, cell).into_iter())
+        let windows = (self.windows.tree.layout(frame, cell).into_iter())
             .map(|(id, rect)| {
-                let selected = id == self.selected;
+                let selected = id == self.windows.selected;
                 let window = match selected {
-                    true => &mut self.window,
-                    false => self.others.get_mut(&id).expect("tree windows are live"),
+                    true => &mut self.windows.window,
+                    false => self
+                        .windows
+                        .others
+                        .get_mut(&id)
+                        .expect("tree windows are live"),
                 };
                 let cols = (rect.width / cell_width) as usize;
                 let (buffers, settings) = (&self.buffers, &self.settings);
@@ -128,7 +136,7 @@ impl Core {
             buffer.name,
             if buffer.modified() { " *" } else { "" },
             workspace.name,
-            workspace.project
+            self.project_name(workspace.project)
         );
         display::FrameDisplay {
             windows,
@@ -141,19 +149,23 @@ impl Core {
 
     /// Makes window `id` the selected one.
     pub(crate) fn select(&mut self, id: WindowId) {
-        if id == self.selected {
+        if id == self.windows.selected {
             return;
         }
-        let window = self.others.remove(&id).expect("selected window is live");
-        let old = std::mem::replace(&mut self.window, window);
-        self.others.insert(self.selected, old);
-        self.selected = id;
+        let window = self
+            .windows
+            .others
+            .remove(&id)
+            .expect("selected window is live");
+        let old = std::mem::replace(&mut self.windows.window, window);
+        self.windows.others.insert(self.windows.selected, old);
+        self.windows.selected = id;
     }
 
     /// The window's first line once point's line is among the `rows` it shows.
     #[cfg(test)]
     pub fn scroll(&mut self, rows: usize) -> usize {
-        self.window.scroll(&self.buffers, rows)
+        self.windows.window.scroll(&self.buffers, rows)
     }
 }
 
@@ -202,12 +214,17 @@ mod tests {
     /// Each window's (id, point), in tree order, and the selected id.
     fn windows(h: &Harness) -> (Vec<(usize, usize)>, usize) {
         let core = &h.core;
-        let point = |id| match core.others.get(&id) {
+        let point = |id| match core.windows.others.get(&id) {
             Some(w) => w.point(&core.buffers),
             None => core.point(),
         };
-        let all = core.tree.leaves().into_iter().map(|id| (id.0, point(id)));
-        (all.collect(), core.selected.0)
+        let all = core
+            .windows
+            .tree
+            .leaves()
+            .into_iter()
+            .map(|id| (id.0, point(id)));
+        (all.collect(), core.windows.selected.0)
     }
 
     #[test]
@@ -215,10 +232,10 @@ mod tests {
         let mut h = on("abcdef");
         h.keys("C-f C-f C-f C-x 2");
         assert_eq!(windows(&h), (vec![(0, 3), (1, 3)], 0));
-        assert_eq!(h.core.window.mark(&h.core.buffers), None);
+        assert_eq!(h.core.windows.window.mark(&h.core.buffers), None);
         h.keys("C-SPC C-x 3");
         assert_eq!(
-            h.core.others[&crate::WindowId(2)].mark(&h.core.buffers),
+            h.core.windows.others[&crate::WindowId(2)].mark(&h.core.buffers),
             None,
             "no mark"
         );
@@ -230,7 +247,7 @@ mod tests {
         h.keys("C-f C-f C-f C-x 2 M->");
         assert_eq!(windows(&h), (vec![(0, 6), (1, 3)], 0));
         h.keys("C-x o");
-        assert_eq!((h.point(), h.core.selected.0), (3, 1));
+        assert_eq!((h.point(), h.core.windows.selected.0), (3, 1));
         h.keys("C-x o");
         assert_eq!(h.point(), 6);
         h.keys("C-b C-b C-b C-b C-b X Y");
@@ -248,15 +265,15 @@ mod tests {
         let order: Vec<_> = windows(&h).0.iter().map(|w| w.0).collect();
         assert_eq!(order, [0, 2, 1]);
         h.keys("C-x o");
-        assert_eq!(h.core.selected.0, 2);
+        assert_eq!(h.core.windows.selected.0, 2);
         h.keys("C-x o C-x o");
-        assert_eq!(h.core.selected.0, 0, "wraps to the first");
+        assert_eq!(h.core.windows.selected.0, 0, "wraps to the first");
         h.keys("C-u - 1 C-x o");
-        assert_eq!(h.core.selected.0, 1, "backward to the last");
+        assert_eq!(h.core.windows.selected.0, 1, "backward to the last");
         h.keys("C-u 4 C-x o");
-        assert_eq!(h.core.selected.0, 0);
+        assert_eq!(h.core.windows.selected.0, 0);
         h.keys("C-x 1 C-x o");
-        assert_eq!(h.core.selected.0, 0, "one window does nothing");
+        assert_eq!(h.core.windows.selected.0, 0, "one window does nothing");
     }
 
     #[test]
@@ -317,9 +334,8 @@ mod tests {
         assert_eq!(lines(&mut h), ["-- *scratch*<main>  1:0 [unwatched]"]);
         h.keys("C-g");
         h.core
-            .projects
-            .push(crate::project::Loaded::ad_hoc("other", &h.path("other")));
-        h.core.new_workspace("other", "other");
+            .add_project(crate::project::Loaded::ad_hoc("other", &h.path("other")));
+        h.new_workspace("other", "other");
         h.send(crate::Msg::Tick);
         assert_eq!(lines(&mut h), ["-- *scratch*<other>  1:0"]);
         h.keys("C-x p p home RET");
@@ -334,7 +350,7 @@ mod tests {
         assert_eq!(h.frame(80., 100.).title, "t.txt | main | home");
         h.keys("x");
         assert_eq!(h.frame(80., 100.).title, "t.txt * | main | home");
-        h.core.new_workspace("w2", "other");
+        h.new_workspace("w2", "other");
         assert_eq!(h.frame(80., 100.).title, "*scratch*<w2> | w2 | other");
         h.core.rename_workspace("w3").unwrap();
         assert_eq!(h.frame(80., 100.).title, "*scratch*<w3> | w3 | other");
@@ -387,7 +403,7 @@ mod tests {
             .map(|i| char::from(b'a' + (i % 26) as u8))
             .collect();
         let mut h = on(&format!("{long}\nnext"));
-        let id = h.core.window.buffer();
+        let id = h.core.windows.window.buffer();
         let buffer = h.core.buffers.get_mut(id).unwrap();
         let rule = crate::buffer::Prop::Line(crate::buffer::Decoration::Rule(0x888888));
         buffer.add_property(9_990..9_995, rule).unwrap();

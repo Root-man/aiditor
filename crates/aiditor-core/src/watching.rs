@@ -3,31 +3,32 @@
 use std::path::PathBuf;
 
 use crate::command::Args;
-use crate::project::Project;
+use crate::project::{Entry, ProjectId};
 use crate::project_commands::{FileIndex, scope};
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
 
 impl Core {
     /// A project with `watch = true`: its kept files and directories, as a walk of its current
     /// roots and patterns counted them without an error, and its `max_watched_files`.
-    fn watch_counts(&self, project: &Project) -> Option<(usize, usize, usize)> {
-        let index = (self.index.get(&project.name))
+    fn watch_counts(&self, entry: &Entry) -> Option<(usize, usize, usize)> {
+        let project = &entry.project;
+        let index = (self.index.get(&entry.id))
             .filter(|i| project.watch && i.ready && i.scope == Some(scope(project)))?;
         let files = index.roots.iter().map(|(_, files)| files.len()).sum();
         let limit = (project.max_watched_files).unwrap_or(self.settings.max_watched_files);
         Some((files, index.directories, limit))
     }
 
-    pub(crate) fn project_watched(&self, project: &Project) -> bool {
-        (self.watch_counts(project)).is_some_and(|(files, dirs, limit)| files.max(dirs) <= limit)
+    pub(crate) fn project_watched(&self, entry: &Entry) -> bool {
+        (self.watch_counts(entry)).is_some_and(|(files, dirs, limit)| files.max(dirs) <= limit)
     }
 
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
     /// file a buffer visits.
     pub fn watch_set(&self) -> WatchSet {
         let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
-            .filter(|p| self.workspaces.iter().any(|w| w.project == p.project.name))
-            .filter(|p| self.project_watched(&p.project))
+            .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
+            .filter(|p| self.project_watched(p))
             .flat_map(|p| {
                 (p.project.all_roots()).map(|r| (r.path.clone(), p.project.ignore.clone()))
             })
@@ -45,12 +46,13 @@ impl Core {
     /// Sends the watch set when it changed since last sent.
     pub(crate) fn watch(&mut self, effects: &mut Effects) {
         let refusals: std::collections::BTreeMap<_, _> = (self.projects.iter())
-            .filter(|p| self.workspaces.iter().any(|w| w.project == p.project.name))
-            .filter_map(|p| Some((p.project.name.clone(), self.watch_counts(&p.project)?)))
+            .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
+            .filter_map(|p| Some((p.id, self.watch_counts(p)?)))
             .filter(|(_, (files, dirs, limit))| files.max(dirs) > limit)
             .collect();
         for (name, &(files, directories, limit)) in &refusals {
             if self.watch_refusals.get(name) != Some(&(files, directories, limit)) {
+                let name = self.project_name(*name);
                 self.report(format!("Project {name} is unwatched: files = {files}, directories = {directories}; max_watched_files = {limit} exceeded"));
             }
         }
@@ -74,19 +76,14 @@ impl Ctx<'_> {
                     && self
                         .core
                         .index
-                        .get(&p.project.name)
+                        .get(&p.id)
                         .is_none_or(|i| i.scope != Some(scope(&p.project)))
             })
-            .filter(|p| {
-                self.core
-                    .workspaces
-                    .iter()
-                    .any(|w| w.project == p.project.name)
-            })
-            .map(|p| p.project.name.clone())
+            .filter(|p| self.core.workspaces.iter().any(|w| w.project == p.id))
+            .map(|p| p.id)
             .collect();
         for name in names {
-            _ = self.index_project(&name, true);
+            _ = self.index_project(name, true);
         }
     }
 
@@ -124,7 +121,7 @@ impl Ctx<'_> {
         if self.core.prompts.minibuffer.is_some() {
             return;
         }
-        let id = self.core.window.buffer();
+        let id = self.core.windows.window.buffer();
         let focused = std::mem::replace(&mut self.core.focused, id);
         let buffer = self.core.current_mut();
         if focused != id && buffer.conflict.is_some() && !buffer.conflict_asked {
@@ -149,16 +146,16 @@ impl Ctx<'_> {
             .core
             .projects
             .iter()
-            .filter(|p| self.core.project_watched(&p.project))
-            .map(|p| p.project.name.clone())
+            .filter(|p| self.core.project_watched(p))
+            .map(|p| p.id)
             .collect();
-        let stale: Vec<String> = (self.core.index.iter_mut())
+        let stale: Vec<ProjectId> = (self.core.index.iter_mut())
             .filter(|(name, _)| watched.contains(*name))
-            .filter_map(|(name, index)| (stale(index, &paths) || rescan).then(|| name.clone()))
+            .filter_map(|(name, index)| (stale(index, &paths) || rescan).then_some(*name))
             .collect();
         for name in stale {
             // A project no longer loaded has nothing to walk.
-            _ = self.index_project(&name, true);
+            _ = self.index_project(name, true);
         }
     }
 }
@@ -245,8 +242,8 @@ mod tests {
     fn a_save_in_one_workspace_reverts_the_other_workspaces_buffer() {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
-        let main = h.core.window.buffer();
-        h.core.new_workspace("w", "home");
+        let main = h.core.windows.window.buffer();
+        h.new_workspace("w", "home");
         h.open("a.txt");
         h.keys("x C-x C-s");
         assert_eq!(h.disk("a.txt"), "xa\n");
@@ -380,8 +377,8 @@ mod tests {
         h.keys("C-x C-s RET");
         assert_eq!(name(&h), "a.txt");
         assert!(mode_line(&mut h).contains("[conflict]"));
-        let other = *h.core.others.keys().next().unwrap();
-        let diff = h.core.others[&other].buffer();
+        let other = *h.core.windows.others.keys().next().unwrap();
+        let diff = h.core.windows.others[&other].buffer();
         let text = h.core.buffers.get(diff).unwrap().text().to_string();
         assert!(text.contains("-other\n+xa\n"), "{text}");
         assert_eq!(h.disk("a.txt"), "other\n");
@@ -467,7 +464,7 @@ mod tests {
     fn a_rescan_checks_every_visited_file_in_every_workspace() {
         let mut h = Harness::new(&[("a.txt", ""), ("b.txt", "")]);
         h.open("a.txt");
-        h.core.new_workspace("w", "home");
+        h.new_workspace("w", "home");
         h.open("b.txt");
         std::fs::remove_file(h.path("a.txt")).unwrap();
         h.send(Msg::FilesChanged {
@@ -525,11 +522,11 @@ mod tests {
             },
             roots: Vec::new(),
         };
-        h.core.projects.push(Loaded {
+        h.core.add_project(Loaded {
             project,
             file: None,
         });
-        h.core.new_workspace("w", "p");
+        h.new_workspace("w", "p");
         h.keys("C-g");
         assert_eq!(h.watched.roots, [(h.path("a"), vec!["*.log".into()])]);
         h.keys("C-x t 0");
@@ -542,8 +539,8 @@ mod tests {
     /// The `p` project on `a`, indexed, with the current workspace bound to it.
     fn indexed() -> Harness {
         let mut h = Harness::new(&[("a/x", "")]);
-        h.core.projects.push(Loaded::ad_hoc("p", &h.path("a")));
-        h.core.workspaces[0].project = "p".into();
+        h.core.add_project(Loaded::ad_hoc("p", &h.path("a")));
+        h.core.workspaces[0].project = h.core.project_id("p").unwrap();
         h.keys("C-x p i p RET");
         h.core.message = None;
         h
@@ -561,14 +558,14 @@ mod tests {
         let mut h = Harness::new(&[("a/x", ""), ("a/y", "")]);
         let mut project = Loaded::ad_hoc("p", &h.path("a"));
         project.project.max_watched_files = Some(2);
-        h.core.projects.push(project);
-        h.core.workspaces[0].project = "p".into();
+        h.core.add_project(project);
+        h.core.workspaces[0].project = h.core.project_id("p").unwrap();
         h.core.settings.max_watched_files = 1;
         let effects = h.core.handle(h.now, Msg::Tick);
         assert_eq!(h.core.watch_set().roots, []);
         assert!(
             effects.iter().any(
-                |e| matches!(e, Effect::File(FileOp::Index { project, .. }) if project == "p")
+                |e| matches!(e, Effect::File(FileOp::Index { project, .. }) if *project == h.core.project_id("p").unwrap())
             )
         );
         h.keys("C-x p f");
@@ -672,11 +669,8 @@ mod tests {
         assert_eq!(h.watched.roots, []);
         assert!(h.core.message().unwrap().contains("directories = 4"));
         let mut empty = Harness::new(&[]);
-        empty
-            .core
-            .projects
-            .push(Loaded::ad_hoc("p", &empty.path("")));
-        empty.core.workspaces[0].project = "p".into();
+        empty.core.add_project(Loaded::ad_hoc("p", &empty.path("")));
+        empty.core.workspaces[0].project = empty.core.project_id("p").unwrap();
         empty.core.settings.max_watched_files = 0;
         empty.send(Msg::Tick);
         assert!(
@@ -756,7 +750,7 @@ mod tests {
         // A saved project edited by hand is walked with its new patterns.
         let mut q = Loaded::ad_hoc("q", &h.path("a"));
         q.file = Some((h.path("q.toml"), String::new()));
-        h.core.projects.push(q.clone());
+        h.core.add_project(q.clone());
         h.keys("C-x p i q RET");
         q.project.ignore = vec!["*.log".into()];
         let effects = (h.core).handle(
@@ -770,7 +764,7 @@ mod tests {
             .filter_map(|e| match e {
                 Effect::File(FileOp::Index {
                     project, ignore, ..
-                }) => Some((&**project, ignore)),
+                }) => Some((h.core.project_name(*project), ignore)),
                 _ => None,
             })
             .collect();
@@ -841,8 +835,8 @@ mod tests {
     fn shared_root_and_rescan_reports_refresh_only_watched_indexes() {
         let mut h = indexed();
         h.keys("C-x p w p RET C-n RET");
-        h.core.projects.push(Loaded::ad_hoc("q", &h.path("a")));
-        h.core.new_workspace("q", "q");
+        h.core.add_project(Loaded::ad_hoc("q", &h.path("a")));
+        h.new_workspace("q", "q");
         h.keys("C-x p i q RET");
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
         let walks = h.core.index_walks;

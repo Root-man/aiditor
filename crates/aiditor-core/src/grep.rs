@@ -142,7 +142,7 @@ impl Core {
     /// Puts point at the pending grep jump when `path`, just read, is the current buffer's file.
     pub(crate) fn grep_jump(&mut self, path: &Path) {
         if let Some((_, line, col)) = self.grep.jump.take_if(|(p, ..)| p == path)
-            && self.buffers.visiting(path) == Some(self.window.buffer())
+            && self.buffers.visiting(path) == Some(self.windows.window.buffer())
         {
             self.goto_line_col(line, col);
         }
@@ -152,7 +152,7 @@ impl Core {
         let buffer = self.current();
         // A line past the end, the file having changed since, is the end.
         let p = buffer.char_idx(line, col).unwrap_or(buffer.len_chars());
-        if let Err(err) = self.window.jump(&mut self.buffers, p) {
+        if let Err(err) = self.windows.window.jump(&mut self.buffers, p) {
             tracing::debug!(%err, "grep jump outside the buffer");
         }
     }
@@ -165,13 +165,13 @@ impl Ctx<'_> {
         if let Some(label) = args.strings.first() {
             let hit = self.core.grep.hit(label).ok_or("No match")?;
             let (path, line, col) = (hit.root.join(&hit.path), hit.line, hit.col);
-            let from = self.core.window.buffer();
+            let from = self.core.windows.window.buffer();
             self.find_file(&path.to_string_lossy())?;
             // A visited file is switched to at once; another jumps once read.
-            match self.core.buffers.visiting(&path) == Some(self.core.window.buffer()) {
+            match self.core.buffers.visiting(&path) == Some(self.core.windows.window.buffer()) {
                 true => {
                     // Switching to another buffer recorded the jump already.
-                    if self.core.window.buffer() == from {
+                    if self.core.windows.window.buffer() == from {
                         self.core.push_jump();
                     }
                     self.core.goto_line_col(line, col)
@@ -180,8 +180,8 @@ impl Ctx<'_> {
             }
             return Ok(());
         }
-        let project = self.core.current_workspace().project.clone();
-        let loaded = &self.core.projects[self.core.project(&project)?].project;
+        let project = self.core.current_workspace().project;
+        let loaded = &self.core.projects[self.core.project_at(project)?].project;
         let roots: Vec<PathBuf> = loaded.all_roots().map(|root| root.path.clone()).collect();
         let ignore = loaded.ignore.clone();
         let names = root_names(roots.iter().map(PathBuf::as_path));
@@ -192,7 +192,7 @@ impl Ctx<'_> {
             ..ProjectGrep::default()
         };
         let command = self.core.commands["project-grep"];
-        self.read_string(command, args, format!("Grep in {project}: "), None)
+        self.read_string(command, args, format!("Grep in {}: ", loaded.name), None)
     }
 }
 
@@ -228,7 +228,7 @@ mod tests {
 
     /// The window the prompt was opened from: its file and point.
     fn origin(h: &Harness) -> (Option<std::path::PathBuf>, usize) {
-        let window = &h.core.others[&h.core.tree.leaves()[0]];
+        let window = &h.core.windows.others[&h.core.windows.tree.leaves()[0]];
         let buffer = h.core.buffers.get(window.buffer()).unwrap();
         (buffer.file.clone(), window.point(&h.core.buffers))
     }
@@ -363,8 +363,8 @@ mod tests {
         h.keys("C-n C-f C-x p g needle").advance(WAIT);
         let at: usize = long.lines().take(150).map(|l| l.len() + 1).sum();
         assert_eq!(origin(&h), (Some(h.path("app/long.rs")), at + 2));
-        let id = h.core.tree.leaves()[0];
-        let window = h.core.others.get_mut(&id).unwrap();
+        let id = h.core.windows.tree.leaves()[0];
+        let window = h.core.windows.others.get_mut(&id).unwrap();
         assert_eq!(
             window.scroll(&h.core.buffers, 20),
             140,
@@ -373,7 +373,7 @@ mod tests {
         h.keys("C-g");
         assert_eq!(h.core.current().file, Some(h.path("start.txt")));
         assert_eq!(h.point(), 5);
-        assert_eq!(h.core.window.scroll(&h.core.buffers, 20), 0);
+        assert_eq!(h.core.windows.window.scroll(&h.core.buffers, 20), 0);
     }
 
     #[test]

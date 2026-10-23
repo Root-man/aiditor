@@ -142,7 +142,9 @@ fn atomic_external_saves_revert_every_clean_copy_and_leave_other_buffers_alone()
     let other_tick = editor.core.current().tick();
     editor.open("a.txt");
     editor.keys("C-n");
-    let second = editor.core.new_workspace("second", "sync");
+    let second = editor
+        .core
+        .new_workspace("second", editor.core.project_id("sync").unwrap());
     editor.open("a.txt");
     editor.keys("C-n");
     editor.ready("a.txt");
@@ -188,7 +190,9 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
     let base = editor.core.current().disk;
     editor.keys("mine SPC");
     let tick = editor.core.current().tick();
-    editor.core.new_workspace("clean", "sync");
+    editor
+        .core
+        .new_workspace("clean", editor.core.project_id("sync").unwrap());
     editor.open("a.txt");
 
     fs::write(editor.root.join("a.txt"), "external\n").unwrap();
@@ -229,7 +233,9 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
 fn an_own_save_updates_the_other_workspace_and_preserves_its_own_undo() {
     let mut editor = Editor::new(&[("a.txt", "original\n")], "");
     let observer = editor.core.workspace();
-    let saving = editor.core.new_workspace("saving", "sync");
+    let saving = editor
+        .core
+        .new_workspace("saving", editor.core.project_id("sync").unwrap());
     editor.open("a.txt");
     editor.keys("saved SPC C-x C-s");
     let tick = editor.core.current().tick();

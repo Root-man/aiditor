@@ -292,12 +292,12 @@ impl Ctx<'_> {
         // So a keymap named after the command binds keys at its prompts, as ivy's `:keymap`.
         buffer.minor_modes.push(command.name);
         let window = Window::new(&mut core.buffers, id);
-        core.others.insert(MINIBUFFER, window);
+        core.windows.others.insert(MINIBUFFER, window);
         core.prompts.minibuffer = Some(Minibuffer {
             command: command.name,
             args,
             prompt,
-            from: core.selected,
+            from: core.windows.selected,
             index: 0,
             input: String::new(),
             completion,
@@ -404,7 +404,7 @@ impl Ctx<'_> {
 
     /// Fails with `err` while the minibuffer is selected.
     pub(crate) fn outside_minibuffer(&self, err: &str) -> Result<(), String> {
-        match self.core.selected == MINIBUFFER {
+        match self.core.windows.selected == MINIBUFFER {
             true => Err(err.into()),
             false => Ok(()),
         }
@@ -553,7 +553,7 @@ impl Core {
         let (width, _, cell_width) = self.frame_size;
         let cols =
             ((width / cell_width) as usize).saturating_sub(count.len() + prompt.chars().count());
-        let (window, buffers, settings) = (&mut self.window, &self.buffers, &self.settings);
+        let (window, buffers, settings) = (&mut self.windows.window, &self.buffers, &self.settings);
         let display = window_display(window, buffers, settings, height, cols);
         Some(display::Minibuffer {
             count,
@@ -626,7 +626,8 @@ impl Core {
         self.unpreview();
         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
         mb.previewed = shown;
-        let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+        let from =
+            (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
         if let Some(id) = id.filter(|&id| id != from.buffer()) {
             // Swapped out whole, so its point, mark, ring and scroll stay as markers until restored.
             mb.saved = Some(std::mem::replace(from, Window::new(&mut self.buffers, id)));
@@ -710,10 +711,11 @@ impl Core {
     // shortcut: releasing the stand-in leaves `id`'s remembered point at the preview; save and restore it if reopened buffers start in odd places.
     fn preview_at(&mut self, id: BufferId, p: usize) {
         let mb = self.prompts.minibuffer.as_ref().expect("previewing");
-        if mb.saved.is_none() || self.others[&mb.from].buffer() != id {
+        if mb.saved.is_none() || self.windows.others[&mb.from].buffer() != id {
             self.unpreview();
             let mb = self.prompts.minibuffer.as_mut().expect("previewing");
-            let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+            let from =
+                (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
             // A copy, so another buffer's stand-in keeps the rows it centers in.
             let mut stand_in = from.split(&mut self.buffers);
             if stand_in.buffer() != id {
@@ -722,7 +724,8 @@ impl Core {
             mb.saved = Some(std::mem::replace(from, stand_in));
         }
         let mb = self.prompts.minibuffer.as_ref().expect("previewing");
-        let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+        let from =
+            (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
         if let Err(err) = from.jump(&mut self.buffers, p) {
             tracing::debug!(%err, "preview outside the buffer");
         }
@@ -731,7 +734,9 @@ impl Core {
     /// The window the open minibuffer was opened from, as it was before any preview.
     pub(crate) fn origin(&self) -> Option<&Window> {
         let mb = self.prompts.minibuffer.as_ref()?;
-        mb.saved.as_ref().or_else(|| self.others.get(&mb.from))
+        mb.saved
+            .as_ref()
+            .or_else(|| self.windows.others.get(&mb.from))
     }
 
     /// Puts back the window a preview stands in for.
@@ -740,7 +745,8 @@ impl Core {
             return;
         };
         if let Some(saved) = mb.saved.take() {
-            let from = (self.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
+            let from =
+                (self.windows.others.get_mut(&mb.from)).expect("the minibuffer's window is live");
             std::mem::replace(from, saved).release(&mut self.buffers);
         }
     }
@@ -754,7 +760,8 @@ impl Core {
             _ = self.buffers.kill(peek);
         }
         self.select(mb.from);
-        let window = (self.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
+        let window =
+            (self.windows.others.remove(&MINIBUFFER)).expect("the minibuffer window is live");
         let buffer = self
             .buffers
             .get(window.buffer())
@@ -799,7 +806,10 @@ mod tests {
         h.keys("RET");
         let got = h.core.message().unwrap().to_string();
         assert!(
-            got.ends_with(&format!("strings: {} }}", strings(&["hello"]))),
+            got.ends_with(&format!(
+                "strings: {}, project: None }}",
+                strings(&["hello"])
+            )),
             "{got}"
         );
         assert!(h.core.minibuffer().is_none());
@@ -821,7 +831,7 @@ mod tests {
             h.core.message(),
             Some(
                 format!(
-                    "Args {{ prefix: Some(Number(3)), region: None, strings: {} }}",
+                    "Args {{ prefix: Some(Number(3)), region: None, strings: {}, project: None }}",
                     strings(&["a", "b"])
                 )
                 .as_str()
@@ -1068,7 +1078,7 @@ mod tests {
     /// The frame's windows and the selected window's point, mark, active mark and mark ring.
     fn windows(h: &mut Harness) -> String {
         let frame = h.frame(800., 600.).windows;
-        let (w, b) = (&h.core.window, &h.core.buffers);
+        let (w, b) = (&h.core.windows.window, &h.core.buffers);
         format!(
             "{:?}",
             (frame, w.point(b), w.mark(b), w.active(), w.ring(b))
@@ -1092,8 +1102,8 @@ mod tests {
         let [apple, banana] = ["apple", "banana"].map(|n| h.core.buffers.create(n));
         h.keys("C-x 2 C-SPC M-f C-SPC C-u 40 C-n C-SPC M-f C-SPC C-f C-SPC C-f");
         let before = windows(&mut h);
-        let (file, point) = (h.core.window.buffer(), h.point());
-        let shown = |h: &Harness| h.core.others[&WindowId(0)].buffer();
+        let (file, point) = (h.core.windows.window.buffer(), h.point());
+        let shown = |h: &Harness| h.core.windows.others[&WindowId(0)].buffer();
         h.keys("C-c p");
         assert_eq!(shown(&h), apple, "the first match shows at once");
         h.keys("C-n");
@@ -1102,7 +1112,10 @@ mod tests {
         assert_eq!(shown(&h), file, "cherry has no buffer");
         h.keys("C-p zzz");
         assert_eq!(shown(&h), file, "no match");
-        assert_eq!(h.core.others[&WindowId(0)].point(&h.core.buffers), point);
+        assert_eq!(
+            h.core.windows.others[&WindowId(0)].point(&h.core.buffers),
+            point
+        );
         h.keys("C-g");
         assert_eq!(windows(&mut h), before);
         assert_eq!(
@@ -1123,16 +1136,16 @@ mod tests {
             col: 0,
         });
         assert_eq!(shown(&h), file, "a click restores");
-        let (main, w) = (h.core.workspace(), h.core.new_workspace("w", "p"));
+        let (main, w) = (h.core.workspace(), h.new_workspace("w", "p"));
         h.core.switch_workspace(main).unwrap();
         // The click selected window 1, so the prompt opens from it.
-        let before = h.core.window.buffer();
+        let before = h.core.windows.window.buffer();
         h.keys("C-c p C-n");
-        assert_ne!(h.core.others[&WindowId(1)].buffer(), before);
+        assert_ne!(h.core.windows.others[&WindowId(1)].buffer(), before);
         h.core.switch_workspace(w).unwrap();
         h.core.switch_workspace(main).unwrap();
         assert_eq!(
-            h.core.window.buffer(),
+            h.core.windows.window.buffer(),
             before,
             "a workspace switch restores"
         );
@@ -1157,9 +1170,9 @@ mod tests {
             });
             bind_mode(&mut h, "global", "C-c p", "test-cmd");
             let apple = h.core.buffers.create("apple");
-            let file = h.core.window.buffer();
+            let file = h.core.windows.window.buffer();
             h.keys(if previews { "C-c p" } else { "C-c p x RET" });
-            let shown = h.core.others[&WindowId(0)].buffer();
+            let shown = h.core.windows.others[&WindowId(0)].buffer();
             assert_eq!(shown, if previews { apple } else { file }, "{prompts:?}");
         }
     }

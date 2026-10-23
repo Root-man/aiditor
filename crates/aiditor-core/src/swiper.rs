@@ -135,9 +135,11 @@ impl Ctx<'_> {
         if p != start {
             core.push_jump();
         }
-        core.window.jump(&mut core.buffers, p)?;
-        if p != start && !core.window.active() {
-            core.window.push_mark(&mut core.buffers, start, false)?;
+        core.windows.window.jump(&mut core.buffers, p)?;
+        if p != start && !core.windows.window.active() {
+            core.windows
+                .window
+                .push_mark(&mut core.buffers, start, false)?;
             core.echo("Mark saved where search started".into());
         }
         Ok(())
@@ -164,7 +166,7 @@ mod tests {
 
     /// The point of the window the search was started from.
     fn origin_point(h: &Harness) -> usize {
-        h.core.others[&h.core.tree.leaves()[0]].point(&h.core.buffers)
+        h.core.windows.others[&h.core.windows.tree.leaves()[0]].point(&h.core.buffers)
     }
 
     #[test]
@@ -264,8 +266,9 @@ mod tests {
         let start = line_start(&h, 102);
         h.keys("C-s l100$");
         let top = |h: &mut Harness| {
-            let id = h.core.tree.leaves()[0];
+            let id = h.core.windows.tree.leaves()[0];
             h.core
+                .windows
                 .others
                 .get_mut(&id)
                 .unwrap()
@@ -276,7 +279,7 @@ mod tests {
         assert_eq!(origin_point(&h), start + 4);
         assert_eq!(top(&mut h), 90, "in view keeps the scroll");
         h.keys("C-g");
-        let window = &mut h.core.window;
+        let window = &mut h.core.windows.window;
         assert_eq!(
             window.scroll(&h.core.buffers, 20),
             0,

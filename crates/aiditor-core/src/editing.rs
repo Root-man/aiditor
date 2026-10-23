@@ -26,12 +26,12 @@ impl Ctx<'_> {
         let core = &mut *self.core;
         let buffer = core
             .buffers
-            .get_mut(core.window.buffer())
+            .get_mut(core.windows.window.buffer())
             .expect("current buffer is live");
         let point = if redo { buffer.redo() } else { buffer.undo() };
         match point {
             Some(p) => {
-                if let Err(err) = core.window.set_point(&mut core.buffers, p) {
+                if let Err(err) = core.windows.window.set_point(&mut core.buffers, p) {
                     tracing::debug!(%err, "undo left point out of range");
                 }
             }
@@ -59,8 +59,8 @@ impl Ctx<'_> {
     /// deleted (not killed), as Emacs's `delete-active-region`; otherwise `delete_n`.
     pub(crate) fn delete_char(&mut self, no_prefix: bool, n: i64) -> Result<(), String> {
         let point = self.core.point();
-        match self.core.window.mark(&self.core.buffers) {
-            Some(mark) if no_prefix && self.core.window.active() && mark != point => {
+        match self.core.windows.window.mark(&self.core.buffers) {
+            Some(mark) if no_prefix && self.core.windows.window.active() && mark != point => {
                 self.delete_to(mark)
             }
             _ => self.delete_n(n),

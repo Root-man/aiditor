@@ -107,9 +107,15 @@ pub fn run(op: FileOp) -> Msg {
                 directories,
             }
         }
-        FileOp::WriteProject { path, old, text } => {
-            Msg::ProjectWritten(crate::projects::write(&path, old.as_deref(), text))
-        }
+        FileOp::WriteProject {
+            intent,
+            path,
+            old,
+            text,
+        } => Msg::ProjectWritten {
+            intent,
+            result: crate::projects::write(&path, old.as_deref(), text),
+        },
     }
 }
 
@@ -491,7 +497,7 @@ mod tests {
     fn index_reports_a_missing_root_by_path() {
         let gone = tempfile::tempdir().unwrap().path().join("gone");
         let msg = run(FileOp::Index {
-            project: "p".into(),
+            project: aiditor_core::project::ProjectId::default(),
             walk: 3,
             roots: vec![gone.clone()],
             ignore: Vec::new(),
@@ -505,7 +511,10 @@ mod tests {
         else {
             panic!("not indexed");
         };
-        assert_eq!((&*project, walk, roots.len()), ("p", 3, 1));
+        assert_eq!(
+            (project, walk, roots.len()),
+            (aiditor_core::project::ProjectId::default(), 3, 1)
+        );
         let err = roots[0].1.clone().unwrap_err();
         assert!(err.starts_with(&format!("{}: ", gone.display())), "{err}");
     }

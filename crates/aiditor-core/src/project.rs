@@ -49,6 +49,43 @@ pub struct Loaded {
     pub file: Option<(PathBuf, String)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectId(pub(crate) u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteIntent {
+    pub(crate) project: ProjectId,
+    pub(crate) revision: u64,
+    pub(crate) request: u64,
+}
+
+pub(crate) struct Entry {
+    pub id: ProjectId,
+    pub project: Project,
+    pub file: Option<(PathBuf, String)>,
+    pub revision: u64,
+    pub retained: bool,
+}
+
+impl Entry {
+    pub(crate) fn new(id: ProjectId, loaded: Loaded) -> Self {
+        Self {
+            id,
+            project: loaded.project,
+            file: loaded.file,
+            revision: 1,
+            retained: false,
+        }
+    }
+
+    pub(crate) fn replace(&mut self, loaded: Loaded) {
+        self.project = loaded.project;
+        self.file = loaded.file;
+        self.revision += 1;
+        self.retained = false;
+    }
+}
+
 impl Loaded {
     /// An ad-hoc project named `name` with `root` as its primary.
     pub(crate) fn ad_hoc(name: &str, root: &Path) -> Self {
