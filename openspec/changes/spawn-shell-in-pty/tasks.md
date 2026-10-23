@@ -39,7 +39,7 @@
 
 ## 4. Checks
 
-- [ ] 4.1 Verify that `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and the rest of `.github/workflows/ci.yml` pass. The terminal tests must pass on macOS here and on Linux in CI.
-  Verification scope: macOS workspace tests passed with `--skip files::tests::a_failed_create_can_be_retried`, excluding the baseline failure as approved by the user. Formatting, clippy and the CI architecture checks passed. Linux CI remains pending; keep this task open until it passes.
+- [x] 4.1 Verify that `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and the rest of `.github/workflows/ci.yml` pass. The terminal tests must pass on macOS here and on Linux in CI.
+  Verification: [GitHub Actions run 39961592738](https://github.com/Root-man/aiditor/actions/runs/39961592738) passed on Linux and macOS for implementation commit `c10af6e`, including formatting, clippy, architecture checks and both complete workspace test suites. The existing file-size-limit test was excluded only from the local macOS run with user approval; CI ran it unchanged.
 
 - [x] 4.2 Run `openspec validate spawn-shell-in-pty --strict` and verify it passes.
