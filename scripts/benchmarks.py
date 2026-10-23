@@ -31,6 +31,30 @@ def api(endpoint, *args, payload=None):
     return json.loads(gh("api", endpoint, *args, payload=payload))
 
 
+def validate_measurements(measurements):
+    if not measurements:
+        raise ValueError("Empty benchmark results")
+    for name, values in measurements.items():
+        if not re.fullmatch(r"[a-z0-9/-]+", name):
+            raise ValueError("Invalid benchmark name")
+        numbers = [values[key] for key in ("min_ns", "median_ns", "max_ns")]
+        if any(type(n) not in (int, float) or not math.isfinite(n) or n <= 0 for n in numbers):
+            raise ValueError(f"Invalid timings for {name}")
+        if numbers != sorted(numbers):
+            raise ValueError(f"Unordered timings for {name}")
+
+
+def read_measurements(source):
+    measurements = {}
+    for line in source.read_text().splitlines():
+        name, median, low, high = line.split("\t")
+        if name in measurements:
+            raise ValueError(f"Duplicate benchmark: {name}")
+        measurements[name] = dict(median_ns=float(median), min_ns=float(low), max_ns=float(high))
+    validate_measurements(measurements)
+    return measurements
+
+
 def validate(data):
     if data["version"] != 1:
         raise ValueError("Unsupported benchmark result version")
@@ -41,26 +65,12 @@ def validate(data):
     for key in ("runner", "arch", "cpu", "rustc", "suite"):
         if not isinstance(data["environment"][key], str) or not data["environment"][key]:
             raise ValueError(f"Missing benchmark environment: {key}")
-    if not data["benchmarks"]:
-        raise ValueError("Empty benchmark results")
-    for name, values in data["benchmarks"].items():
-        if not re.fullmatch(r"[a-z0-9/-]+", name):
-            raise ValueError("Invalid benchmark name")
-        numbers = [values[key] for key in ("min_ns", "median_ns", "max_ns")]
-        if any(type(n) not in (int, float) or not math.isfinite(n) or n <= 0 for n in numbers):
-            raise ValueError(f"Invalid timings for {name}")
-        if numbers != sorted(numbers):
-            raise ValueError(f"Unordered timings for {name}")
+    validate_measurements(data["benchmarks"])
     return data
 
 
 def record(source, destination):
-    measurements = {}
-    for line in source.read_text().splitlines():
-        name, median, low, high = line.split("\t")
-        if name in measurements:
-            raise ValueError(f"Duplicate benchmark: {name}")
-        measurements[name] = dict(median_ns=float(median), min_ns=float(low), max_ns=float(high))
+    measurements = read_measurements(source)
     cpu = next(
         line.split(":", 1)[1].strip()
         for line in Path("/proc/cpuinfo").read_text().splitlines()

@@ -15,7 +15,15 @@ Each case warms up by doubling its iteration count until a batch takes at least 
 
 ## Run locally
 
-On macOS or Linux, using the Rust version in `.tool-versions`:
+On macOS or Linux, using Python 3 and the Rust version in `.tool-versions`:
+
+```sh
+python3 scripts/bench_local.py
+```
+
+The script builds and runs the core benchmarks, then prints an aligned table of median, minimum and maximum times, choosing ns, µs or ms for readability. Cargo's progress and diagnostics remain on stderr, so stdout can be redirected to save the formatted report. It works from any directory when invoked with the script's full path, uses a temporary results file that is cleaned up automatically, and needs no GitHub credentials or extra Python packages.
+
+The direct Cargo command remains available:
 
 ```sh
 cargo bench --locked -p aiditor-core --bench core
