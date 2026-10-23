@@ -1,0 +1,69 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to comment on (optional; its head must match the selected branch commit)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read Rust version from .tool-versions
+        run: echo "RUST_VERSION=$(awk '$1 == "rust" {print $2}' .tool-versions)" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmarks-${{ hashFiles('Cargo.toml') }}
+      - name: Benchmark the core
+        env:
+          BENCH_OUTPUT: ${{ runner.temp }}/benchmarks.tsv
+        run: cargo bench --locked -p aiditor-core --bench core
+      - name: Record results and environment
+        env:
+          BENCH_RUNNER: ubuntu-24.04
+        run: python3 scripts/benchmarks.py record "${{ runner.temp }}/benchmarks.tsv" "${{ runner.temp }}/results.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-benchmarks
+          path: ${{ runner.temp }}/results.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+  report:
+    needs: benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-benchmarks
+          path: ${{ runner.temp }}/core-benchmarks
+      - name: Compare and optionally comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BENCH_PR: ${{ inputs.pr }}
+        run: python3 scripts/benchmarks.py report "${{ runner.temp }}/core-benchmarks/results.json"
