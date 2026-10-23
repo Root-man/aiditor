@@ -42,3 +42,5 @@ jobs:
         run: "! grep -rnE 'panic *=? *\"?abort' Cargo.toml crates/*/Cargo.toml .cargo 2>/dev/null"
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Benchmark reporting tests
+        run: python3 -m unittest discover -s scripts -p test_benchmarks.py
