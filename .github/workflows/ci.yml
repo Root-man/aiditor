@@ -33,8 +33,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         # rust-cache's own key ignores [profile] edits, so an exact hit kept restoring stale deps and never re-saved.
         # The environment hash covers every toolchain the runner image preinstalls, so image rollouts missed the cache.
+        # Turning it off also drops the lockfile hash, so the manifests and Cargo.lock go in the key.
         with:
-          key: ${{ hashFiles('Cargo.toml') }}-${{ env.RUST_VERSION }}
+          key: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/*/Cargo.toml') }}-${{ env.RUST_VERSION }}
           add-rust-environment-hash-key: false
           # PR caches are visible only to their own PR and pushed main's caches out of the 10 GB limit.
           save-if: ${{ github.ref == 'refs/heads/main' }}
