@@ -489,7 +489,6 @@ impl Ctx<'_> {
                 // A hand edit may have changed roots or ignore patterns; a project gone fails to walk.
                 let indexed: Vec<String> = self.core.index.keys().cloned().collect();
                 for name in indexed {
-                    self.core.index.get_mut(&name).unwrap().ready = false;
                     _ = self.index_project(&name, true);
                 }
             }
