@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
@@ -119,10 +120,10 @@ pub enum Msg {
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
     },
-    /// The file service's answer to `FileOp::Preview`, as to `FileOp::Open`.
+    /// Prepared preview text, owned by one selection in one prompt session.
     Previewed {
-        path: PathBuf,
-        result: Result<Option<(Vec<u8>, u64)>, String>,
+        request: PreviewRequest,
+        result: Result<Option<Rope>, String>,
     },
     /// The file service's answer to `FileOp::Index`: each root with its files, relative and
     /// sorted, or why it couldn't be walked.
@@ -130,16 +131,18 @@ pub enum Msg {
         project: ProjectId,
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
-        directories: usize,
+        directories: Vec<PathBuf>,
     },
     /// The watcher's debounced report: the paths that may have changed and what each is now, and
-    /// whether events were lost, so every visited file needs checking.
+    /// whether events were lost or directory coverage needs recovery, so every visited file needs checking.
     FilesChanged {
         paths: Vec<(PathBuf, Disk)>,
         rescan: bool,
     },
     /// The file service's answer to `FileOp::Check`: each readable file's hash, `None` when gone.
     Checked(Vec<(PathBuf, Option<u64>)>),
+    /// A watch registration failure or recovery, shown in the echo area and Messages.
+    WatchStatus(String),
     /// The grep service's hits for search `search`, in batches as they are found, or why the
     /// pattern is invalid; `done` on its last message. A cancelled search sends nothing more.
     Grepped {
@@ -177,6 +180,13 @@ pub enum Msg {
     Recover(Vec<Recovered>),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewRequest {
+    pub session: u64,
+    pub revision: u64,
+    pub path: PathBuf,
+}
+
 /// A recovery file read back: what `RecoveryOp::AutoSave` wrote, plus the visited file as it is now.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recovered {
@@ -205,6 +215,8 @@ pub enum Disk {
 pub struct WatchSet {
     pub roots: Vec<(PathBuf, Vec<String>)>,
     pub files: Vec<PathBuf>,
+    /// Shared accepted snapshots, so input handling does not copy every directory.
+    pub directories: Vec<Arc<[PathBuf]>>,
 }
 
 /// A line matching a grep search.
@@ -289,7 +301,7 @@ pub enum FileOp {
     /// Read the file and send `Msg::Opened`.
     Open { intent: VisitIntent, path: PathBuf },
     /// Read the file and send `Msg::Previewed`.
-    Preview(PathBuf),
+    Preview(PreviewRequest),
     /// Hash each file and send `Msg::Checked`.
     Check(Vec<PathBuf>),
     /// Walk every root of `project`, leaving out what its `ignore` patterns match, and send
@@ -480,7 +492,9 @@ impl Ctx<'_> {
                 path,
                 result,
             } => self.core.on_opened(intent, path, result),
-            Msg::Previewed { path, result } => self.core.on_previewed(path, result),
+            Msg::Previewed { request, result } => {
+                self.core.on_previewed(request, result, &mut self.effects)
+            }
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
                     Ok(settings) => self.core.settings = settings,
@@ -503,6 +517,11 @@ impl Ctx<'_> {
                 self.core.reconcile_projects(projects);
                 let indexed: Vec<_> = self.core.index.keys().copied().collect();
                 for id in indexed {
+                    self.core
+                        .index
+                        .get_mut(&id)
+                        .expect("indexed project")
+                        .refresh_filtering();
                     _ = self.index_project(id, true);
                 }
             }
@@ -516,6 +535,7 @@ impl Ctx<'_> {
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
+            Msg::WatchStatus(message) => self.core.report(message),
             Msg::Hint => {
                 self.core.hint_timer = None;
                 self.core.hint_shown = true;
@@ -678,6 +698,7 @@ pub struct Core {
     recovered: Vec<Recovered>,
     /// The watch set last sent to the watcher.
     watching: WatchSet,
+    watch_refresh: bool,
     watch_refusals: BTreeMap<ProjectId, (usize, usize, usize)>,
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
@@ -748,6 +769,7 @@ impl Default for Core {
             autosave_max: None,
             recovered: Vec::new(),
             watching: WatchSet::default(),
+            watch_refresh: false,
             watch_refusals: BTreeMap::new(),
             focused: scratch,
         };

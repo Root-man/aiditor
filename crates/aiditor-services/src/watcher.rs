@@ -4,12 +4,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use aiditor_core::{Disk, Msg, WatchSet};
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode};
 
 use crate::files::{Patterns, walker};
 
@@ -31,10 +32,12 @@ impl Watcher {
         let (tx, rx) = mpsc::channel();
         let events = tx.clone();
         std::thread::spawn(move || {
-            match notify::recommended_watcher(move |e| _ = events.send(In::Event(e))) {
-                Ok(watcher) => run(State::new(watcher), rx, send),
-                Err(err) => tracing::warn!(%err, "no file watcher; buffers won't follow the disk"),
-            }
+            let factory = move || {
+                let events = events.clone();
+                notify::recommended_watcher(move |e| _ = events.send(In::Event(e)))
+                    .map(|w| Box::new(w) as Box<dyn Backend>)
+            };
+            run(State::with_factory(Box::new(factory)), rx, send);
         });
         Watcher(tx)
     }
@@ -51,15 +54,25 @@ fn run(mut state: State, rx: Receiver<In>, send: impl Fn(Msg)) {
     // When the pending report's first and last events came.
     let mut times: Option<(Instant, Instant)> = None;
     loop {
-        let msg = match times.map(|(first, last)| (last + QUIET).min(first + MAX)) {
-            Some(due) if Instant::now() >= due => {
-                if let Some(msg) = state.flush(std::mem::take(&mut pending), rescan) {
-                    send(msg);
-                }
-                (rescan, times) = (false, None);
-                continue;
+        for message in state.messages.drain(..) {
+            send(Msg::WatchStatus(message));
+        }
+        let now = Instant::now();
+        if state.retry.is_some_and(|due| now >= due) {
+            state.sync_at(now);
+            continue;
+        }
+        let flush_due = times.map(|(first, last)| (last + QUIET).min(first + MAX));
+        if flush_due.is_some_and(|due| now >= due) {
+            if let Some(msg) = state.flush(std::mem::take(&mut pending), rescan) {
+                send(msg);
             }
-            Some(due) => match rx.recv_timeout(due - Instant::now()) {
+            (rescan, times) = (false, None);
+            continue;
+        }
+        let due = flush_due.into_iter().chain(state.retry).min();
+        let msg = match due {
+            Some(due) => match rx.recv_timeout(due.saturating_duration_since(Instant::now())) {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -86,17 +99,37 @@ fn run(mut state: State, rx: Receiver<In>, send: impl Fn(Msg)) {
             continue;
         }
         rescan |= event.need_rescan();
-        pending.extend(event.paths.into_iter().map(|p| state.translate(p)));
+        let paths: Vec<_> = event
+            .paths
+            .into_iter()
+            .map(|p| state.translate(p))
+            .collect();
+        if matches!(
+            event.kind,
+            EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))
+        ) {
+            for path in &paths {
+                rescan |= state.kept(path);
+                state.invalidate(path);
+            }
+        }
+        pending.extend(paths);
         let now = Instant::now();
         times = Some((times.map_or(now, |(first, _)| first), now));
     }
+}
+
+fn is_ignore(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|s| s.to_str()),
+        Some(".ignore" | ".gitignore")
+    )
 }
 
 /// A watched root with its project's ignore patterns; a root shared by projects with different
 /// patterns is one of these per project.
 struct Root {
     path: PathBuf,
-    ignore: Vec<String>,
     patterns: Patterns,
     /// The kept directories, the root included: those the index's walk enters.
     dirs: BTreeSet<PathBuf>,
@@ -105,55 +138,93 @@ struct Root {
 /// Each listed directory's entries that a root's walk keeps, by root index and directory.
 type Listings = BTreeMap<(usize, PathBuf), BTreeSet<PathBuf>>;
 
-/// What is watched, and how.
+trait Backend {
+    fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_>;
+}
+
+impl Backend for RecommendedWatcher {
+    fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_> {
+        notify::Watcher::paths_mut(self)
+    }
+}
+
+type Factory = Box<dyn FnMut() -> notify::Result<Box<dyn Backend>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Registration {
+    mode: RecursiveMode,
+    identity: (u64, u64),
+}
+
+fn identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    let meta = fs::metadata(path)?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::other("not a directory"));
+    }
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// Desired coverage and registrations acknowledged by the backend are kept separately.
 struct State {
-    watcher: RecommendedWatcher,
+    factory: Factory,
+    watcher: Option<Box<dyn Backend>>,
     roots: Vec<Root>,
-    /// The visited files.
     files: Vec<PathBuf>,
-    /// The visited files' directories that no root covers.
     extra: BTreeSet<PathBuf>,
-    /// What `notify` watches.
-    watched: BTreeMap<PathBuf, RecursiveMode>,
-    /// Watched paths' canonical forms that differ, with the path as watched: FSEvents reports
-    /// canonical paths (`/private/var/...` for `/var/...`).
+    watched: BTreeMap<PathBuf, Registration>,
+    uncertain: BTreeSet<PathBuf>,
     aliases: Vec<(PathBuf, PathBuf)>,
+    retry: Option<Instant>,
+    attempts: u32,
+    failure: Option<String>,
+    messages: Vec<String>,
 }
 
 impl State {
+    #[cfg(test)]
     fn new(watcher: RecommendedWatcher) -> Self {
+        let mut state = Self::with_factory(Box::new(|| unreachable!("test watcher supplied")));
+        state.watcher = Some(Box::new(watcher));
+        state
+    }
+
+    fn with_factory(factory: Factory) -> Self {
         State {
-            watcher,
+            factory,
+            watcher: None,
             roots: Vec::new(),
             files: Vec::new(),
             extra: BTreeSet::new(),
             watched: BTreeMap::new(),
+            uncertain: BTreeSet::new(),
             aliases: Vec::new(),
+            retry: None,
+            attempts: 0,
+            failure: None,
+            messages: Vec::new(),
         }
     }
 
     fn set(&mut self, set: WatchSet) {
-        (self.roots).retain(|r| set.roots.contains(&(r.path.clone(), r.ignore.clone())));
-        for (path, ignore) in set.roots {
-            if self
-                .roots
-                .iter()
-                .any(|r| r.path == path && r.ignore == ignore)
-            {
-                continue;
-            }
-            let patterns = Patterns::lenient(&ignore);
-            let dirs = (walker(&path, &path, &patterns).build().flatten())
-                .filter(|e| e.file_type().is_some_and(|t| t.is_dir()))
-                .map(ignore::DirEntry::into_path)
-                .collect();
-            self.roots.push(Root {
-                path,
-                ignore,
-                patterns,
-                dirs,
-            });
-        }
+        self.roots = set
+            .roots
+            .into_iter()
+            .map(|(path, ignore)| {
+                let patterns = Patterns::lenient(&ignore);
+                let dirs = set
+                    .directories
+                    .iter()
+                    .flat_map(|dirs| dirs.iter())
+                    .filter(|d| d.starts_with(&path))
+                    .cloned()
+                    .collect();
+                Root {
+                    path,
+                    patterns,
+                    dirs,
+                }
+            })
+            .collect();
         self.files = set.files;
         self.sync();
     }
@@ -180,57 +251,215 @@ impl State {
 
     /// Whether a change at `path` is reported: one in a kept or extra directory, or of a kept one.
     fn keep(&self, path: &Path) -> bool {
-        self.kept(path)
+        (is_ignore(path) && self.roots.iter().any(|r| path.starts_with(&r.path)))
+            || self.kept(path)
             || (path.parent()).is_some_and(|dir| self.kept(dir) || self.extra.contains(dir))
     }
 
-    /// Updates the extra directories and the `notify` watches to match the roots and files.
-    fn sync(&mut self) {
-        self.extra = (self.files.iter())
-            .filter_map(|file| file.parent())
-            .filter(|dir| !self.kept(dir))
-            .map(Path::to_path_buf)
+    fn invalidate(&mut self, path: &Path) {
+        let invalid: Vec<_> = self
+            .watched
+            .keys()
+            .filter(|p| p.starts_with(path))
+            .cloned()
             .collect();
-        let mut want = BTreeMap::new();
-        for root in &self.roots {
-            match cfg!(target_os = "macos") {
-                true => _ = want.insert(root.path.clone(), RecursiveMode::Recursive),
-                false => want
-                    .extend((root.dirs.iter()).map(|d| (d.clone(), RecursiveMode::NonRecursive))),
+        for path in invalid {
+            self.watched.remove(&path);
+            self.uncertain.insert(path);
+        }
+    }
+
+    fn covered(&self, dir: &Path) -> bool {
+        self.roots.iter().any(|root| {
+            if !root.dirs.contains(dir) {
+                return false;
+            }
+            let (path, mode) = if cfg!(target_os = "macos") {
+                (root.path.as_path(), RecursiveMode::Recursive)
+            } else {
+                (dir, RecursiveMode::NonRecursive)
+            };
+            self.watched
+                .get(path)
+                .is_some_and(|r| r.mode == mode && identity(path).ok() == Some(r.identity))
+        })
+    }
+
+    fn fallback(&self) -> BTreeSet<PathBuf> {
+        self.files
+            .iter()
+            .filter_map(|file| file.parent())
+            .filter(|dir| !self.covered(dir))
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
+    fn sync(&mut self) {
+        self.sync_at(Instant::now());
+    }
+
+    fn sync_at(&mut self, now: Instant) {
+        if self.roots.is_empty() && self.files.is_empty() {
+            self.watcher = None;
+            self.watched.clear();
+            self.uncertain.clear();
+            self.extra.clear();
+            self.aliases.clear();
+            self.retry = None;
+            self.attempts = 0;
+            self.failure = None;
+            return;
+        }
+        let mut errors = Vec::new();
+        if self.watcher.is_none() {
+            match (self.factory)() {
+                Ok(watcher) => self.watcher = Some(watcher),
+                Err(err) => errors.push(format!("initialization: {err}")),
             }
         }
-        for dir in &self.extra {
-            want.entry(dir.clone())
-                .or_insert(RecursiveMode::NonRecursive);
-        }
-        let mut paths = self.watcher.paths_mut();
-        // Errors are expected for directories deleted since; their events are gone anyway.
-        for (path, mode) in &self.watched {
-            if want.get(path) != Some(mode)
-                && let Err(err) = paths.remove(path)
-            {
-                tracing::info!(%err, path = %path.display(), "unwatch failed");
+        if self.watcher.is_some() {
+            let mut roots = BTreeMap::new();
+            for root in &self.roots {
+                if cfg!(target_os = "macos") {
+                    roots.insert(root.path.clone(), RecursiveMode::Recursive);
+                } else {
+                    roots.extend(
+                        root.dirs
+                            .iter()
+                            .map(|d| (d.clone(), RecursiveMode::NonRecursive)),
+                    );
+                }
+            }
+            let mut want = roots.clone();
+            for dir in self.fallback() {
+                want.entry(dir).or_insert(RecursiveMode::NonRecursive);
+            }
+            self.apply(&want, &mut errors);
+            self.extra = self.fallback();
+            for dir in &self.extra {
+                // A failed recursive root can still acknowledge a non-recursive fallback.
+                roots.insert(dir.clone(), RecursiveMode::NonRecursive);
+            }
+            if roots != want {
+                self.apply(&roots, &mut errors);
+            }
+            if cfg!(target_os = "macos") {
+                self.aliases = self
+                    .watched
+                    .keys()
+                    .filter_map(|path| {
+                        let canonical = fs::canonicalize(path).ok()?;
+                        (canonical != *path).then(|| (canonical, path.clone()))
+                    })
+                    .collect();
             }
         }
-        for (path, &mode) in &want {
-            if self.watched.get(path) != Some(&mode)
-                && let Err(err) = paths.add(path, mode)
-            {
-                tracing::info!(%err, path = %path.display(), "watch failed");
+        errors.sort();
+        errors.dedup();
+        if errors.is_empty() {
+            self.retry = None;
+            self.attempts = 0;
+            if self.failure.take().is_some() {
+                self.messages.push("File watching recovered".into());
+            }
+        } else {
+            let error = errors.join("; ");
+            if self.failure.as_ref() != Some(&error) {
+                self.messages
+                    .push(format!("File watching failed: {error}; retrying"));
+                self.failure = Some(error);
+            }
+            self.retry = Some(now + Duration::from_secs((1u64 << self.attempts.min(5)).min(30)));
+            self.attempts = self.attempts.saturating_add(1);
+        }
+    }
+
+    fn apply(&mut self, want: &BTreeMap<PathBuf, RecursiveMode>, errors: &mut Vec<String>) {
+        let mut desired = BTreeMap::new();
+        for (path, &mode) in want {
+            match identity(path) {
+                Ok(identity) => {
+                    desired.insert(path.clone(), Registration { mode, identity });
+                }
+                Err(err) => errors.push(format!("{}: {err}", path.display())),
             }
         }
-        if let Err(err) = paths.commit() {
-            tracing::info!(%err, "watch failed");
+        let replaced: Vec<_> = self
+            .watched
+            .iter()
+            .filter(|(path, old)| identity(path).ok() != Some(old.identity))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for path in replaced {
+            self.invalidate(&path);
         }
-        self.watched = want;
-        // inotify reports paths as watched, so only FSEvents needs them mapped back.
-        if cfg!(target_os = "macos") {
-            self.aliases = (self.watched.keys())
-                .filter_map(|path| {
-                    let canonical = fs::canonicalize(path).ok()?;
-                    (canonical != *path).then(|| (canonical, path.clone()))
-                })
-                .collect();
+        let remove: BTreeSet<_> = self
+            .watched
+            .iter()
+            .filter(|(p, r)| desired.get(*p) != Some(*r))
+            .map(|(p, _)| p.clone())
+            .chain(self.uncertain.iter().cloned())
+            .collect();
+        let add: Vec<_> = desired
+            .iter()
+            .filter(|(p, r)| self.watched.get(*p) != Some(*r))
+            .map(|(p, r)| (p.clone(), *r))
+            .collect();
+        if remove.is_empty() && add.is_empty() {
+            return;
+        }
+        let mut next = self.watched.clone();
+        let mut failed_removals = BTreeSet::new();
+        let mut acknowledged = BTreeSet::new();
+        let mut paths = self.watcher.as_mut().expect("initialized").paths_mut();
+        for path in &remove {
+            match paths.remove(path) {
+                Ok(()) => {
+                    next.remove(path);
+                    acknowledged.insert(path.clone());
+                }
+                Err(err) if matches!(err.kind, notify::ErrorKind::WatchNotFound) => {
+                    next.remove(path);
+                    acknowledged.insert(path.clone());
+                }
+                Err(err) => {
+                    errors.push(format!("remove {}: {err}", path.display()));
+                    failed_removals.insert(path.clone());
+                }
+            }
+        }
+        for (path, registration) in &add {
+            if failed_removals.contains(path) {
+                continue;
+            }
+            match paths.add(path, registration.mode) {
+                Ok(()) => {
+                    next.insert(path.clone(), *registration);
+                    acknowledged.insert(path.clone());
+                }
+                Err(err) => errors.push(format!("add {}: {err}", path.display())),
+            }
+        }
+        // shortcut: notify 8.2.0 hides some macOS startup failures; revisit when its API reports them.
+        match paths.commit() {
+            Ok(()) => {
+                self.watched = next;
+                for path in acknowledged {
+                    self.uncertain.remove(&path);
+                }
+            }
+            Err(err) => {
+                errors.push(format!("commit: {err}"));
+                self.uncertain.extend(remove);
+                self.uncertain.extend(add.into_iter().map(|(path, _)| path));
+                // A failed macOS commit can stop the shared stream, including unchanged roots.
+                if cfg!(target_os = "macos") {
+                    self.uncertain.extend(self.watched.keys().cloned());
+                }
+                for path in &self.uncertain {
+                    self.watched.remove(path);
+                }
+            }
         }
     }
 
@@ -246,7 +475,7 @@ impl State {
 
     /// The report for the event paths `raw`, if there is anything to report. A new kept
     /// directory is watched and its files reported; a gone one stops being watched.
-    fn flush(&mut self, raw: BTreeSet<PathBuf>, rescan: bool) -> Option<Msg> {
+    fn flush(&mut self, raw: BTreeSet<PathBuf>, mut rescan: bool) -> Option<Msg> {
         let mut listings = Listings::new();
         // The roots whose walk keeps `path`, listing its parent `dir`.
         let mut keeping = |s: &Self, dir: &Path, path: &Path| -> Vec<usize> {
@@ -258,7 +487,11 @@ impl State {
         for path in raw.iter().filter(|p| self.keep(p)) {
             // An ignored file in a kept directory is left out, unless a buffer visits it.
             let ignored = match path.parent().filter(|dir| self.kept(dir)) {
-                Some(dir) if !self.files.contains(path) && fs::symlink_metadata(path).is_ok() => {
+                Some(dir)
+                    if !is_ignore(path)
+                        && !self.files.contains(path)
+                        && fs::symlink_metadata(path).is_ok() =>
+                {
                     keeping(self, dir, path).is_empty()
                 }
                 _ => false,
@@ -290,7 +523,20 @@ impl State {
                 changed = true;
             }
         }
-        if changed {
+        let replaced = raw.iter().any(|path| {
+            self.uncertain.contains(path)
+                || self
+                    .watched
+                    .get(path)
+                    .is_some_and(|r| identity(path).ok() != Some(r.identity))
+        });
+        rescan |= raw.iter().any(|path| {
+            identity(path).is_ok_and(|id| {
+                self.uncertain.contains(path)
+                    || self.watched.get(path).is_some_and(|r| r.identity != id)
+            })
+        });
+        if changed || replaced {
             self.sync();
         }
         if report.is_empty() && !rescan {
@@ -332,6 +578,17 @@ mod tests {
                 .map(|r| (r.to_path_buf(), Vec::new()))
                 .collect(),
             files: files.iter().map(|f| f.to_path_buf()).collect(),
+            directories: vec![
+                roots
+                    .iter()
+                    .flat_map(|root| {
+                        crate::files::inventory(root, &Patterns::lenient(&[]))
+                            .unwrap()
+                            .1
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ],
         }
     }
 
@@ -364,6 +621,210 @@ mod tests {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Msg::FilesChanged { paths, .. }) => paths,
             other => panic!("no report: {other:?}"),
+        }
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        installed: BTreeMap<PathBuf, RecursiveMode>,
+        calls: Vec<(String, PathBuf)>,
+        add: BTreeSet<PathBuf>,
+        remove: BTreeSet<PathBuf>,
+        commit: bool,
+    }
+
+    type FakeBackend = std::sync::Arc<std::sync::Mutex<Fake>>;
+
+    struct FakePaths(FakeBackend);
+
+    impl Backend for FakeBackend {
+        fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_> {
+            Box::new(FakePaths(self.clone()))
+        }
+    }
+
+    impl notify::PathsMut for FakePaths {
+        fn add(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            let mut fake = self.0.lock().unwrap();
+            fake.calls.push(("add".into(), path.into()));
+            if fake.add.contains(path) {
+                return Err(notify::Error::generic("add refused"));
+            }
+            fake.installed.insert(path.into(), mode);
+            Ok(())
+        }
+        fn remove(&mut self, path: &Path) -> notify::Result<()> {
+            let mut fake = self.0.lock().unwrap();
+            fake.calls.push(("remove".into(), path.into()));
+            if fake.remove.contains(path) {
+                return Err(notify::Error::generic("remove refused"));
+            }
+            fake.installed.remove(path);
+            Ok(())
+        }
+        fn commit(self: Box<Self>) -> notify::Result<()> {
+            if self.0.lock().unwrap().commit {
+                Err(notify::Error::generic("commit uncertain"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn fake_state() -> (State, FakeBackend) {
+        let backend = FakeBackend::default();
+        let cloned = backend.clone();
+        (
+            State::with_factory(Box::new(move || Ok(Box::new(cloned.clone())))),
+            backend,
+        )
+    }
+
+    #[test]
+    fn replacement_and_equal_scope_recovery_preserve_unaffected_registrations() {
+        let a = tree(&[("nested/a", "")]);
+        let b = tree(&[("b", "")]);
+        let (mut s, backend) = fake_state();
+        let initial = set(&[a.path(), b.path()], &[]);
+        s.set(initial.clone());
+        backend.lock().unwrap().calls.clear();
+        s.set(initial.clone());
+        assert_eq!(backend.lock().unwrap().calls.len(), 0);
+        let old = a.path().join("old");
+        fs::rename(a.path().join("nested"), &old).unwrap();
+        fs::create_dir(a.path().join("nested")).unwrap();
+        s.set(initial);
+        assert_eq!(s.watched[b.path()].identity, identity(b.path()).unwrap());
+        assert!(
+            backend
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(_, p)| p != b.path())
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                s.watched[&a.path().join("nested")].identity,
+                identity(&a.path().join("nested")).unwrap()
+            );
+        }
+        s.invalidate(a.path());
+        backend.lock().unwrap().calls.clear();
+        s.sync();
+        assert!(
+            backend
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|(op, p)| op == "add" && p == a.path())
+        );
+        assert!(s.watched.contains_key(a.path()));
+    }
+
+    #[test]
+    fn failed_add_remove_and_commit_repair_only_after_acknowledgment() {
+        let a = tree(&[("a", "")]);
+        let b = tree(&[("b", "")]);
+        let (mut s, backend) = fake_state();
+        backend.lock().unwrap().add.insert(a.path().into());
+        s.set(set(&[a.path(), b.path()], &[]));
+        assert_eq!(s.watched.keys().collect::<Vec<_>>(), [b.path()]);
+        assert!(s.retry.is_some());
+        backend.lock().unwrap().add.clear();
+        s.sync();
+        assert_eq!(s.watched.len(), 2);
+        backend.lock().unwrap().remove.insert(a.path().into());
+        s.set(set(&[b.path()], &[]));
+        assert_eq!(s.watched.len(), 2);
+        backend.lock().unwrap().remove.clear();
+        s.sync();
+        assert_eq!(s.watched.keys().collect::<Vec<_>>(), [b.path()]);
+        backend.lock().unwrap().commit = true;
+        s.set(set(&[a.path(), b.path()], &[]));
+        assert!(s.uncertain.contains(a.path()));
+        assert!(s.retry.is_some());
+        backend.lock().unwrap().commit = false;
+        s.sync();
+        assert_eq!(s.watched.len(), 2);
+        assert_eq!(s.uncertain.len(), 0);
+        assert_eq!(s.retry, None);
+        assert_eq!(s.messages.last().unwrap(), "File watching recovered");
+    }
+
+    #[test]
+    fn retries_are_capped_report_changes_once_and_cancel_on_release() {
+        let dir = tree(&[("a", "")]);
+        let (mut s, backend) = fake_state();
+        backend.lock().unwrap().add.insert(dir.path().into());
+        s.set(set(&[dir.path()], &[]));
+        s.messages.clear();
+        let now = Instant::now();
+        s.attempts = 0;
+        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+            s.sync_at(now);
+            assert_eq!(s.retry, Some(now + Duration::from_secs(seconds)));
+        }
+        assert_eq!(s.messages.len(), 0);
+        backend.lock().unwrap().commit = true;
+        s.sync_at(now);
+        assert_eq!(s.messages.len(), 1);
+        s.set(WatchSet::default());
+        assert_eq!(s.retry, None);
+        assert_eq!(s.watched.len(), 0);
+    }
+
+    #[test]
+    fn a_failed_root_keeps_a_confirmed_visited_parent() {
+        let dir = tree(&[("child/a", "")]);
+        let (mut s, backend) = fake_state();
+        backend.lock().unwrap().add.insert(dir.path().into());
+        s.set(set(&[dir.path()], &[&dir.path().join("child/a")]));
+        assert!(s.watched.contains_key(&dir.path().join("child")));
+        assert!(s.retry.is_some());
+        backend.lock().unwrap().add.clear();
+        s.sync();
+        assert!(s.covered(&dir.path().join("child")));
+        assert_eq!(s.retry, None);
+    }
+
+    #[test]
+    fn initialization_and_registration_retry_without_filesystem_events() {
+        for initialization in [true, false] {
+            let dir = tree(&[("a", "")]);
+            let desired = set(&[dir.path()], &[]);
+            let backend = FakeBackend::default();
+            if !initialization {
+                backend.lock().unwrap().add.insert(dir.path().into());
+            }
+            let worker_backend = backend.clone();
+            let (tx, rx) = mpsc::channel();
+            let (reports, received) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let mut first = initialization;
+                let factory = move || {
+                    if std::mem::take(&mut first) {
+                        Err(notify::Error::generic("initialization refused"))
+                    } else {
+                        Ok(Box::new(worker_backend.clone()) as Box<dyn Backend>)
+                    }
+                };
+                run(State::with_factory(Box::new(factory)), rx, move |m| {
+                    reports.send(m).unwrap();
+                });
+            });
+            tx.send(In::Set(desired)).unwrap();
+            assert!(
+                matches!(received.recv_timeout(Duration::from_secs(2)).unwrap(), Msg::WatchStatus(s) if s.contains("refused"))
+            );
+            backend.lock().unwrap().add.clear();
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(3)).unwrap(),
+                Msg::WatchStatus("File watching recovered".into())
+            );
+            drop(tx);
+            worker.join().unwrap();
         }
     }
 
@@ -525,6 +986,15 @@ mod tests {
                 ignore.iter().map(|p| p.to_string()).collect(),
             )],
             files: Vec::new(),
+            directories: vec![
+                crate::files::inventory(
+                    root,
+                    &Patterns::lenient(&ignore.iter().map(|p| p.to_string()).collect::<Vec<_>>()),
+                )
+                .unwrap()
+                .1
+                .into(),
+            ],
         };
         let mut s = state();
         s.set(ignoring(&["*.log"]));
@@ -553,7 +1023,9 @@ mod tests {
         assert!(!s.kept(&root.join("new")));
         // A root shared by projects with different patterns: what either keeps is watched.
         let mut both = ignoring(&["*.log"]);
-        both.roots.extend(ignoring(&["*", "!notes/"]).roots);
+        let other = ignoring(&["*", "!notes/"]);
+        both.roots.extend(other.roots);
+        both.directories.extend(other.directories);
         s.set(both);
         assert_eq!(s.roots.len(), 2);
         assert!(s.kept(&root.join("src")) && s.kept(&root.join("notes/d")));

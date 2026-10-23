@@ -116,6 +116,33 @@ impl Editor {
         }
     }
 
+    fn later_write(&mut self, name: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        while let Ok(msg) = self.reports.recv_timeout(Duration::from_millis(200)) {
+            assert!(
+                Instant::now() < deadline,
+                "{} reports never settled",
+                std::env::consts::OS
+            );
+            self.send(msg);
+        }
+        let path = self.root.join(name);
+        fs::write(&path, "later independent write").unwrap();
+        loop {
+            let msg = self
+                .reports
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|err| {
+                    panic!("{} later write to {path:?}: {err}", std::env::consts::OS)
+                });
+            let observed = matches!(&msg, Msg::FilesChanged { paths, .. } if paths.iter().any(|(p, _)| p == &path));
+            self.send(msg);
+            if observed {
+                return;
+            }
+        }
+    }
+
     fn wait_for(&mut self, what: &str, done: impl Fn(&Core) -> bool) {
         let deadline = Instant::now() + TIMEOUT;
         while !done(&self.core) {
@@ -281,4 +308,75 @@ fn visited_files_still_follow_the_disk_without_project_root_watches() {
         assert!(!editor.core.current().modified());
         assert_eq!(editor.core.current().disk, Some(hash(b"external\n")));
     }
+}
+
+#[test]
+fn accepted_recovery_covers_lost_directories_ignore_changes_and_replacements() {
+    let mut editor = Editor::new(
+        &[
+            ("a", "a"),
+            ("kept/old", "old"),
+            (".ignore", "hidden/\n.ignore\n"),
+            ("hidden/file", "hidden"),
+        ],
+        "",
+    );
+    fs::create_dir_all(editor.root.join("lost/deep")).unwrap();
+    fs::write(editor.root.join("lost/deep/file"), "lost").unwrap();
+    editor.send(Msg::FilesChanged {
+        paths: vec![],
+        rescan: true,
+    });
+    assert!(
+        editor
+            .core
+            .watch_set()
+            .directories
+            .iter()
+            .any(|dirs| dirs.contains(&editor.root.join("lost/deep")))
+    );
+    editor.ready("lost/deep/file");
+    editor.later_write("lost/deep/file");
+
+    fs::write(editor.root.join(".ignore"), ".ignore\n").unwrap();
+    let hidden = editor.root.join("hidden");
+    editor.wait_for("excluded ignore file to restore hidden coverage", |c| {
+        c.watch_set()
+            .directories
+            .iter()
+            .any(|dirs| dirs.contains(&hidden))
+    });
+    editor.ready("hidden/file");
+    editor.later_write("hidden/file");
+
+    let kept = editor.root.join("kept");
+    fs::rename(&kept, editor._dir.path().join("old-kept")).unwrap();
+    fs::create_dir_all(kept.join("deep")).unwrap();
+    fs::write(kept.join("deep/new"), "new").unwrap();
+    editor.wait_for("replacement directory coverage", |c| {
+        c.watch_set()
+            .directories
+            .iter()
+            .any(|dirs| dirs.contains(&kept.join("deep")))
+    });
+    editor.ready("kept/deep/new");
+    editor.later_write("kept/deep/new");
+}
+
+#[test]
+fn recovery_crossing_the_limit_keeps_visited_file_synchronization() {
+    let mut editor = Editor::new(&[("a", "original")], "max_watched_files = 2");
+    fs::create_dir_all(editor.root.join("new/deep")).unwrap();
+    fs::write(editor.root.join("new/deep/b"), "b").unwrap();
+    editor.send(Msg::FilesChanged {
+        paths: vec![],
+        rescan: true,
+    });
+    assert_eq!(editor.core.watch_set().roots.len(), 0);
+    assert_eq!(editor.core.watch_set().files, [editor.root.join("a")]);
+    editor.ready("a");
+    fs::write(editor.root.join("a"), "fallback after recovery").unwrap();
+    editor.wait_for("visited fallback after size-limit recovery", |c| {
+        c.text() == "fallback after recovery"
+    });
 }

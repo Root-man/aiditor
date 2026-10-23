@@ -8,6 +8,16 @@ use aiditor_core::key::parse_keys;
 use aiditor_services::projects;
 use support::Driver;
 
+fn kept_directories(d: &Driver) -> Vec<std::path::PathBuf> {
+    d.watched
+        .directories
+        .iter()
+        .flat_map(|dirs| dirs.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 #[test]
 fn production_visit_save_and_index_replies_can_be_held() {
     let dir = tempfile::tempdir().unwrap();
@@ -296,4 +306,256 @@ fn concurrent_workspace_saves_keep_the_losing_buffers_edits() {
         assert_eq!(d.core.text(), text);
         assert_eq!(d.core.current().modified(), disk != text);
     }
+}
+
+#[test]
+fn real_inventory_drives_limits_shared_roots_and_ignore_refresh() {
+    use aiditor_core::Disk;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(root.join("notes/empty")).unwrap();
+    fs::write(root.join("notes/a"), "a").unwrap();
+    fs::write(root.join(".ignore"), "notes/\n").unwrap();
+    let definition = |name: &str, limit, watch| {
+        projects::write(&dir.path().join(format!("{name}.toml")), None,
+            format!("name = '{name}'\nwatch = {watch}\nmax_watched_files = {limit}\nignore = ['.ignore']\n[primary]\npath = {root:?}\n")).unwrap()
+    };
+    let loaded = definition("p", 10, true);
+    let mut d = Driver::default();
+    d.send(Msg::ProjectsLoaded {
+        dir: None,
+        projects: vec![Ok(loaded.clone())],
+    });
+    d.core.launch(&root, &root);
+    d.send(Msg::Tick);
+    d.settle();
+    assert_eq!(kept_directories(&d), std::slice::from_ref(&root));
+    d.send(Msg::FilesChanged {
+        paths: vec![(root.join("notes/a"), Disk::File)],
+        rescan: false,
+    });
+    d.settle();
+    fs::write(root.join(".ignore"), "").unwrap();
+    d.send(Msg::FilesChanged {
+        paths: vec![(root.join(".ignore"), Disk::File)],
+        rescan: false,
+    });
+    d.settle();
+    assert_eq!(
+        kept_directories(&d),
+        [root.clone(), root.join("notes"), root.join("notes/empty")]
+    );
+    fs::write(root.join("notes/b"), "b").unwrap();
+    d.send(Msg::FilesChanged {
+        paths: vec![(root.join("notes/b"), Disk::File)],
+        rescan: false,
+    });
+    assert!(d.replies.iter().any(|r| matches!(r, Msg::Indexed { roots, .. } if roots[0].1.as_ref().unwrap().contains(&"notes/b".into()))));
+    d.settle();
+    fs::write(root.join(".ignore"), "notes/\n").unwrap();
+    d.send(Msg::FilesChanged {
+        paths: vec![(root.join(".ignore"), Disk::File)],
+        rescan: false,
+    });
+    d.settle();
+    assert_eq!(kept_directories(&d), std::slice::from_ref(&root));
+
+    let zero = definition("zero", 0, true);
+    let off = definition("off", 10, false);
+    d.send(Msg::ProjectsLoaded {
+        dir: None,
+        projects: vec![Ok(loaded), Ok(zero), Ok(off)],
+    });
+    d.settle();
+    let original = d.core.workspace();
+    d.core
+        .new_workspace("zero", d.core.project_id("zero").unwrap());
+    d.send(Msg::Tick);
+    d.settle();
+    assert_eq!(d.watched.roots, [(root.clone(), vec![".ignore".into()])]);
+    d.core.kill_workspace(original).unwrap();
+    d.send(Msg::Tick);
+    d.settle();
+    assert_eq!(d.watched.roots.len(), 0);
+    d.core
+        .new_workspace("off", d.core.project_id("off").unwrap());
+    d.call("project-index", &["off"]);
+    d.send(Msg::FilesChanged {
+        paths: vec![(root.join(".ignore"), Disk::File)],
+        rescan: false,
+    });
+    let off_id = d.core.project_id("off").unwrap();
+    assert!(d.replies.iter().all(|r| match r {
+        Msg::Indexed { project, .. } => *project != off_id,
+        _ => true,
+    }));
+    d.settle();
+    assert_eq!(kept_directories(&d), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn explicit_index_and_reload_reread_global_excludes() {
+    let Ok(fixture) = std::env::var("AIDITOR_EXCLUDES_FIXTURE") else {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("gitconfig");
+        fs::write(
+            &config,
+            format!(
+                "[core]\nexcludesFile = {}\n",
+                dir.path().join("excludes").display()
+            ),
+        )
+        .unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "explicit_index_and_reload_reread_global_excludes",
+                "--nocapture",
+            ])
+            .env("AIDITOR_EXCLUDES_FIXTURE", dir.path())
+            .env("GIT_CONFIG_GLOBAL", config)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    };
+    let fixture = std::path::PathBuf::from(fixture);
+    let root = fixture.join("repo");
+    fs::create_dir_all(root.join("notes")).unwrap();
+    fs::write(root.join("notes/a"), "a").unwrap();
+    fs::write(fixture.join("excludes"), "notes/\n").unwrap();
+    let loaded = projects::write(
+        &fixture.join("p.toml"),
+        None,
+        format!("name = 'p'\n[primary]\npath = {root:?}\n"),
+    )
+    .unwrap();
+    let mut d = Driver::default();
+    d.send(Msg::ProjectsLoaded {
+        dir: None,
+        projects: vec![Ok(loaded.clone())],
+    });
+    d.core.launch(&root, &root);
+    d.send(Msg::Tick);
+    d.settle();
+    assert_eq!(kept_directories(&d), std::slice::from_ref(&root));
+    fs::write(fixture.join("excludes"), "").unwrap();
+    d.call("project-index", &["p"]);
+    assert_eq!(kept_directories(&d), [root.clone(), root.join("notes")]);
+    fs::write(fixture.join("excludes"), "notes/\n").unwrap();
+    d.send(Msg::ProjectsLoaded {
+        dir: None,
+        projects: vec![Ok(loaded)],
+    });
+    d.settle();
+    assert_eq!(kept_directories(&d), [root]);
+}
+
+#[test]
+fn preview_service_prepares_text_and_reports_invalid_or_unreadable_files() {
+    use aiditor_core::{FileOp, PreviewRequest};
+    use aiditor_services::files;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("preview");
+    let preview = || {
+        let Msg::Previewed { result, .. } = files::run(FileOp::Preview(PreviewRequest {
+            session: 7,
+            revision: 9,
+            path: path.clone(),
+        })) else {
+            panic!("not a preview");
+        };
+        result
+    };
+    assert_eq!(preview().unwrap(), None);
+    for (bytes, text) in [
+        ("α\nβ".as_bytes(), "α\nβ"),
+        (
+            b"\xef\xbb\xbfhello\r\nworld\r\n".as_slice(),
+            "hello\nworld\n",
+        ),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(preview().unwrap().unwrap().to_string(), text);
+    }
+    for (bytes, error) in [
+        (b"a\0b".as_slice(), "binary file"),
+        (b"\xff".as_slice(), "not valid UTF-8"),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            preview().unwrap_err(),
+            format!("{}: {error}", path.display())
+        );
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
+    let refused = preview();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        refused
+            .unwrap_err()
+            .starts_with(&format!("{}: ", path.display()))
+    );
+}
+
+#[test]
+fn a_held_preview_worker_leaves_query_and_cancel_responsive() {
+    use aiditor_core::FileOp;
+    use aiditor_core::command::{ArgSpec, Command, Preview};
+    use aiditor_services::files;
+    use std::sync::mpsc;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a"), "α\r\n".repeat(100_000)).unwrap();
+    let mut d = project_driver(dir.path());
+    d.core.register(Command {
+        name: "preview-test",
+        spec: ArgSpec {
+            prompts: &["Pick: "],
+            completion: Some(|core, _| {
+                ["a", "b", "c"]
+                    .iter()
+                    .map(|p| {
+                        core.projects()
+                            .last()
+                            .unwrap()
+                            .primary
+                            .path
+                            .join(p)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect()
+            }),
+            preview: Some(|_, path| Some(Preview::File(path.into()))),
+            ..Default::default()
+        },
+        handler: |_, _| Ok(()),
+    });
+    d.hold_files = true;
+    d.call("preview-test", &[]);
+    d.send(Msg::Tick);
+    let op = d.files.pop_front().unwrap();
+    assert!(matches!(op, FileOp::Preview(_)));
+    let (release, held) = mpsc::channel();
+    let (entered, started) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        entered.send(()).unwrap();
+        held.recv().unwrap();
+        files::run(op)
+    });
+    started.recv().unwrap();
+    d.keys("b");
+    assert_eq!(d.core.text(), "b");
+    d.keys("C-g typed");
+    assert_eq!(d.core.text(), "typed");
+    release.send(()).unwrap();
+    d.send(worker.join().unwrap());
+    assert_eq!(d.core.text(), "typed");
+    assert_eq!(d.files.len(), 0);
 }

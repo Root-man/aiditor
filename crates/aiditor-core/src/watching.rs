@@ -43,7 +43,18 @@ impl Core {
             .collect();
         files.sort();
         files.dedup();
-        WatchSet { roots, files }
+        let directories = self
+            .projects
+            .iter()
+            .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
+            .filter(|p| self.project_watched(p))
+            .map(|p| self.index[&p.id].directories().clone())
+            .collect();
+        WatchSet {
+            roots,
+            files,
+            directories,
+        }
     }
 
     /// Sends the watch set when it changed since last sent.
@@ -61,7 +72,7 @@ impl Core {
         }
         self.watch_refusals = refusals;
         let set = self.watch_set();
-        if set != self.watching {
+        if std::mem::take(&mut self.watch_refresh) || set != self.watching {
             self.watching = set.clone();
             effects.push(Effect::Watch(set));
         }
@@ -154,7 +165,12 @@ impl Ctx<'_> {
             .collect();
         let stale: Vec<ProjectId> = (self.core.index.iter_mut())
             .filter(|(name, _)| watched.contains(*name))
-            .filter_map(|(name, index)| (index.stale(&paths) || rescan).then_some(*name))
+            .filter_map(|(name, index)| {
+                if rescan {
+                    index.refresh_filtering();
+                }
+                (index.stale(&paths) || rescan).then_some(*name)
+            })
             .collect();
         for name in stale {
             // A project no longer loaded has nothing to walk.
@@ -193,6 +209,29 @@ mod tests {
 
     fn mode_line(h: &mut Harness) -> String {
         h.display(5).mode_line
+    }
+
+    #[test]
+    fn watcher_status_reaches_echo_and_messages() {
+        let mut h = Harness::new(&[]);
+        for message in [
+            "File watching failed: add refused; retrying",
+            "File watching recovered",
+        ] {
+            h.send(Msg::WatchStatus(message.into()));
+            assert!(h.core.message().unwrap().ends_with(message));
+        }
+        let messages = h
+            .core
+            .buffers
+            .recent()
+            .find(|(_, b)| b.name == "*Messages*")
+            .unwrap()
+            .1
+            .text()
+            .to_string();
+        assert!(messages.contains("add refused"));
+        assert!(messages.contains("File watching recovered"));
     }
 
     #[test]

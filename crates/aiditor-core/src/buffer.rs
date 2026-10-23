@@ -144,9 +144,13 @@ impl Buffers {
 
     /// A buffer visiting `path`, holding `text` already read from it.
     pub fn create_for_file(&mut self, path: &Path, text: &str) -> BufferId {
+        self.create_for_prepared_file(path, Rope::from_str(text))
+    }
+
+    pub(crate) fn create_for_prepared_file(&mut self, path: &Path, text: Rope) -> BufferId {
         let id = self.create(&file_name(path));
         let buffer = self.map.get_mut(&id).expect("just created");
-        buffer.content = Content::Text(Rope::from_str(text));
+        buffer.content = Content::Text(text);
         buffer.file = Some(path.to_path_buf());
         id
     }
@@ -665,6 +669,11 @@ pub fn hash(bytes: &[u8]) -> u64 {
     (bytes.iter()).fold(0xcbf2_9ce4_8422_2325, |h, &b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     })
+}
+
+/// Validates and prepares a preview on the file service worker, without hashing its bytes.
+pub fn prepare_preview(bytes: &[u8]) -> Result<Rope, &'static str> {
+    decode(bytes).map(|(text, ..)| Rope::from_str(&text))
 }
 
 /// A file's bytes as buffer text, and whether it used CRLF and a BOM; or why it is refused.

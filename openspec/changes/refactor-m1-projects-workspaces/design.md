@@ -75,6 +75,8 @@ Update confirmed state only for acknowledged registrations/removals. A failed or
 
 Retry pending failures on a service deadline independent of incoming filesystem events, with capped backoff (1, 2, 4, 8, 16, then 30 seconds) and an immediate attempt after relevant desired coverage changes. Surface the first failure and changed failures through the core's echo/`*Messages*` route; suppress identical repeats and report recovery once. Cancel retries when coverage is no longer requested. Keep visited-file fallback for paths without confirmed root coverage, including failed root registrations.
 
+Backend acknowledgment limit (accepted during implementation): confirmed means acknowledged by `notify`'s public API. In notify 8.2.0 on macOS, batch commit and watch/unwatch discard stream startup errors, and the FSEvents stream-start result is ignored internally. These unreported failures cannot trigger our retry/reporting policy. This change does not patch or replace the backend; reported failures and uncertain public batch outcomes remain recoverable as specified.
+
 Alternatives: logging alone hides permanent lost coverage; periodically rewatching everything adds gaps and churn; relying on set equality cannot detect replaced directories. Confirmed state plus targeted reconciliation addresses the observed failure modes. Do not redefine `[unwatched]`, which currently expresses project eligibility; registration errors use explicit messages.
 
 ### D6. Preview session identity and coalescing (#5)

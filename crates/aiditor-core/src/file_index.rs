@@ -1,7 +1,8 @@
 //! Project index transitions and snapshots; disk walks run in services.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::project::{Project, ProjectId};
 use crate::{Core, Ctx, Disk, Effect, FileOp};
@@ -25,7 +26,7 @@ pub(crate) struct FileIndex {
     ready: bool,
     loud: bool,
     roots: Vec<(PathBuf, Vec<PathBuf>)>,
-    directories: usize,
+    directories: Arc<[PathBuf]>,
     missed: BTreeSet<PathBuf>,
 }
 
@@ -40,6 +41,9 @@ impl FileIndex {
         if self.requested.as_ref() != Some(&scope) {
             self.missed.clear();
             self.ready = false;
+        }
+        if !quiet {
+            self.missed.clear();
         }
         self.requests += 1;
         self.requested = Some(scope.clone());
@@ -57,7 +61,7 @@ impl FileIndex {
         &mut self,
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
-        directories: usize,
+        directories: Vec<PathBuf>,
     ) -> Reply {
         if self.active != Some(walk) {
             return Reply::Obsolete;
@@ -79,11 +83,19 @@ impl FileIndex {
             .collect();
         self.ready = errors.is_empty();
         self.accepted = self.requested.clone();
-        self.directories = directories;
+        self.directories = directories.into();
         Reply::Accepted {
             loud: std::mem::take(&mut self.loud),
             errors,
         }
+    }
+
+    pub(crate) fn directories(&self) -> &Arc<[PathBuf]> {
+        &self.directories
+    }
+
+    pub(crate) fn refresh_filtering(&mut self) {
+        self.missed.clear();
     }
 
     pub(crate) fn roots(&self) -> &[(PathBuf, Vec<PathBuf>)] {
@@ -94,7 +106,7 @@ impl FileIndex {
         (self.ready && self.accepted.as_ref() == Some(scope) && self.requested(scope)).then(|| {
             (
                 self.roots.iter().map(|(_, files)| files.len()).sum(),
-                self.directories,
+                self.directories.len(),
             )
         })
     }
@@ -113,6 +125,15 @@ impl FileIndex {
     /// walk ignores (a visited `.env`) start none.
     // shortcut: a create or delete re-walks the whole project; update the index per path if large projects lag.
     pub(crate) fn stale(&mut self, paths: &[(PathBuf, Disk)]) -> bool {
+        if paths.iter().any(|(path, _)| {
+            matches!(
+                path.file_name().and_then(|s| s.to_str()),
+                Some(".ignore" | ".gitignore")
+            ) && self.roots.iter().any(|(root, _)| path.starts_with(root))
+        }) {
+            self.refresh_filtering();
+            return true;
+        }
         let mut stale = false;
         for (path, disk) in paths {
             for (root, files) in &self.roots {
@@ -121,21 +142,24 @@ impl FileIndex {
                 };
                 stale |= match disk {
                     Disk::File => {
-                        !files.iter().any(|f| f == rel) && self.missed.insert(path.clone())
+                        files.binary_search_by(|f| f.as_path().cmp(rel)).is_err()
+                            && self.missed.insert(path.clone())
                     }
                     Disk::Gone => {
                         self.missed.remove(path);
-                        files.iter().any(|f| f.starts_with(rel))
+                        has_descendant(files, rel) || self.directories.binary_search(path).is_ok()
                     }
-                    Disk::Dir => {
-                        !files.iter().any(|f| f.starts_with(rel))
-                            && self.missed.insert(path.clone())
-                    }
+                    Disk::Dir => !has_descendant(files, rel) && self.missed.insert(path.clone()),
                 };
             }
         }
         stale
     }
+}
+
+fn has_descendant(files: &[PathBuf], path: &Path) -> bool {
+    let at = files.partition_point(|file| file.as_path() < path);
+    files.get(at).is_some_and(|file| file.starts_with(path))
 }
 
 impl Core {
@@ -179,7 +203,7 @@ impl Ctx<'_> {
         project: ProjectId,
         walk: u64,
         roots: Vec<(PathBuf, Result<Vec<PathBuf>, String>)>,
-        directories: usize,
+        directories: Vec<PathBuf>,
     ) {
         if self.core.project_at(project).is_err() {
             return;
@@ -198,6 +222,7 @@ impl Ctx<'_> {
                 }));
             }
             Reply::Accepted { loud, errors } => {
+                self.core.watch_refresh = true;
                 if !loud {
                     if !errors.is_empty() {
                         tracing::info!(?project, errors, "re-walk after a file change");
@@ -225,6 +250,59 @@ mod tests {
     use crate::Msg;
     use crate::harness::Harness;
     use crate::project::Loaded;
+
+    #[test]
+    fn sorted_events_keep_component_boundaries_and_missed_suppression() {
+        let mut index = FileIndex {
+            roots: vec![("/r".into(), vec!["app2/a".into(), "src/a".into()])],
+            ..Default::default()
+        };
+        for (path, disk, expected) in [
+            ("app", Disk::Gone, false),
+            ("app2", Disk::Gone, true),
+            ("src/a", Disk::File, false),
+            ("src/b", Disk::File, true),
+            ("src/b", Disk::File, false),
+            ("empty", Disk::Dir, true),
+            ("empty", Disk::Dir, false),
+            (".env", Disk::File, true),
+            (".env", Disk::File, false),
+            (".env", Disk::Gone, false),
+            (".env", Disk::File, true),
+        ] {
+            assert_eq!(
+                index.stale(&[(Path::new("/r").join(path), disk)]),
+                expected,
+                "{path} {disk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sorted_lookup_work_on_one_hundred_thousand_files() {
+        let files: Vec<_> = (0..100_000)
+            .map(|i| PathBuf::from(format!("dir{i:06}/file")))
+            .collect();
+        let (mut linear, mut sorted) = (0, 0);
+        for i in (0..100_000).step_by(1000) {
+            let path = PathBuf::from(format!("dir{i:06}"));
+            let before = files.iter().any(|file| {
+                linear += 1;
+                file.starts_with(&path)
+            });
+            let at = files.partition_point(|file| {
+                sorted += 1;
+                file < &path
+            });
+            sorted += 1;
+            let after = files.get(at).is_some_and(|file| file.starts_with(&path));
+            assert_eq!(after, before);
+            assert!(has_descendant(&files, &path));
+        }
+        eprintln!("100000 files / 100 directory events: linear={linear}, sorted={sorted}");
+        assert!(sorted < 2000);
+        assert!(linear > 4_000_000);
+    }
 
     type Walk = (ProjectId, u64, Vec<PathBuf>, Vec<String>);
 
@@ -270,7 +348,9 @@ mod tests {
                 .iter()
                 .map(|root| (root.clone(), Ok(files.iter().map(PathBuf::from).collect())))
                 .collect(),
-            directories,
+            directories: (0..directories)
+                .map(|n| walk.2[0].join(format!("dir{n}")))
+                .collect(),
         }
     }
 
@@ -346,7 +426,8 @@ mod tests {
             h.core.index[&project].counts(&(first.2, first.3)),
             Some((2, 3))
         );
-        assert_eq!(h.core.watch_set(), accepted);
+        assert_eq!(h.core.watch_set().roots, accepted.roots);
+        assert_eq!(h.core.watch_set().directories[0].len(), 3);
     }
 
     #[test]
@@ -380,7 +461,7 @@ mod tests {
                 ("/new".into(), Ok(vec!["good".into()])),
                 ("/missing".into(), Err("/missing: unavailable".into())),
             ],
-            directories: 1,
+            directories: vec!["/new".into()],
         });
         assert_eq!(
             h.core.message(),

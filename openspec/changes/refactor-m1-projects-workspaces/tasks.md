@@ -41,23 +41,23 @@ These stages implement one change. Opportunity numbers refer to `proposal.md`; d
 - [x] 6.1 Extract index state/transitions into a core module with private readiness, scope, generation, counts, missed paths and announcement state; migrate project/watcher callers and verify existing indexing and watch-limit tests.
 - [x] 6.2 Keep one active walk and one latest pending refresh per project, forwarding explicit-user announcement intent; verify burst requests, changed queued scopes, released projects, stale replies and one final announcement using controlled delivery.
 - [x] 6.3 Separate last accepted snapshot/counts from requested scope; verify same-scope re-walks preserve watches and mode lines, changed scopes wait for fresh counts, and partial-root errors retain current reporting behavior.
-- [ ] 6.4 Replace linear exact/descendant file scans with sorted lookups and preserve missed-path suppression; verify component-boundary cases such as `app`/`app2`, empty directories, ignored visited files and creates/deletes, and compare lookup work on a reproducible event/file fixture.
-- [ ] 6.5 Return kept directories with files from the shared walk and derive counts from that result; verify ignored trees, root inclusion, zero limits, shared roots and directory counts using real filesystem fixtures.
-- [ ] 6.6 Invalidate index filtering and clear missed suppression after relevant ignore-file changes, including excluded ignore files; verify newly included/excluded paths, manual reload of global excludes and the unchanged on-demand policy for unwatched projects.
+- [x] 6.4 Replace linear exact/descendant file scans with sorted lookups and preserve missed-path suppression; verify component-boundary cases such as `app`/`app2`, empty directories, ignored visited files and creates/deletes, and compare lookup work on a reproducible event/file fixture.
+- [x] 6.5 Return kept directories with files from the shared walk and derive counts from that result; verify ignored trees, root inclusion, zero limits, shared roots and directory counts using real filesystem fixtures.
+- [x] 6.6 Invalidate index filtering and clear missed suppression after relevant ignore-file changes, including excluded ignore files; verify newly included/excluded paths, manual reload of global excludes and the unchanged on-demand policy for unwatched projects.
 
 ## 7. Recover and accurately track native watches (#3, #4; D5)
 
-- [ ] 7.1 Carry accepted directory coverage and recovery intent from index results to watch reconciliation even for equal root/pattern sets; verify lost-directory-event recovery and same-scope continuity without dropping unrelated registrations.
-- [ ] 7.2 Detect replaced or invalidated directory registrations and re-establish them while preserving unaffected ones; verify delete/recreate within one debounce interval and later file notifications with deterministic policy tests and native watcher tests.
-- [ ] 7.3 Track desired, confirmed and uncertain backend changes with a narrow failure-injection seam; verify add, remove and commit failures remain pending and subsequent success repairs coverage.
-- [ ] 7.4 Add deadline-driven capped retries and first/changed-failure plus recovery reporting, including backend initialization failure; verify recovery without incoming events, duplicate-message suppression and cancelling retries when coverage is released.
-- [ ] 7.5 Derive visited-file fallback from confirmed root coverage and retain shared-root union/size-limit behavior; verify failed-root fallback, differing ignore patterns across shared roots and recovery that crosses `max_watched_files`.
-- [ ] 7.6 Exercise native coverage recovery on macOS and Linux using the existing CI matrix; verify later writes are observed after replacement/ignore changes and record platform-specific failure diagnostics if a check fails.
+- [x] 7.1 Carry accepted directory coverage and recovery intent from index results to watch reconciliation even for equal root/pattern sets; verify lost-directory-event recovery and same-scope continuity without dropping unrelated registrations.
+- [x] 7.2 Detect replaced or invalidated directory registrations and re-establish them while preserving unaffected ones; verify delete/recreate within one debounce interval and later file notifications with deterministic policy tests and native watcher tests.
+- [x] 7.3 Track desired, confirmed and uncertain backend changes with a narrow failure-injection seam; verify add, remove and commit failures remain pending and subsequent success repairs coverage.
+- [x] 7.4 Add deadline-driven capped retries and first/changed-failure plus recovery reporting, including backend initialization failure; verify recovery without incoming events, duplicate-message suppression and cancelling retries when coverage is released.
+- [x] 7.5 Derive visited-file fallback from confirmed root coverage and retain shared-root union/size-limit behavior; verify failed-root fallback, differing ignore patterns across shared roots and recovery that crosses `max_watched_files`.
+- [x] 7.6 Exercise native coverage recovery on macOS and Linux using the existing CI matrix; verify later writes are observed after replacement/ignore changes and record platform-specific failure diagnostics if a check fails.
 
 ## 8. Coalesce and prepare previews off-thread (#5; D6)
 
-- [ ] 8.1 Add prompt-session/request identity with one active and one latest pending preview across closures/reopenings; verify rapid `a` to `b` to `c` selection reads the latest pending file and old same-path sessions cannot install replies.
-- [ ] 8.2 Move preview read validation, decoding and Rope preparation into services and return transferable prepared text without an unused content hash; verify UTF-8/BOM/CRLF, binary/missing/unreadable behavior and input handling while a worker is deliberately held.
+- [x] 8.1 Add prompt-session/request identity with one active and one latest pending preview across closures/reopenings; verify rapid `a` to `b` to `c` selection reads the latest pending file and old same-path sessions cannot install replies.
+- [x] 8.2 Move preview read validation, decoding and Rope preparation into services and return transferable prepared text without an unused content hash; verify UTF-8/BOM/CRLF, binary/missing/unreadable behavior and input handling while a worker is deliberately held.
 - [ ] 8.3 Install/release prepared previews through existing restoration and buffer ownership paths; verify at most one hidden preview buffer, same-file grep position changes, visited-buffer reuse, `C-g`, clicks, workspace switching and fresh ordinary visitation on `RET`.
 
 ## 9. Move runtime reload work out of the frontend (#9; D7)

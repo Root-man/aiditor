@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 
-use crate::buffer::{BufferId, decode, file_name};
+use crate::buffer::{BufferId, file_name};
 use crate::command::{Args, Command, Preview};
 use crate::frame::window_display;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
-use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, display};
+use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, PreviewRequest, display};
 
 /// How many answers each prompt's history keeps, Emacs's `history-length`.
 const HISTORY_MAX: usize = 100;
@@ -29,6 +29,7 @@ const MINIBUFFER: WindowId = WindowId(usize::MAX);
 
 /// A prompt waiting in the minibuffer for the command that asked.
 pub(crate) struct Minibuffer {
+    session: u64,
     command: &'static str,
     /// The args so far; the answer becomes the next string.
     args: Args,
@@ -48,7 +49,7 @@ pub(crate) struct Minibuffer {
     /// What was last previewed; `None` before any and with no selection.
     previewed: Option<Preview>,
     /// The file whose read for a preview is awaited.
-    reading: Option<PathBuf>,
+    reading: Option<PreviewRequest>,
     /// The hidden buffer a previewed file was read into, killed on closing.
     peek: Option<BufferId>,
 }
@@ -86,6 +87,10 @@ struct Filtered {
 /// The open prompt, each prompt's history and the completion matcher.
 #[derive(Default)]
 pub(crate) struct Prompts {
+    sessions: u64,
+    preview_revision: u64,
+    active_preview: Option<PreviewRequest>,
+    pending_preview: Option<PreviewRequest>,
     /// The prompt being answered, while the minibuffer is open.
     pub(crate) minibuffer: Option<Minibuffer>,
     /// Each prompt's answers, newest first.
@@ -293,7 +298,9 @@ impl Ctx<'_> {
         buffer.minor_modes.push(command.name);
         let window = Window::new(&mut core.buffers, id);
         core.windows.others.insert(MINIBUFFER, window);
+        core.prompts.sessions += 1;
         core.prompts.minibuffer = Some(Minibuffer {
+            session: core.prompts.sessions,
             command: command.name,
             args,
             prompt,
@@ -607,16 +614,19 @@ impl Core {
                     None => {
                         let mb = self.prompts.minibuffer.as_mut().expect("checked above");
                         mb.previewed = shown;
-                        if mb.reading.as_ref() != Some(&path) {
-                            mb.reading = Some(path.clone());
-                            effects.push(Effect::File(FileOp::Preview(path)));
-                        }
+                        self.request_preview(path, effects);
                         return;
                     }
                 }
             }
             None => (None, None),
         };
+        self.prompts.pending_preview = None;
+        self.prompts
+            .minibuffer
+            .as_mut()
+            .expect("previewing")
+            .reading = None;
         if let (Some(id), Some(p)) = (id, at) {
             self.preview_at(id, p);
             let mb = self.prompts.minibuffer.as_mut().expect("checked above");
@@ -634,38 +644,70 @@ impl Core {
         }
     }
 
-    /// Takes the file service's answer to `FileOp::Preview` when it is the awaited read: the
-    /// file replaces the last one read in the hidden peek buffer, and the next `preview` shows
-    /// it. A file that can't be shown leaves the window as it was.
-    // shortcut: whole files are read however large; add consult's size limit if previews feel slow.
+    fn request_preview(&mut self, path: PathBuf, effects: &mut Effects) {
+        let prompts = &mut self.prompts;
+        let mb = prompts.minibuffer.as_mut().expect("previewing");
+        let reusable = prompts
+            .active_preview
+            .iter()
+            .chain(prompts.pending_preview.iter())
+            .find(|r| r.session == mb.session && r.path == path)
+            .cloned();
+        let request = reusable.unwrap_or_else(|| {
+            prompts.preview_revision += 1;
+            PreviewRequest {
+                session: mb.session,
+                revision: prompts.preview_revision,
+                path,
+            }
+        });
+        mb.reading = Some(request.clone());
+        if prompts.active_preview.is_none() {
+            prompts.active_preview = Some(request.clone());
+            effects.push(Effect::File(FileOp::Preview(request)));
+        } else if prompts.active_preview.as_ref() == Some(&request) {
+            prompts.pending_preview = None;
+        } else {
+            prompts.pending_preview = Some(request);
+        }
+    }
+
     pub(crate) fn on_previewed(
         &mut self,
-        path: PathBuf,
-        result: Result<Option<(Vec<u8>, u64)>, String>,
+        request: PreviewRequest,
+        result: Result<Option<ropey::Rope>, String>,
+        effects: &mut Effects,
     ) {
-        let awaited =
-            (self.prompts.minibuffer.as_ref()).is_some_and(|mb| mb.reading == Some(path.clone()));
-        if !awaited {
+        if self.prompts.active_preview.as_ref() != Some(&request) {
             return;
         }
-        self.unpreview();
-        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-        mb.reading = None;
-        if let Some(old) = mb.peek.take() {
-            _ = self.buffers.kill(old);
+        self.prompts.active_preview = None;
+        if self
+            .prompts
+            .minibuffer
+            .as_ref()
+            .is_some_and(|mb| mb.reading.as_ref() == Some(&request))
+        {
+            self.unpreview();
+            let mb = self.prompts.minibuffer.as_mut().expect("previewing");
+            mb.reading = None;
+            if let Some(old) = mb.peek.take() {
+                _ = self.buffers.kill(old);
+            }
+            if let Ok(Some(text)) = result {
+                let id = self.buffers.create_for_prepared_file(&request.path, text);
+                self.buffers
+                    .rename(id, &format!(" {}", file_name(&request.path)));
+                self.buffers.get_mut(id).expect("just created").read_only = true;
+                let mb = self.prompts.minibuffer.as_mut().expect("previewing");
+                mb.peek = Some(id);
+                mb.previewed = None;
+            }
         }
-        let Ok(Some((bytes, _))) = result else {
-            return;
-        };
-        let Ok((text, ..)) = decode(&bytes) else {
-            return;
-        };
-        let id = self.buffers.create_for_file(&path, &text);
-        self.buffers.rename(id, &format!(" {}", file_name(&path)));
-        self.buffers.get_mut(id).expect("just created").read_only = true;
-        let mb = self.prompts.minibuffer.as_mut().expect("checked above");
-        mb.peek = Some(id);
-        mb.previewed = None;
+        if let Some(next) = self.prompts.pending_preview.take() {
+            self.prompts.active_preview = Some(next.clone());
+            effects.push(Effect::File(FileOp::Preview(next)));
+        }
     }
 
     /// Adds `candidates` to the open minibuffer's list when `command` opened it completing.
@@ -756,6 +798,7 @@ impl Core {
     pub(crate) fn close_minibuffer(&mut self) -> Option<Minibuffer> {
         self.unpreview();
         let mb = self.prompts.minibuffer.take()?;
+        self.prompts.pending_preview = None;
         if let Some(peek) = mb.peek {
             _ = self.buffers.kill(peek);
         }
@@ -795,6 +838,110 @@ mod tests {
     use crate::harness::test_cmd;
     use crate::minibuffer::HISTORY_MAX;
     use crate::window::WindowId;
+
+    fn pending_previews() -> Harness {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(fruit),
+                preview: Some(|_, candidate| {
+                    Some(Preview::File(std::path::Path::new("/").join(candidate)))
+                }),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        h.keys("C-c p");
+        h
+    }
+
+    fn reads(h: &mut Harness) -> Vec<crate::PreviewRequest> {
+        std::mem::take(&mut h.effects)
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::Effect::File(crate::FileOp::Preview(r)) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn answer_preview(h: &mut Harness, request: crate::PreviewRequest, text: &str) {
+        h.send(Msg::Previewed {
+            request,
+            result: Ok(Some(
+                crate::buffer::prepare_preview(text.as_bytes()).unwrap(),
+            )),
+        });
+    }
+
+    #[test]
+    fn preview_reads_coalesce_to_the_latest_selection_and_input_keeps_working() {
+        let mut h = pending_previews();
+        let first = reads(&mut h).pop().unwrap();
+        h.keys("C-n C-n");
+        assert_eq!(
+            h.core.prompts.selected_candidate().as_deref(),
+            Some("cherry")
+        );
+        assert_eq!(reads(&mut h).len(), 0);
+        answer_preview(&mut h, first, "obsolete apple");
+        let next = reads(&mut h);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].path, std::path::Path::new("/cherry"));
+        assert_eq!(h.core.prompts.minibuffer.as_ref().unwrap().peek, None);
+        answer_preview(&mut h, next[0].clone(), "fresh cherry");
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "fresh cherry"
+        );
+        h.keys("C-g typed");
+        assert_eq!(h.text(), "typed");
+        assert_eq!(reads(&mut h).len(), 0);
+    }
+
+    #[test]
+    fn reopened_same_path_has_its_own_request_and_closed_queues_do_not_run() {
+        let mut h = pending_previews();
+        let old = reads(&mut h).pop().unwrap();
+        h.keys("C-n C-g C-c p");
+        assert_eq!(reads(&mut h).len(), 0);
+        answer_preview(&mut h, old.clone(), "old session");
+        let current = reads(&mut h).pop().unwrap();
+        assert_eq!(current.path, old.path);
+        assert!(current.session > old.session);
+        assert_eq!(h.core.prompts.minibuffer.as_ref().unwrap().peek, None);
+        answer_preview(&mut h, old, "duplicate old session");
+        answer_preview(&mut h, current, "current session");
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "current session"
+        );
+        h.keys("C-n C-n");
+        let active = reads(&mut h).pop().unwrap();
+        h.keys("C-g");
+        answer_preview(&mut h, active, "closed");
+        assert_eq!(reads(&mut h).len(), 0);
+        assert_eq!(h.text(), "");
+    }
+
+    #[test]
+    fn returning_to_an_active_file_reuses_its_read() {
+        let mut h = pending_previews();
+        let first = reads(&mut h).pop().unwrap();
+        h.keys("C-n C-p");
+        answer_preview(&mut h, first, "apple");
+        assert_eq!(reads(&mut h).len(), 0);
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "apple"
+        );
+    }
 
     #[test]
     fn a_key_script_answers_a_prompt() {

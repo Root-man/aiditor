@@ -209,7 +209,7 @@ impl Harness {
                     roots,
                     ..
                 }) => {
-                    let mut directories = 0;
+                    let mut directories = Vec::new();
                     let roots = (roots.into_iter())
                         .map(|root| {
                             let mut files = Vec::new();
@@ -222,6 +222,7 @@ impl Harness {
                             (root, result)
                         })
                         .collect();
+                    directories.sort();
                     self.send(Msg::Indexed {
                         project,
                         walk,
@@ -259,9 +260,14 @@ impl Harness {
                         result,
                     });
                 }
-                Effect::File(FileOp::Preview(path)) => {
-                    let result = read(&path);
-                    self.send(Msg::Previewed { path, result });
+                Effect::File(FileOp::Preview(request)) => {
+                    let result = read(&request.path).and_then(|file| {
+                        file.map(|(bytes, _)| {
+                            crate::buffer::prepare_preview(&bytes).map_err(str::to_string)
+                        })
+                        .transpose()
+                    });
+                    self.send(Msg::Previewed { request, result });
                 }
                 // As `files::run` does.
                 Effect::File(FileOp::Check(paths)) => {
@@ -376,9 +382,9 @@ fn walk_files(
     root: &Path,
     dir: &Path,
     files: &mut Vec<PathBuf>,
-    directories: &mut usize,
+    directories: &mut Vec<PathBuf>,
 ) -> std::io::Result<()> {
-    *directories += 1;
+    directories.push(dir.to_path_buf());
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -402,7 +408,7 @@ fn grep(op: &GrepSearch) -> Result<Vec<Hit>, String> {
     let mut hits = Vec::new();
     for root in &op.roots {
         let mut files = Vec::new();
-        _ = walk_files(root, root, &mut files, &mut 0);
+        _ = walk_files(root, root, &mut files, &mut Vec::new());
         files.sort();
         for path in files {
             let text = std::fs::read_to_string(root.join(&path)).unwrap_or_default();

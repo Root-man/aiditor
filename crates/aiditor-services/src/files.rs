@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aiditor_core::buffer::{encode, hash, revert, unified_diff};
+use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
 use aiditor_core::{FileOp, Msg};
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -78,9 +78,14 @@ pub fn run(op: FileOp) -> Msg {
                 result,
             }
         }
-        FileOp::Preview(path) => {
-            let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
-            Msg::Previewed { path, result }
+        FileOp::Preview(request) => {
+            let result = match fs::read(&request.path) {
+                Ok(bytes) => prepare_preview(&bytes).map(Some).map_err(str::to_string),
+                Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(err.to_string()),
+            }
+            .map_err(|err| format!("{}: {err}", request.path.display()));
+            Msg::Previewed { request, result }
         }
         FileOp::Check(paths) => {
             let files = (paths.into_iter())
@@ -101,16 +106,17 @@ pub fn run(op: FileOp) -> Msg {
             ignore,
         } => {
             let patterns = Patterns::lenient(&ignore);
-            let mut directories = 0;
+            let mut directories = Vec::new();
             let roots = (roots.into_iter())
                 .map(|root| {
-                    let files = inventory(&root, &patterns).map(|(files, count)| {
-                        directories += count;
+                    let files = inventory(&root, &patterns).map(|(files, dirs)| {
+                        directories.extend(dirs);
                         files
                     });
                     (root, files)
                 })
                 .collect();
+            directories.sort();
             Msg::Indexed {
                 project,
                 walk,
@@ -168,20 +174,25 @@ pub fn index(root: &Path, patterns: &Patterns) -> Result<Vec<PathBuf>, String> {
     inventory(root, patterns).map(|(files, _)| files)
 }
 
-fn inventory(root: &Path, patterns: &Patterns) -> Result<(Vec<PathBuf>, usize), String> {
+pub(crate) fn inventory(
+    root: &Path,
+    patterns: &Patterns,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     fs::read_dir(root).map_err(|err| format!("{}: {err}", root.display()))?;
     let mut files = Vec::new();
-    let mut directories = 0;
+    let mut directories = Vec::new();
     for entry in walker(root, root, patterns).build().flatten() {
         let Some(kind) = entry.file_type() else {
             continue;
         };
         if kind.is_dir() {
-            directories += 1;
+            directories.push(entry.path().to_path_buf());
         } else if kind.is_file() || kind.is_symlink() && entry.path().is_file() {
             files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
         }
     }
+    files.sort();
+    directories.sort();
     Ok((files, directories))
 }
 
@@ -564,10 +575,14 @@ mod tests {
         assert_eq!(result, Ok(None));
         let file = dir.path().join("f");
         fs::write(&file, "").unwrap();
-        let Msg::Previewed { result, .. } = run(FileOp::Preview(file.clone())) else {
+        let Msg::Previewed { result, .. } = run(FileOp::Preview(aiditor_core::PreviewRequest {
+            session: 1,
+            revision: 1,
+            path: file.clone(),
+        })) else {
             panic!("not previewed");
         };
-        assert_eq!(result.unwrap().unwrap().0, b"");
+        assert_eq!(result.unwrap().unwrap().to_string(), "");
         let Msg::Listed { result, .. } = run(FileOp::ListDir(file.clone())) else {
             panic!("not listed");
         };
@@ -680,12 +695,22 @@ mod tests {
         let patterns = Patterns::new(&["other/".into(), ".ignore".into()]).unwrap();
         assert_eq!(
             inventory(root, &patterns).unwrap(),
-            (vec![PathBuf::from("kept/a")], 4)
+            (
+                vec![PathBuf::from("kept/a")],
+                ["", "kept", "kept/empty", "kept/empty/nested"]
+                    .map(|p| root.join(p))
+                    .to_vec()
+            )
         );
         let patterns = Patterns::new(&["*".into(), "!kept/".into()]).unwrap();
         assert_eq!(
             inventory(root, &patterns).unwrap(),
-            (vec![PathBuf::from("kept/a")], 4)
+            (
+                vec![PathBuf::from("kept/a")],
+                ["", "kept", "kept/empty", "kept/empty/nested"]
+                    .map(|p| root.join(p))
+                    .to_vec()
+            )
         );
     }
 

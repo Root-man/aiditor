@@ -1081,9 +1081,13 @@ mod tests {
     fn a_read_no_longer_awaited_is_dropped() {
         let mut h = findable(&[]);
         h.keys("C-x p f");
-        let result = Ok(Some((b"late".to_vec(), 0)));
+        let result = Ok(Some(crate::buffer::prepare_preview(b"late").unwrap()));
         h.send(Msg::Previewed {
-            path: h.path("b/x"),
+            request: crate::PreviewRequest {
+                session: 0,
+                revision: 0,
+                path: h.path("b/x"),
+            },
             result,
         });
         assert_eq!(shown(&h), " x");
