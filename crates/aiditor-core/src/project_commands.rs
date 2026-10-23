@@ -150,22 +150,62 @@ impl Core {
             .collect()
     }
 
-    /// The file `text` names in `project`: under the root its first component names, else under
-    /// the primary.
-    pub(crate) fn project_file(&self, project: ProjectId, text: &str) -> Result<PathBuf, String> {
-        let roots = self.index.get(&project).map_or(&[][..], |i| i.roots());
-        if let Some((head, rest)) = text.split_once('/')
-            && let Some(i) = root_names(roots.iter().map(|(root, _)| root.as_path()))
-                .iter()
-                .position(|n| n == head)
-        {
-            return Ok(roots[i].0.join(rest));
-        }
-        let primary = &self.projects[self.project_at(project)?]
+    pub(crate) fn finder(&self, project: ProjectId) -> Result<Finder, String> {
+        let roots: Vec<_> = self.projects[self.project_at(project)?]
             .project
-            .primary
-            .path;
-        Ok(primary.join(text))
+            .all_roots()
+            .map(|r| r.path.clone())
+            .collect();
+        let waiting = self
+            .index
+            .get(&project)
+            .is_none_or(|index| !index.roots().iter().map(|(p, _)| p).eq(roots.iter()));
+        let names = root_names(roots.iter().map(PathBuf::as_path));
+        Ok(Finder {
+            project,
+            roots,
+            names,
+            waiting,
+        })
+    }
+
+    pub(crate) fn fill_project_finder(&mut self, project: ProjectId) {
+        let Some(finder) = self
+            .prompts
+            .minibuffer
+            .as_mut()
+            .and_then(|mb| mb.finder.as_mut())
+        else {
+            return;
+        };
+        if finder.project != project || !finder.waiting {
+            return;
+        }
+        let roots = self.index[&project].roots();
+        if !roots.iter().map(|(p, _)| p).eq(finder.roots.iter()) {
+            return;
+        }
+        finder.waiting = false;
+        let files = self.project_files(project);
+        self.add_candidates("project-find-file", files);
+    }
+}
+
+pub(crate) struct Finder {
+    project: ProjectId,
+    roots: Vec<PathBuf>,
+    names: Vec<String>,
+    waiting: bool,
+}
+
+impl Finder {
+    pub(crate) fn path(&self, text: &str) -> PathBuf {
+        if let Some((head, rest)) = text.split_once('/')
+            && let Some(i) = self.names.iter().position(|n| n == head)
+        {
+            return self.roots[i].join(rest);
+        }
+        self.roots[0].join(text)
     }
 }
 
@@ -202,6 +242,9 @@ impl Ctx<'_> {
 
     pub(crate) fn project_written(&mut self, intent: WriteIntent, result: Result<Loaded, String>) {
         let core = &mut self.core;
+        if result.is_ok() {
+            core.reload.project_revision += 1;
+        }
         let at = core.project_at(intent.project).ok();
         let current = core.pending_project_writes.get(&intent.project) == Some(&intent);
         if current {
@@ -213,7 +256,7 @@ impl Ctx<'_> {
             })
         {
             if result.is_ok() {
-                self.effects.push(Effect::LoadSettings);
+                self.reload_configuration();
             }
             return;
         }
@@ -378,7 +421,7 @@ impl Ctx<'_> {
     pub(crate) fn project_find_file(&mut self, args: Args) -> Result<(), String> {
         let project = self.core.current_workspace().project;
         if let Some(text) = args.strings.first() {
-            let path = self.core.project_file(project, text)?;
+            let path = self.core.finder(project)?.path(text);
             return self.find_file(&path.to_string_lossy());
         }
         if let Some(index) = self.core.index.get_mut(&project) {
@@ -387,11 +430,23 @@ impl Ctx<'_> {
         } else {
             self.index_project(project, false)?;
         }
-        let files = self.core.project_files(project);
+        let finder = self.core.finder(project)?;
+        let files = if finder.waiting {
+            Vec::new()
+        } else {
+            self.core.project_files(project)
+        };
         let choices: Vec<&str> = files.iter().map(String::as_str).collect();
         let command = self.core.commands["project-find-file"];
         let prompt = format!("Find file in {}: ", self.core.project_name(project));
-        self.read_string(command, args, prompt, Some(&choices))
+        self.read_string(command, args, prompt, Some(&choices))?;
+        self.core
+            .prompts
+            .minibuffer
+            .as_mut()
+            .expect("opened finder")
+            .finder = Some(finder);
+        Ok(())
     }
 
     pub(crate) fn open_project_file(&mut self, args: &Args) -> Result<(), String> {
@@ -619,7 +674,7 @@ mod tests {
         assert!(
             h.effects
                 .iter()
-                .any(|e| matches!(e, crate::Effect::LoadSettings))
+                .any(|e| matches!(e, crate::Effect::LoadConfiguration { .. }))
         );
     }
 
@@ -1039,6 +1094,139 @@ mod tests {
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
     }
 
+    #[test]
+    fn typed_root_prefixes_resolve_while_the_first_index_is_held() {
+        for (typed, expected) in [("b/new.rs", "b/new.rs"), ("a<2>/new.rs", "q/a/new.rs")] {
+            let mut h = findable(&["q/a"]);
+            h.collect_effects = true;
+            h.keys("C-x p f");
+            assert_eq!(candidates(&mut h), Vec::<String>::new());
+            h.keys(&format!("{typed} M-RET"));
+            let paths: Vec<_> = h
+                .effects
+                .iter()
+                .filter_map(|e| match e {
+                    crate::Effect::File(crate::FileOp::Open { path, .. }) => Some(path.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(paths, [h.path(expected)]);
+        }
+    }
+
+    fn saved_finder() -> (Harness, Loaded) {
+        let mut h = Harness::new(&[("old/lib/x", "old"), ("new/lib/x", "new")]);
+        let mut loaded = Loaded::ad_hoc("p", &h.path("old/lib"));
+        loaded.project.watch = false;
+        loaded.file = Some((h.path("p.toml"), String::new()));
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded.clone())],
+        });
+        h.new_workspace("p", "p");
+        (h, loaded)
+    }
+
+    #[test]
+    fn finder_preview_candidates_and_typed_paths_keep_their_original_mapping() {
+        for accept in ["RET", "lib/new.rs M-RET"] {
+            let (mut h, mut loaded) = saved_finder();
+            h.keys("C-x p f");
+            assert_eq!(candidates(&mut h), ["lib/x"]);
+            loaded.project.primary.path = h.path("new/lib");
+            h.send(Msg::ProjectsLoaded {
+                dir: None,
+                projects: vec![Ok(loaded)],
+            });
+            assert_eq!(candidates(&mut h), ["lib/x"]);
+            h.keys("zzz C-a C-k");
+            let origin = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
+            assert_eq!(
+                h.core.buffers.get(origin).unwrap().text().to_string(),
+                "old"
+            );
+            h.keys(accept);
+            let file = if accept == "RET" { "x" } else { "new.rs" };
+            assert_eq!(visited(&h), Some(h.path(&format!("old/lib/{file}"))));
+            h.keys("C-x p f RET");
+            assert_eq!(visited(&h), Some(h.path("new/lib/x")));
+        }
+    }
+
+    #[test]
+    fn incompatible_initial_results_stay_out_and_reopened_finders_use_current_roots() {
+        let (mut h, mut loaded) = saved_finder();
+        h.collect_effects = true;
+        h.keys("C-x p f");
+        let take_walk = |h: &mut Harness| {
+            std::mem::take(&mut h.effects)
+                .into_iter()
+                .find_map(|e| match e {
+                    crate::Effect::File(crate::FileOp::Index {
+                        project,
+                        walk,
+                        roots,
+                        ..
+                    }) => Some((project, walk, roots)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let answer = |(project, walk, roots): (_, _, Vec<std::path::PathBuf>)| Msg::Indexed {
+            project,
+            walk,
+            roots: roots
+                .into_iter()
+                .map(|root| (root, Ok(vec!["x".into()])))
+                .collect(),
+            directories: Vec::new(),
+        };
+        let initial = take_walk(&mut h);
+        loaded.project.primary.path = h.path("new/lib");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded)],
+        });
+        h.send(answer(initial));
+        let latest = take_walk(&mut h);
+        h.send(answer(latest));
+        assert_eq!(candidates(&mut h), Vec::<String>::new());
+        h.keys("lib/new.rs M-RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("old/lib/new.rs"))));
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), ["lib/x"]);
+        h.keys("RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("new/lib/x"))));
+    }
+
+    #[test]
+    fn duplicate_labels_survive_reordering_and_a_reopened_finder_waits_for_compatible_files() {
+        let (mut h, mut loaded) = saved_finder();
+        loaded.project.roots.push(Root {
+            path: h.path("new/lib"),
+            role: String::new(),
+        });
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded.clone())],
+        });
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), ["lib/x", "lib<2>/x"]);
+        h.collect_effects = true;
+        std::mem::swap(&mut loaded.project.primary, &mut loaded.project.roots[0]);
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded)],
+        });
+        h.keys("lib<2>/new.rs M-RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("new/lib/new.rs"))));
+        h.effects.clear();
+        h.keys("C-x p f");
+        assert_eq!(candidates(&mut h), Vec::<String>::new());
+        h.keys("lib<2>/new.rs M-RET");
+        assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("old/lib/new.rs"))));
+    }
+
     /// The name of the buffer the first window shows while the minibuffer is open.
     fn shown(h: &Harness) -> String {
         let id = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
@@ -1075,6 +1263,46 @@ mod tests {
         h.open("b/x").open("a/x");
         h.keys("C-x p f C-n");
         assert_eq!(shown(&h), "x");
+    }
+
+    #[test]
+    fn accepting_a_prepared_preview_reads_the_file_afresh() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f");
+        let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
+        std::fs::write(h.path("a/x"), "changed after preview").unwrap();
+        h.keys("RET");
+        assert_eq!(h.text(), "changed after preview");
+        assert_ne!(h.core.windows.window.buffer(), peek);
+        assert!(!h.core.current().read_only);
+    }
+
+    #[test]
+    fn click_and_workspace_switch_release_prepared_previews() {
+        for switch in [false, true] {
+            let mut h = findable(&[]);
+            h.keys("origin C-f");
+            let main = h.core.workspace();
+            let other = h.new_workspace("other", "tmp");
+            h.core.switch_workspace(main).unwrap();
+            let original = h.core.windows.window.buffer();
+            let window = h.core.windows.selected;
+            h.keys("C-x p f");
+            let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
+            if switch {
+                h.core.switch_workspace(other).unwrap();
+                h.core.switch_workspace(main).unwrap();
+            } else {
+                h.send(Msg::Click {
+                    window,
+                    line: 0,
+                    col: 0,
+                });
+            }
+            assert_eq!(h.core.windows.window.buffer(), original);
+            assert_eq!(h.text(), "origin");
+            assert!(h.core.buffers.get(peek).is_none());
+        }
     }
 
     #[test]

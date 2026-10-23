@@ -308,11 +308,18 @@ impl Harness {
                     }
                 }
                 Effect::Grep(GrepOp::Cancel) => self.greps.push(None),
-                Effect::LoadSettings => {
-                    let text = std::fs::read_to_string(self.path("settings.toml")).ok();
-                    self.core.handle(self.now, Msg::SettingsLoaded(Ok(text)));
-                    let text = std::fs::read_to_string(self.path("keymap.toml")).ok();
-                    self.core.handle(self.now, Msg::KeymapLoaded(Ok(text)));
+                Effect::LoadConfiguration { request } => {
+                    let settings = std::fs::read_to_string(self.path("settings.toml")).ok();
+                    let keymap = std::fs::read_to_string(self.path("keymap.toml")).ok();
+                    self.send(Msg::ConfigurationLoaded {
+                        request,
+                        bundle: crate::configuration::Bundle {
+                            settings: Ok(settings),
+                            keymap: Ok(keymap),
+                            projects_dir: self.core.projects_dir.clone(),
+                            projects: Vec::new(),
+                        },
+                    });
                 }
             }
         }

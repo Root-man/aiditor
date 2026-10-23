@@ -151,6 +151,79 @@ mod tests {
     use crate::Msg;
     use crate::harness::{Harness, line_start, mark, on};
 
+    #[test]
+    #[ignore = "manual reproducible Swiper baseline; prints timings"]
+    fn prompt_and_query_baseline() {
+        use crate::{Core, key::parse_keys};
+        use std::time::{Duration, Instant};
+
+        let queries = [
+            "needle",
+            "needle !skip",
+            "NEEDLE",
+            "alpha value",
+            "(",
+            "needle\\ value",
+        ];
+        let median = |mut samples: Vec<Duration>| {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1000.
+        };
+        for lines in [1_000, 100_000] {
+            let fixture: String = (0..lines)
+                .map(|i| {
+                    let kind = if i % 5 == 0 { "skip" } else { "keep" };
+                    format!("{i:06} alpha needle value {kind} été\n")
+                })
+                .collect();
+            let mut opening = Vec::new();
+            let mut changes = vec![Vec::new(); queries.len()];
+            for _ in 0..7 {
+                let mut core = Core::default();
+                core.open(
+                    std::path::Path::new("/swiper-baseline.txt"),
+                    Some((fixture.as_bytes().to_vec(), 0)),
+                );
+                let start = Instant::now();
+                std::hint::black_box(core.handle(start, Msg::Key(parse_keys("C-s").unwrap()[0])));
+                opening.push(start.elapsed());
+                assert_eq!(
+                    core.frame().minibuffer.unwrap().count,
+                    format!("1/{lines} ")
+                );
+                let mut previous = 0;
+                for (i, query) in queries.iter().enumerate() {
+                    let start = Instant::now();
+                    std::hint::black_box(core.handle(
+                        start,
+                        Msg::Insert {
+                            text: (*query).into(),
+                            replace: Some(0..previous),
+                        },
+                    ));
+                    changes[i].push(start.elapsed());
+                    previous = query.encode_utf16().count();
+                    assert_eq!(core.text(), *query);
+                    if i == 0 {
+                        assert_eq!(
+                            core.frame().minibuffer.unwrap().count,
+                            format!("1/{lines} ")
+                        );
+                    }
+                }
+            }
+            println!(
+                "Swiper: lines={lines} bytes={} debug_assertions={} samples=7 open_median_ms={:.3}",
+                fixture.len(),
+                cfg!(debug_assertions),
+                median(opening)
+            );
+            for (query, samples) in queries.iter().zip(changes) {
+                println!("  query={query:?} median_ms={:.3}", median(samples));
+            }
+        }
+    }
+
     /// The listed candidates and the count before the prompt.
     fn listed(h: &mut Harness) -> (Vec<String>, String) {
         let mb = h.core.minibuffer().expect("the minibuffer is open");

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{files, grep, recovery, watcher};
+use aiditor_services::{configuration, files, grep, recovery, watcher};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
     Point, ScrollWheelEvent, Task, Window, div, font, prelude::*, px, rgb,
@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::element::{FrameElement, Painted, block, echo_line, text_run};
 use crate::input::to_key;
-use crate::{Args, FONT, read_config, read_projects};
+use crate::{Args, FONT};
 
 pub(crate) struct Editor {
     pub(crate) core: Core,
@@ -138,12 +138,12 @@ impl Editor {
                     }
                     cx.quit()
                 }
-                Effect::LoadSettings => {
+                Effect::LoadConfiguration { request } => {
                     let dir = self.config_dir.clone();
-                    let read = |name| read_config(dir.as_deref(), name);
-                    self.handle(Msg::SettingsLoaded(read("settings.toml")), cx);
-                    self.handle(Msg::KeymapLoaded(read("keymap.toml")), cx);
-                    self.handle(read_projects(dir.as_deref()), cx);
+                    let tx = self.tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        _ = tx.blocking_send(configuration::load(dir.as_deref(), request));
+                    });
                 }
             }
         }
@@ -559,6 +559,8 @@ mod tests {
 
     #[gpui::test]
     fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
             config_dir: Some(dir.path().to_owned()),
@@ -581,7 +583,21 @@ mod tests {
             dir.path().display()
         );
         std::fs::write(projects.join("p.toml"), text).unwrap();
+        std::fs::write(dir.path().join("settings.toml"), "font_size = 18").unwrap();
         cx.simulate_keystrokes("ctrl-x ctrl-r");
+        cx.simulate_input("typing");
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "typing");
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if editor.read_with(cx, |e, _| e.core.settings().font_size == 18.) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.settings().font_size),
+            18.
+        );
         let names = editor.read_with(cx, |e, _| {
             e.core
                 .projects()
@@ -590,6 +606,9 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(names[1..], ["p"], "after the launch `$HOME` project");
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]

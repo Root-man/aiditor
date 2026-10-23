@@ -1,8 +1,8 @@
 //! The built-in commands.
 
+use crate::Core;
 use crate::command::{ArgSpec, Args, Command, Prefix, Preview};
 use crate::key::{Key, KeyCode};
-use crate::{Core, Effect};
 
 /// Completes the first prompt over the projects' names and leaves the others free.
 fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
@@ -354,8 +354,8 @@ pub(crate) fn builtins() -> Vec<Command> {
             // Asks its own question, so it can start indexing before the prompt opens.
             spec: ArgSpec {
                 preview: Some(|core, c| {
-                    let project = &core.current_workspace().project;
-                    core.project_file(*project, c).ok().map(Preview::File)
+                    let finder = core.prompts.minibuffer.as_ref()?.finder.as_ref()?;
+                    Some(Preview::File(finder.path(c)))
                 }),
                 ..ArgSpec::default()
             },
@@ -441,7 +441,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "reload-settings",
             spec: ArgSpec::default(),
             handler: |ctx, _| {
-                ctx.effects.push(Effect::LoadSettings);
+                ctx.reload_configuration();
                 Ok(())
             },
         },

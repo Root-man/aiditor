@@ -222,6 +222,8 @@ impl Ctx<'_> {
                 }));
             }
             Reply::Accepted { loud, errors } => {
+                let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
+                self.core.fill_project_finder(project);
                 self.core.watch_refresh = true;
                 if !loud {
                     if !errors.is_empty() {
@@ -229,16 +231,11 @@ impl Ctx<'_> {
                     }
                     return;
                 }
-                let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
                 let s = if n == 1 { "" } else { "s" };
                 self.core.echo(format!(
                     "Indexed {n} file{s} in {}{errors}",
                     self.core.project_name(project)
                 ));
-                if self.core.current_workspace().project == project {
-                    let files = self.core.project_files(project);
-                    self.core.add_candidates("project-find-file", files);
-                }
             }
         }
     }

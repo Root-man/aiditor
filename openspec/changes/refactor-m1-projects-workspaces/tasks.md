@@ -58,28 +58,28 @@ These stages implement one change. Opportunity numbers refer to `proposal.md`; d
 
 - [x] 8.1 Add prompt-session/request identity with one active and one latest pending preview across closures/reopenings; verify rapid `a` to `b` to `c` selection reads the latest pending file and old same-path sessions cannot install replies.
 - [x] 8.2 Move preview read validation, decoding and Rope preparation into services and return transferable prepared text without an unused content hash; verify UTF-8/BOM/CRLF, binary/missing/unreadable behavior and input handling while a worker is deliberately held.
-- [ ] 8.3 Install/release prepared previews through existing restoration and buffer ownership paths; verify at most one hidden preview buffer, same-file grep position changes, visited-buffer reuse, `C-g`, clicks, workspace switching and fresh ordinary visitation on `RET`.
+- [x] 8.3 Install/release prepared previews through existing restoration and buffer ownership paths; verify at most one hidden preview buffer, same-file grep position changes, visited-buffer reuse, `C-g`, clicks, workspace switching and fresh ordinary visitation on `RET`.
 
 ## 9. Move runtime reload work out of the frontend (#9; D7)
 
-- [ ] 9.1 Add a shared background loader for a request-numbered settings/keymap/project bundle and adapt GPUI dispatch; verify a held reload permits input and the accepted components apply in their existing order with independent validation/fallback behavior.
-- [ ] 9.2 Coalesce repeat reload requests and reject obsolete bundles; verify two reloads cannot apply older or mixed-generation configuration after the latest request.
-- [ ] 9.3 Coordinate reload snapshots with project entry revisions and successful edits; verify both reload-before-write and write-before-reload reply orderings reconcile the current disk definition without replacing a newer accepted edit with an older snapshot.
-- [ ] 9.4 Update exhaustive runner/test effect handling while preserving the headless runner's current omitted watching/configuration capabilities; verify startup behavior, headless supported file/search effects and frontend reload tests.
+- [x] 9.1 Add a shared background loader for a request-numbered settings/keymap/project bundle and adapt GPUI dispatch; verify a held reload permits input and the accepted components apply in their existing order with independent validation/fallback behavior.
+- [x] 9.2 Coalesce repeat reload requests and reject obsolete bundles; verify two reloads cannot apply older or mixed-generation configuration after the latest request.
+- [x] 9.3 Coordinate reload snapshots with project entry revisions and successful edits; verify both reload-before-write and write-before-reload reply orderings reconcile the current disk definition without replacing a newer accepted edit with an older snapshot.
+- [x] 9.4 Update exhaustive runner/test effect handling while preserving the headless runner's current omitted watching/configuration capabilities; verify startup behavior, headless supported file/search effects and frontend reload tests.
 
 ## 10. Keep project finder mappings stable (#12; D8)
 
-- [ ] 10.1 Capture roots and root labels for each finder, using the shown index snapshot or initial pending scope as appropriate; verify typed `lib/new.rs` and duplicate-name `lib<2>/new.rs` resolve before the first walk completes.
-- [ ] 10.2 Use that mapping for preview, selected candidates and typed acceptance and reject incompatible late candidate injection; verify a project reload cannot reinterpret visible candidates and a newly opened finder uses its latest compatible snapshot.
+- [x] 10.1 Capture roots and root labels for each finder, using the shown index snapshot or initial pending scope as appropriate; verify typed `lib/new.rs` and duplicate-name `lib<2>/new.rs` resolve before the first walk completes.
+- [x] 10.2 Use that mapping for preview, selected candidates and typed acceptance and reject incompatible late candidate injection; verify a project reload cannot reinterpret visible candidates and a newly opened finder uses its latest compatible snapshot.
 
 ## 11. Flush grep hits during file processing (#10; D8)
 
-- [ ] 11.1 Share the batch flush path between match processing, file completion and search completion; verify with controllable time that matching lines in one ongoing file scan produce an intermediate batch.
-- [ ] 11.2 Preserve ordered hits, search IDs, cancellation-before-send, exact limits and final completion; verify multi-root order, Unicode columns, cancellation after an intermediate batch and the 10,000-hit prompt cap with the production grep service.
+- [x] 11.1 Share the batch flush path between match processing, file completion and search completion; verify with controllable time that matching lines in one ongoing file scan produce an intermediate batch.
+- [x] 11.2 Preserve ordered hits, search IDs, cancellation-before-send, exact limits and final completion; verify multi-root order, Unicode columns, cancellation after an intermediate batch and the 10,000-hit prompt cap with the production grep service.
 
 ## 12. Reuse Swiper query work (#14; D9)
 
-- [ ] 12.1 Capture a reproducible baseline for prompt-open and per-query costs on small and large multiline buffers, recording fixture size and build mode in the change's validation notes; verify the measurements execute real Swiper paths without a new dependency.
+- [x] 12.1 Capture a reproducible baseline for prompt-open and per-query costs on small and large multiline buffers, recording fixture size and build mode in the change's validation notes; verify the measurements execute real Swiper paths without a new dependency.
 - [ ] 12.2 Share a prompt-scoped compiled query across filtering, preview and acceptance, with only the necessary command/minibuffer seam changes; verify smart case, ordered words, exclusions, escaped separators, literal fallback and match point placement.
 - [ ] 12.3 Reduce avoidable line-text copying using the buffer snapshot and existing completion boundary; verify line order, trailing-newline handling, stable selection, history, mark and jump behavior through existing positive-behavior tests.
 - [ ] 12.4 Repeat the baseline fixtures and document the change in cost and remaining full-scan limit; verify results are comparable and no background filtering, global cache or size cutoff was introduced.

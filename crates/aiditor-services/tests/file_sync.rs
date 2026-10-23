@@ -81,7 +81,7 @@ impl Editor {
                 Effect::File(op) => replies.push(files::run(op)),
                 Effect::Watch(set) => self.watcher.set(set),
                 Effect::Recovery(_) | Effect::SetClipboard(_) => {}
-                Effect::Grep(_) | Effect::LoadSettings | Effect::Quit => {
+                Effect::Grep(_) | Effect::LoadConfiguration { .. } | Effect::Quit => {
                     panic!("unexpected effect in file sync test")
                 }
             }

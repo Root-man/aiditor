@@ -407,4 +407,18 @@ mod tests {
         h.keys("C-g");
         assert_eq!((h.core.current().file.clone(), h.point()), (None, 0));
     }
+
+    #[test]
+    fn same_file_hits_reuse_prepared_text_and_follow_the_selected_position() {
+        let mut h = grepping(&[("app/a.rs", "needle\nété needle\n")]);
+        h.keys("C-x p g needle").advance(WAIT);
+        let path = h.path("app/a.rs");
+        let first = h.core.buffers.visiting(&path).unwrap();
+        assert_eq!(origin(&h), (Some(path.clone()), 0));
+        h.keys("C-n");
+        assert_eq!(h.core.buffers.visiting(&path), Some(first));
+        assert_eq!(origin(&h), (Some(path), 11));
+        h.keys("C-g");
+        assert_eq!((h.core.current().file.clone(), h.point()), (None, 0));
+    }
 }

@@ -75,8 +75,48 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
                 std::process::exit(0);
             }
             // Key scripts run against files nothing else touches.
-            Effect::SetClipboard(_) | Effect::LoadSettings | Effect::Watch(_) => continue,
+            Effect::SetClipboard(_) | Effect::LoadConfiguration { .. } | Effect::Watch(_) => {
+                continue;
+            }
         };
         send(core, service, reply);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_configuration_keeps_file_and_search_effects_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "needle\n").unwrap();
+        let mut core = Core::default();
+        core.launch(dir.path(), dir.path());
+        core.open(&file, files::read(&file).unwrap());
+        let mut service = Some(recovery::spawn(dir.path().join("recovery")));
+        for key in parse_keys("C-x C-r x C-x C-s C-x p g needle").unwrap() {
+            send(&mut core, &mut service, Msg::Key(key));
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "xneedle\n");
+        std::thread::sleep(std::time::Duration::from_millis(210));
+        send(&mut core, &mut service, Msg::Tick);
+        assert!(
+            core.frame()
+                .minibuffer
+                .unwrap()
+                .candidates
+                .iter()
+                .any(|s| s.ends_with("a.txt:1:xneedle"))
+        );
+        for key in parse_keys("RET").unwrap() {
+            send(&mut core, &mut service, Msg::Key(key));
+        }
+        assert_eq!(core.current().file.as_ref(), Some(&file));
+        assert_eq!(core.point(), 1);
+        let (tx, thread) = service.take().unwrap();
+        drop(tx);
+        thread.join().unwrap();
     }
 }

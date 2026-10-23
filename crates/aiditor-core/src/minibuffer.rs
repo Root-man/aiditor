@@ -30,6 +30,7 @@ const MINIBUFFER: WindowId = WindowId(usize::MAX);
 /// A prompt waiting in the minibuffer for the command that asked.
 pub(crate) struct Minibuffer {
     session: u64,
+    pub(crate) finder: Option<crate::project_commands::Finder>,
     command: &'static str,
     /// The args so far; the answer becomes the next string.
     args: Args,
@@ -301,6 +302,7 @@ impl Ctx<'_> {
         core.prompts.sessions += 1;
         core.prompts.minibuffer = Some(Minibuffer {
             session: core.prompts.sessions,
+            finder: None,
             command: command.name,
             args,
             prompt,
@@ -347,6 +349,16 @@ impl Ctx<'_> {
             return self.set_text(dir);
         }
         let text = selected.unwrap_or_else(|| self.core.text());
+        let text = match self
+            .core
+            .prompts
+            .minibuffer
+            .as_ref()
+            .and_then(|mb| mb.finder.as_ref())
+        {
+            Some(finder) => finder.path(&text).to_string_lossy().into_owned(),
+            None => text,
+        };
         let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
         // A filtering prompt's typed text was remembered on closing.
         if mb.history && !filtered {

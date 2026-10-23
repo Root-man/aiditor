@@ -9,6 +9,7 @@ mod bindings;
 pub mod buffer;
 mod builtins;
 pub mod command;
+pub mod configuration;
 pub mod display;
 mod editing;
 mod file_index;
@@ -152,6 +153,10 @@ pub enum Msg {
     },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
+    ConfigurationLoaded {
+        request: u64,
+        bundle: configuration::Bundle,
+    },
     /// The user's keymap file, the same way.
     KeymapLoaded(Result<Option<String>, String>),
     /// Every project file in the projects directory `dir`, parsed and checked, or why it was
@@ -250,9 +255,8 @@ pub enum Effect {
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
-    /// Read the user's settings, keymap and project files and send `Msg::SettingsLoaded`,
-    /// `Msg::KeymapLoaded` and `Msg::ProjectsLoaded`.
-    LoadSettings,
+    /// Read one configuration bundle and send `Msg::ConfigurationLoaded`.
+    LoadConfiguration { request: u64 },
     /// Put this text on the system clipboard.
     SetClipboard(String),
     /// Quit the app.
@@ -495,6 +499,9 @@ impl Ctx<'_> {
             Msg::Previewed { request, result } => {
                 self.core.on_previewed(request, result, &mut self.effects)
             }
+            Msg::ConfigurationLoaded { request, bundle } => {
+                self.configuration_loaded(request, bundle)
+            }
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
                     Ok(settings) => self.core.settings = settings,
@@ -673,6 +680,7 @@ pub struct Core {
     projects: Vec<Entry>,
     next_project: u64,
     project_writes: u64,
+    reload: configuration::Reload,
     pending_project_writes: HashMap<ProjectId, WriteIntent>,
     /// Where new project files go; `None` without a config dir.
     projects_dir: Option<PathBuf>,
@@ -754,6 +762,7 @@ impl Default for Core {
             projects: vec![Entry::new(ProjectId(0), Loaded::ad_hoc(&name, &home))],
             next_project: 1,
             project_writes: 0,
+            reload: configuration::Reload::default(),
             pending_project_writes: HashMap::new(),
             projects_dir: None,
             index: HashMap::new(),

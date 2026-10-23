@@ -51,7 +51,7 @@ impl Driver {
                 Effect::Watch(set) => self.watched = set,
                 Effect::Recovery(_) | Effect::SetClipboard(_) => {}
                 Effect::Quit => self.quit = true,
-                Effect::LoadSettings => panic!("unexpected effect in service test"),
+                Effect::LoadConfiguration { .. } => panic!("unexpected effect in service test"),
             }
         }
     }

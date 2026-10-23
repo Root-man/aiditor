@@ -88,3 +88,41 @@ The user explicitly authorized using the backend's public acknowledgments. With 
 - During development, focused checks caught and corrected early fallback removal, a held-worker fixture missing its initial core tick, a status assertion that overlooked existing echo aggregation, and replacement coverage needing a fresh index. Those failed attempts are not counted as successful checks.
 - Formatting, all-target clippy, the core dependency boundary, panic-profile scan, and strict OpenSpec validation passed. Existing Cargo future-incompatibility notices for `block` and `proc-macro-error2` remain.
 - Manual interactive GUI flows and Linux frontend checks were not run; they remain part of tasks 14.2–14.3. One very large preview can still delay the next read and consumes full-file memory; this work bounds request count rather than file size.
+
+## Tasks 8.3–12.1: implementation and evidence
+
+Ten tasks completed in this batch: 8.3, 9.1–9.4, 10.1–10.2, 11.1–11.2 and 12.1. Progress is 43/53. Task 12.2 is next; the Swiper optimization itself is not part of this batch.
+
+- Prepared previews already install through the existing ownership/restoration paths. New regression coverage verifies a fresh ordinary read after acceptance, hidden-buffer release on clicks/workspace switches, and same-file grep position changes with the same prepared buffer. Existing one-hidden-buffer, visited-buffer reuse and cancellation tests pass.
+- Runtime configuration reads now run on the blocking pool through the shared services loader. One numbered settings/keymap/project bundle reaches the core; accepted components apply in that order with independent fallback. One active request and the latest requested number coalesce repeats and discard obsolete/duplicate replies. A project-write success advances the revision captured by reloads, forcing a fresh bundle after a conflicting snapshot; a superseded write uses the same reload path.
+- Core tests hold reload replies while typing and verify coalescing/fallback. A channel-held production loader worker also allows input before release. Real project reads/writes exercise both reload-before-write and write-before-reload reply delivery. Frontend tests verify asynchronous reload application and typing; headless tests exercise omitted configuration alongside production save/search/jump behavior. Startup keeps its synchronous reads through the shared loader helpers.
+- Each finder captures root paths and their unique labels. Preview, candidate acceptance and typed acceptance use that mapping until close. Initial candidates join only a waiting finder with compatible roots; a finder with an existing snapshot stays unchanged. Newly opened finders wait for compatible results when old indexed roots differ from the current definition. Tests cover initial typed prefixes, duplicate labels, reordering, reload while open, obsolete initial results and reopening.
+- Grep uses one flush path from matches, file completion and search completion. A controlled clock proves two intermediate batches arrive during a single four-line matching scan. Production tests retain multi-root/file/line order, Unicode columns, search IDs, cancellation and exact zero/small limits, and fill the real core prompt to its 10,000-hit cap from a 10,005-line file. Deadline tests no longer depend on sleeps.
+
+### Swiper baseline (task 12.1)
+
+Reproduce with `cargo test -p aiditor-core prompt_and_query_baseline -- --ignored --nocapture`. This is an explicitly ignored measurement test, run separately from ordinary checks; it adds no dependency and no production optimization.
+
+Environment: macOS arm64, Rust 1.99.0 (`b940084d7`, 2026-09-28), ordinary unoptimized test profile with debug assertions, dependency optimization level 3 as configured in the workspace. Seven samples per fixture; medians below are milliseconds. Fixture creation and `Core::open` are outside the timed region. Prompt opening handles the actual `C-s`; each query replaces the previous prompt text through `Msg::Insert`, executing actual filtering and preview. Frame assertions are outside timing. These are core handling costs, not GUI rendering or input-latency guarantees.
+
+Fixture: lines numbered from zero with `format!("{i:06} alpha needle value {kind} été\n")`, where `kind` is `skip` every fifth line and `keep` otherwise; each line ends with a real newline. Small: 1,000 lines / 37,000 UTF-8 bytes. Large: 100,000 lines / 3,700,000 UTF-8 bytes. Queries run in the table's order for every sample.
+
+| Operation | 1,000 lines | 100,000 lines |
+| --- | ---: | ---: |
+| Open prompt | 0.295 | 26.358 |
+| `needle` | 0.212 | 9.103 |
+| `needle !skip` | 0.381 | 13.592 |
+| `NEEDLE` | 0.067 | 4.352 |
+| `alpha value` | 0.281 | 9.651 |
+| `(` (literal fallback) | 0.055 | 4.213 |
+| `needle\ value` (escaped space) | 0.236 | 9.227 |
+
+Swiper still scans all lines per query and recompiles for filtering/preview/acceptance. Tasks 12.2–12.4 will change and remeasure that behavior against this baseline.
+
+### Verification scope
+
+Final macOS `cargo test --quiet`: 474 passed, zero failed (21 frontend, 379 core, 57 services unit, 1 headless, 9 boundary, 1 crash-recovery and 6 native file-sync tests). The single ignored Swiper measurement test passed separately with the results above. Native watcher tests ran outside the filesystem sandbox.
+
+Formatting, all-target clippy with warnings denied, the core dependency boundary, the panic-profile scan and strict OpenSpec validation pass. Existing Cargo future-incompatibility notices for `block` and `proc-macro-error2` remain. During implementation, compiler checks caught and corrected test-only use of `find` on a vector and a private minibuffer accessor before passing reruns.
+
+Linux and manual interactive GUI flows were not run in this batch; whole-change cross-platform and integrated GUI checks remain tasks 14.2–14.3. No changes were pushed or published.

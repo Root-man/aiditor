@@ -41,8 +41,20 @@ impl Grep {
 /// Searches `op`'s roots, sending `Msg::Grepped` batches until done or `op.limit` hits.
 /// `cancelled` is checked before each file, after each match and before each send; once it is
 /// true nothing more is sent.
-pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool, mut send: impl FnMut(Msg)) {
+pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool, send: impl FnMut(Msg)) {
+    search_with_clock(op, cancelled, send, Instant::now);
+}
+
+fn search_with_clock(
+    op: &GrepSearch,
+    cancelled: impl Fn() -> bool,
+    mut send: impl FnMut(Msg),
+    now: impl Fn() -> Instant,
+) {
     let mut reply = |hits, done| {
+        if cancelled() {
+            return;
+        }
         send(Msg::Grepped {
             search: op.id,
             hits,
@@ -60,7 +72,18 @@ pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool, mut send: impl FnMu
         .line_number(true)
         .binary_detection(BinaryDetection::quit(b'\0'))
         .build();
-    let (mut hits, mut found, mut sent) = (Vec::new(), 0, Instant::now());
+    let (mut hits, mut found, mut sent) = (Vec::new(), 0, now());
+    let mut flush = |hits: &mut Vec<Hit>, done| {
+        if cancelled() {
+            return false;
+        }
+        let at = now();
+        if done || (!hits.is_empty() && at.duration_since(sent) >= BATCH) {
+            reply(Ok(std::mem::take(hits)), done);
+            sent = at;
+        }
+        true
+    };
     let patterns = crate::files::Patterns::lenient(&op.ignore);
     'roots: for root in &op.roots {
         for file in crate::files::walk(root, &patterns) {
@@ -87,22 +110,16 @@ pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool, mut send: impl FnMu
                     text: text.to_string(),
                 });
                 found += 1;
-                Ok(found < op.limit)
+                Ok(flush(&mut hits, false) && found < op.limit)
             });
             // Unreadable files are skipped, as `rg` skips them.
             _ = searcher.search_path(&matcher, &file, sink);
-            if !hits.is_empty() && sent.elapsed() >= BATCH {
-                if cancelled() {
-                    return;
-                }
-                reply(Ok(std::mem::take(&mut hits)), false);
-                sent = Instant::now();
+            if !flush(&mut hits, false) {
+                return;
             }
         }
     }
-    if !cancelled() {
-        reply(Ok(hits), true);
-    }
+    flush(&mut hits, true);
 }
 
 #[cfg(test)]
@@ -238,6 +255,48 @@ mod tests {
         assert_eq!(hits(&op(&[dir.path()], "x", 0)).len(), 0);
     }
 
+    #[test]
+    fn the_production_search_fills_the_prompt_to_its_exact_ten_thousand_hit_cap() {
+        let dir = tree(&[("a", &"needle\n".repeat(10_005))]);
+        let mut core = aiditor_core::Core::default();
+        core.launch(dir.path(), dir.path());
+        let now = Instant::now();
+        for key in aiditor_core::key::parse_keys("C-x p g needle").unwrap() {
+            core.handle(now, Msg::Key(key));
+        }
+        let effects = core.handle(now + Duration::from_secs(1), Msg::Tick);
+        let op = effects
+            .into_iter()
+            .find_map(|e| match e {
+                aiditor_core::Effect::Grep(GrepOp::Search(op)) => Some(op),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(op.limit, 10_000);
+        let mut total = 0;
+        let mut done = 0;
+        search(
+            &op,
+            || false,
+            |msg| {
+                if let Msg::Grepped {
+                    hits,
+                    done: finished,
+                    ..
+                } = &msg
+                {
+                    total += hits.as_ref().unwrap().len();
+                    done += usize::from(*finished);
+                }
+                core.handle(now + Duration::from_secs(1), msg);
+            },
+        );
+        assert_eq!((total, done), (10_000, 1));
+        let prompt = core.frame().minibuffer.unwrap();
+        assert_eq!(prompt.count, "1/10000 ");
+        assert!(prompt.candidates[0].ends_with("a:1:needle"));
+    }
+
     /// Each message as its hit count and whether it is done.
     fn batches(msgs: &[Msg]) -> Vec<(usize, bool)> {
         (msgs.iter())
@@ -249,37 +308,61 @@ mod tests {
     }
 
     #[test]
-    fn hits_stream_in_batches_then_done() {
-        let dir = tree(&[("a", "x\n"), ("b", "x\n"), ("c", "x\n")]);
-        // Two checks per file, so each file takes a whole batch interval.
-        let slow = || {
-            std::thread::sleep(BATCH / 2);
-            false
+    fn one_ongoing_file_streams_ordered_batches_on_the_deadline() {
+        let dir = tree(&[("a", "été x\nété x\nété x\nété x\n")]);
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let now = || {
+            let at = start + elapsed.get();
+            elapsed.set(elapsed.get() + BATCH / 2);
+            at
         };
         let mut msgs = Vec::new();
-        search(&op(&[dir.path()], "x", 100), slow, |m| msgs.push(m));
-        let expected = [(1, false), (1, false), (1, false), (0, true)];
-        assert_eq!(batches(&msgs), expected);
+        search_with_clock(
+            &op(&[dir.path()], "x", 100),
+            || false,
+            |m| msgs.push(m),
+            now,
+        );
+        assert_eq!(batches(&msgs), [(2, false), (2, false), (0, true)]);
+        let positions: Vec<_> = msgs
+            .into_iter()
+            .flat_map(|m| match m {
+                Msg::Grepped { search, hits, .. } => {
+                    assert_eq!(search, 7);
+                    hits.unwrap()
+                        .into_iter()
+                        .map(|h| (h.line, h.col))
+                        .collect::<Vec<_>>()
+                }
+                _ => panic!("not grepped"),
+            })
+            .collect();
+        assert_eq!(positions, [(0, 4), (1, 4), (2, 4), (3, 4)]);
     }
 
     #[test]
-    fn a_search_cancelled_after_its_first_batch_sends_nothing_more() {
-        let names: Vec<String> = (0..200).map(|i| format!("f{i:03}")).collect();
-        let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x\n")).collect();
-        let dir = tree(&files);
-        let (sent, after) = (Cell::new(false), Cell::new(0));
-        let cancelled = || {
-            std::thread::sleep(BATCH / 2);
-            after.set(after.get() + usize::from(sent.get()));
-            sent.get()
+    fn a_search_cancelled_after_an_in_file_batch_sends_nothing_more() {
+        let dir = tree(&[("a", &"x\n".repeat(100))]);
+        let sent = Cell::new(false);
+        let ticks = Cell::new(0);
+        let start = Instant::now();
+        let now = || {
+            let at = start + BATCH * ticks.get();
+            ticks.set(ticks.get() + 1);
+            at
         };
         let mut msgs = Vec::new();
-        search(&op(&[dir.path()], "x", 1 << 20), cancelled, |m| {
-            sent.set(true);
-            msgs.push(m);
-        });
-        // One batch, then the next file's check stops it.
-        assert_eq!((batches(&msgs), after.get()), (vec![(1, false)], 1));
+        search_with_clock(
+            &op(&[dir.path()], "x", 100),
+            || sent.get(),
+            |m| {
+                sent.set(true);
+                msgs.push(m);
+            },
+            now,
+        );
+        assert_eq!(batches(&msgs), [(1, false)]);
     }
 
     #[test]
