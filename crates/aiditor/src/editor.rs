@@ -25,6 +25,7 @@ pub(crate) struct Editor {
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
     grep: grep::Grep,
+    terminals: terminal::Terminals,
     watcher: watcher::Watcher,
     /// The recovery service, when there is a data dir.
     recovery: Option<(
@@ -87,6 +88,7 @@ impl Editor {
             timer: None,
             config_dir: args.config_dir,
             grep: grep::Grep::default(),
+            terminals: terminal::Terminals::default(),
             watcher,
             recovery: args.recovery_dir.map(recovery::spawn),
             debug: args.debug.then(Stats::default),
@@ -120,7 +122,11 @@ impl Editor {
         }
         for effect in effects {
             match effect {
-                Effect::Terminal(op) => Self::drain(terminal::spawn(op), cx),
+                Effect::Terminal(op) => {
+                    if let Some(rx) = self.terminals.run(op) {
+                        Self::drain(rx, cx)
+                    }
+                }
                 Effect::File(op) => {
                     let tx = self.tx.clone();
                     tokio::task::spawn_blocking(move || _ = tx.blocking_send(files::run(op)));
