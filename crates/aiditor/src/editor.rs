@@ -381,15 +381,18 @@ mod tests {
     use aiditor_core::keymap::{self, Binding, Keymap};
     use gpui::{Bounds, EntityInputHandler, ShapedLine};
     use gpui::{Modifiers, ScrollDelta, TestAppContext, VisualTestContext, point};
-    use std::path::Path;
 
     fn editor<'a>(
         cx: &'a mut TestAppContext,
         text: &str,
     ) -> (gpui::Entity<Editor>, &'a mut VisualTestContext) {
         let (editor, cx) = cx.add_window_view(|window, cx| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("t.txt");
+            std::fs::write(&path, text).unwrap();
             let mut core = Core::default();
-            core.open(Path::new("/nonexistent/t.txt"), Some((text.into(), 0)));
+            core.open(&path, files::read(&path).unwrap());
+            cx.on_release(move |_, _| drop(dir)).detach();
             Editor::new(
                 core,
                 Args::default(),
@@ -508,9 +511,10 @@ mod tests {
     fn closing_the_window_offers_to_save(cx: &mut TestAppContext) {
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
+        let path = editor.read_with(cx, |e, _| e.core.current().file.clone().unwrap());
         assert!(!cx.simulate_close(), "the window stays open");
         let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
-        assert_eq!(prompt.as_deref(), Some("Save file /nonexistent/t.txt? "));
+        assert_eq!(prompt, Some(format!("Save file {}? ", path.display())));
     }
 
     #[gpui::test]
@@ -789,7 +793,10 @@ mod tests {
         };
         let channel = aiditor_services::channel();
         let mut core = Core::default();
-        core.open(Path::new("/nonexistent/t.txt"), Some((Vec::new(), 0)));
+        let source = tempfile::tempdir().unwrap();
+        let path = source.path().join("t.txt");
+        std::fs::write(&path, "").unwrap();
+        core.open(&path, files::read(&path).unwrap());
         let (editor, cx) =
             cx.add_window_view(|window, cx| Editor::new(core, args, channel, window, cx));
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));

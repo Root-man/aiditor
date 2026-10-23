@@ -391,11 +391,24 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_newer_search_or_a_cancel_stops_the_running_one() {
-        let names: Vec<String> = (0..2000).map(|i| format!("f{i:04}")).collect();
-        let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x\n")).collect();
-        let (big, small) = (tree(&files), tree(&[("a", "x\n")]));
+    #[test]
+    fn a_newer_search_or_a_cancel_supersedes_queued_searches() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let hold = || {
+            let (started, ready) = std::sync::mpsc::channel();
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            runtime.spawn_blocking(move || {
+                started.send(()).unwrap();
+                _ = held.recv();
+            });
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            release
+        };
+        let dir = tree(&[("a", "x\n")]);
         let (tx, mut rx) = crate::channel();
         let grep = Grep::default();
         let search = |id, root: &Path| {
@@ -413,15 +426,21 @@ mod tests {
                 done.push(search);
             }
         };
-        grep.run(search(1, big.path()), tx.clone());
-        grep.run(search(2, small.path()), tx.clone());
-        while !done_with(&mut rx, &mut take, 2).await {}
-        grep.run(search(3, big.path()), tx.clone());
+        let release = hold();
+        grep.run(search(1, dir.path()), tx.clone());
+        grep.run(search(2, dir.path()), tx.clone());
+        drop(release);
+        runtime.block_on(async { while !done_with(&mut rx, &mut take, 2).await {} });
+        let release = hold();
+        grep.run(search(3, dir.path()), tx.clone());
         grep.run(GrepOp::Cancel, tx);
+        drop(release);
         // Ends once every search's task has dropped its sender.
-        while let Some(msg) = rx.recv().await {
-            take(msg);
-        }
+        runtime.block_on(async {
+            while let Some(msg) = rx.recv().await {
+                take(msg);
+            }
+        });
         assert_eq!(done, [2]);
     }
 
