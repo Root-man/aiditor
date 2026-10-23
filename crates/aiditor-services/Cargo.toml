@@ -9,7 +9,9 @@ grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.33"
+libc = "0.2.189"
 notify = "8.2.0"
+portable-pty = "0.9.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.53.2", features = ["full"] }

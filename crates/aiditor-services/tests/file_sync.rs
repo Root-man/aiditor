@@ -86,6 +86,7 @@ impl Editor {
         let mut replies = Vec::new();
         for effect in effects {
             match effect {
+                Effect::Terminal(_) => {}
                 Effect::File(op) if self.hold_operations => self.operations.push(op),
                 Effect::File(op) => replies.push(files::run(op)),
                 Effect::Watch(set) => self.watcher.set(set),

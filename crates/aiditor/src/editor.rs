@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{configuration, files, grep, recovery, watcher};
+use aiditor_services::{configuration, files, grep, recovery, terminal, watcher};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
     Point, ScrollWheelEvent, Task, Window, div, font, prelude::*, px, rgb,
@@ -62,7 +62,7 @@ impl Editor {
     pub(crate) fn new(
         core: Core,
         args: Args,
-        (tx, mut rx): (mpsc::Sender<Msg>, mpsc::Receiver<Msg>),
+        (tx, rx): (mpsc::Sender<Msg>, mpsc::Receiver<Msg>),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -72,17 +72,7 @@ impl Editor {
             _ = this.update(cx, |editor, cx| editor.handle(Msg::Quit, cx));
             false
         });
-        cx.spawn(async move |this, cx| {
-            while let Some(msg) = rx.recv().await {
-                if this
-                    .update(cx, |editor, cx| editor.handle(msg, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        Self::drain(rx, cx);
         if args.debug {
             spawn_heartbeat(cx);
         }
@@ -107,6 +97,20 @@ impl Editor {
         }
     }
 
+    fn drain(mut rx: mpsc::Receiver<Msg>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Some(msg) = rx.recv().await {
+                if this
+                    .update(cx, |editor, cx| editor.handle(msg, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Every message reaches the core here, so the timer is always re-armed.
     pub(crate) fn handle(&mut self, msg: Msg, cx: &mut Context<Self>) {
         let start = Instant::now();
@@ -116,6 +120,7 @@ impl Editor {
         }
         for effect in effects {
             match effect {
+                Effect::Terminal(op) => Self::drain(terminal::spawn(op), cx),
                 Effect::File(op) => {
                     let tx = self.tx.clone();
                     tokio::task::spawn_blocking(move || _ = tx.blocking_send(files::run(op)));
