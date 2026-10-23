@@ -1,6 +1,8 @@
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +10,7 @@ from unittest.mock import patch
 import zipfile
 
 import benchmarks
+import bench_local
 
 
 def result():
@@ -168,6 +171,74 @@ class BenchmarkReporting(unittest.TestCase):
                 self.assertEqual(api.call_count, 1)
         with self.assertRaises(ValueError):
             benchmarks.comment("owner/repo", "12; echo unsafe", "a" * 40, "report")
+
+
+class LocalBenchmarks(unittest.TestCase):
+    def test_duration_uses_readable_units(self):
+        for value, expected in [(355, "355.0 ns"), (1000, "1.000 µs"), (134638, "134.638 µs"), (1_000_000, "1.000 ms")]:
+            with self.subTest(value=value):
+                self.assertEqual(bench_local.duration(value), expected)
+
+    def test_table_aligns_columns_and_reports_all_results(self):
+        measurements = {
+            "edit-undo/100k-lines": dict(min_ns=200, median_ns=237, max_ns=482),
+            "display/50-rows-in-100k-lines": dict(min_ns=133000, median_ns=134638, max_ns=136000),
+            "swiper/two-queries-in-100k-lines": dict(min_ns=10490000, median_ns=10650000, max_ns=10860000),
+        }
+        output = bench_local.table(measurements)
+        lines = output.splitlines()
+        self.assertIn("237.0 ns", lines[4])
+        self.assertIn("134.638 µs", lines[5])
+        self.assertIn("10.650 ms", lines[6])
+        self.assertEqual(len(lines[2]), len(lines[4]))
+        self.assertEqual(len(lines[4]), len(lines[5]))
+        self.assertEqual(len(lines[5]), len(lines[6]))
+        self.assertIn("21 warmed-up batch averages", output)
+
+    def test_reads_tsv_and_preserves_result_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "results.tsv"
+            source.write_text("edit-undo/100k-lines\t1000\t900\t1100\n")
+            self.assertEqual(benchmarks.read_measurements(source), result()["benchmarks"])
+            for invalid in ["", "bad row", "edit-undo/100k-lines\tnan\t900\t1100\n", source.read_text() * 2]:
+                with self.subTest(invalid=invalid):
+                    source.write_text(invalid)
+                    with self.assertRaises(ValueError):
+                        benchmarks.read_measurements(source)
+
+    @patch("bench_local.subprocess.run")
+    def test_runs_core_from_repository_and_prints_table(self, run):
+        def cargo(command, **kwargs):
+            self.assertEqual(command, ["cargo", "bench", "--locked", "-p", "aiditor-core", "--bench", "core"])
+            self.assertEqual(kwargs["cwd"], benchmarks.ROOT)
+            self.assertEqual(kwargs["env"]["BENCH_LOCAL_TEST"], "inherited")
+            Path(kwargs["env"]["BENCH_OUTPUT"]).write_text("edit-undo/100k-lines\t1000\t900\t1100\n")
+            return subprocess.CompletedProcess(command, 0, stdout="raw benchmark output\n")
+
+        run.side_effect = cargo
+        output = io.StringIO()
+        with patch.dict(os.environ, BENCH_LOCAL_TEST="inherited"), redirect_stdout(output):
+            self.assertEqual(bench_local.main(), 0)
+        self.assertIn("aiditor core benchmarks", output.getvalue())
+        self.assertIn("edit-undo/100k-lines", output.getvalue())
+        self.assertIn("1.000 µs", output.getvalue())
+
+    @patch("bench_local.subprocess.run")
+    def test_cargo_failure_preserves_exit_status_and_diagnostics(self, run):
+        for returncode, expected in [(101, 101), (-9, 137)]:
+            with self.subTest(returncode=returncode):
+                run.return_value = subprocess.CompletedProcess(["cargo"], returncode, stdout="benchmark failed\n")
+                error = io.StringIO()
+                with redirect_stderr(error):
+                    self.assertEqual(bench_local.main(), expected)
+                self.assertIn("benchmark failed", error.getvalue())
+
+    @patch("bench_local.subprocess.run", side_effect=FileNotFoundError("cargo unavailable"))
+    def test_missing_cargo_has_readable_error(self, run):
+        error = io.StringIO()
+        with redirect_stderr(error):
+            self.assertEqual(bench_local.main(), 1)
+        self.assertIn("Benchmark run failed: cargo unavailable", error.getvalue())
 
 
 if __name__ == "__main__":
