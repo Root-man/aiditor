@@ -18,4 +18,3 @@ tracing = "0.1.44"
 [dev-dependencies]
 insta = "1.49.0"
 proptest = "1.12.0"
-tempfile = "3.27.0"

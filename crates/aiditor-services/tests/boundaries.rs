@@ -559,3 +559,73 @@ fn a_held_preview_worker_leaves_query_and_cancel_responsive() {
     assert_eq!(d.core.text(), "typed");
     assert_eq!(d.files.len(), 0);
 }
+
+#[test]
+fn visits_saves_reverts_and_diffs_use_real_encoding_and_read_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("text");
+    let mut d = Driver::default();
+    fs::write(&path, b"\xef\xbb\xbfalpha\r\nbeta\r\n").unwrap();
+    d.call("find-file", &[path.to_str().unwrap()]);
+    assert_eq!(d.core.text(), "alpha\nbeta\n");
+    d.keys("x C-x C-s");
+    assert_eq!(fs::read(&path).unwrap(), b"\xef\xbb\xbfxalpha\r\nbeta\r\n");
+    assert_eq!(d.core.current().disk, Some(hash(&fs::read(&path).unwrap())));
+    assert!(!d.core.current().modified());
+
+    fs::write(&path, "replaced\n").unwrap();
+    d.call("diff-buffer-with-file", &[]);
+    d.keys("C-x o");
+    assert_eq!(d.core.current().name, "*Diff*");
+    assert!(d.core.text().contains("-replaced\n+xalpha\n+beta\n"));
+    d.keys("C-x o");
+    d.call("revert-buffer", &[]);
+    assert_eq!(d.core.text(), "replaced\n");
+    d.keys("C-/ C-x C-s");
+    assert_eq!(fs::read(&path).unwrap(), b"xalpha\nbeta\n");
+
+    for (bytes, reason) in [
+        (b"x\0".as_slice(), "binary file"),
+        (b"\xff".as_slice(), "not valid UTF-8"),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        for command in ["revert-buffer", "diff-buffer-with-file"] {
+            d.call(command, &[]);
+            assert_eq!(
+                d.core.message(),
+                Some(format!("{}: {reason}", path.display()).as_str())
+            );
+            assert_eq!(d.core.text(), "xalpha\nbeta\n");
+        }
+    }
+    fs::remove_file(&path).unwrap();
+    d.call("revert-buffer", &[]);
+    assert!(d.core.message().unwrap().ends_with("no longer exists"));
+    d.keys("C-a new SPC C-x C-s");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "new xalpha\nbeta\n");
+}
+
+#[test]
+fn recovered_text_conflicts_with_a_changed_file_and_can_be_compared() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a");
+    fs::write(&path, "external\n").unwrap();
+    let mut d = Driver::default();
+    d.send(Msg::Recover(vec![aiditor_core::Recovered {
+        file: dir.path().join("recovery"),
+        name: "a".into(),
+        path: Some(path.clone()),
+        hash: Some(hash(b"base\n")),
+        text: "recovered\n".into(),
+        disk: aiditor_services::files::read(&path).unwrap(),
+    }]));
+    d.keys("RET C-x C-s");
+    assert!(d.core.message().unwrap().contains("changed on disk"));
+    assert!(d.core.current().modified());
+    assert_eq!(d.core.text(), "recovered\n");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "external\n");
+    d.call("diff-buffer-with-file", &[]);
+    d.keys("C-x o");
+    assert_eq!(d.core.current().name, "*Diff*");
+    assert!(d.core.text().contains("-external\n+recovered\n"));
+}

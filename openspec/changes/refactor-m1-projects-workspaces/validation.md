@@ -126,3 +126,80 @@ Final macOS `cargo test --quiet`: 474 passed, zero failed (21 frontend, 379 core
 Formatting, all-target clippy with warnings denied, the core dependency boundary, the panic-profile scan and strict OpenSpec validation pass. Existing Cargo future-incompatibility notices for `block` and `proc-macro-error2` remain. During implementation, compiler checks caught and corrected test-only use of `find` on a vector and a private minibuffer accessor before passing reruns.
 
 Linux and manual interactive GUI flows were not run in this batch; whole-change cross-platform and integrated GUI checks remain tasks 14.2–14.3. No changes were pushed or published.
+
+## Tasks 12.2–14.4: final batch
+
+### Swiper measurements and scope
+
+The exact task 12.1 fixture and command were rerun before and after this batch on the same macOS arm64 host, Rust 1.99.0, unoptimized test profile with optimized dependencies, seven samples per fixture. No background filtering, global cache, dependency or size cutoff was added. The prompt owns one compiled query revision for filtering, preview and acceptance, plus an immutable Rope snapshot; visible labels are formatted at the completion boundary. Preview/acceptance still calculate coordinates against the live origin text, preserving behavior if a watcher updates that buffer.
+
+| Operation | 1,000 lines before / after (ms) | 100,000 lines before / after (ms) |
+| --- | ---: | ---: |
+| Open prompt | 0.311 / 0.134 | 23.395 / 10.341 |
+| `needle` | 0.225 / 0.255 | 8.651 / 15.807 |
+| `needle !skip` | 0.398 / 0.386 | 12.463 / 19.939 |
+| `NEEDLE` | 0.067 / 0.174 | 3.955 / 12.442 |
+| `alpha value` | 0.286 / 0.313 | 9.072 / 16.083 |
+| `(` | 0.057 / 0.162 | 3.923 / 12.333 |
+| `needle\ value` | 0.240 / 0.285 | 8.861 / 15.806 |
+
+Opening avoids allocating every formatted label, but scanning Rope lines is slower per query than scanning the former preformatted strings. This is a measured trade-off, not an across-the-board speedup: the full scan remains on the core thread. Existing smart-case/ordered-word/exclusion/escape/literal-fallback, selection, trailing-newline, history, mark and jump tests pass. A new long-line Unicode test spans Rope chunks and verifies preview/acceptance and subsequent query positions. An experimental chunk scan was removed because it added code without resolving the measured query regression.
+
+### Completed boundary migration (13.1)
+
+The opening inventory's migration destinations are now implemented. Core's harness has no file reads/writes, directory traversal, regex grep or tempfile setup. It binds request IDs to configured read/list/index/check/save/revert/diff/grep replies; absent fixtures leave the operation collected for explicit delivery. Saved hashes are supplied by tests, never inferred by a substitute writer. Project acknowledgements only parse the core's in-memory prepared definition; no filesystem validation is simulated. Revert fixtures use the pure buffer diff function on supplied bytes. Core assertions now check emitted save text and accepted hashes/flags instead of claiming disk effects. All 379 pre-existing active core tests remain; two additional Swiper tests bring the count to 381.
+
+| Removed harness contract | Executed production coverage |
+| --- | --- |
+| Save / encoding / conflict / recreation / aliases / temps | `files` write tests; `boundaries::{visits_saves_reverts_and_diffs_use_real_encoding_and_read_failures,concurrent_workspace_saves_keep_the_losing_buffers_edits,queued_saves_finish_or_cancel_quit_and_workspace_kill_without_losing_edits}` |
+| WriteProject / TOML / comments / validation / conflict / creation | `projects` unit tests; `boundaries::{project_edits_recreate_deleted_files_keep_comments_and_report_typed_conflicts,project_and_buffer_writes_share_the_disk_check}` |
+| Index / ignore / counts / root failures | `files` index and inventory tests; `boundaries::{real_inventory_drives_limits_shared_roots_and_ignore_refresh,explicit_index_and_reload_reread_global_excludes}` |
+| Check / deletion / clean and dirty copies | `files::check_hashes_files_and_reports_gone_ones`; all native `file_sync` scenarios |
+| Open / Preview / binary / UTF-8 / missing / unreadable | `files` read/run tests; `boundaries::{production_visit_save_and_index_replies_can_be_held,preview_service_prepares_text_and_reports_invalid_or_unreadable_files}` |
+| Revert / Diff / errors / line endings / recovery comparison | `files::run_diffs_*`; new encoding/read-failure and recovered-conflict boundary tests; native `file_sync` tests |
+| ListDir / sorted directories / errors | `files::{lists_sorted_with_directories_marked,run_replies_with_path_prefixed_errors}` |
+| Grep / order / matching / Unicode / cancellation / deadlines / limits | All production `grep` tests, including controlled-clock streaming and the integrated 10,000-hit cap; supported headless search test |
+| Settings / keymaps / projects | Production `configuration` loader tests, including independent failures, held input and both write/reload orderings; frontend reload test |
+
+`file_sync.rs` now holds real operations or replies. Two barrier-released workspace saves return in reverse delivery order: one complete edit wins, the loser retains edits, and a later native notification updates the clean winner while conflicting the dirty loser. Held production reverts delivered after further edits/workspace switching update only their original unchanged buffers. Existing replacement, ignore-policy, lost-event, fallback and limit-crossing native scenarios remain.
+
+### Structural verification and opportunity reconciliation
+
+The design checklist was checked against the finished implementation: no filesystem calls or services/GPUI/Tokio dependency in core; one shared service write gate; private index transition fields; `ProjectId` ownership; one `Windows` type; prompt-scoped shared Swiper query; exhaustive GPUI/headless dispatch. No new dependency was added; core's unused tempfile dev dependency was removed.
+
+| Proposal ID | Implementation and evidence |
+| --- | --- |
+| 1 | `VisitIntent` and deferred destination; core visiting/grep cancellation and same-path tests; held frontend/service reads |
+| 2 | `files::write`, typed expectations, gate, exclusive temps; same-file/link/project races and cleanup tests |
+| 3 | Accepted directory snapshots and identity reconciliation; native replacement/ignore/lost-event recovery tests |
+| 4 | Desired/confirmed/uncertain registrations, deadlines and reports; injected backend failures and autonomous retry tests |
+| 5 | Prompt/request identities and one active/latest preview; held production preparation plus restoration tests |
+| 6 | Prepared core replies and real service contracts; completed migration table above |
+| 7 | Private `FileIndex` transition owner; generation/scope/readiness tests |
+| 8 | Sorted lookups and one active/latest walk; comparison fixture and coalesced-reply tests |
+| 9 | Background numbered configuration bundle; ordered/coalesced component and project-write tests |
+| 10 | Shared grep flush path; controlled-clock in-file batches, order/cancellation/exact caps |
+| 11 | Typed project write formatting and missing-file recreation; real comments/conflict/collision tests |
+| 12 | Captured finder roots/labels; pre-index typed prefixes, duplicate labels and reload tests |
+| 13 | Stable project IDs and path reconciliation; missing/invalid/renamed/duplicate/retained ownership tests |
+| 14 | Shared prompt query, lazy labels and Rope snapshot; behavior tests and comparable measured trade-off above |
+| 15 | Common active/saved `Windows`; workspace/display/marker/preview/jump tests without snapshot changes |
+
+`docs/editor.md` was reconciled against all nine delta specs. It distinguishes preserved M1 policies (deleted-file recreation, duplicate first match, on-demand unwatched indexes, minibuffer closure on workspace switching) from changed navigation cancellation, retained identities, ordered reloads, stable finder mapping and watcher recovery. Existing limitations remain: public notify acknowledgement cannot reveal hidden macOS stream-start failures; the gate is process-local and in-place fallback is not crash-atomic; full-file preview memory and synchronous Swiper scans remain unbounded by file size.
+
+### Final verification (14.2–14.4)
+
+All ten tasks in this batch are complete: 12.2–12.4, 13.1–13.3 and 14.1–14.4. Overall progress is 53/53.
+
+| Check | macOS arm64 host | Linux isolated container |
+| --- | --- | --- |
+| `cargo fmt --all --check` | Passed | Passed |
+| `cargo clippy --all-targets -- -D warnings` | Passed | Passed |
+| Core dependency and panic-profile checks from CI | Passed | Passed |
+| Full `cargo test` | 481 passed, zero failed, one ignored measurement | 481 passed, zero failed, one ignored measurement |
+
+Both final suites ran with Rust 1.99.0 on the finished code: 22 frontend, 381 core, 57 services unit, 1 headless, 11 boundary, 1 crash-recovery and 8 native file-sync tests. The ignored measurement passed separately on macOS, as recorded above. Linux used the CI system dependencies and a non-root test user with fixtures on the container filesystem; macOS native notification tests ran outside the filesystem sandbox. These are local executions of the CI checks, not a claim that hosted GitHub CI ran. Existing dependency future-incompatibility notices remain for `proc-macro-error2` on both platforms and `block` on macOS.
+
+The new GPUI `integrated_finders_visits_saves_and_directory_recovery` test passed on both platforms. It drives rapid finder/grep selection and acceptance, a held ordinary read across workspace switching and typing, directory replacement followed by another independent disk notification, and queued conflicting saves from two workspaces. It waits for an observed write before replacing the directory, so recovery is tested after native coverage is established. Existing GPUI reload-during-typing coverage and the held production configuration-loader test also pass. These are automated GUI event flows; manual visual rendering and physical keyboard interaction were not checked.
+
+Final review found and corrected live-buffer match placement after a watcher revert, including a buffer shortened below the selected snapshot line. The new regression test verifies the live match position and graceful acceptance failure after shortening. Full platform suites were rerun after this correction. Strict OpenSpec validation and `git diff --check` pass. No changes were pushed or published.

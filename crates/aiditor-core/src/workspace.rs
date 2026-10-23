@@ -658,7 +658,10 @@ mod tests {
         assert_eq!(current(&h), ("repo", "repo"));
         let repo = h.core.projects()[3];
         assert_eq!((&repo.name, &repo.primary.path), (&"repo".into(), &root));
-        assert!(!h.path("projects").exists(), "nothing written");
+        assert_eq!(
+            h.core.projects[h.core.project(current(&h).1).unwrap()].file,
+            None
+        );
         // A taken name gets `<2>`, and an ad-hoc project at the root is reused.
         let mut h = projects();
         h.core.launch(&h.path("x/one/f"), &h.path("x/one"));
@@ -792,8 +795,9 @@ mod tests {
         h.keys("C-x t 0");
         let prompt = format!("Save file {}? ", h.path("f.txt").display());
         assert_eq!(h.core.minibuffer().unwrap().prompt, prompt);
+        h.save_reply("x\n");
         h.keys("RET");
-        assert_eq!(h.disk("f.txt"), "x\n");
+        assert_eq!(h.submitted("f.txt"), "x\n");
         assert_eq!(names(&h).len(), 1, "killed once saved");
     }
 
@@ -807,20 +811,25 @@ mod tests {
         assert_eq!((names(&h).len(), h.text()), (2, "x".into()));
         h.keys("C-x t k RET no RET yes RET");
         assert_eq!(names(&h).len(), 1);
-        assert_eq!(h.disk("f.txt"), "", "unchanged on disk");
+        assert_eq!(h.writes, Vec::<(std::path::PathBuf, String)>::new());
     }
 
     #[test]
     fn a_failed_save_keeps_the_workspace() {
         let mut h = modified();
-        std::fs::write(h.path("f.txt"), "theirs").unwrap();
+        h.read_reply("f.txt", Some(b"theirs"));
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("f.txt").display()
+        )));
         h.keys("C-x t 0 RET");
         let err = format!("{} changed on disk; not saved", h.path("f.txt").display());
         assert_eq!(h.core.message(), Some(err.as_str()));
         assert_eq!(names(&h).len(), 2);
         // The cancelled kill doesn't come back with a later save.
+        h.save_reply("x\n");
         h.keys("C-x C-s Keep SPC mine RET");
-        assert_eq!(h.disk("f.txt"), "x\n");
+        assert_eq!(h.submitted("f.txt"), "x\n");
         assert_eq!(names(&h).len(), 2);
     }
 
@@ -853,7 +862,10 @@ mod tests {
         let project = (h.core.projects().into_iter()).find(|p| p.name == "new");
         let project = project.unwrap().clone();
         assert_eq!(project.primary.path, new);
-        assert!(!h.path("projects").exists(), "nothing written");
+        assert_eq!(
+            h.core.projects[h.core.project(current(&h).1).unwrap()].file,
+            None
+        );
         h.send(Msg::ProjectsLoaded {
             dir: Some(h.path("projects")),
             projects: Vec::new(),

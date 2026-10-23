@@ -199,8 +199,9 @@ mod tests {
     const WAIT: Duration = Duration::from_millis(200);
 
     /// The current workspace's project at `app`, with `lib` as a second root.
-    fn grepping(files: &[(&str, &str)]) -> Harness {
+    fn grepping(files: &[(&str, &str)], hits: &[(&str, &str, usize, usize, &str)]) -> Harness {
         let mut h = Harness::new(files);
+        h.grep_reply(hits);
         let (app, lib) = (h.path("app"), h.path("lib"));
         let project = &mut h.core.projects[0].project;
         project.primary.path = app;
@@ -225,11 +226,19 @@ mod tests {
         (buffer.file.clone(), window.point(&h.core.buffers))
     }
 
+    const HITS: &[(&str, &str, usize, usize, &str)] = &[
+        ("app", "a.rs", 0, 0, "needle"),
+        ("app", "b.rs", 1, 2, "  needle"),
+    ];
+
     const FILES: &[(&str, &str)] = &[("app/a.rs", "needle\n"), ("app/b.rs", "x\n  needle\n")];
 
     #[test]
     fn deferred_grep_destination_belongs_to_its_visit_and_uses_character_columns() {
-        let mut h = grepping(&[("app/a.rs", "top\né🙂 needle\n")]);
+        let mut h = grepping(
+            &[("app/a.rs", "top\né🙂 needle\n")],
+            &[("app", "a.rs", 1, 3, "é🙂 needle")],
+        );
         h.keys("C-x p g needle").advance(WAIT);
         h.collect_effects = true;
         h.keys("RET");
@@ -254,12 +263,14 @@ mod tests {
 
     #[test]
     fn search_move_jump() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT).keys("C-n RET");
         assert_eq!(h.core.current().file, Some(h.path("app/b.rs")));
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         assert!(h.core.prompts.minibuffer.is_none());
         // A visited file is switched to at once.
+        h.grep_reply(HITS);
+        h.grep_reply(HITS);
         h.keys("C-x p g needle").advance(WAIT).keys("C-n RET");
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         h.keys("C-x p g needle").advance(WAIT).keys("RET");
@@ -271,7 +282,7 @@ mod tests {
 
     #[test]
     fn opening_and_history() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g");
         assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
         assert_eq!(listed(&mut h), Vec::<String>::new());
@@ -283,7 +294,7 @@ mod tests {
 
     #[test]
     fn searches_wait_for_a_pause_and_three_chars() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g nee").advance(WAIT / 2);
         assert_eq!(h.greps, []);
         h.keys("d").advance(WAIT / 2);
@@ -302,7 +313,13 @@ mod tests {
             ("app/src/a.rs", "\n\nlet needle = 1;\n"),
             ("lib/n", "Needle\n"),
         ];
-        let mut h = grepping(&files);
+        let mut h = grepping(
+            &files,
+            &[
+                ("app", "src/a.rs", 2, 4, "let needle = 1;"),
+                ("lib", "n", 0, 0, "Needle"),
+            ],
+        );
         h.keys("C-x p g needle").advance(WAIT);
         assert_eq!(
             listed(&mut h),
@@ -312,9 +329,9 @@ mod tests {
 
     #[test]
     fn old_hits_stay_until_the_new_search_answers() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT);
-        h.grep_paused = true;
+        h.hits.clear();
         h.keys("s").advance(WAIT);
         assert_eq!(h.greps.last(), Some(&Some("needles".into())));
         assert_eq!(listed(&mut h).len(), 2);
@@ -349,7 +366,9 @@ mod tests {
 
     #[test]
     fn an_invalid_pattern_shows_its_error() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
+        h.hits
+            .push_back(Err("regex parse error\nerror: unclosed group".into()));
         h.keys("C-x p g needle")
             .advance(WAIT)
             .keys("DEL DEL DEL DEL (")
@@ -360,8 +379,8 @@ mod tests {
 
     #[test]
     fn leaving_cancels_a_running_search() {
-        let mut h = grepping(FILES);
-        h.grep_paused = true;
+        let mut h = grepping(FILES, HITS);
+        h.hits.clear();
         h.keys("C-x p g needle").advance(WAIT).keys("C-g");
         assert_eq!(h.greps, [Some("needle".into()), None]);
     }
@@ -374,7 +393,10 @@ mod tests {
                 i => format!("l{i}\n"),
             })
             .collect();
-        let mut h = grepping(&[("app/long.rs", &long), ("start.txt", "one\ntwo\n")]);
+        let mut h = grepping(
+            &[("app/long.rs", &long), ("start.txt", "one\ntwo\n")],
+            &[("app", "long.rs", 150, 2, "  needle")],
+        );
         h.open("start.txt");
         h.display(20);
         h.keys("C-n C-f C-x p g needle").advance(WAIT);
@@ -395,7 +417,7 @@ mod tests {
 
     #[test]
     fn the_selected_hit_is_previewed() {
-        let mut h = grepping(FILES);
+        let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT);
         assert_eq!(origin(&h), (Some(h.path("app/a.rs")), 0));
         h.keys("C-n");
@@ -410,7 +432,13 @@ mod tests {
 
     #[test]
     fn same_file_hits_reuse_prepared_text_and_follow_the_selected_position() {
-        let mut h = grepping(&[("app/a.rs", "needle\nété needle\n")]);
+        let mut h = grepping(
+            &[("app/a.rs", "needle\nété needle\n")],
+            &[
+                ("app", "a.rs", 0, 0, "needle"),
+                ("app", "a.rs", 1, 4, "été needle"),
+            ],
+        );
         h.keys("C-x p g needle").advance(WAIT);
         let path = h.path("app/a.rs");
         let first = h.core.buffers.visiting(&path).unwrap();

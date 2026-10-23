@@ -9,7 +9,11 @@ use crate::{Core, Ctx};
 pub type Handler = fn(&mut Ctx, Args) -> Result<(), String>;
 
 /// Given the text and every candidate, the indices of those that match, in the order to list them.
-pub type Filter = fn(&str, &[String]) -> Vec<usize>;
+#[derive(Clone, Copy, Debug)]
+pub enum Filter {
+    Items(fn(&str, &[String]) -> Vec<usize>),
+    Swiper,
+}
 
 #[derive(Clone, Copy)]
 pub struct Command {

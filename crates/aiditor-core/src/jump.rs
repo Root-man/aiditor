@@ -176,6 +176,10 @@ mod tests {
     #[test]
     fn back_after_a_grep_jump_returns_and_forward_goes_again() {
         let mut h = grepping(&[("app/a.rs", "needle\n"), ("app/b.rs", "x\n  needle\n")]);
+        h.grep_reply(&[
+            ("app", "a.rs", 0, 0, "needle"),
+            ("app", "b.rs", 1, 2, "  needle"),
+        ]);
         h.keys("C-f C-x p g needle").advance(WAIT).keys("C-n RET");
         let hit = line_start(&h, 1) + 2;
         assert_eq!(at(&h), pos("b.rs", hit));
@@ -191,6 +195,7 @@ mod tests {
     fn a_grep_hit_in_the_current_buffer_records_once() {
         let mut h = grepping(&[("app/a.rs", "x\nneedle\n")]);
         let before = back(&h).len();
+        h.grep_reply(&[("app", "a.rs", 1, 0, "needle")]);
         h.keys("C-x p g needle").advance(WAIT).keys("RET");
         assert_eq!(h.point(), 2);
         assert_eq!(back(&h).len(), before + 1);

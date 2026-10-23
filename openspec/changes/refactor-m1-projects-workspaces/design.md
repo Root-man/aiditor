@@ -129,13 +129,13 @@ Use barriers/channel handshakes for overlapping writes and delayed completions; 
 
 Structural acceptance checklist:
 
-- [ ] Core has no filesystem effect implementation, GPUI dependency, Tokio dependency or dependency on services.
-- [ ] One shared service write path owns disk expectation checking, replacement and typed error handling.
-- [ ] One index module owns generations, scope, readiness, counts, queued refresh and missed-path state.
-- [ ] Project names label stable session identities; workspace/index ownership does not use names as identity.
-- [ ] Active and saved window configurations use the existing common representation.
-- [ ] Swiper's filter, preview and acceptance share the same compiled query revision.
-- [ ] GPUI, headless and tests handle every changed effect/reply contract.
+- [x] Core has no filesystem effect implementation, GPUI dependency, Tokio dependency or dependency on services.
+- [x] One shared service write path owns disk expectation checking, replacement and typed error handling.
+- [x] One index module owns generations, scope, readiness, counts, queued refresh and missed-path state.
+- [x] Project names label stable session identities; workspace/index ownership does not use names as identity.
+- [x] Active and saved window configurations use the existing common representation.
+- [x] Swiper's filter, preview and acceptance share the same compiled query revision.
+- [x] GPUI, headless and tests handle every changed effect/reply contract.
 
 ## Risks / Trade-offs
 

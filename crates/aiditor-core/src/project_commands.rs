@@ -681,6 +681,9 @@ mod tests {
     /// A harness with directories `a` and `b`, projects going to `projects/` and `loaded` loaded.
     fn with(loaded: Vec<Loaded>) -> Harness {
         let mut h = Harness::new(&[("a/x", ""), ("b/x", "")]);
+        h.listing("", &["a/", "b/"]);
+        h.listing("a", &["x"]);
+        h.listing("b", &["x"]);
         // Without the launch `$HOME` project, so the lists hold only the test's.
         h.core.projects.clear();
         let dir = Some(h.path("projects"));
@@ -740,7 +743,7 @@ mod tests {
     fn create_prepares_a_definition_and_accepts_the_written_reply() {
         let mut h = with(Vec::new());
         let a = h.path("a").display().to_string();
-        let tmp = h.dir.path().display().to_string();
+        let tmp = h.dir.as_path().display().to_string();
         // Only directories are listed, the typed one first, and RET takes the selected one.
         h.keys(&format!("C-x p c app RET C-a C-k {tmp}/"));
         assert_eq!(
@@ -798,8 +801,7 @@ mod tests {
         );
         let text =
             format!("# Mine\nname = \"app\"\nwatch = true # quiet\n\n[primary]\npath = \"{a}\"\n");
-        std::fs::create_dir(h.path("projects")).unwrap();
-        std::fs::write(h.path("projects/app.toml"), &text).unwrap();
+        h.read_reply("projects/app.toml", Some(text.as_bytes()));
         let loaded = Loaded {
             project: Project::parse(&text).unwrap(),
             file: Some((h.path("projects/app.toml"), text)),
@@ -886,10 +888,7 @@ mod tests {
             err.as_deref(),
             Some("tmp has no file; save it with project-save")
         );
-        assert!(
-            !h.path("projects").exists(),
-            "nothing written before a save"
-        );
+        assert_eq!(h.core.projects[h.core.project("tmp").unwrap()].file, None);
         let edited = project(&h, "tmp");
         assert_eq!(edited.roots[0].role, "Bee");
         assert!(!edited.watch);
@@ -959,6 +958,8 @@ mod tests {
     /// The `tmp` project from `ad_hoc` with `b` and `roots` as additional roots.
     fn indexable(roots: &[&str]) -> Harness {
         let mut h = with(Vec::new());
+        h.index_reply("a", &["x"], &["a"]);
+        h.index_reply("b", &["x"], &["b"]);
         let mut loaded = ad_hoc(&h);
         for root in ["b"].iter().chain(roots) {
             loaded.project.roots.push(Root {
@@ -993,9 +994,7 @@ mod tests {
     #[test]
     fn index_holds_each_roots_files_and_counts_them() {
         let mut h = indexable(&[]);
-        std::fs::create_dir_all(h.path("a/.git")).unwrap();
-        std::fs::write(h.path("a/.git/config"), "").unwrap();
-        std::fs::write(h.path("a/.env"), "").unwrap();
+        h.index_reply("a", &[".env", "x"], &["a"]);
         h.keys("C-x p i tmp RET");
         assert_eq!(h.core.message(), Some("Indexed 3 files in tmp"));
         assert_eq!(
@@ -1010,6 +1009,10 @@ mod tests {
     #[test]
     fn index_names_a_root_it_could_not_walk() {
         let mut h = indexable(&["gone"]);
+        h.indexes.insert(
+            h.path("gone"),
+            Err(format!("{}: missing root", h.path("gone").display())),
+        );
         call(&mut h, "project-index", &["tmp"]);
         let gone = h.path("gone").display().to_string();
         let msg = h.core.message().unwrap();
@@ -1060,8 +1063,8 @@ mod tests {
     #[test]
     fn a_repeated_root_name_gets_a_number() {
         let mut h = findable(&["q/a"]);
-        std::fs::create_dir_all(h.path("q/a")).unwrap();
-        std::fs::write(h.path("q/a/y"), "").unwrap();
+        h.read_reply("q/a/y", Some(b""));
+        h.index_reply("q/a", &["y"], &["q/a"]);
         h.keys("C-x p f");
         assert_eq!(candidates(&mut h), ["a/x", "b/x", "a<2>/y"]);
         h.keys("C-g");
@@ -1072,6 +1075,8 @@ mod tests {
     #[test]
     fn a_typed_name_is_visited_under_its_root_or_the_primary() {
         let mut h = findable(&[]);
+        h.read_reply("b/new.rs", None);
+        h.read_reply("a/notes.md", None);
         h.keys("C-x p f b/new.rs M-RET");
         assert_eq!(visited(&h), Some(h.path("b/new.rs")));
         assert_eq!(h.text(), "");
@@ -1116,6 +1121,9 @@ mod tests {
 
     fn saved_finder() -> (Harness, Loaded) {
         let mut h = Harness::new(&[("old/lib/x", "old"), ("new/lib/x", "new")]);
+        h.index_reply("old/lib", &["x"], &["old/lib"]);
+        h.index_reply("new/lib", &["x"], &["new/lib"]);
+        h.read_reply("old/lib/new.rs", None);
         let mut loaded = Loaded::ad_hoc("p", &h.path("old/lib"));
         loaded.project.watch = false;
         loaded.file = Some((h.path("p.toml"), String::new()));
@@ -1236,7 +1244,7 @@ mod tests {
     #[test]
     fn the_finder_previews_files_in_a_hidden_buffer() {
         let mut h = findable(&[]);
-        std::fs::write(h.path("b/x"), "bee").unwrap();
+        h.read_reply("b/x", Some("bee".as_ref()));
         h.keys("C-x p f C-n");
         assert_eq!(shown(&h), " x");
         let peek = h.core.buffers.visiting(&h.path("b/x")).unwrap();
@@ -1270,7 +1278,7 @@ mod tests {
         let mut h = findable(&[]);
         h.keys("C-x p f");
         let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
-        std::fs::write(h.path("a/x"), "changed after preview").unwrap();
+        h.read_reply("a/x", Some("changed after preview".as_ref()));
         h.keys("RET");
         assert_eq!(h.text(), "changed after preview");
         assert_ne!(h.core.windows.window.buffer(), peek);

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::hash;
 use aiditor_core::key::{Key, KeyCode, parse_keys};
-use aiditor_core::{Core, Effect, Msg};
+use aiditor_core::{Core, Effect, FileOp, Msg};
 use aiditor_services::{files, projects, watcher::Watcher};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -17,6 +17,10 @@ struct Editor {
     watcher: Watcher,
     reports: Receiver<Msg>,
     root: PathBuf,
+    hold_operations: bool,
+    operations: Vec<FileOp>,
+    hold_replies: bool,
+    replies: Vec<Msg>,
     _dir: tempfile::TempDir,
 }
 
@@ -43,6 +47,10 @@ impl Editor {
             watcher,
             reports,
             root,
+            hold_operations: false,
+            operations: Vec::new(),
+            hold_replies: false,
+            replies: Vec::new(),
             _dir: dir,
         };
         editor.send(Msg::ProjectsLoaded {
@@ -78,6 +86,7 @@ impl Editor {
         let mut replies = Vec::new();
         for effect in effects {
             match effect {
+                Effect::File(op) if self.hold_operations => self.operations.push(op),
                 Effect::File(op) => replies.push(files::run(op)),
                 Effect::Watch(set) => self.watcher.set(set),
                 Effect::Recovery(_) | Effect::SetClipboard(_) => {}
@@ -86,8 +95,12 @@ impl Editor {
                 }
             }
         }
-        for reply in replies {
-            self.send(reply);
+        if self.hold_replies {
+            self.replies.extend(replies);
+        } else {
+            for reply in replies {
+                self.send(reply);
+            }
         }
     }
 
@@ -379,4 +392,122 @@ fn recovery_crossing_the_limit_keeps_visited_file_synchronization() {
     editor.wait_for("visited fallback after size-limit recovery", |c| {
         c.text() == "fallback after recovery"
     });
+}
+
+#[test]
+fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() {
+    let mut editor = Editor::new(&[("a.txt", "base\n")], "");
+    let first = editor.core.workspace();
+    editor.hold_operations = true;
+    editor.keys("first SPC C-x C-s");
+    let second = editor
+        .core
+        .new_workspace("second", editor.core.project_id("sync").unwrap());
+    editor.open("a.txt");
+    editor.keys("second SPC C-x C-s");
+    let operations = std::mem::take(&mut editor.operations);
+    assert_eq!(operations.len(), 2);
+    assert!(
+        operations
+            .iter()
+            .all(|op| matches!(op, FileOp::Save { .. }))
+    );
+    let barrier = std::sync::Barrier::new(2);
+    let replies = std::thread::scope(|scope| {
+        let handles: Vec<_> = operations
+            .into_iter()
+            .map(|op| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    files::run(op)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|reply| matches!(reply, Msg::Saved { result: Ok(_), .. }))
+            .count(),
+        1
+    );
+    editor.hold_operations = false;
+    for reply in replies.into_iter().rev() {
+        editor.send(reply);
+    }
+    let disk = fs::read_to_string(editor.root.join("a.txt")).unwrap();
+    for (workspace, expected) in [(first, "first base\n"), (second, "second base\n")] {
+        editor.core.switch_workspace(workspace).unwrap();
+        assert_eq!(editor.core.text(), expected);
+        assert_eq!(editor.core.current().modified(), disk != expected);
+    }
+    let winner = if disk == "first base\n" {
+        first
+    } else {
+        second
+    };
+    let loser = if winner == first { second } else { first };
+    editor.core.switch_workspace(winner).unwrap();
+    fs::write(editor.root.join("a.txt"), "later\n").unwrap();
+    editor.wait_for(
+        "the successful save's clean buffer to follow a later write",
+        |c| c.text() == "later\n",
+    );
+    editor.core.switch_workspace(loser).unwrap();
+    assert_eq!(
+        editor.core.text(),
+        if loser == first {
+            "first base\n"
+        } else {
+            "second base\n"
+        }
+    );
+    assert!(editor.core.current().modified());
+    assert_eq!(editor.core.current().conflict, Some(hash(b"later\n")));
+}
+
+#[test]
+fn held_reverts_keep_new_edits_and_apply_only_to_their_original_buffer() {
+    let mut editor = Editor::new(&[("a.txt", "base\n"), ("other.txt", "other\n")], "");
+    let first = editor.core.workspace();
+    let second = editor
+        .core
+        .new_workspace("second", editor.core.project_id("sync").unwrap());
+    editor.open("a.txt");
+    editor.hold_replies = true;
+    fs::write(editor.root.join("a.txt"), "disk\n").unwrap();
+    editor.send(Msg::FilesChanged {
+        paths: vec![],
+        rescan: true,
+    });
+    let checks = std::mem::take(&mut editor.replies);
+    for check in checks {
+        editor.send(check);
+    }
+    let replies = std::mem::take(&mut editor.replies);
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|reply| matches!(reply, Msg::Reverted { .. }))
+            .count(),
+        2
+    );
+    editor.keys("mine SPC");
+    editor.core.switch_workspace(first).unwrap();
+    editor.open("other.txt");
+    editor.hold_replies = false;
+    for reply in replies.into_iter().rev() {
+        editor.send(reply);
+    }
+    assert_eq!(editor.core.text(), "other\n");
+    editor.keys("C-x b a.txt RET");
+    assert_eq!(editor.core.text(), "disk\n");
+    editor.core.switch_workspace(second).unwrap();
+    assert_eq!(editor.core.text(), "mine base\n");
+    assert!(editor.core.current().modified());
 }

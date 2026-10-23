@@ -9,7 +9,7 @@ use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 
 use crate::buffer::{BufferId, file_name};
-use crate::command::{Args, Command, Preview};
+use crate::command::{Args, Command, Filter, Preview};
 use crate::frame::window_display;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
@@ -77,12 +77,22 @@ struct Completion {
 
 /// A command's candidates matched by its spec's `filter`.
 struct Filtered {
+    swiper: Option<crate::swiper::Search>,
     items: Vec<String>,
     notes: Vec<String>,
     /// The indices of the matching items, in the filter's order.
     matched: Vec<usize>,
     /// The item last selected, kept while nothing matches.
     anchor: usize,
+}
+
+impl Filtered {
+    fn candidate(&self, index: usize) -> String {
+        match &self.swiper {
+            Some(search) => search.candidate(index),
+            None => self.items[index].clone(),
+        }
+    }
 }
 
 /// The open prompt, each prompt's history and the completion matcher.
@@ -100,11 +110,21 @@ pub(crate) struct Prompts {
     pub(crate) matcher: Option<Nucleo<(String, String)>>,
     /// The timer that polls the matcher again while it is still matching.
     repoll: Option<TimerId>,
-    /// The text of the last minibuffer closed, as ivy's `ivy-text` outlives the read.
-    pub(crate) last_text: String,
+    pub(crate) accepted_swiper: Option<crate::swiper::Search>,
 }
 
 impl Prompts {
+    pub(crate) fn swiper(&self) -> Option<&crate::swiper::Search> {
+        self.minibuffer
+            .as_ref()?
+            .completion
+            .as_ref()?
+            .filtered
+            .as_ref()?
+            .swiper
+            .as_ref()
+    }
+
     /// Whether the open prompt completes directories only.
     fn directories(&self, commands: &HashMap<&'static str, Command>) -> bool {
         self.minibuffer.as_ref().is_some_and(|mb| {
@@ -159,7 +179,7 @@ impl Prompts {
         let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
         if let Some(f) = &completion.filtered {
             let last = f.matched.len().checked_sub(1)?;
-            return Some(f.items[f.matched[completion.selected.min(last)]].clone());
+            return Some(f.candidate(f.matched[completion.selected.min(last)]));
         }
         let snapshot = self.matcher.as_ref()?.snapshot();
         let last = snapshot.matched_item_count().checked_sub(1)?;
@@ -248,9 +268,17 @@ impl Ctx<'_> {
             // A filtering prompt lists even no candidates, so it still requires a match.
             (Some(filter), None) => {
                 let items = candidates.take().unwrap_or_default();
+                let mut swiper = matches!(filter, Filter::Swiper)
+                    .then(|| crate::swiper::Search::new(core.current().text().clone()));
+                let matched = match (&mut swiper, filter) {
+                    (Some(search), _) => search.filter(""),
+                    (_, Filter::Items(filter)) => filter("", &items),
+                    _ => unreachable!(),
+                };
                 Some(Filtered {
+                    swiper,
                     notes: items.iter().map(|c| note(core, c)).collect(),
-                    matched: filter("", &items),
+                    matched,
                     items,
                     anchor: 0,
                 })
@@ -359,7 +387,7 @@ impl Ctx<'_> {
             Some(finder) => finder.path(&text).to_string_lossy().into_owned(),
             None => text,
         };
-        let mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
+        let mut mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
         // A filtering prompt's typed text was remembered on closing.
         if mb.history && !filtered {
             self.core.prompts.remember(&mb.prompt, text.clone());
@@ -367,7 +395,13 @@ impl Ctx<'_> {
         let mut args = mb.args;
         args.strings.push(text);
         self.core.this_command = Some(mb.command);
+        self.core.prompts.accepted_swiper = mb
+            .completion
+            .as_mut()
+            .and_then(|c| c.filtered.as_mut())
+            .and_then(|f| f.swiper.take());
         self.call(mb.command, args);
+        self.core.prompts.accepted_swiper = None;
         Ok(())
     }
 
@@ -457,8 +491,11 @@ impl Core {
                 if let Some(last) = f.matched.len().checked_sub(1) {
                     f.anchor = f.matched[completion.selected.min(last)];
                 }
-                let filter = self.commands[mb.command].spec.filter;
-                f.matched = filter.expect("filtered by the spec")(&text, &f.items);
+                f.matched = match (&mut f.swiper, self.commands[mb.command].spec.filter) {
+                    (Some(search), _) => search.filter(&text),
+                    (_, Some(Filter::Items(filter))) => filter(&text, &f.items),
+                    _ => unreachable!("filtered by the spec"),
+                };
                 // ivy's swiper rule: the selected item if it still matches, else the next one.
                 let next = f.matched.iter().position(|&i| i >= f.anchor);
                 let next = next.unwrap_or(f.matched.len().saturating_sub(1));
@@ -546,7 +583,7 @@ impl Core {
                     let rows = range(f.matched.len());
                     let items = f.matched[rows.clone()].iter();
                     (candidates, annotations) = items
-                        .map(|&i| (f.items[i].clone(), f.notes[i].clone()))
+                        .map(|&i| (f.candidate(i), f.notes.get(i).cloned().unwrap_or_default()))
                         .unzip();
                     (f.matched.len(), rows)
                 }
@@ -826,7 +863,6 @@ impl Core {
         if mb.history && mb.completion.as_ref().is_some_and(|c| c.filtered.is_some()) {
             self.prompts.remember(&mb.prompt, text.clone());
         }
-        self.prompts.last_text = text;
         _ = self.buffers.kill(window.buffer());
         Some(mb)
     }

@@ -80,19 +80,19 @@ These stages implement one change. Opportunity numbers refer to `proposal.md`; d
 ## 12. Reuse Swiper query work (#14; D9)
 
 - [x] 12.1 Capture a reproducible baseline for prompt-open and per-query costs on small and large multiline buffers, recording fixture size and build mode in the change's validation notes; verify the measurements execute real Swiper paths without a new dependency.
-- [ ] 12.2 Share a prompt-scoped compiled query across filtering, preview and acceptance, with only the necessary command/minibuffer seam changes; verify smart case, ordered words, exclusions, escaped separators, literal fallback and match point placement.
-- [ ] 12.3 Reduce avoidable line-text copying using the buffer snapshot and existing completion boundary; verify line order, trailing-newline handling, stable selection, history, mark and jump behavior through existing positive-behavior tests.
-- [ ] 12.4 Repeat the baseline fixtures and document the change in cost and remaining full-scan limit; verify results are comparable and no background filtering, global cache or size cutoff was introduced.
+- [x] 12.2 Share a prompt-scoped compiled query across filtering, preview and acceptance, with only the necessary command/minibuffer seam changes; verify smart case, ordered words, exclusions, escaped separators, literal fallback and match point placement.
+- [x] 12.3 Reduce avoidable line-text copying using the buffer snapshot and existing completion boundary; verify line order, trailing-newline handling, stable selection, history, mark and jump behavior through existing positive-behavior tests.
+- [x] 12.4 Repeat the baseline fixtures and document the change in cost and remaining full-scan limit; verify results are comparable and no background filtering, global cache or size cutoff was introduced.
 
 ## 13. Finish the test-boundary cleanup (#6; D11)
 
-- [ ] 13.1 Complete the test migration inventory and remove duplicated filesystem/grep execution from the core harness; verify every migrated filesystem contract runs through production services and pure core tests use explicit replies.
-- [ ] 13.2 Extend `aiditor-services/tests/file_sync.rs` with controlled completion orderings and real shared-write behavior; verify cross-workspace saves, watcher recovery, failed operations and stale completions affect the intended buffers only.
-- [ ] 13.3 Check the structural acceptance checklist in the design against the finished tree; verify core dependency boundaries, private index transitions, stable project ownership, one window representation and shared Swiper query preparation.
+- [x] 13.1 Complete the test migration inventory and remove duplicated filesystem/grep execution from the core harness; verify every migrated filesystem contract runs through production services and pure core tests use explicit replies.
+- [x] 13.2 Extend `aiditor-services/tests/file_sync.rs` with controlled completion orderings and real shared-write behavior; verify cross-workspace saves, watcher recovery, failed operations and stale completions affect the intended buffers only.
+- [x] 13.3 Check the structural acceptance checklist in the design against the finished tree; verify core dependency boundaries, private index transitions, stable project ownership, one window representation and shared Swiper query preparation.
 
 ## 14. Document and verify the whole change
 
-- [ ] 14.1 Update `docs/editor.md` with the chosen navigation cancellation, project reload/retention, watcher recovery and remaining performance limits; verify it agrees with all nine delta specs and distinguishes preserved M1 policy from behavior changed here.
-- [ ] 14.2 Run the repository's formatting, clippy, core dependency and panic-profile checks plus the full test suite on macOS and Linux; verify the existing CI checks pass and record exact results without treating planned checks as executed.
-- [ ] 14.3 Exercise the integrated GUI flows: rapid finder/grep selection, workspace switching during a read, concurrent same-file saves, configuration reload during typing, and directory replacement; verify buffers, prompt ownership and later disk notifications match the acceptance scenarios.
-- [ ] 14.4 Reconcile proposal IDs 1–15 against implementation and evidence, record remaining limitations in validation notes, and run strict OpenSpec validation; verify no opportunity, caller, fixture or acceptance scenario was silently omitted.
+- [x] 14.1 Update `docs/editor.md` with the chosen navigation cancellation, project reload/retention, watcher recovery and remaining performance limits; verify it agrees with all nine delta specs and distinguishes preserved M1 policy from behavior changed here.
+- [x] 14.2 Run the repository's formatting, clippy, core dependency and panic-profile checks plus the full test suite on macOS and Linux; verify the existing CI checks pass and record exact results without treating planned checks as executed.
+- [x] 14.3 Exercise the integrated GUI flows: rapid finder/grep selection, workspace switching during a read, concurrent same-file saves, configuration reload during typing, and directory replacement; verify buffers, prompt ownership and later disk notifications match the acceptance scenarios.
+- [x] 14.4 Reconcile proposal IDs 1–15 against implementation and evidence, record remaining limitations in validation notes, and run strict OpenSpec validation; verify no opportunity, caller, fixture or acceptance scenario was silently omitted.

@@ -320,6 +320,8 @@ mod tests {
     #[test]
     fn unwatched_status_follows_the_workspace_project_and_watch_setting() {
         let mut h = Harness::new(&[("other/x", "")]);
+        h.index_reply("other", &["x"], &["other"]);
+        h.index_reply("", &["other/x"], &["", "other"]);
         h.core.projects[0].project.primary.path = h.path("");
         let lines = |h: &mut Harness| {
             h.frame(800., 600.)

@@ -157,8 +157,7 @@ mod tests {
         h.advance(SEC);
         let file = ("a".to_string(), Some(h.path("a")), "xy1\n".to_string());
         assert_eq!(recovered(&h), [file]);
-        // Nothing new beside the file.
-        assert_eq!(std::fs::read_dir(h.dir.path()).unwrap().count(), 1);
+        h.save_reply("xy1\n");
         h.keys("C-x C-s");
         assert!(h.recovery.is_empty());
         // Quiet once nothing is unwritten.
@@ -230,7 +229,12 @@ mod tests {
     /// auto-saved from a disk version holding `base`.
     fn left(h: &Harness, path: Option<&str>, base: &str, text: &str) -> Recovered {
         let path = path.map(|p| h.path(p));
-        let disk = (path.as_ref()).and_then(|p| std::fs::read(p).ok());
+        let disk = path
+            .as_ref()
+            .and_then(|p| h.reads.get(p))
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|r| r.as_ref())
+            .map(|(b, _)| b.clone());
         Recovered {
             file: format!("/recovery/{text}").into(),
             name: (path.as_ref()).map_or("*scratch*".into(), |_| "a".into()),
@@ -258,8 +262,9 @@ mod tests {
             [("a".into(), Some(h.path("a")), "1\nx\n".into())]
         );
         assert_eq!(h.deleted, [PathBuf::from("/recovery/1\nx\n")]);
+        h.save_reply("1\nx\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a"), "1\nx\n");
+        assert_eq!(h.submitted("a"), "1\nx\n");
         assert!(h.recovery.is_empty());
     }
 
@@ -267,6 +272,13 @@ mod tests {
     fn a_recovered_buffer_can_be_compared_with_its_file() {
         let mut h = Harness::new(&[("a", "2\n")]);
         let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        h.diffs.insert(
+            h.path("a"),
+            Ok(format!(
+                "--- {}\n+++ a\n@@ -1 +1,2 @@\n-2\n+1\n+x\n",
+                h.path("a").display()
+            )),
+        );
         h.send(Msg::Recover(vec![r]))
             .keys("RET M-x diff-buffer-with-file RET");
         let id = h.core.buffers.find("*Diff*").unwrap();
@@ -283,8 +295,13 @@ mod tests {
     fn a_recovered_file_changed_on_disk_since_is_not_saved_over() {
         let mut h = Harness::new(&[("a", "2\n")]);
         let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("a").display()
+        )));
         h.send(Msg::Recover(vec![r])).keys("RET C-x C-s");
-        assert_eq!(h.disk("a"), "2\n");
+        assert_eq!(h.core.current().disk, Some(hash(b"1\n")));
+        assert!(h.core.current().modified());
         assert!(h.core.message().unwrap().contains("changed on disk"));
     }
 

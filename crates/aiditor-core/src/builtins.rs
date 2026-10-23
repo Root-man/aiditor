@@ -365,7 +365,9 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-grep",
             // Asks its own question, which names the project; the hits are matched already.
             spec: ArgSpec {
-                filter: Some(|_, items| (0..items.len()).collect()),
+                filter: Some(crate::command::Filter::Items(|_, items| {
+                    (0..items.len()).collect()
+                })),
                 preview: Some(crate::grep::preview),
                 ..ArgSpec::default()
             },
@@ -642,8 +644,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "swiper",
             spec: ArgSpec {
                 prompts: &["Swiper: "],
-                completion: Some(crate::swiper::candidates),
-                filter: Some(crate::swiper::filter),
+                filter: Some(crate::command::Filter::Swiper),
                 preselect: Some(crate::swiper::preselect),
                 preview: Some(crate::swiper::preview),
                 ..ArgSpec::default()
@@ -724,13 +725,14 @@ mod tests {
     fn builtins_are_callable_by_name() {
         let mut h = Harness::new(&[("a.txt", ""), ("settings.toml", "font_size = 18")]);
         h.open("a.txt");
+        h.save_reply("ab\n");
         h.keys("ab");
         h.call("undo", Args::default());
         assert_eq!(h.text(), "");
         h.call("undo-redo", Args::default());
         assert_eq!(h.text(), "ab");
         h.call("save-buffer", Args::default());
-        assert_eq!(h.disk("a.txt"), "ab\n");
+        assert_eq!(h.submitted("a.txt"), "ab\n");
         h.call("reload-settings", Args::default());
         assert_eq!(h.core.settings().font_size, 18.0);
     }

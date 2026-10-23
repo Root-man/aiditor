@@ -189,14 +189,20 @@ mod tests {
     use crate::project::{Loaded, Project, Root};
     use crate::{Disk, Effect, FileOp, Msg};
 
-    /// Reports `names` in the temp dir as the watcher would, each as it is on disk now.
+    /// Delivers prepared check/revert replies with a synthetic watcher report.
     fn report(h: &mut Harness, names: &[&str]) {
-        let paths = (names.iter().map(|n| h.path(n)))
-            .map(|p| {
-                let disk = match std::fs::metadata(&p) {
-                    Err(_) => Disk::Gone,
-                    Ok(m) if m.is_dir() => Disk::Dir,
-                    Ok(_) => Disk::File,
+        let paths = names
+            .iter()
+            .map(|name| {
+                let p = h.path(name);
+                let read = h.reads.get(&p).cloned().unwrap_or(Ok(None)).unwrap();
+                h.prepare_revert(name, read.as_ref().map(|(b, _)| b.as_slice()));
+                let disk = if h.directories.values().flatten().any(|d| *d == p) {
+                    Disk::Dir
+                } else if read.is_some() {
+                    Disk::File
+                } else {
+                    Disk::Gone
                 };
                 (p, disk)
             })
@@ -238,19 +244,20 @@ mod tests {
     fn a_deleted_file_shows_in_the_mode_line_and_comes_back() {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
         assert_eq!(mode_line(&mut h), "-- a.txt [deleted]  1:0");
         assert_eq!(h.text(), "a\n");
         let buffer = h.core.current();
         assert!(!buffer.modified() && buffer.disk.is_none());
-        std::fs::write(h.path("a.txt"), "back\n").unwrap();
+        h.read_reply("a.txt", Some("back\n".as_ref()));
         report(&mut h, &["a.txt"]);
         // A clean buffer reverts to the file that came back, taking its hash.
         assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
         assert_eq!(h.text(), "back\n");
+        h.save_reply("xback\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xback\n");
+        assert_eq!(h.submitted("a.txt"), "xback\n");
     }
 
     #[test]
@@ -260,8 +267,9 @@ mod tests {
         let main = h.core.windows.window.buffer();
         h.new_workspace("w", "home");
         h.open("a.txt");
+        h.save_reply("xa\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(h.submitted("a.txt"), "xa\n");
         // The check the watcher's report of that save starts, answered by hand to see who reverts.
         let checked = vec![(h.path("a.txt"), Some(hash(b"xa\n")))];
         let effects = h.core.handle(h.now, Msg::Checked(checked));
@@ -272,6 +280,7 @@ mod tests {
             })
             .collect();
         assert_eq!(reverted, [main], "the saving buffer is left alone");
+        h.prepare_revert("a.txt", Some(b"xa\n"));
         h.run(effects);
         let buffer = h.core.buffers.get(main).unwrap();
         assert_eq!(
@@ -279,7 +288,7 @@ mod tests {
             ("xa\n".into(), false)
         );
         // Through the watcher's report too.
-        std::fs::write(h.path("a.txt"), "xay\n").unwrap();
+        h.read_reply("a.txt", Some("xay\n".as_ref()));
         report(&mut h, &["a.txt"]);
         let buffer = h.core.buffers.get(main).unwrap();
         assert_eq!(buffer.text().to_string(), "xay\n");
@@ -292,7 +301,7 @@ mod tests {
         h.open("a.txt");
         h.keys("C-n C-n C-f");
         h.core.message = None;
-        std::fs::write(h.path("a.txt"), "new\na\nb\nc\n").unwrap();
+        h.read_reply("a.txt", Some("new\na\nb\nc\n".as_ref()));
         report(&mut h, &["a.txt"]);
         assert_eq!(h.text(), "new\na\nb\nc\n");
         assert_eq!(mode_line(&mut h), "-- a.txt  4:1");
@@ -307,7 +316,7 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
         let path = h.path("a.txt");
-        std::fs::write(&path, b"a\0").unwrap();
+        h.read_reply("a.txt", Some(b"a\0"));
         report(&mut h, &["a.txt"]);
         assert_eq!(h.text(), "a\n");
         let binary = format!("{}: binary file", path.display());
@@ -319,7 +328,7 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
         h.keys("x");
-        std::fs::write(h.path("a.txt"), "other\n").unwrap();
+        h.read_reply("a.txt", Some("other\n".as_ref()));
         report(&mut h, &["a.txt"]);
         h
     }
@@ -343,15 +352,16 @@ mod tests {
         let candidates = h.core.minibuffer().unwrap().candidates;
         assert_eq!(candidates, ["Compare", "Take disk", "Keep mine"]);
         h.keys("C-g");
-        assert_eq!(h.disk("a.txt"), "other\n");
+        assert_eq!(h.core.current().disk, Some(hash(b"a\n")));
         assert!(mode_line(&mut h).contains("[conflict]"));
     }
 
     #[test]
     fn keep_mine_from_a_save_overwrites_the_disk() {
         let mut h = conflicted();
+        h.save_reply("xa\n");
         h.keys("C-x C-s Keep SPC mine RET");
-        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(h.submitted("a.txt"), "xa\n");
         assert_eq!(mode_line(&mut h), "-- a.txt  1:1");
     }
 
@@ -359,21 +369,22 @@ mod tests {
     fn keep_mine_from_m_x_waits_for_the_save() {
         let mut h = conflicted();
         h.keys("M-x resolve-conflict RET Keep SPC mine RET");
-        assert_eq!(h.disk("a.txt"), "other\n");
+        assert_eq!(h.core.current().disk, Some(hash(b"other\n")));
         assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        h.save_reply("xa\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(h.submitted("a.txt"), "xa\n");
     }
 
     #[test]
     fn an_answer_after_the_conflict_ended_does_nothing() {
         let mut h = conflicted();
         h.keys("M-x resolve-conflict RET");
-        std::fs::write(h.path("a.txt"), "a\n").unwrap();
+        h.read_reply("a.txt", Some("a\n".as_ref()));
         report(&mut h, &["a.txt"]);
         h.keys("Keep SPC mine RET");
         assert_eq!(h.core.message(), None);
-        assert_eq!(h.disk("a.txt"), "a\n");
+        assert_eq!(h.core.current().disk, Some(hash(b"a\n")));
     }
 
     #[test]
@@ -389,6 +400,10 @@ mod tests {
     #[test]
     fn compare_shows_the_diff_and_stays_conflicted() {
         let mut h = conflicted();
+        h.diffs.insert(
+            h.path("a.txt"),
+            Ok("--- file\n+++ buffer\n@@ -1 +1 @@\n-other\n+xa\n".into()),
+        );
         h.keys("C-x C-s RET");
         assert_eq!(name(&h), "a.txt");
         assert!(mode_line(&mut h).contains("[conflict]"));
@@ -396,7 +411,7 @@ mod tests {
         let diff = h.core.windows.others[&other].buffer();
         let text = h.core.buffers.get(diff).unwrap().text().to_string();
         assert!(text.contains("-other\n+xa\n"), "{text}");
-        assert_eq!(h.disk("a.txt"), "other\n");
+        assert_eq!(h.core.current().disk, Some(hash(b"a\n")));
     }
 
     #[test]
@@ -410,29 +425,31 @@ mod tests {
         assert_eq!(prompt(&mut h), None);
         assert_eq!(name(&h), "a.txt");
         // A new disk version asks again; keep mine then lets a plain save overwrite it.
-        std::fs::write(h.path("a.txt"), "third\n").unwrap();
+        h.read_reply("a.txt", Some("third\n".as_ref()));
         report(&mut h, &["a.txt"]);
         h.keys("C-x b RET C-x b RET");
         assert_eq!(prompt(&mut h), Some(asked(&mut h)));
         h.keys("Keep SPC mine RET");
         assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        h.save_reply("xa\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(h.submitted("a.txt"), "xa\n");
     }
 
     #[test]
     fn a_conflict_ends_when_the_file_goes_back_or_is_deleted() {
         let mut h = conflicted();
-        std::fs::write(h.path("a.txt"), "a\n").unwrap();
+        h.read_reply("a.txt", Some("a\n".as_ref()));
         report(&mut h, &["a.txt"]);
         assert_eq!(mode_line(&mut h), "** a.txt  1:1");
-        std::fs::write(h.path("a.txt"), "other\n").unwrap();
+        h.read_reply("a.txt", Some("other\n".as_ref()));
         report(&mut h, &["a.txt"]);
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
         assert_eq!(mode_line(&mut h), "** a.txt [deleted]  1:1");
+        h.save_reply("xa\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(h.submitted("a.txt"), "xa\n");
         h.keys("M-x resolve-conflict RET");
         let none = "No conflict with the file on disk";
         assert_eq!(h.core.message(), Some(none));
@@ -443,7 +460,11 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
         h.keys("x");
-        std::fs::write(h.path("a.txt"), "other\n").unwrap();
+        h.read_reply("a.txt", Some(b"other\n"));
+        h.saves.push_back(Err(format!(
+            "{} changed on disk; not saved",
+            h.path("a.txt").display()
+        )));
         h.keys("C-x C-s");
         assert!(h.core.message().unwrap().contains("changed on disk"));
         assert!(mode_line(&mut h).contains("[conflict]"));
@@ -455,7 +476,7 @@ mod tests {
     fn a_clean_buffer_of_a_missing_file_takes_the_created_file() {
         let mut h = Harness::new(&[]);
         h.open("new.txt");
-        std::fs::write(h.path("new.txt"), "made\n").unwrap();
+        h.read_reply("new.txt", Some("made\n".as_ref()));
         report(&mut h, &["new.txt"]);
         assert_eq!(h.text(), "made\n");
         assert!(!h.core.current().modified());
@@ -465,8 +486,8 @@ mod tests {
     fn a_deleted_or_renamed_directory_deletes_the_files_under_it() {
         let mut h = Harness::new(&[("d/a.txt", ""), ("e/b.txt", "")]);
         h.open("d/a.txt").open("e/b.txt");
-        std::fs::remove_dir_all(h.path("d")).unwrap();
-        std::fs::rename(h.path("e"), h.path("f")).unwrap();
+        h.read_reply("d/a.txt", None);
+        h.read_reply("e/b.txt", None);
         // inotify reports only the directories.
         report(&mut h, &["d", "e"]);
         assert!(mode_line(&mut h).contains("[deleted]"));
@@ -481,7 +502,7 @@ mod tests {
         h.open("a.txt");
         h.new_workspace("w", "home");
         h.open("b.txt");
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.read_reply("a.txt", None);
         h.send(Msg::FilesChanged {
             paths: Vec::new(),
             rescan: true,
@@ -495,7 +516,7 @@ mod tests {
     fn a_clean_deleted_buffer_does_not_stop_quitting() {
         let mut h = Harness::new(&[("a.txt", "")]);
         h.open("a.txt");
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
         h.keys("C-x C-c");
         assert!(h.quit);
@@ -505,22 +526,25 @@ mod tests {
     fn saving_a_deleted_buffer_writes_it_back() {
         let mut h = Harness::new(&[("a.txt", "a\n")]);
         h.open("a.txt");
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
+        h.save_reply("a\n");
         h.keys("C-x C-s");
-        assert_eq!(h.disk("a.txt"), "a\n");
+        assert_eq!(h.submitted("a.txt"), "a\n");
         assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
         h.keys("C-x C-s");
         assert_eq!(h.core.message(), Some("(No changes need to be saved)"));
         // A delete the watcher missed: the save writes the file back too.
-        std::fs::remove_file(h.path("a.txt")).unwrap();
+        h.read_reply("a.txt", None);
+        h.save_reply("xa\n");
         h.keys("x C-x C-s");
-        assert_eq!(h.disk("a.txt"), "xa\n");
+        assert_eq!(h.submitted("a.txt"), "xa\n");
     }
 
     #[test]
     fn the_watch_set_follows_buffers_and_workspaces() {
         let mut h = Harness::new(&[("a/x", ""), ("out.txt", "")]);
+        h.index_reply("a", &["x"], &["a"]);
         h.open("out.txt");
         h.keys("C-g");
         assert_eq!(h.watched.roots, [], "$HOME isn't watched");
@@ -554,6 +578,7 @@ mod tests {
     /// The `p` project on `a`, indexed, with the current workspace bound to it.
     fn indexed() -> Harness {
         let mut h = Harness::new(&[("a/x", "")]);
+        h.index_reply("a", &["x"], &["a"]);
         h.core.add_project(Loaded::ad_hoc("p", &h.path("a")));
         h.core.workspaces[0].project = h.core.project_id("p").unwrap();
         h.keys("C-x p i p RET");
@@ -571,6 +596,7 @@ mod tests {
     #[test]
     fn startup_waits_for_counts_and_project_limit_overrides_settings() {
         let mut h = Harness::new(&[("a/x", ""), ("a/y", "")]);
+        h.index_reply("a", &["x", "y"], &["a"]);
         let mut project = Loaded::ad_hoc("p", &h.path("a"));
         project.project.max_watched_files = Some(2);
         h.core.add_project(project);
@@ -638,16 +664,18 @@ mod tests {
         let mut h = indexed();
         h.core.settings.max_watched_files = 1;
         h.open("a/x");
-        std::fs::write(h.path("a/y"), "").unwrap();
+        h.read_reply("a/y", Some(b""));
+        h.index_reply("a", &["x", "y"], &["a"]);
         report(&mut h, &["a/y"]);
         assert_eq!(h.watched.roots, []);
         assert_eq!(h.watched.files, [h.path("a/x")]);
         let walks = h.core.index_requests();
-        std::fs::write(h.path("a/x"), "changed").unwrap();
+        h.read_reply("a/x", Some("changed".as_ref()));
         report(&mut h, &["a/x"]);
         assert_eq!(h.text(), "changed");
         assert_eq!(h.core.index_requests(), walks);
-        std::fs::remove_file(h.path("a/y")).unwrap();
+        h.read_reply("a/y", None);
+        h.index_reply("a", &["x"], &["a"]);
         h.keys("C-x p i p RET");
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
     }
@@ -655,8 +683,9 @@ mod tests {
     #[test]
     fn kept_directories_and_additional_roots_share_the_project_limit() {
         let mut h = indexed();
-        std::fs::create_dir_all(h.path("a/empty/nested")).unwrap();
         h.core.settings.max_watched_files = 2;
+        h.index_reply("a", &["x"], &["a", "a/empty", "a/empty/nested"]);
+        h.index_reply("b", &[], &["b"]);
         report(&mut h, &["a/empty"]);
         assert_eq!(h.watched.roots, []);
         assert!(
@@ -668,7 +697,6 @@ mod tests {
         h.core.settings.max_watched_files = 3;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
-        std::fs::create_dir(h.path("b")).unwrap();
         let b = h.path("b");
         h.core
             .projects
@@ -684,6 +712,7 @@ mod tests {
         assert_eq!(h.watched.roots, []);
         assert!(h.core.message().unwrap().contains("directories = 4"));
         let mut empty = Harness::new(&[]);
+        empty.index_reply("", &[], &[""]);
         empty.core.add_project(Loaded::ad_hoc("p", &empty.path("")));
         empty.core.workspaces[0].project = empty.core.project_id("p").unwrap();
         empty.core.settings.max_watched_files = 0;
@@ -747,7 +776,7 @@ mod tests {
         let walks = h.core.index_requests();
         report(&mut h, &["a"]);
         assert_eq!(h.core.index_requests(), walks);
-        std::fs::create_dir(h.path("a/empty")).unwrap();
+        h.index_reply("a", &["x"], &["a", "a/empty"]);
         report(&mut h, &["a/empty"]);
         report(&mut h, &["a/empty"]);
         assert_eq!(h.core.index_requests(), walks + 1);
@@ -793,20 +822,21 @@ mod tests {
     #[test]
     fn creates_and_deletes_refresh_the_index_quietly() {
         let mut h = indexed();
-        std::fs::write(h.path("a/y"), "").unwrap();
+        h.read_reply("a/y", Some(b""));
+        h.index_reply("a", &["x", "y"], &["a"]);
         report(&mut h, &["a/y"]);
         assert_eq!(h.core.message(), None);
         assert_eq!(found(&mut h), ["a/x", "a/y"]);
-        std::fs::remove_file(h.path("a/x")).unwrap();
+        h.read_reply("a/x", None);
+        h.index_reply("a", &["y"], &["a"]);
         report(&mut h, &["a/x"]);
         assert_eq!(found(&mut h), ["a/y"]);
         let walks = h.core.index_requests();
-        std::fs::write(h.path("a/y"), "written").unwrap();
+        h.read_reply("a/y", Some("written".as_ref()));
         report(&mut h, &["a/y"]);
         assert_eq!(h.core.index_requests(), walks, "a write starts no walk");
-        // A file the walk ignores (the harness's ignores only `.git`) starts one walk, then none.
-        std::fs::create_dir(h.path("a/.git")).unwrap();
-        std::fs::write(h.path("a/.git/x"), "").unwrap();
+        // A file the walk ignores (the prepared reply excludes `.git`) starts one walk, then none.
+        h.read_reply("a/.git/x", Some("".as_ref()));
         report(&mut h, &["a/.git/x"]);
         report(&mut h, &["a/.git/x"]);
         assert_eq!(h.core.index_requests(), walks + 1);
@@ -831,15 +861,17 @@ mod tests {
         assert_eq!(h.watched.roots, []);
         assert_eq!(h.watched.files, [h.path("a/x")]);
         let walks = h.core.index_requests();
-        std::fs::write(h.path("a/y"), "").unwrap();
-        std::fs::write(h.path("a/x"), "changed").unwrap();
+        h.read_reply("a/y", Some(b""));
+        h.index_reply("a", &["x", "y"], &["a"]);
+        h.read_reply("a/x", Some("changed".as_ref()));
         report(&mut h, &["a/x", "a/y"]);
         assert_eq!(h.text(), "changed");
         assert_eq!(h.core.index_requests(), walks);
         assert_eq!(found(&mut h), ["a/x"]);
         h.keys("C-x p i p RET");
         assert_eq!(found(&mut h), ["a/x", "a/y"]);
-        std::fs::write(h.path("a/z"), "").unwrap();
+        h.read_reply("a/z", Some(b""));
+        h.index_reply("a", &["x", "y", "z"], &["a"]);
         h.send(Msg::ProjectsLoaded {
             dir: None,
             projects: Vec::new(),
@@ -847,7 +879,8 @@ mod tests {
         assert_eq!(found(&mut h), ["a/x", "a/y", "a/z"]);
         h.keys("C-x p w p RET C-p RET");
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
-        std::fs::write(h.path("a/new"), "").unwrap();
+        h.read_reply("a/new", Some(b""));
+        h.index_reply("a", &["new", "x", "y", "z"], &["a"]);
         report(&mut h, &["a/new"]);
         assert_eq!(found(&mut h), ["a/new", "a/x", "a/y", "a/z"]);
     }
@@ -861,11 +894,13 @@ mod tests {
         h.keys("C-x p i q RET");
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
         let walks = h.core.index_requests();
-        std::fs::write(h.path("a/y"), "").unwrap();
+        h.read_reply("a/y", Some(b""));
+        h.index_reply("a", &["x", "y"], &["a"]);
         report(&mut h, &["a/y"]);
         assert_eq!(h.core.index_requests(), walks + 1);
         assert_eq!(found(&mut h), ["a/x", "a/y"]);
-        std::fs::write(h.path("a/z"), "").unwrap();
+        h.read_reply("a/z", Some(b""));
+        h.index_reply("a", &["x", "y", "z"], &["a"]);
         h.send(Msg::FilesChanged {
             paths: Vec::new(),
             rescan: true,
