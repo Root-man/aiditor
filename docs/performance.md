@@ -39,6 +39,8 @@ The CLI equivalent is:
 gh workflow run benchmarks.yml --ref your-branch -f pr=123
 ```
 
+To exercise the comparison, run the workflow twice on the same branch with the same PR number: the first run establishes the baseline and the second compares against it when the environment metadata matches.
+
 Omit `-f pr=123` for a summary without a PR comment. The tested commit is the selected branch's commit when dispatched. Fork PRs are not supported: the optional PR must be open, in this repository, and still have that tested commit as its head when reporting. Invalid or stale targets fail reporting after retaining the summary; they receive no comment.
 
 The workflow uses `ubuntu-24.04`, builds only the core benchmark target, and caches its build artifacts separately from ordinary CI. The benchmark job has read-only repository permissions. A separate reporting job can read Actions artifacts and write PR comments. No hosted workflow is dispatched by local development commands.
