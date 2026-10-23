@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,56 @@ pub struct Terminals(HashMap<TerminalId, Handle>);
 struct Handle {
     master: Box<dyn MasterPty + Send>,
     input: mpsc::Sender<Vec<u8>>,
+    shell: Arc<Mutex<Shell>>,
+}
+
+/// The shell's process, shared by the handle and the terminal's thread.
+enum Shell {
+    Starting,
+    Running(libc::pid_t),
+    /// Killed before it started, so it's killed as it starts.
+    Killed,
+    Exited,
+}
+
+/// How long a hung-up shell has to exit before SIGKILL.
+const GRACE: Duration = Duration::from_millis(100);
+
+impl Handle {
+    /// SIGHUP, then SIGTERM, to the shell's and the foreground job's process groups; returns them
+    /// for the SIGKILL.
+    fn hang_up(&self) -> Vec<libc::pid_t> {
+        let mut shell = self.shell.lock().unwrap();
+        let pid = match *shell {
+            Shell::Running(pid) => pid,
+            Shell::Starting => {
+                *shell = Shell::Killed;
+                return Vec::new();
+            }
+            Shell::Killed | Shell::Exited => return Vec::new(),
+        };
+        // The shell leads its own session, so its pid is its process group's id.
+        let mut groups = vec![pid];
+        if let Some(fd) = self.master.as_raw_fd() {
+            let foreground = unsafe { libc::tcgetpgrp(fd) };
+            if foreground > 0 && foreground != pid {
+                groups.push(foreground);
+            }
+        }
+        signal(&groups, libc::SIGHUP);
+        signal(&groups, libc::SIGTERM);
+        groups
+    }
+}
+
+/// Signals each process group, even after the shell has exited, so a job ignoring the hangup
+/// still gets SIGKILL. shortcut: a reaped shell's emptied group id could be reused within the
+/// grace; check `Shell::Exited` per group if that ever shows up.
+fn signal(groups: &[libc::pid_t], signal: libc::c_int) {
+    for &group in groups {
+        // A group that is already gone is fine.
+        unsafe { libc::killpg(group, signal) };
+    }
 }
 
 impl Terminals {
@@ -69,6 +119,34 @@ impl Terminals {
                 }
                 None
             }
+            TerminalOp::Kill { id } => {
+                if let Some(terminal) = self.0.remove(&id) {
+                    let groups = terminal.hang_up();
+                    thread::spawn(move || {
+                        thread::sleep(GRACE);
+                        signal(&groups, libc::SIGKILL);
+                    });
+                }
+                None
+            }
+        }
+    }
+
+    /// Kill every terminal, blocking for one shared grace, so no shell outlives the app.
+    pub fn kill_all(&mut self) {
+        let hung_up: Vec<_> = self
+            .0
+            .drain()
+            .map(|(_, terminal)| terminal.hang_up())
+            .collect();
+        if hung_up.is_empty() {
+            return;
+        }
+        // shortcut: a shell still starting gets the grace to start and be killed by its thread;
+        // wait for its state instead if a spawn ever takes longer than that.
+        thread::sleep(GRACE);
+        for groups in hung_up {
+            signal(&groups, libc::SIGKILL);
         }
     }
 
@@ -109,11 +187,13 @@ impl Terminals {
             }
         };
         let (input, input_rx) = mpsc::channel::<Vec<u8>>();
+        let shell = Arc::new(Mutex::new(Shell::Starting));
         self.0.insert(
             id,
             Handle {
                 master: pair.master,
                 input,
+                shell: shell.clone(),
             },
         );
         let slave = pair.slave;
@@ -139,7 +219,16 @@ impl Terminals {
             let result = start();
             drop(slave);
             let mut child = match result {
-                Ok(child) => child,
+                Ok(child) => {
+                    let pid = child.process_id().expect("a spawned child has a pid") as libc::pid_t;
+                    let mut state = shell.lock().unwrap();
+                    match *state {
+                        Shell::Killed => signal(&[pid], libc::SIGKILL),
+                        _ => *state = Shell::Running(pid),
+                    }
+                    drop(state);
+                    child
+                }
                 Err(err) => {
                     _ = tx.blocking_send(Msg::TerminalSpawned {
                         id,
@@ -167,7 +256,9 @@ impl Terminals {
                 let fd = reader.as_raw_fd();
                 read_output(reader, fd, id, tx, exited_rx);
             });
-            match child.wait() {
+            let status = child.wait();
+            *shell.lock().unwrap() = Shell::Exited;
+            match status {
                 Ok(status) => {
                     _ = exited_tx.send(status);
                 }

@@ -147,6 +147,7 @@ impl Editor {
                         drop(tx);
                         _ = thread.join();
                     }
+                    self.terminals.kill_all();
                     cx.quit()
                 }
                 Effect::LoadConfiguration { request } => {

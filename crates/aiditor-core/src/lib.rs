@@ -368,6 +368,9 @@ pub enum TerminalOp {
         rows: u16,
         cols: u16,
     },
+    /// Hang up the shell and its foreground job, SIGKILL after 100 ms; ignored for an unknown
+    /// terminal. The exit message still follows.
+    Kill { id: TerminalId },
 }
 
 /// Work for the grep service.
