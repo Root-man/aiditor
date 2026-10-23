@@ -1,30 +1,65 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aiditor_core::{FileOp, Msg, TerminalId, TerminalOp};
-use aiditor_services::{channel, files, terminal};
+use aiditor_services::terminal::Terminals;
+use aiditor_services::{channel, files};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 
 const ID: TerminalId = TerminalId(7);
 
+fn spawn(
+    terminals: &mut Terminals,
+    cwd: &Path,
+    command: Option<Vec<String>>,
+    env: Vec<(String, String)>,
+) -> Receiver<Msg> {
+    terminals
+        .run(TerminalOp::Spawn {
+            id: ID,
+            command,
+            cwd: cwd.into(),
+            env,
+            rows: 24,
+            cols: 80,
+        })
+        .expect("spawn returns a receiver")
+}
+
 fn start(cwd: &Path, command: Option<Vec<String>>, env: Vec<(String, String)>) -> Receiver<Msg> {
-    terminal::spawn(TerminalOp::Spawn {
-        id: ID,
-        command,
-        cwd: cwd.into(),
-        env,
-        rows: 24,
-        cols: 80,
-    })
+    spawn(&mut Terminals::default(), cwd, command, env)
+}
+
+fn sh(script: &str) -> Option<Vec<String>> {
+    Some(vec!["/bin/sh".into(), "-c".into(), script.into()])
 }
 
 fn script(cwd: &Path, script: &str) -> Receiver<Msg> {
-    start(
-        cwd,
-        Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
-        vec![],
-    )
+    start(cwd, sh(script), vec![])
+}
+
+fn write(terminals: &mut Terminals, bytes: &[u8]) {
+    assert!(
+        terminals
+            .run(TerminalOp::Write {
+                id: ID,
+                bytes: bytes.into()
+            })
+            .is_none()
+    );
+}
+
+/// The output until it holds `needle`.
+async fn output_until(rx: &mut Receiver<Msg>, needle: &str) -> String {
+    let mut output = Vec::new();
+    while !String::from_utf8_lossy(&output).contains(needle) {
+        match next(rx).await {
+            Some(Msg::TerminalOutput { bytes, .. }) => output.extend(bytes),
+            msg => panic!("expected {needle:?} in output, got {msg:?} after {output:?}"),
+        }
+    }
+    String::from_utf8_lossy(&output).into()
 }
 
 async fn next(rx: &mut Receiver<Msg>) -> Option<Msg> {
@@ -360,4 +395,92 @@ async fn exit_is_reported_during_a_background_output_flood() {
     );
     assert!(result.expect("shell exit was delayed by continuous background output") > 0);
     assert!(matches!(after_exit, Some(Msg::TerminalOutput { id: ID, bytes }) if !bytes.is_empty()));
+}
+
+#[tokio::test]
+async fn input_echoes_and_reaches_the_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let mut rx = spawn(&mut terminals, dir.path(), Some(vec!["cat".into()]), vec![]);
+    started(&mut rx).await;
+    write(&mut terminals, b"hi\n");
+    write(&mut terminals, b"\x04");
+    let output = String::from_utf8(output_until_exit(&mut rx, 0).await).unwrap();
+    assert_eq!(output.matches("hi").count(), 2, "{output:?}");
+}
+
+#[tokio::test]
+async fn resize_reaches_the_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let mut rx = spawn(&mut terminals, dir.path(), sh("read x; stty size"), vec![]);
+    started(&mut rx).await;
+    let resize = TerminalOp::Resize {
+        id: ID,
+        rows: 30,
+        cols: 100,
+    };
+    assert!(terminals.run(resize).is_none());
+    write(&mut terminals, b"\n");
+    assert!(output_until_exit(&mut rx, 0).await.ends_with(b"30 100\r\n"));
+}
+
+#[tokio::test]
+async fn ctrl_c_interrupts_the_foreground_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let command = Some(vec!["sleep".into(), "30".into()]);
+    let mut rx = spawn(&mut terminals, dir.path(), command, vec![]);
+    started(&mut rx).await;
+    write(&mut terminals, b"\x03");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match next(&mut rx).await.expect("terminal closed before exit") {
+                Msg::TerminalOutput { .. } => {}
+                Msg::TerminalExited { code, signal, .. } => {
+                    return assert!(code != 0 || signal.is_some());
+                }
+                msg => panic!("unexpected {msg:?}"),
+            }
+        }
+    })
+    .await
+    .expect("sleep was not interrupted");
+}
+
+#[tokio::test]
+async fn backspace_erases_a_whole_multibyte_char() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let script = sh("read -r line; printf '<%s>' \"$line\"");
+    let mut rx = spawn(&mut terminals, dir.path(), script, vec![]);
+    started(&mut rx).await;
+    write(&mut terminals, "a\u{e9}\x7f\n".as_bytes());
+    output_until(&mut rx, "<a>").await;
+}
+
+#[tokio::test]
+async fn a_large_write_to_a_program_that_does_not_read_returns_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    let script = sh("stty raw -echo; echo ready; sleep 5");
+    let mut rx = spawn(&mut terminals, dir.path(), script, vec![]);
+    started(&mut rx).await;
+    output_until(&mut rx, "ready").await;
+    let start = Instant::now();
+    write(&mut terminals, &vec![b'x'; 1_000_000]);
+    write(&mut terminals, b"more");
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn input_and_resize_for_an_unknown_terminal_are_ignored() {
+    let mut terminals = Terminals::default();
+    write(&mut terminals, b"x");
+    let resize = TerminalOp::Resize {
+        id: ID,
+        rows: 30,
+        cols: 100,
+    };
+    assert!(terminals.run(resize).is_none());
 }

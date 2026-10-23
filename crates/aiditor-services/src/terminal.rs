@@ -1,15 +1,17 @@
 //! PTY processes, each with its own bounded output channel.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
-use std::io::{self, Read};
-use std::os::fd::RawFd;
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aiditor_core::{Msg, TerminalOp};
-use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
+use aiditor_core::{Msg, TerminalId, TerminalOp};
+use portable_pty::{CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 fn terminal_env(
@@ -31,91 +33,172 @@ fn terminal_env(
     env.into_iter().collect()
 }
 
-/// Return this terminal's receiver: started, then output, then exit.
-pub fn spawn(op: TerminalOp) -> Receiver<Msg> {
-    let (tx, rx) = channel(4);
-    thread::spawn(move || {
-        let TerminalOp::Spawn {
-            id,
-            command,
-            cwd,
-            env,
-            rows,
-            cols,
-        } = op;
-        let start = || {
-            if !cwd.is_dir() {
-                return Err(format!("{}: not a directory", cwd.display()));
+/// The spawned terminals, each one's PTY master and input queue by id.
+#[derive(Default)]
+pub struct Terminals(HashMap<TerminalId, Handle>);
+
+struct Handle {
+    master: Box<dyn MasterPty + Send>,
+    input: mpsc::Sender<Vec<u8>>,
+}
+
+impl Terminals {
+    /// Run `op` without blocking; a spawn returns its terminal's receiver: started, then output,
+    /// then exit.
+    pub fn run(&mut self, op: TerminalOp) -> Option<Receiver<Msg>> {
+        match op {
+            TerminalOp::Spawn {
+                id,
+                command,
+                cwd,
+                env,
+                rows,
+                cols,
+            } => Some(self.spawn(id, command, cwd, env, size(rows, cols))),
+            TerminalOp::Write { id, bytes } => {
+                if let Some(terminal) = self.0.get(&id) {
+                    _ = terminal.input.send(bytes);
+                }
+                None
             }
-            let mut command = match command {
-                Some(args) if args.is_empty() => return Err("empty terminal command".into()),
-                Some(args) => CommandBuilder::from_argv(args.into_iter().map(Into::into).collect()),
-                None => CommandBuilder::new_default_prog(),
-            };
-            command.cwd(cwd);
-            command.env_remove("SHLVL");
-            for (key, value) in terminal_env(std::env::vars_os(), env) {
-                command.env(key, value);
+            TerminalOp::Resize { id, rows, cols } => {
+                if let Some(terminal) = self.0.get(&id)
+                    && let Err(err) = terminal.master.resize(size(rows, cols))
+                {
+                    tracing::warn!("resizing terminal: {err}");
+                }
+                None
             }
+        }
+    }
+
+    /// Opens the PTY here, so input and resizes have somewhere to go at once; the rest runs on
+    /// the terminal's own thread.
+    fn spawn(
+        &mut self,
+        id: TerminalId,
+        command: Option<Vec<String>>,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+        size: PtySize,
+    ) -> Receiver<Msg> {
+        let (tx, rx) = channel(4);
+        let open = || {
             let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
+                .openpty(size)
                 .map_err(|err| err.to_string())?;
-            if let Some(fd) = pair.master.as_raw_fd()
-                && let Err(err) = set_iutf8(fd)
-            {
+            let fd = pair
+                .master
+                .as_raw_fd()
+                .expect("Unix PTY has a file descriptor");
+            if let Err(err) = set_iutf8(fd) {
                 tracing::warn!("setting terminal IUTF8: {err}");
             }
-            let reader = pair
-                .master
-                .try_clone_reader()
-                .map_err(|err| err.to_string())?;
-            let child = pair
-                .slave
-                .spawn_command(command)
-                .map_err(|err| err.to_string())?;
-            drop(pair.slave);
-            Ok((child, reader, pair.master))
+            let reader = dup(fd).map_err(|err| err.to_string())?;
+            let writer = dup(fd).map_err(|err| err.to_string())?;
+            Ok::<_, String>((pair, reader, writer))
         };
-        let (mut child, reader, master) = match start() {
-            Ok(process) => process,
+        let (pair, reader, mut writer) = match open() {
+            Ok(pty) => pty,
             Err(err) => {
-                _ = tx.blocking_send(Msg::TerminalSpawned {
+                _ = tx.try_send(Msg::TerminalSpawned {
                     id,
                     result: Err(err),
                 });
-                return;
+                return rx;
             }
         };
-        if tx
-            .blocking_send(Msg::TerminalSpawned { id, result: Ok(()) })
-            .is_err()
-        {
-            return;
-        }
-        let (exited_tx, exited_rx) = mpsc::channel();
+        let (input, input_rx) = mpsc::channel::<Vec<u8>>();
+        self.0.insert(
+            id,
+            Handle {
+                master: pair.master,
+                input,
+            },
+        );
+        let slave = pair.slave;
         thread::spawn(move || {
-            let fd = master.as_raw_fd().expect("Unix PTY has a file descriptor");
-            read_output(reader, fd, id, tx, exited_rx);
-        });
-        match child.wait() {
-            Ok(status) => {
-                _ = exited_tx.send(status);
+            let start = || {
+                if !cwd.is_dir() {
+                    return Err(format!("{}: not a directory", cwd.display()));
+                }
+                let mut command = match command {
+                    Some(args) if args.is_empty() => return Err("empty terminal command".into()),
+                    Some(args) => {
+                        CommandBuilder::from_argv(args.into_iter().map(Into::into).collect())
+                    }
+                    None => CommandBuilder::new_default_prog(),
+                };
+                command.cwd(cwd);
+                command.env_remove("SHLVL");
+                for (key, value) in terminal_env(std::env::vars_os(), env) {
+                    command.env(key, value);
+                }
+                slave.spawn_command(command).map_err(|err| err.to_string())
+            };
+            let result = start();
+            drop(slave);
+            let mut child = match result {
+                Ok(child) => child,
+                Err(err) => {
+                    _ = tx.blocking_send(Msg::TerminalSpawned {
+                        id,
+                        result: Err(err),
+                    });
+                    return;
+                }
+            };
+            if tx
+                .blocking_send(Msg::TerminalSpawned { id, result: Ok(()) })
+                .is_err()
+            {
+                return;
             }
-            Err(err) => tracing::warn!("waiting for terminal: {err}"),
-        }
-    });
-    rx
+            // Blocks only this thread when the program isn't reading; a write error means it's gone.
+            thread::spawn(move || {
+                for bytes in input_rx {
+                    if writer.write_all(&bytes).is_err() {
+                        break;
+                    }
+                }
+            });
+            let (exited_tx, exited_rx) = mpsc::channel();
+            thread::spawn(move || {
+                let fd = reader.as_raw_fd();
+                read_output(reader, fd, id, tx, exited_rx);
+            });
+            match child.wait() {
+                Ok(status) => {
+                    _ = exited_tx.send(status);
+                }
+                Err(err) => tracing::warn!("waiting for terminal: {err}"),
+            }
+        });
+        rx
+    }
+}
+
+fn size(rows: u16, cols: u16) -> PtySize {
+    PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+/// A duplicate of the master's fd, so each thread owns the fd it uses.
+fn dup(fd: RawFd) -> io::Result<File> {
+    // The fd belongs to the open master, which outlives this call.
+    unsafe { BorrowedFd::borrow_raw(fd) }
+        .try_clone_to_owned()
+        .map(File::from)
 }
 
 fn read_output(
     mut reader: impl Read,
     fd: RawFd,
-    id: aiditor_core::TerminalId,
+    id: TerminalId,
     tx: Sender<Msg>,
     exited_rx: mpsc::Receiver<ExitStatus>,
 ) {

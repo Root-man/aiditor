@@ -360,6 +360,14 @@ pub enum TerminalOp {
         rows: u16,
         cols: u16,
     },
+    /// Queue bytes for the PTY's input, in order; ignored for an unknown or gone terminal.
+    Write { id: TerminalId, bytes: Vec<u8> },
+    /// Set the PTY's window size; ignored for an unknown terminal.
+    Resize {
+        id: TerminalId,
+        rows: u16,
+        cols: u16,
+    },
 }
 
 /// Work for the grep service.
