@@ -1,6 +1,7 @@
 //! Swiper: the buffer's matching lines listed in the minibuffer, as ivy's `swiper`.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
 use ropey::Rope;
@@ -15,15 +16,27 @@ fn lines(text: &Rope) -> usize {
 }
 
 pub(crate) struct Search {
-    snapshot: Rope,
+    snapshot: String,
+    lines: Vec<Range<usize>>,
     positive: Option<Regex>,
     negative: Vec<Regex>,
 }
 
 impl Search {
-    pub(crate) fn new(snapshot: Rope) -> Self {
+    pub(crate) fn new(text: &Rope) -> Self {
+        let snapshot = text.to_string();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (end, _) in snapshot.match_indices('\n') {
+            lines.push(start..end);
+            start = end + 1;
+        }
+        if start < snapshot.len() {
+            lines.push(start..snapshot.len());
+        }
         Self {
             snapshot,
+            lines,
             positive: None,
             negative: Vec::new(),
         }
@@ -32,13 +45,11 @@ impl Search {
     pub(crate) fn filter(&mut self, text: &str) -> Vec<usize> {
         (self.positive, self.negative) = regexes(text);
         // shortcut: each query scans all lines on the core thread; move scans off-thread if measured input latency warrants it.
-        self.snapshot
-            .lines()
-            .take(lines(&self.snapshot))
+        self.lines
+            .iter()
             .enumerate()
             .filter_map(|(i, line)| {
-                let content = Cow::<str>::from(line);
-                let content = content.trim_end_matches('\n');
+                let content = &self.snapshot[line.clone()];
                 (self.positive.as_ref().is_none_or(|r| r.is_match(content))
                     && !self.negative.iter().any(|r| r.is_match(content)))
                 .then_some(i)
@@ -47,9 +58,9 @@ impl Search {
     }
 
     pub(crate) fn candidate(&self, line: usize) -> String {
-        let width = lines(&self.snapshot).to_string().len();
-        let content = Cow::<str>::from(self.snapshot.line(line));
-        format!("{:<width$} {}", line + 1, content.trim_end_matches('\n'))
+        let width = self.lines.len().to_string().len();
+        let content = &self.snapshot[self.lines[line].clone()];
+        format!("{:<width$} {}", line + 1, content)
     }
 
     fn target(&self, text: &Rope, line: usize) -> Option<usize> {
@@ -238,6 +249,15 @@ mod tests {
                 println!("  query={query:?} median_ms={:.3}", median(samples));
             }
         }
+    }
+
+    #[test]
+    fn snapshot_lines_keep_blank_lines_and_non_lf_separators() {
+        let mut h = on("é\r\u{85}\u{2028}z\n\nlast");
+        h.keys("C-s");
+        assert_eq!(listed(&mut h).0, ["1 é\r\u{85}\u{2028}z", "2 ", "3 last"]);
+        h.keys("z RET");
+        assert_eq!(h.point(), 5);
     }
 
     #[test]

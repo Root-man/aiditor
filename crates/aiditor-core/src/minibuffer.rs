@@ -269,7 +269,7 @@ impl Ctx<'_> {
             (Some(filter), None) => {
                 let items = candidates.take().unwrap_or_default();
                 let mut swiper = matches!(filter, Filter::Swiper)
-                    .then(|| crate::swiper::Search::new(core.current().text().clone()));
+                    .then(|| crate::swiper::Search::new(core.current().text()));
                 let matched = match (&mut swiper, filter) {
                     (Some(search), _) => search.filter(""),
                     (_, Filter::Items(filter)) => filter("", &items),

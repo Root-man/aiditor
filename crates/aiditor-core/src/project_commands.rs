@@ -242,28 +242,29 @@ impl Ctx<'_> {
 
     pub(crate) fn project_written(&mut self, intent: WriteIntent, result: Result<Loaded, String>) {
         let core = &mut self.core;
-        if result.is_ok() {
-            core.reload.project_revision += 1;
-        }
         let at = core.project_at(intent.project).ok();
         let current = core.pending_project_writes.get(&intent.project) == Some(&intent);
         if current {
             core.pending_project_writes.remove(&intent.project);
         }
+        let loaded = match result {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                if current {
+                    core.echo(format!("project {err}"));
+                }
+                return;
+            }
+        };
+        core.reload.project_revision += 1;
         if !current
             || at.map_or(intent.revision != 0, |i| {
                 core.projects[i].revision != intent.revision
             })
         {
-            if result.is_ok() {
-                self.reload_configuration();
-            }
+            self.reload_configuration();
             return;
         }
-        let loaded = match result {
-            Ok(loaded) => loaded,
-            Err(err) => return core.echo(format!("project {err}")),
-        };
         let path = loaded
             .file
             .as_ref()
@@ -637,6 +638,43 @@ mod tests {
                 .unwrap()
                 .0,
             path
+        );
+    }
+
+    #[test]
+    fn a_current_write_error_is_reported_after_reload_changes_the_revision() {
+        let mut h = Harness::new(&[]);
+        h.collect_effects = true;
+        let old = saved(&h, "p.toml", "p");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(old)],
+        });
+        let id = h.core.project_id("p").unwrap();
+        h.keys("C-x p d p RET claude RET");
+        let intent = std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::WriteProject { intent, .. }) => Some(intent),
+                _ => None,
+            })
+            .unwrap();
+        let latest = saved(&h, "p.toml", "latest");
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(latest.clone())],
+        });
+        h.send(Msg::ProjectWritten {
+            intent,
+            result: Err("p.toml changed on disk; reload projects and retry".into()),
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project p.toml changed on disk; reload projects and retry")
+        );
+        assert_eq!(
+            h.core.projects[h.core.project_at(id).unwrap()].project,
+            latest.project
         );
     }
 

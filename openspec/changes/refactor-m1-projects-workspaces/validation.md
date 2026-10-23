@@ -203,3 +203,33 @@ Both final suites ran with Rust 1.99.0 on the finished code: 22 frontend, 381 co
 The new GPUI `integrated_finders_visits_saves_and_directory_recovery` test passed on both platforms. It drives rapid finder/grep selection and acceptance, a held ordinary read across workspace switching and typing, directory replacement followed by another independent disk notification, and queued conflicting saves from two workspaces. It waits for an observed write before replacing the directory, so recovery is tested after native coverage is established. Existing GPUI reload-during-typing coverage and the held production configuration-loader test also pass. These are automated GUI event flows; manual visual rendering and physical keyboard interaction were not checked.
 
 Final review found and corrected live-buffer match placement after a watcher revert, including a buffer shortened below the selected snapshot line. The new regression test verifies the live match position and graceful acceptance failure after shortening. Full platform suites were rerun after this correction. Strict OpenSpec validation and `git diff --check` pass. No changes were pushed or published.
+
+## Verification follow-up
+
+The review identified two reproducible error paths. Before the fixes, `a_current_write_error_is_reported_after_reload_changes_the_revision` failed with an empty echo area, and `a_failed_create_can_be_retried` failed because retry returned `AlreadyExists`. Both regression tests pass after the fixes.
+
+- Given a current project write held across a reload, when its error arrives after the entry revision changes, then the reason appears in the echo area and the reloaded definition remains. Revision checks still suppress applying a superseded successful write and request fresh configuration.
+- Given a create that fails after creating its file, when the user retries, then creation succeeds. A subprocess with a file-size limit reproduces a real partial write without changing limits in the main test runner. Write/sync failure removes the newly created file on a best-effort basis and preserves the original error; cleanup itself can still fail due to filesystem errors.
+- Given a Swiper snapshot containing blank lines, Unicode and non-LF separators, when filtering or accepting a match, then line labels and match positions retain the existing LF-only semantics. Existing empty/trailing-newline, chunk-spanning, live-revert, history and selection tests remain applicable.
+
+The flat snapshot uses one prompt-owned string plus line byte ranges; line ends exclude LF from the outset, avoiding per-query Rope traversal and trimming. This adds a full text copy for the prompt, with no global cache or background filtering. The full scan remains synchronous. Design D9 and `docs/editor.md` now describe this representation.
+
+### Swiper remeasurement
+
+Same task 12.1 command, fixture, host, Rust 1.99.0 and debug/dependency optimization settings; seven samples and median milliseconds. The before column was measured immediately before this follow-up's implementation, and the after column uses the flat snapshot with precomputed line ranges.
+
+| Operation | 1,000 lines before / after (ms) | 100,000 lines before / after (ms) |
+| --- | ---: | ---: |
+| Open prompt | 0.120 / 0.112 | 10.232 / 4.053 |
+| `needle` | 0.219 / 0.251 | 15.623 / 7.248 |
+| `needle !skip` | 0.339 / 0.478 | 19.901 / 11.369 |
+| `NEEDLE` | 0.156 / 0.133 | 12.291 / 4.111 |
+| `alpha value` | 0.276 / 0.351 | 16.150 / 7.633 |
+| `(` | 0.141 / 0.099 | 12.338 / 4.140 |
+| `needle\ value` | 0.256 / 0.306 | 15.795 / 7.439 |
+
+Large-buffer query costs are now approximately the pre-refactor range (3.923–12.463 ms), with most queries faster and the two no-match cases slightly slower. Small-buffer timings are mixed at sub-millisecond scale. These measurements do not establish a GUI latency guarantee.
+
+Hosted CI for the original PR head `ea0b482` passed on both macOS and Ubuntu: [run 39916293828](https://github.com/Root-man/aiditor/actions/runs/39916293828). This closes the earlier hosted-CI evidence gap for that commit; it does not verify the follow-up until a new run completes. Manual visual/physical-keyboard checks remain unperformed; task 14.3 was exercised through automated GPUI flows.
+
+Follow-up local macOS checks passed: 484 tests (22 frontend, 383 core, 58 services unit, 1 headless, 11 boundary, 1 crash recovery, 8 native file sync), zero failed, with the measurement test ignored in the ordinary suite and passed separately. Formatting, all-target clippy with warnings denied, dependency/panic-profile checks, strict OpenSpec validation and `git diff --check` passed. Existing Cargo future-incompatibility notices are unchanged. The draft PR's Checks panel carries the hosted results for the follow-up commit.

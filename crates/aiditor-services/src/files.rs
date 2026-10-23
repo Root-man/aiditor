@@ -326,8 +326,10 @@ pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u6
                         err(e)
                     }
                 })?;
-            file.write_all(bytes).map_err(err)?;
-            file.sync_all().map_err(err)?;
+            if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                _ = fs::remove_file(path);
+                return Err(err(e));
+            }
             return Ok(hash(bytes));
         }
         WriteExpectation::Update(expected) => {
@@ -392,6 +394,34 @@ mod tests {
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
+    }
+
+    #[test]
+    fn a_failed_create_can_be_retried() {
+        const CHILD: &str = "AIDITOR_TEST_FILE_SIZE_LIMIT";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new("sh")
+                .args(["-c", "trap '' XFSZ; ulimit -f 1; exec \"$@\"", "file-limit"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "files::tests::a_failed_create_can_be_retried",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        assert!(matches!(
+            write(&path, &[b'x'; 64 * 1024], WriteExpectation::Create),
+            Err(WriteFailure::Io(_))
+        ));
+        write(&path, b"retry", WriteExpectation::Create).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"retry");
     }
 
     #[test]
