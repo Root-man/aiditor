@@ -231,8 +231,15 @@ async fn buffered_output_precedes_exit_after_a_slow_receiver_resumes() {
         "i=0; while [ $i -lt 10 ]; do printf abcdefghij; sleep 0.05; i=$((i+1)); done; touch done",
     );
     started(&mut rx).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(dir.path().join("done").exists());
+    let done = dir.path().join("done");
+    timeout(Duration::from_secs(10), async {
+        while !done.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal did not finish writing while its receiver was held");
+    tokio::time::sleep(Duration::from_millis(150)).await;
     let bytes = output_until_exit(&mut rx, 0).await;
     assert_eq!(
         bytes.len(),
@@ -304,4 +311,53 @@ async fn large_final_output_precedes_exit_with_a_slow_receiver() {
     }
     assert_eq!(total, 1_000_000);
     assert_eq!(next(&mut rx).await, None);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn exit_is_reported_during_a_background_output_flood() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rx = script(
+        dir.path(),
+        "(trap '' HUP; exec > /dev/tty; touch ready; exec yes b) & echo $! > writer.pid; while [ ! -f ready ]; do sleep 0.01; done; exit 0",
+    );
+    started(&mut rx).await;
+    let result = timeout(Duration::from_secs(1), async {
+        let mut total = 0;
+        loop {
+            match next(&mut rx).await.unwrap() {
+                Msg::TerminalOutput { id, bytes } => {
+                    assert_eq!(id, ID);
+                    total += bytes.len();
+                }
+                msg => {
+                    assert_eq!(
+                        msg,
+                        Msg::TerminalExited {
+                            id: ID,
+                            code: 0,
+                            signal: None
+                        }
+                    );
+                    return total;
+                }
+            }
+        }
+    })
+    .await;
+    let after_exit = if result.is_ok() {
+        next(&mut rx).await
+    } else {
+        None
+    };
+    let pid = std::fs::read_to_string(dir.path().join("writer.pid")).unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", pid.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(result.expect("shell exit was delayed by continuous background output") > 0);
+    assert!(matches!(after_exit, Some(Msg::TerminalOutput { id: ID, bytes }) if !bytes.is_empty()));
 }

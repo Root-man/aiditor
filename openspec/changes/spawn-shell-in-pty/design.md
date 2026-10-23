@@ -58,7 +58,7 @@ Each terminal runs on `std::thread`s:
 Tokio's blocking pool is for finite work, and these threads live as long as the terminal. #215 adds a third thread, the writer.
 
 ### Exit after output
-The reader owns the terminal's sender. When the wait thread supplies the child's exit status, the reader keeps draining output until EOF or it has spent 100 ms polling for more PTY input. Time blocked sending output does not consume that grace, so a slow core cannot let exit overtake buffered output. Output and exit use the same sender, preserving their order. A background job can keep writing after the exit message on Linux; its writes do not restart the grace. macOS revokes the slave when the session leader exits, so the continued-background-output regression runs only on Linux.
+The reader owns the terminal's sender. When the wait thread supplies the child's exit status, the reader keeps draining output until EOF or its 100 ms exit deadline passes. All loop work, including reading and copying ready output, consumes that grace; only the measured `blocking_send` duration extends the deadline, so a slow core cannot let exit overtake buffered output. Output and exit use the same sender, preserving their order. A background job can keep writing after the exit message on Linux; its writes do not restart the grace. macOS revokes the slave when the session leader exits, so the continued-background-output regressions run only on Linux.
 
 Polling bounds idle reads to 100 ms so a background job holding the PTY open cannot delay the exit status. If EOF arrives before the status, the reader waits for the wait thread. Linux `EIO` is EOF (`portable-pty` already normalizes it; the service handles it explicitly too).
 
@@ -82,7 +82,7 @@ The spawn thread fails the spawn when `cwd` is not a directory, before calling `
 
 ## Risks / Trade-offs
 
-- [Exit reporting uses a 100 ms polling grace] → Backpressure does not consume it. Background output continues after exit; its writes do not restart the grace.
+- [Exit reporting uses a 100 ms deadline] → All reader-loop work consumes it except output delivery blocked by backpressure. Background output continues after exit; its writes do not restart the deadline.
 - [Linux may drop the PTY's buffered output when the slave closes] → Kernels since 4.x return the remaining data before `EIO`. The "output then exit" test runs on Linux CI and would catch a regression.
 - [macOS `stty -a` might not print `iutf8`] → Check on the first macOS run. If it doesn't, assert the flag with `tcgetattr` on the master instead.
 - [Shells are not killed yet] → Until #216, a spawned terminal outlives its use. Nothing in the app spawns one before then, and service tests run scripts that exit.

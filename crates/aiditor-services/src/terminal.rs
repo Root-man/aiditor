@@ -121,7 +121,6 @@ fn read_output(
 ) {
     let mut exited_rx = Some(exited_rx);
     let mut exit = None;
-    let mut grace = Duration::from_millis(100);
     let mut eof = false;
     let mut bytes = vec![0; 64 * 1024];
     loop {
@@ -133,15 +132,18 @@ fn read_output(
             };
             match status {
                 Ok(status) => {
-                    exit = Some(status);
+                    exit = Some((status, Instant::now() + Duration::from_millis(100)));
                     exited_rx = None;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => exited_rx = None,
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if (eof || grace.is_zero())
-            && let Some(status) = exit.take()
+        if (eof
+            || exit
+                .as_ref()
+                .is_some_and(|(_, deadline)| Instant::now() >= *deadline))
+            && let Some((status, _)) = exit.take()
             && tx
                 .blocking_send(Msg::TerminalExited {
                     id,
@@ -160,17 +162,13 @@ fn read_output(
             events: libc::POLLIN,
             revents: 0,
         };
-        // Only waiting for PTY input consumes the grace; output backpressure never does.
-        let start = Instant::now();
-        let timeout = if exit.is_some() {
-            grace.as_millis().max(1) as i32
-        } else {
-            100
-        };
+        let timeout = exit.as_ref().map_or(100, |(_, deadline)| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .max(1) as i32
+        });
         let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
-        if exit.is_some() {
-            grace = grace.saturating_sub(start.elapsed());
-        }
         match ready {
             0 => continue,
             -1 => {
@@ -189,13 +187,17 @@ fn read_output(
                 eof = true;
             }
             Ok(len) => {
-                if tx
-                    .blocking_send(Msg::TerminalOutput {
-                        id,
-                        bytes: bytes[..len].to_vec(),
-                    })
-                    .is_err()
-                {
+                let msg = Msg::TerminalOutput {
+                    id,
+                    bytes: bytes[..len].to_vec(),
+                };
+                let send_start = Instant::now();
+                let result = tx.blocking_send(msg);
+                // Pause only output delivery; reading and copying still consume the grace.
+                if let Some((_, deadline)) = &mut exit {
+                    *deadline += send_start.elapsed();
+                }
+                if result.is_err() {
                     return;
                 }
             }
@@ -230,6 +232,54 @@ fn set_iutf8(fd: std::os::fd::RawFd) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exit_grace_includes_time_spent_reading_ready_output() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        struct SlowRead(UnixStream);
+        impl Read for SlowRead {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                thread::sleep(Duration::from_millis(5));
+                self.0.read(bytes)
+            }
+        }
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let fd = reader.as_raw_fd();
+        let producer = thread::spawn(move || while writer.write_all(&[b'x'; 1024]).is_ok() {});
+        let id = aiditor_core::TerminalId(7);
+        let (tx, mut rx) = channel(4);
+        let (exited_tx, exited_rx) = mpsc::channel();
+        exited_tx.send(ExitStatus::with_exit_code(0)).unwrap();
+        let reader = thread::spawn(move || read_output(SlowRead(reader), fd, id, tx, exited_rx));
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut total = 0;
+            loop {
+                match rx.recv().await.unwrap() {
+                    Msg::TerminalOutput { bytes, .. } => total += bytes.len(),
+                    msg => {
+                        assert_eq!(
+                            msg,
+                            Msg::TerminalExited {
+                                id,
+                                code: 0,
+                                signal: None
+                            }
+                        );
+                        return total;
+                    }
+                }
+            }
+        })
+        .await;
+        drop(rx);
+        reader.join().unwrap();
+        producer.join().unwrap();
+        assert!(result.expect("ready output extended the exit grace") > 0);
+    }
 
     #[test]
     fn environment_applies_overrides_and_terminal_defaults() {

@@ -11,13 +11,14 @@
   - a channel 4 deep;
   - a spawn thread that checks cwd, sets `IUTF8`, spawns, drops the slave and sends `TerminalSpawned`;
   - a reader thread sending batches of up to 64 KB;
-  - a wait thread that supplies the child status to the reader; the reader sends `TerminalExited` after EOF or 100 ms spent polling for more input, excluding output backpressure;
+  - a wait thread that supplies the child status to the reader; the reader sends `TerminalExited` after EOF or a 100 ms deadline that counts all loop time except output delivery;
 
   Verify with `/bin/sh -c` tests in the services crate:
   - `printf a; printf b; exit 3` gives `Spawned`, output `ab`, then `Exited` with code 3;
   - a missing program and a missing cwd each give a failure and nothing more;
   - 1 MB of output arrives whole, in batches of at most 64 KB;
-  - `sleep 5 & exit 0` reports `Exited` within about a second, as does a continuously writing background job;
+  - the slow-receiver regression waits for the producer's completion marker before holding the receiver beyond the exit grace, without assuming startup completes within one second;
+  - `sleep 5 & exit 0` reports `Exited` within about a second, as does a background job writing with no sleeps; a controlled ready-reader test covers time spent reading outside `poll`;
   - `stty -a` lists `iutf8` without a leading `-`;
   - `env` shows the terminal variables, and an extra variable reaches the process.
 - [x] 2.3 Test the login shell. With no command, `SHELL=/bin/bash` and `HOME` set to a temp dir whose `.bash_profile` runs `echo "$0"; exit`, the output is `-bash`. Do the same with zsh through `ZDOTDIR` and `.zprofile`, skipping when zsh isn't installed. Verify both pass on macOS.
@@ -39,7 +40,7 @@
 
 ## 4. Checks
 
-- [x] 4.1 Verify that `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and the rest of `.github/workflows/ci.yml` pass. The terminal tests must pass on macOS here and on Linux in CI.
-  Verification: [GitHub Actions run 39961592738](https://github.com/Root-man/aiditor/actions/runs/39961592738) passed on Linux and macOS for implementation commit `c10af6e`, including formatting, clippy, architecture checks and both complete workspace test suites. The existing file-size-limit test was excluded only from the local macOS run with user approval; CI ran it unchanged.
+- [ ] 4.1 Verify that `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and the rest of `.github/workflows/ci.yml` pass. The terminal tests must pass on macOS here and on Linux in CI.
+  Prior verification (before the no-sleep flood regression): [GitHub Actions run 39961592738](https://github.com/Root-man/aiditor/actions/runs/39961592738) passed on Linux and macOS for implementation commit `c10af6e`, including formatting, clippy, architecture checks and both complete workspace test suites. The existing file-size-limit test was excluded only from the local macOS run with user approval; CI ran it unchanged.
 
 - [x] 4.2 Run `openspec validate spawn-shell-in-pty --strict` and verify it passes.
