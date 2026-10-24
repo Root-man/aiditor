@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -12,7 +13,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode, test::TermSize};
 use alacritty_terminal::vte::ansi::{Color, CursorShape as Shape, NamedColor, Processor, Rgb};
 
-use crate::buffer::{Buffer, BufferId};
+use crate::buffer::{Buffer, BufferId, Face, Prop};
 use crate::display::{self, CursorShape, Run};
 use crate::key::{Key, KeyCode};
 use crate::settings::Theme;
@@ -79,9 +80,16 @@ impl Terminal {
 
     /// Row `line`'s text, trailing blanks trimmed; 0 is the screen's top, negative is scrollback.
     pub fn row(&self, line: i32) -> String {
+        let mut text = self.cells(line, self.term.columns());
+        text.truncate(text.trim_end_matches(' ').len());
+        text
+    }
+
+    /// The text of row `line`'s cells before column `end`, untrimmed.
+    fn cells(&self, line: i32, end: usize) -> String {
         let row = &self.term.grid()[Line(line)];
         let mut text = String::new();
-        for col in 0..self.term.columns() {
+        for col in 0..end {
             let cell = &row[Column(col)];
             if cell
                 .flags
@@ -92,63 +100,80 @@ impl Terminal {
             text.push(cell.c);
             text.extend(cell.zerowidth().into_iter().flatten());
         }
-        text.truncate(text.trim_end_matches(' ').len());
         text
+    }
+
+    /// Copy mode's text: the scrollback then the screen, soft-wrapped rows joined and blank rows
+    /// below the cursor dropped; the char ranges of its colours resolved against `theme`; and the
+    /// cursor's line and char column in it.
+    pub fn copy_text(&self, theme: &Theme) -> (String, Vec<(Range<usize>, Face)>, usize, usize) {
+        let grid = self.term.grid();
+        let (cursor, cols) = (grid.cursor.point, self.term.columns());
+        let mut lines = vec![String::new()];
+        // Each colour as its line and char range in that line.
+        let mut colors = Vec::new();
+        let mut at = (0, 0);
+        for line in -(self.history() as i32)..self.term.screen_lines() as i32 {
+            let n = lines.len() - 1;
+            let current = &mut lines[n];
+            let offset = current.chars().count();
+            if line == cursor.line.0 {
+                let before = self.cells(line, cursor.column.0);
+                at = (n, offset + before.chars().count());
+            }
+            for run in self.runs(line, theme) {
+                let face = Face {
+                    fg: Some(run.fg),
+                    bg: run.bg,
+                    bold: run.bold,
+                    italic: run.italic,
+                    underline: run.underline,
+                };
+                if face
+                    != (Face {
+                        fg: Some(theme.foreground),
+                        ..Face::default()
+                    })
+                {
+                    let start = offset + self.cells(line, run.col.into()).chars().count();
+                    colors.push((n, start..start + run.text.chars().count(), face));
+                }
+            }
+            if grid[Line(line)][Column(cols - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
+            {
+                *current += &self.cells(line, cols);
+            } else {
+                *current += &self.row(line);
+                lines.push(String::new());
+            }
+        }
+        while lines.len() > at.0 + 1 && lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        let mut starts = vec![0];
+        for line in &lines {
+            starts.push(starts.last().expect("a start") + line.chars().count() + 1);
+        }
+        // Colour on trimmed blanks or dropped rows has no text to go on.
+        let faces = (colors.into_iter())
+            .filter(|(n, ..)| *n < lines.len())
+            .map(|(n, range, face)| {
+                let end = starts[n + 1] - 1;
+                (
+                    (starts[n] + range.start).min(end)..(starts[n] + range.end).min(end),
+                    face,
+                )
+            })
+            .filter(|(range, _)| !range.is_empty())
+            .collect();
+        (lines.join("\n"), faces, at.0, at.1)
     }
 
     /// The screen's rows as runs of styled cells, and the cursor, colors resolved against `theme`.
     pub fn display(&self, theme: &Theme) -> display::Terminal {
-        let rows = (0..self.term.screen_lines() as i32).map(|line| {
-            let row = &self.term.grid()[Line(line)];
-            let mut runs: Vec<Run> = Vec::new();
-            for col in 0..self.term.columns() {
-                let cell = &row[Column(col)];
-                let flags = cell.flags;
-                if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                let (mut fg, mut bg) = (self.color(cell.fg, theme), self.color(cell.bg, theme));
-                if flags.contains(Flags::INVERSE) {
-                    (fg, bg) = (bg, fg);
-                }
-                if flags.contains(Flags::DIM) {
-                    fg = dim(fg);
-                }
-                let bg = (bg != theme.background).then_some(bg);
-                let (bold, italic) = (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC));
-                let underline = flags.intersects(Flags::ALL_UNDERLINES);
-                if cell.c == ' ' && bg.is_none() && !underline {
-                    continue;
-                }
-                let (col, wide) = (col as u16, flags.contains(Flags::WIDE_CHAR));
-                let mut text = String::from(cell.c);
-                text.extend(cell.zerowidth().into_iter().flatten());
-                // A wide char runs alone, so each glyph of a run advances exactly one cell.
-                match runs.last_mut() {
-                    Some(run)
-                        if !wide
-                            && run.col + run.cells == col
-                            && run.cells as usize == run.text.chars().count()
-                            && (run.fg, run.bg, run.bold, run.italic, run.underline)
-                                == (fg, bg, bold, italic, underline) =>
-                    {
-                        run.cells += 1;
-                        run.text += &text;
-                    }
-                    _ => runs.push(Run {
-                        col,
-                        cells: if wide { 2 } else { 1 },
-                        text,
-                        fg,
-                        bg,
-                        bold,
-                        italic,
-                        underline,
-                    }),
-                }
-            }
-            runs
-        });
+        let rows = (0..self.term.screen_lines() as i32).map(|line| self.runs(line, theme));
         let cursor = self.term.renderable_content().cursor;
         let shape = match cursor.shape {
             Shape::Hidden => None,
@@ -168,6 +193,59 @@ impl Terminal {
                 shape,
             }),
         }
+    }
+
+    /// Row `line`'s runs of styled cells, colors resolved against `theme`.
+    fn runs(&self, line: i32, theme: &Theme) -> Vec<Run> {
+        let row = &self.term.grid()[Line(line)];
+        let mut runs: Vec<Run> = Vec::new();
+        for col in 0..self.term.columns() {
+            let cell = &row[Column(col)];
+            let flags = cell.flags;
+            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let (mut fg, mut bg) = (self.color(cell.fg, theme), self.color(cell.bg, theme));
+            if flags.contains(Flags::INVERSE) {
+                (fg, bg) = (bg, fg);
+            }
+            if flags.contains(Flags::DIM) {
+                fg = dim(fg);
+            }
+            let bg = (bg != theme.background).then_some(bg);
+            let (bold, italic) = (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC));
+            let underline = flags.intersects(Flags::ALL_UNDERLINES);
+            if cell.c == ' ' && bg.is_none() && !underline {
+                continue;
+            }
+            let (col, wide) = (col as u16, flags.contains(Flags::WIDE_CHAR));
+            let mut text = String::from(cell.c);
+            text.extend(cell.zerowidth().into_iter().flatten());
+            // A wide char runs alone, so each glyph of a run advances exactly one cell.
+            match runs.last_mut() {
+                Some(run)
+                    if !wide
+                        && run.col + run.cells == col
+                        && run.cells as usize == run.text.chars().count()
+                        && (run.fg, run.bg, run.bold, run.italic, run.underline)
+                            == (fg, bg, bold, italic, underline) =>
+                {
+                    run.cells += 1;
+                    run.text += &text;
+                }
+                _ => runs.push(Run {
+                    col,
+                    cells: if wide { 2 } else { 1 },
+                    text,
+                    fg,
+                    bg,
+                    bold,
+                    italic,
+                    underline,
+                }),
+            }
+        }
+        runs
     }
 
     /// The bytes xterm sends for `key`, as Zed's `keys.rs`, or `None` for a key it has none for.
@@ -332,6 +410,48 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Enters copy mode in the current terminal buffer, with point at the terminal's cursor, or
+    /// leaves it without copying.
+    pub(crate) fn vterm_copy_mode(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let buffer =
+            (core.buffers.get_mut(core.windows.window.buffer())).expect("current buffer is live");
+        let terminal = buffer.terminal().ok_or("Not in a terminal")?;
+        if buffer.copy_mode() {
+            buffer.set_copy_text(None);
+            core.windows.window.set_active(false);
+            return Ok(());
+        }
+        let (text, faces, line, col) = terminal.copy_text(&core.settings.theme);
+        buffer.set_copy_text(Some(text.as_str().into()));
+        for (range, face) in faces {
+            buffer.add_property(range, Prop::Face(face))?;
+        }
+        let at = buffer.char_idx(line, col)?;
+        core.windows.window.set_point(&mut core.buffers, at)?;
+        Ok(())
+    }
+
+    /// Copies the region, or point's line without one, to the kill ring and the clipboard and
+    /// leaves copy mode.
+    pub(crate) fn vterm_copy_mode_done(&mut self) -> Result<(), String> {
+        let core = &*self.core;
+        let buffer = core.current();
+        if !buffer.copy_mode() {
+            return Err("Not in copy mode".into());
+        }
+        let (window, point) = (&core.windows.window, core.point());
+        let range = match window.mark(&core.buffers).filter(|_| window.active()) {
+            Some(mark) => point.min(mark)..point.max(mark),
+            None => {
+                let (line, _) = buffer.line_col(point)?;
+                buffer.char_idx(line, 0)?..buffer.char_idx(line, usize::MAX)?
+            }
+        };
+        self.kill_region(Some(range), true)?;
+        self.vterm_copy_mode()
+    }
+
     /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
         let core = &mut *self.core;
@@ -371,11 +491,11 @@ pub(crate) fn editor_key(key: Key) -> bool {
 }
 
 impl Core {
-    /// The current buffer's terminal while it takes keys: its shell is live and no key
-    /// sequence is pending.
+    /// The current buffer's terminal while it takes keys: its shell is live, it isn't in copy
+    /// mode and no key sequence is pending.
     pub(crate) fn char_mode(&self) -> Option<TerminalId> {
         let buffer = self.windows.window.buffer();
-        (self.pending.is_empty())
+        (self.pending.is_empty() && !self.current().copy_mode())
             .then(|| self.terminals.iter().find(|&(_, &b)| b == buffer))
             .flatten()
             .map(|(&id, _)| id)
@@ -493,6 +613,60 @@ mod tests {
         let mut t = fed(2, 10, "ab\x1b[1");
         t.feed(b";1Hx");
         assert_eq!(t.screen(), "xb\n");
+    }
+
+    impl Terminal {
+        /// Copy mode's text and cursor, without its colours.
+        fn copy(&self) -> (String, usize, usize) {
+            let (text, _, line, col) = self.copy_text(&Settings::default().theme);
+            (text, line, col)
+        }
+    }
+
+    #[test]
+    fn copy_text_is_the_scrollback_then_the_screen() {
+        let t = fed(3, 10, "1\r\n2\r\n3\r\n4\r\n$ ");
+        assert_eq!(t.copy(), ("1\n2\n3\n4\n$".into(), 4, 2));
+        // Blank rows below the cursor go; the cursor's own row stays.
+        assert_eq!(fed(4, 10, "a\r\n").copy(), ("a\n".into(), 1, 0));
+        let t = fed(2, 4, "abcdefghij\r\nx");
+        assert_eq!(
+            t.copy(),
+            ("abcdefghij\nx".into(), 1, 1),
+            "wrapped rows join"
+        );
+        let t = fed(2, 4, "abcdef");
+        assert_eq!(
+            t.copy(),
+            ("abcdef".into(), 0, 6),
+            "the cursor on a continuation row"
+        );
+        let t = fed(2, 10, "1\r\n2\r\n3\x1b[?1049h\x1b[Hvim");
+        assert_eq!(t.copy(), ("vim".into(), 0, 3), "the alternate screen alone");
+    }
+
+    #[test]
+    fn copy_text_keeps_colours() {
+        let theme = Settings::default().theme;
+        let t = fed(3, 4, "a\x1b[31mbcdef\x1b[0m g\r\n\x1b[44m  \x1b[0m\r\n");
+        let (text, faces, ..) = t.copy_text(&theme);
+        assert_eq!(text, "abcdef g\n\n");
+        let red = Face {
+            fg: Some(theme.ansi[1]),
+            ..Face::default()
+        };
+        // A run split by the wrap is two faces; the blank blue row has no text to colour.
+        assert_eq!(faces, [(1..4, red), (4..6, red)]);
+        let t = fed(1, 10, "\x1b[1mb\x1b[0;3mi\x1b[0;4mu\x1b[0m.");
+        let (text, faces, ..) = t.copy_text(&theme);
+        let fg = Some(theme.foreground);
+        let attrs: Vec<_> = (faces.iter())
+            .inspect(|(_, face)| assert_eq!(face.fg, fg))
+            .map(|(r, f)| (r.clone(), f.bold, f.italic, f.underline))
+            .collect();
+        assert_eq!(text, "biu.");
+        let want = [(0..1, true, false, false), (1..2, false, true, false)];
+        assert_eq!(attrs, [&want[..], &[(2..3, false, false, true)]].concat());
     }
 
     #[test]
@@ -824,6 +998,111 @@ mod tests {
             assert_eq!(h.core.message(), Some("Quit"));
             assert_eq!(typed(&mut h, "s-z C-c a"), "");
             assert_eq!(h.core.message(), Some("C-c a is undefined"));
+        }
+
+        /// A shown live terminal holding `seq 1 5000`'s output and a `$ ` prompt, in copy mode.
+        fn copying() -> (Harness, TerminalId, String) {
+            let (mut h, id) = shown();
+            let seq: String = (1..=5000).map(|n| format!("{n}\r\n")).collect();
+            output(&mut h, id, &(seq + "$ "));
+            assert_eq!(typed(&mut h, "C-c C-t"), "");
+            let text = (1..=5000).map(|n| format!("{n}\n")).collect::<String>() + "$";
+            (h, id, text)
+        }
+
+        /// The clipboard text set since the last drain of effects, if any.
+        fn clipboard(h: &Harness) -> Option<String> {
+            (h.effects.iter().rev()).find_map(|e| match e {
+                Effect::SetClipboard(text) => Some(text.clone()),
+                _ => None,
+            })
+        }
+
+        fn line(h: &Harness) -> usize {
+            h.core.current().line_col(h.point()).unwrap().0
+        }
+
+        #[test]
+        fn copy_mode_shows_the_scrollback_as_text() {
+            let (mut h, _, text) = copying();
+            assert_eq!((h.text(), h.point()), (text.clone(), text.len()));
+            let frame = h.frame(800., 300.);
+            let display = &frame.windows[0].display;
+            assert!(display.terminal.is_none() && display.cursor.is_some());
+            assert_eq!(display.mode_line, "%% t [copy]  5001:1");
+            // Motion, swiper and the mark work; inserting fails; the shell hears nothing.
+            h.keys("M-< C-n C-SPC C-e M-w");
+            assert_eq!(clipboard(&h).as_deref(), Some("2"));
+            assert!(writes(&mut h).is_empty());
+            assert_eq!(typed(&mut h, "C-s 4999 RET"), "");
+            assert_eq!(line(&h), 4998);
+            assert_eq!(typed(&mut h, "x"), "");
+            assert_eq!(h.core.message(), Some("Buffer is read-only"));
+            assert_eq!(h.text(), text);
+        }
+
+        #[test]
+        fn a_wrapped_command_is_one_line() {
+            let (mut h, id) = shown();
+            output(&mut h, id, "$ echo 0123456789abc\r\n0123456789abc\r\n$ ");
+            h.keys("C-c C-t");
+            assert_eq!(h.text(), "$ echo 0123456789abc\n0123456789abc\n$");
+        }
+
+        #[test]
+        fn copy_mode_draws_the_colours_until_it_ends() {
+            let (mut h, id) = shown();
+            output(&mut h, id, "\x1b[31mred\x1b[0m\r\n$ ");
+            h.keys("C-c C-t");
+            let red = h.core.settings().theme.ansi[1];
+            let frame = h.frame(800., 300.);
+            let span = &frame.windows[0].display.lines[0].spans[0];
+            assert_eq!((span.text.as_str(), span.face.fg), ("red", Some(red)));
+            h.keys("C-c C-t");
+            assert_eq!(h.core.current().properties().count(), 0);
+        }
+
+        #[test]
+        fn copy_mode_on_the_alternate_screen_is_the_screen() {
+            let (mut h, id) = shown();
+            output(&mut h, id, "1\r\n2\r\n3\x1b[?1049h\x1b[Hvim");
+            h.keys("C-c C-t");
+            assert_eq!((h.text(), h.point()), ("vim".into(), 3));
+        }
+
+        #[test]
+        fn output_waits_for_copy_mode_to_end() {
+            let (mut h, id, text) = copying();
+            h.keys("M-<");
+            output(&mut h, id, "new\r\n");
+            assert_eq!((h.text(), h.point()), (text, 0));
+            assert_eq!(typed(&mut h, "C-c C-t"), "", "leaves without copying");
+            assert_eq!((h.text(), h.point()), (String::new(), 0));
+            assert!(h.core.kills.current_kill(0).is_err());
+            let screen = h.core.current().terminal().unwrap().screen();
+            assert_eq!(screen, "$ new\n");
+            let frame = h.frame(800., 300.);
+            assert!(frame.windows[0].display.terminal.is_some());
+            assert_eq!(frame.windows[0].display.mode_line, "%% t [char]");
+            assert_eq!(typed(&mut h, "a"), "a", "char mode again");
+        }
+
+        #[test]
+        fn ret_copies_the_region_or_the_line_and_leaves() {
+            let (mut h, _, _) = copying();
+            h.keys("M-< C-SPC C-f C-f RET");
+            assert_eq!(clipboard(&h).as_deref(), Some("1\n"));
+            assert!(writes(&mut h).is_empty());
+            assert_eq!(h.core.kills.current_kill(0).unwrap(), "1\n");
+            assert!(!h.core.current().copy_mode() && h.text().is_empty());
+            assert!(h.frame(800., 300.).windows[0].display.terminal.is_some());
+            assert_eq!(typed(&mut h, "RET"), "\r", "char mode again");
+            h.keys("C-c C-t M-< C-n C-f RET");
+            assert_eq!(
+                clipboard(&h).as_deref(),
+                Some("2"),
+                "the line, without a region"
+            );
         }
 
         #[test]

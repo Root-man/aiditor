@@ -114,6 +114,11 @@
 # Linux) goes to the shell.
 [vterm-mode]
 "C-c C-c" = "vterm-send-C-c"
+"C-c C-t" = "vterm-copy-mode"
+
+# A terminal buffer in copy mode, a read-only buffer over its scrollback.
+[vterm-copy-mode]
+"RET" = "vterm-copy-mode-done"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
