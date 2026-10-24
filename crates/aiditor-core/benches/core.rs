@@ -2,7 +2,9 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use aiditor_core::{Core, Msg, buffer::Buffers, display, key::parse_keys, settings::Settings};
+use aiditor_core::{
+    Core, Msg, buffer::Buffers, display, key::parse_keys, settings::Settings, terminal::Terminal,
+};
 
 fn measure(name: &str, mut operation: impl FnMut(), output: &mut String) {
     let mut iterations = 1;
@@ -130,6 +132,40 @@ fn main() {
     );
     assert_eq!(core.text(), "needle !skip");
     assert_eq!(core.frame().minibuffer.unwrap().count, "1/80000 ");
+
+    // One PTY batch is at most 64 KB; the core parses each on the UI thread.
+    let (terminal, _) = core.create_terminal("vterm", 50, 120);
+    let yes = "y\r\n".repeat(64 * 1024 / 3).into_bytes();
+    let cat = fixture.replace('\n', "\r\n").as_bytes()[..64 * 1024].to_vec();
+    for (name, batch) in [
+        ("terminal-output/64k-batch-of-yes", yes),
+        ("terminal-output/64k-batch-of-cat", cat.clone()),
+    ] {
+        measure(
+            name,
+            || {
+                black_box(core.handle(
+                    Instant::now(),
+                    Msg::TerminalOutput {
+                        id: terminal,
+                        bytes: batch.clone(),
+                    },
+                ));
+            },
+            &mut output,
+        );
+    }
+    let mut terminal = Terminal::new(50, 120);
+    terminal.feed(&cat);
+    assert!(terminal.screen().contains("alpha needle value"));
+    let theme = Settings::default().theme;
+    measure(
+        "terminal-display/50x120-screen",
+        || {
+            black_box(terminal.display(&theme));
+        },
+        &mut output,
+    );
     if let Some(path) = std::env::var_os("BENCH_OUTPUT") {
         std::fs::write(path, output).expect("write benchmark results");
     }
