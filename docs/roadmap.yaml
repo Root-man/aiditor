@@ -841,6 +841,15 @@ milestones:
               - "Typing during the flood shows no visible lag on macOS and Linux, with the measured times recorded in docs/editor.md under Output floods"
               - "If it lags, a follow-up task to move the emulator into the terminal task is added to the roadmap"
             blocked_by: [m2-term-buffers, m2-term-render]
+          - key: m2-term-emoji
+            title: "Draw colour emoji"
+            labels: [frontend, linux]
+            body: |
+              A starship prompt's 🦀 isn't drawn in a terminal on Fedora, whose only colour emoji font is the COLRv1 `Noto-COLRv1.ttf`. Find whether text buffers miss it too (font fallback app-wide) or only the terminal painter does, and whether GPUI's Linux text system can draw COLRv1 glyphs; then draw emoji, two cells wide in terminals, falling back to a monochrome emoji font when colour glyphs can't be drawn.
+            acceptance:
+              - "🦀 shows in a terminal and in a text buffer on Linux and macOS"
+              - "In a terminal, the emoji takes two cells and the rest of the row stays on the grid"
+            blocked_by: [m2-term-render]
       - key: m2-modes
         title: "Char mode and copy mode"
         labels: [terminal, keymap]
@@ -889,6 +898,17 @@ milestones:
               - "`RET` copies the region, or the current line without one, to the kill ring and clipboard, and returns to char mode on the live screen"
               - "Output in copy mode doesn't change its text or point, and shows once copy mode ends"
             blocked_by: [m2-decide-escape]
+          - key: m2-term-mouse
+            title: "Mouse in terminals"
+            labels: [frontend]
+            body: |
+              The wheel over a terminal scrolls its scrollback, entering copy mode (as Emacs vterm's mouse wheel) unless the program is on the alternate screen. When the program turned on mouse reporting (modes 1000, 1002, 1003 with SGR 1006), clicks, drags and the wheel are sent to it as xterm encodes them, as Zed's `terminal/src/mappings/mouse.rs` does, so `vim`, `less` and `htop` take the mouse. Drag to select in char mode is out of scope until text buffers have it (#30).
+            acceptance:
+              - "The wheel over a shell with scrollback shows older output"
+              - "With `set mouse=a`, a click in `vim` moves its cursor and the wheel scrolls it"
+              - "The wheel in `less` scrolls it (alternate scroll, mode 1007)"
+              - "Core tests check the bytes each mouse event sends, in SGR and normal encoding"
+            blocked_by: [m2-copy-mode]
       - key: m2-shell-integration
         title: "Shell integration: OSC 133 and OSC 7"
         labels: [terminal]
