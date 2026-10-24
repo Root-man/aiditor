@@ -58,7 +58,7 @@ A terminal buffer's text SHALL be empty outside copy mode and the buffer read-on
 - **THEN** the echo area says `Buffer is read-only` and its grid is unchanged
 
 ### Requirement: vterm opens a terminal buffer
-`vterm` (through `M-x`) SHALL spawn the user's login shell in a new terminal buffer of the current workspace and show it in the selected window. The buffer SHALL be named `vterm<n><workspace>`, `n` the smallest number from 1 no buffer of that name has. The shell's working directory SHALL be the current buffer's file's directory, or the primary root of the current workspace's project when the buffer visits no file.
+`vterm` (through `M-x`) SHALL spawn the user's login shell in a new terminal buffer of the current workspace and show it in the selected window. The buffer SHALL be named `vterm<n><workspace>`, `n` the smallest number from 1 no buffer of that name has. The shell's working directory SHALL be the current buffer's file's directory, a terminal buffer's directory, or the primary root of the current workspace's project when the buffer has neither.
 
 #### Scenario: Names count within a workspace
 - **WHEN** `M-x vterm` runs twice in workspace `work`, then once in workspace `fix`
@@ -75,6 +75,14 @@ A terminal buffer's text SHALL be empty outside copy mode and the buffer read-on
 #### Scenario: Working directory from the project
 - **WHEN** `M-x vterm` runs from `*scratch*` in a workspace whose project's primary root is `/r/app`
 - **THEN** the shell is spawned in `/r/app`
+
+#### Scenario: Working directory from a terminal
+- **WHEN** a terminal's shell reported `/tmp` through OSC 7 and `M-x vterm` runs from its buffer
+- **THEN** the new shell is spawned in `/tmp`
+
+#### Scenario: Working directory from a terminal without OSC 7
+- **WHEN** a terminal spawned in `/r/app` reported no directory and `M-x vterm` runs from its buffer
+- **THEN** the new shell is spawned in `/r/app`
 
 ### Requirement: The terminal is sized to its smallest window
 A live terminal's grid and PTY SHALL be as many rows as the text area (the window less its mode line) and as many columns as fit in the narrowest and shortest window of the current workspace showing it, taking rows and columns independently, as Emacs's `window-adjust-process-window-size-smallest`. When that size changes, the core SHALL resize the grid and send one `TerminalOp::Resize`. A terminal no window shows, or one before the frame size is known, SHALL keep its size; a new one starts at 24x80 until the frame size is known.
@@ -357,7 +365,7 @@ Once the scrollback reaches its line limit, the terminal SHALL drop its marks an
 - **THEN** the terminal has no marks, and a mark fed afterwards is ignored
 
 ### Requirement: The terminal keeps the shell's directory
-A terminal SHALL take OSC 7's `file://host/path` or `kitty-shell-cwd://host/path` as its current directory, percent-decoding the path, when the host is empty, `localhost` or this machine's hostname and the decoded path is absolute. Any other OSC 7 SHALL leave the directory unchanged, since program output is untrusted. A terminal starts with no directory.
+A terminal SHALL take OSC 7's `file://host/path` or `kitty-shell-cwd://host/path` as its current directory, percent-decoding the path, when the host is empty, `localhost` or this machine's hostname and the decoded path is absolute. Any other OSC 7 SHALL leave the directory unchanged, since program output is untrusted. A terminal starts with the directory its shell is spawned in.
 
 #### Scenario: Local host
 - **WHEN** `\e]7;file://localhost/tmp/a%20b\a` is fed, then `\e]7;file:///home\e\\`
@@ -370,3 +378,7 @@ A terminal SHALL take OSC 7's `file://host/path` or `kitty-shell-cwd://host/path
 #### Scenario: Remote, relative or garbage
 - **WHEN** after `/home`, OSC 7 is fed with `file://elsewhere.example/etc`, `file://localhost` (no path), `file:tmp` (relative), `http://localhost/x` or `file:///bad%zz`
 - **THEN** the directory stays `/home`
+
+#### Scenario: Before any OSC 7
+- **WHEN** `M-x vterm` spawns a shell in `/r/app` and no OSC 7 has been fed
+- **THEN** the terminal's directory is `/r/app`
