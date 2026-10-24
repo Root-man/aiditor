@@ -126,6 +126,7 @@ impl Buffers {
             minor_modes: Vec::new(),
             workspace_rows: Vec::new(),
             point: MarkerId(0),
+            prompts: Vec::new(),
         })
     }
 
@@ -281,6 +282,8 @@ pub struct Buffer {
     pub(crate) workspace_rows: Vec<(usize, WorkspaceId)>,
     /// The point of the last window that stopped showing this buffer, where the next one starts.
     pub point: MarkerId,
+    /// In copy mode, each command's input start in the text, sorted.
+    pub(crate) prompts: Vec<usize>,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.
@@ -357,6 +360,7 @@ impl Buffer {
             return;
         };
         *copy = text;
+        self.prompts.clear();
         for (start, end, _) in std::mem::take(&mut self.props) {
             self.markers.remove(&start);
             self.markers.remove(&end);

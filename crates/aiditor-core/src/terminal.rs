@@ -35,6 +35,15 @@ impl EventListener for Replies {
     }
 }
 
+/// What `Terminal::copy_text` returns: text, faces, the cursor's line and column, and prompts.
+pub type CopyText = (
+    String,
+    Vec<(Range<usize>, Face)>,
+    usize,
+    usize,
+    Vec<(usize, usize)>,
+);
+
 /// Lines of scrollback, alacritty's default.
 const SCROLLBACK: usize = 10_000;
 
@@ -137,8 +146,8 @@ pub struct Terminal {
     replies: Replies,
     scan_parser: Parser,
     scan: Scan,
-    /// Each mark with its absolute line: the scrollback's oldest is 0.
-    marks: Vec<(usize, Mark)>,
+    /// Each mark with its absolute line (the scrollback's oldest is 0) and column.
+    marks: Vec<(usize, usize, Mark)>,
     cwd: Option<PathBuf>,
 }
 
@@ -178,8 +187,9 @@ impl Terminal {
             match self.scan.signal.take() {
                 Some(Signal::Mark(mark)) if main && !full => {
                     let grid = self.term.grid();
-                    let line = grid.history_size() + grid.cursor.point.line.0 as usize;
-                    self.marks.push((line, mark));
+                    let point = grid.cursor.point;
+                    let line = grid.history_size() + point.line.0 as usize;
+                    self.marks.push((line, point.column.0, mark));
                 }
                 Some(Signal::Cwd(path)) => self.cwd = Some(path),
                 Some(Signal::ClearHistory) if main => self.marks.clear(),
@@ -194,11 +204,11 @@ impl Terminal {
     }
 
     /// The OSC 133 marks kept so far, oldest first, each with its absolute line (`history()`
-    /// plus a screen row).
+    /// plus a screen row) and grid column.
     // shortcut: a column resize reflows wrapped lines without moving the marks, so a mark below
     // a rewrapped line is off by the rows it gained or lost; track them through reflow if that
     // matters.
-    pub fn marks(&self) -> &[(usize, Mark)] {
+    pub fn marks(&self) -> &[(usize, usize, Mark)] {
         &self.marks
     }
 
@@ -255,15 +265,21 @@ impl Terminal {
     }
 
     /// Copy mode's text: the scrollback then the screen, soft-wrapped rows joined and blank rows
-    /// below the cursor dropped; the char ranges of its colours resolved against `theme`; and the
-    /// cursor's line and char column in it.
-    pub fn copy_text(&self, theme: &Theme) -> (String, Vec<(Range<usize>, Face)>, usize, usize) {
+    /// below the cursor dropped; the char ranges of its colours resolved against `theme`; the
+    /// cursor's line and char column in it; and each command's input start (its `B` mark, else
+    /// its `A`) as a sorted line and char column.
+    pub fn copy_text(&self, theme: &Theme) -> CopyText {
         let grid = self.term.grid();
         let (cursor, cols) = (grid.cursor.point, self.term.columns());
         let mut lines = vec![String::new()];
         // Each colour as its line and char range in that line.
         let mut colors = Vec::new();
         let mut at = (0, 0);
+        let mut on_line: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (i, &(line, ..)) in self.marks.iter().enumerate() {
+            on_line.entry(line).or_default().push(i);
+        }
+        let mut places = vec![None; self.marks.len()];
         for line in -(self.history() as i32)..self.term.screen_lines() as i32 {
             let n = lines.len() - 1;
             let current = &mut lines[n];
@@ -271,6 +287,11 @@ impl Terminal {
             if line == cursor.line.0 {
                 let before = self.cells(line, cursor.column.0);
                 at = (n, offset + before.chars().count());
+            }
+            let absolute = (line + self.history() as i32) as usize;
+            for &i in on_line.get(&absolute).into_iter().flatten() {
+                let before = self.cells(line, self.marks[i].1.min(cols));
+                places[i] = Some((n, offset + before.chars().count()));
             }
             for run in self.runs(line, theme) {
                 let face = Face {
@@ -303,6 +324,23 @@ impl Terminal {
         while lines.len() > at.0 + 1 && lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
+        let mut prompts: Vec<(usize, usize)> = Vec::new();
+        let mut awaits_input = false;
+        for (&(.., mark), place) in self.marks.iter().zip(places) {
+            let place = place.filter(|&(n, _)| n < lines.len());
+            match (mark, place) {
+                (Mark::Prompt, Some(place)) => prompts.push(place),
+                (Mark::Input, Some(place)) if awaits_input => {
+                    *prompts.last_mut().expect("a prompt") = place
+                }
+                (Mark::Input, Some(place)) => prompts.push(place),
+                _ => {}
+            }
+            // A prompt with no place of its own leaves its input to stand alone.
+            awaits_input = mark == Mark::Prompt && place.is_some();
+        }
+        prompts.sort_unstable();
+        prompts.dedup();
         let mut starts = vec![0];
         for line in &lines {
             starts.push(starts.last().expect("a start") + line.chars().count() + 1);
@@ -319,7 +357,7 @@ impl Terminal {
             })
             .filter(|(range, _)| !range.is_empty())
             .collect();
-        (lines.join("\n"), faces, at.0, at.1)
+        (lines.join("\n"), faces, at.0, at.1, prompts)
     }
 
     /// The screen's rows as runs of styled cells, and the cursor, colors resolved against `theme`.
@@ -575,12 +613,35 @@ impl Ctx<'_> {
             core.windows.window.set_active(false);
             return Ok(());
         }
-        let (text, faces, line, col) = terminal.copy_text(&core.settings.theme);
+        let (text, faces, line, col, prompts) = terminal.copy_text(&core.settings.theme);
         buffer.set_copy_text(Some(text.as_str().into()));
         for (range, face) in faces {
             buffer.add_property(range, Prop::Face(face))?;
         }
+        buffer.prompts = (prompts.into_iter())
+            .map(|(line, col)| buffer.char_idx(line, col))
+            .collect::<Result<_, _>>()?;
         let at = buffer.char_idx(line, col)?;
+        core.windows.window.set_point(&mut core.buffers, at)?;
+        Ok(())
+    }
+
+    /// Moves point to the `n`th command's input start after point, before it when `n` is
+    /// negative, or the farthest one when fewer exist.
+    pub(crate) fn vterm_next_prompt(&mut self, n: i64) -> Result<(), String> {
+        let core = &mut *self.core;
+        let (prompts, point) = (&core.current().prompts, core.point());
+        let count = n.unsigned_abs() as usize;
+        let target = match n > 0 {
+            true => prompts.iter().filter(|&&p| p > point).take(count).last(),
+            false => prompts
+                .iter()
+                .rev()
+                .filter(|&&p| p < point)
+                .take(count)
+                .last(),
+        };
+        let at = *target.ok_or("No prompt found")?;
         core.windows.window.set_point(&mut core.buffers, at)?;
         Ok(())
     }
@@ -776,13 +837,18 @@ mod tests {
             "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;2\x07",
         );
         use Mark::*;
-        let marks = [(0, Prompt), (0, Input), (1, Output), (2, End(Some(2)))];
+        let marks = [
+            (0, 0, Prompt),
+            (0, 2, Input),
+            (1, 0, Output),
+            (2, 0, End(Some(2))),
+        ];
         assert_eq!(t.marks(), marks);
         t.feed(b"\r\n\r\n\r\n\x1b]13");
         t.feed(b"3;D\x1b\\");
         assert_eq!(t.history(), 3);
         assert_eq!(t.marks()[..4], marks);
-        assert_eq!(t.marks()[4], (5, End(None)));
+        assert_eq!(t.marks()[4], (5, 0, End(None)));
     }
 
     #[test]
@@ -798,9 +864,9 @@ mod tests {
             10,
             "\x1b]133;A\x07\r\n\x1b[H\x1b[2J\x1b[3J\x1b]133;B\x07",
         );
-        assert_eq!(t.marks(), [(0, Mark::Input)]);
+        assert_eq!(t.marks(), [(0, 0, Mark::Input)]);
         t.feed(b"\x1b[?1049h\x1b[3J\x1b[?1049l");
-        assert_eq!(t.marks(), [(0, Mark::Input)]);
+        assert_eq!(t.marks(), [(0, 0, Mark::Input)]);
         t.feed(b"\x1bc");
         assert_eq!(t.marks(), []);
     }
@@ -813,7 +879,7 @@ mod tests {
         t.feed(b"\x1b]133;A\x07");
         assert_eq!(t.marks(), []);
         t.feed(b"\x1b[3J\x1b]133;A\x07");
-        assert_eq!(t.marks(), [(2, Mark::Prompt)]);
+        assert_eq!(t.marks(), [(2, 0, Mark::Prompt)]);
     }
 
     #[test]
@@ -842,7 +908,7 @@ mod tests {
     impl Terminal {
         /// Copy mode's text and cursor, without its colours.
         fn copy(&self) -> (String, usize, usize) {
-            let (text, _, line, col) = self.copy_text(&Settings::default().theme);
+            let (text, _, line, col, _) = self.copy_text(&Settings::default().theme);
             (text, line, col)
         }
     }
@@ -1274,6 +1340,69 @@ mod tests {
             output(&mut h, id, "$ echo 0123456789abc\r\n0123456789abc\r\n$ ");
             h.keys("C-c C-t");
             assert_eq!(h.text(), "$ echo 0123456789abc\n0123456789abc\n$");
+        }
+
+        /// Three commands, each between OSC 133 marks, then a fourth prompt.
+        const COMMANDS: &str = "\x1b]133;A\x07$ \x1b]133;B\x07echo 1\r\n\x1b]133;C\x071\r\n\x1b]133;D;0\x07\
+            \x1b]133;A\x07$ \x1b]133;B\x07echo 2\r\n\x1b]133;C\x072\r\n\x1b]133;D;0\x07\
+            \x1b]133;A\x07$ \x1b]133;B\x07echo 3\r\n\x1b]133;C\x073\r\n\x1b]133;D;0\x07\
+            \x1b]133;A\x07$ \x1b]133;B\x07";
+
+        #[test]
+        fn prompt_jumps_land_on_each_commands_input() {
+            let (mut h, id) = shown();
+            output(&mut h, id, COMMANDS);
+            h.keys("C-c C-t");
+            assert_eq!(h.text(), "$ echo 1\n1\n$ echo 2\n2\n$ echo 3\n3\n$");
+            let input = |line| h.core.current().char_idx(line, 2).unwrap();
+            let [first, second, third] = [input(0), input(2), input(4)];
+            h.keys("C-c C-p");
+            assert_eq!(h.point(), third);
+            h.keys("C-c C-p");
+            assert_eq!(h.point(), second);
+            h.keys("C-c C-p");
+            assert_eq!(h.point(), first);
+            h.keys("C-c C-p");
+            assert_eq!(h.core.message(), Some("No prompt found"));
+            assert_eq!(h.point(), first);
+            h.keys("C-c C-n");
+            assert_eq!(h.point(), second);
+            h.keys("C-u - C-c C-n");
+            assert_eq!(h.point(), first, "a negative count goes back");
+            h.keys("C-u 9 C-c C-n");
+            assert_eq!(h.point(), h.text().len(), "stops at the newest prompt");
+            h.keys("C-u 2 C-c C-p");
+            assert_eq!(h.point(), second, "skips one prompt");
+        }
+
+        #[test]
+        fn a_prompt_without_input_mark_is_its_start() {
+            let (mut h, id) = shown();
+            output(&mut h, id, "\x1b]133;A\x07$ ls\r\nx\r\n$ ");
+            h.keys("C-c C-t C-c C-p");
+            assert_eq!(h.point(), 0);
+        }
+
+        #[test]
+        fn a_prompt_jump_finds_a_wrapped_input() {
+            let (mut h, id) = shown();
+            // The 11-char prompt wraps in 10 columns, so the input starts on the second row.
+            output(
+                &mut h,
+                id,
+                "\x1b]133;A\x07~/long/dir$\x1b]133;B\x07 ls\r\n\x1b]133;A\x07$ \x1b]133;B\x07",
+            );
+            h.keys("C-c C-t C-c C-p");
+            let text = h.text();
+            assert_eq!(&text[..h.point()], "~/long/dir$");
+        }
+
+        #[test]
+        fn no_marks_no_prompt() {
+            let (mut h, _, text) = copying();
+            h.keys("C-c C-p");
+            assert_eq!(h.core.message(), Some("No prompt found"));
+            assert_eq!(h.point(), text.len());
         }
 
         #[test]

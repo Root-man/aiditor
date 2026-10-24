@@ -634,6 +634,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.vterm_copy_mode(),
         },
         Command {
+            name: "vterm-previous-prompt",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.vterm_next_prompt(args.count().saturating_neg()),
+        },
+        Command {
+            name: "vterm-next-prompt",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.vterm_next_prompt(args.count()),
+        },
+        Command {
             name: "vterm-copy-mode-done",
             spec: ArgSpec {
                 clipboard: true,
