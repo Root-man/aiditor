@@ -6,7 +6,7 @@ Char mode ([#232](https://github.com/Root-man/aiditor/issues/232)) sends typed k
 
 ## What Changes
 
-- A `vterm-yank` command writes the newest kill to the current terminal's shell, first taking in clipboard text from another app as `yank` does. The `vterm-mode` keymap binds `s-v` to it.
+- A `vterm-yank` command writes the newest kill to the current terminal's shell, first taking in clipboard text from another app as `yank` does. The `vterm-mode` keymap binds `s-v` and `C-S-v` to it; `C-S-v` stays with the editor in char mode, as in Linux terminals, since KDE and GNOME take Super keys.
 - When the program turned on bracketed paste (mode 2004), the text is wrapped in `\x1b[200~` and `\x1b[201~` with every ESC removed, as Zed does; otherwise it is sent as is.
 - Defaults picked: `C-y` keeps reaching the shell (readline's yank), as #89 decided; no prefix argument or `M-y` in terminals.
 - Not in scope: copy mode (#88), image paste, rewriting newlines to `\r` without bracketed paste.

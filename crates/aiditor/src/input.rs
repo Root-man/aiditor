@@ -222,6 +222,7 @@ mod tests {
             ("left", Some("<left>")),
             ("f1", Some("<f1>")),
             ("shift-home", Some("S-<home>")),
+            ("ctrl-shift-v", Some("C-S-v")),
             ("pagedown", Some("<next>")),
             ("f13", None),
             ("fn-a", None),

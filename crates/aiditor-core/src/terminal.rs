@@ -347,7 +347,7 @@ impl Ctx<'_> {
     }
 }
 
-/// Whether `key` stays with the editor in char mode, as #89 decided.
+/// Whether `key` stays with the editor in char mode, as #89 and #233 decided.
 pub(crate) fn editor_key(key: Key) -> bool {
     let ctrl = |c| {
         key == Key {
@@ -359,7 +359,13 @@ pub(crate) fn editor_key(key: Key) -> bool {
         meta: true,
         ..Key::plain(KeyCode::Char('x'))
     };
-    key.super_ || ctrl('x') || ctrl('c') || key == meta_x
+    // C-S-v pastes, as in Linux terminals, where Super belongs to the desktop.
+    let paste = Key {
+        ctrl: true,
+        shift: true,
+        ..Key::plain(KeyCode::Char('v'))
+    };
+    key.super_ || ctrl('x') || ctrl('c') || key == meta_x || key == paste
 }
 
 impl Core {
@@ -827,6 +833,8 @@ mod tests {
             assert_eq!(typed(&mut h, "s-v"), "ls\n");
             output(&mut h, id, "\x1b[?2004h");
             assert_eq!(typed(&mut h, "s-v"), "\x1b[200~ls\n\x1b[201~");
+            assert_eq!(typed(&mut h, "C-S-v"), "\x1b[200~ls\n\x1b[201~");
+            assert_eq!(typed(&mut h, "C-v"), "\x16", "C-v still reaches the shell");
             assert_eq!(h.text(), "", "nothing inserted");
         }
     }
