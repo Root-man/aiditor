@@ -112,6 +112,10 @@
 "q" = "workspace-list-quit"
 "C-g" = "workspace-list-quit"
 
+# Terminal buffers in char mode, where every key but C-x, C-c, M-x and Cmd keys goes to the shell.
+[vterm-mode]
+"C-c C-c" = "vterm-send-C-c"
+
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
 "C-g" = "abort-minibuffers"

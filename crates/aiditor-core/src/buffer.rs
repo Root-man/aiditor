@@ -141,6 +141,7 @@ impl Buffers {
         let id = self.create(&unique(name, |n| self.find(n).is_some()));
         let buffer = self.map.get_mut(&id).expect("just created");
         (buffer.content, buffer.read_only) = (Content::Terminal(Box::new(terminal)), true);
+        buffer.major_mode = "vterm-mode";
         id
     }
 

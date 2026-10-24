@@ -169,6 +169,16 @@ pub(crate) fn to_key(ks: &Keystroke, option_as_meta: bool) -> Option<Key> {
         "right" => KeyCode::Right,
         "up" => KeyCode::Up,
         "down" => KeyCode::Down,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "delete" => KeyCode::Delete,
+        f if let Some(n) = f.strip_prefix('f').and_then(|n| n.parse().ok())
+            && (1..=12).contains(&n) =>
+        {
+            KeyCode::F(n)
+        }
         // The key's own character, so C-x stays C-x whatever Option would type.
         _ if m.control || m.platform || meta || ks.key_char.is_none() => {
             let name = if ks.key == "space" { " " } else { &ks.key };
@@ -210,7 +220,10 @@ mod tests {
             ("alt-,", Some("M-,")),
             ("ctrl-alt-,", Some("C-M-,")),
             ("left", Some("<left>")),
-            ("f1", None),
+            ("f1", Some("<f1>")),
+            ("shift-home", Some("S-<home>")),
+            ("pagedown", Some("<next>")),
+            ("f13", None),
             ("fn-a", None),
         ] {
             assert_eq!(key(stroke, true).as_deref(), want, "{stroke}");

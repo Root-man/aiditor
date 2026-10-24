@@ -616,6 +616,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.vterm(),
         },
         Command {
+            name: "vterm-send-C-c",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.vterm_send_c_c(),
+        },
+        Command {
             name: "revert-buffer",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.revert_buffer(args),
