@@ -455,6 +455,12 @@ mod tests {
             KeyCode::Right => "right".into(),
             KeyCode::Up => "up".into(),
             KeyCode::Down => "down".into(),
+            KeyCode::Home => "home".into(),
+            KeyCode::End => "end".into(),
+            KeyCode::PageUp => "pageup".into(),
+            KeyCode::PageDown => "pagedown".into(),
+            KeyCode::Delete => "delete".into(),
+            KeyCode::F(n) => format!("f{n}"),
         }
     }
 

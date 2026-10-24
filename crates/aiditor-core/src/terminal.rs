@@ -9,11 +9,12 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, test::TermSize};
+use alacritty_terminal::term::{Config, Term, TermMode, test::TermSize};
 use alacritty_terminal::vte::ansi::{Color, CursorShape as Shape, NamedColor, Processor, Rgb};
 
 use crate::buffer::{Buffer, BufferId};
 use crate::display::{self, CursorShape, Run};
+use crate::key::{Key, KeyCode};
 use crate::settings::Theme;
 use crate::window::WindowId;
 use crate::{Core, Ctx, Effect, Effects, TerminalId, TerminalOp};
@@ -169,6 +170,59 @@ impl Terminal {
         }
     }
 
+    /// The bytes xterm sends for `key`, as Zed's `keys.rs`, or `None` for a key it has none for.
+    pub fn encode(&self, key: Key) -> Option<Vec<u8>> {
+        let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
+        let m = 1 + u8::from(key.shift) + 2 * u8::from(key.meta) + 4 * u8::from(key.ctrl);
+        let esc = |s: String| Some(format!("\x1b{s}").into_bytes());
+        let cursor = |c: char| match m {
+            1 if app_cursor => esc(format!("O{c}")),
+            1 => esc(format!("[{c}")),
+            _ => esc(format!("[1;{m}{c}")),
+        };
+        let tilde = |n: u8| match m {
+            1 => esc(format!("[{n}~")),
+            _ => esc(format!("[{n};{m}~")),
+        };
+        let bytes = match key.code {
+            KeyCode::Left => return cursor('D'),
+            KeyCode::Right => return cursor('C'),
+            KeyCode::Up => return cursor('A'),
+            KeyCode::Down => return cursor('B'),
+            KeyCode::Home => return cursor('H'),
+            KeyCode::End => return cursor('F'),
+            KeyCode::PageUp => return tilde(5),
+            KeyCode::PageDown => return tilde(6),
+            KeyCode::Delete => return tilde(3),
+            KeyCode::F(n @ 1..=4) if m == 1 => return esc(format!("O{}", (b'O' + n) as char)),
+            KeyCode::F(n @ 1..=4) => return esc(format!("[1;{m}{}", (b'O' + n) as char)),
+            KeyCode::F(n @ 5..=12) => {
+                return tilde([15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5]);
+            }
+            KeyCode::F(_) => return None,
+            KeyCode::Tab if key.shift => b"\x1b[Z".to_vec(),
+            KeyCode::Tab => b"\t".to_vec(),
+            KeyCode::Return if key.shift => b"\n".to_vec(),
+            KeyCode::Return => b"\r".to_vec(),
+            KeyCode::Escape => b"\x1b".to_vec(),
+            KeyCode::Backspace if key.ctrl => b"\x08".to_vec(),
+            KeyCode::Backspace => b"\x7f".to_vec(),
+            KeyCode::Char(' ') if key.ctrl => b"\0".to_vec(),
+            KeyCode::Char('?') if key.ctrl => b"\x7f".to_vec(),
+            KeyCode::Char(c @ ('@'..='_' | 'a'..='z')) if key.ctrl => {
+                vec![c.to_ascii_uppercase() as u8 & 0x1f]
+            }
+            KeyCode::Char(_) if key.ctrl => return None,
+            KeyCode::Char(c) if key.shift => c.to_uppercase().to_string().into_bytes(),
+            KeyCode::Char(c) => c.to_string().into_bytes(),
+        };
+        Some(if key.meta {
+            [b"\x1b", &bytes[..]].concat()
+        } else {
+            bytes
+        })
+    }
+
     /// `color` as 0xRRGGBB: what the program set with OSC 4, 10 or 11, else the theme's palette,
     /// the xterm cube or gray ramp.
     fn color(&self, color: Color, theme: &Theme) -> u32 {
@@ -243,6 +297,15 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Sends `^C` to the current buffer's shell.
+    pub(crate) fn vterm_send_c_c(&mut self) -> Result<(), String> {
+        let id = self.core.char_mode().ok_or("Not in a live terminal")?;
+        let bytes = b"\x03".to_vec();
+        self.effects
+            .push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+        Ok(())
+    }
+
     /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
         let core = &mut *self.core;
@@ -258,7 +321,32 @@ impl Ctx<'_> {
     }
 }
 
+/// Whether `key` stays with the editor in char mode, as #89 decided.
+pub(crate) fn editor_key(key: Key) -> bool {
+    let ctrl = |c| {
+        key == Key {
+            ctrl: true,
+            ..Key::plain(KeyCode::Char(c))
+        }
+    };
+    let meta_x = Key {
+        meta: true,
+        ..Key::plain(KeyCode::Char('x'))
+    };
+    key.super_ || ctrl('x') || ctrl('c') || key == meta_x
+}
+
 impl Core {
+    /// The current buffer's terminal while it takes keys: its shell is live and no key
+    /// sequence is pending.
+    pub(crate) fn char_mode(&self) -> Option<TerminalId> {
+        let buffer = self.windows.window.buffer();
+        (self.pending.is_empty())
+            .then(|| self.terminals.iter().find(|&(_, &b)| b == buffer))
+            .flatten()
+            .map(|(&id, _)| id)
+    }
+
     /// Whether buffer `id` is a terminal whose shell hasn't exited.
     pub(crate) fn live_terminal(&self, id: BufferId) -> bool {
         self.terminals.values().any(|&b| b == id)
@@ -498,6 +586,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keys_encode_as_xterm() {
+        let mut t = Terminal::new(2, 10);
+        let enc = |t: &Terminal, keys: &str| -> Vec<u8> {
+            (crate::key::parse_keys(keys).unwrap().into_iter())
+                .flat_map(|k| t.encode(k).unwrap_or_else(|| panic!("{k} has no encoding")))
+                .collect()
+        };
+        for (keys, want) in [
+            ("hé SPC", "hé "),
+            (
+                "C-a C-e C-r C-g C-u C-S-a C-SPC C-@ C-[ C-\\ C-] C-^ C-_ C-S-_ C-?",
+                "\x01\x05\x12\x07\x15\x01\0\0\x1b\x1c\x1d\x1e\x1f\x1f\x7f",
+            ),
+            (
+                "M-b M-S-b C-M-a M-RET M-DEL",
+                "\x1bb\x1bB\x1b\x01\x1b\r\x1b\x7f",
+            ),
+            (
+                "RET S-RET TAB S-TAB ESC DEL C-DEL S-DEL",
+                "\r\n\t\x1b[Z\x1b\x7f\x08\x7f",
+            ),
+            (
+                "<prior> <next> <delete> C-<delete>",
+                "\x1b[5~\x1b[6~\x1b[3~\x1b[3;5~",
+            ),
+            (
+                "<f1> <f4> <f5> <f10> <f11> <f12> S-<f1> C-<f5>",
+                "\x1bOP\x1bOS\x1b[15~\x1b[21~\x1b[23~\x1b[24~\x1b[1;2P\x1b[15;5~",
+            ),
+        ] {
+            assert_eq!(String::from_utf8(enc(&t, keys)).unwrap(), want, "{keys}");
+        }
+        let arrows =
+            "<up> <down> <right> <left> <home> <end> C-<left> M-<up> S-<end> C-M-S-<right>";
+        let modified = "\x1b[1;5D\x1b[1;3A\x1b[1;2F\x1b[1;8C";
+        let normal = format!("\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F{modified}");
+        assert_eq!(String::from_utf8(enc(&t, arrows)).unwrap(), normal);
+        t.feed(b"\x1b[?1h");
+        let app = format!("\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF{modified}");
+        assert_eq!(String::from_utf8(enc(&t, arrows)).unwrap(), app);
+        t.feed(b"\x1b[?1l");
+        assert_eq!(enc(&t, "<up>"), b"\x1b[A");
+        let ctrl_1 = crate::key::parse_keys("C-1").unwrap()[0];
+        assert_eq!(t.encode(ctrl_1), None);
+        assert_eq!(t.encode(Key::plain(KeyCode::F(0))), None);
+    }
+
     mod in_the_core {
         use crate::harness::Harness;
         use crate::{Effect, Msg, TerminalId, TerminalOp};
@@ -567,15 +703,85 @@ mod tests {
             let (id, buffer) = h.core.create_terminal("t", 2, 10);
             output(&mut h, id, "shown");
             h.core.show_buffer(buffer);
-            h.keys("C-f C-n C-b M-> M-< C-x h C-g C-s shown C-g");
+            for command in [
+                "forward-char",
+                "next-line",
+                "end-of-buffer",
+                "mark-whole-buffer",
+            ] {
+                h.keys(&format!("M-x {command} RET"));
+            }
             assert_eq!((h.point(), h.text()), (0, String::new()));
-            h.keys("x");
-            assert_eq!(h.core.message(), Some("Buffer is read-only"));
-            h.clipboard = Some("pasted".into());
-            h.keys("C-g C-y");
+            h.keys("M-x newline RET");
             assert_eq!(h.core.message(), Some("Buffer is read-only"));
             let terminal = h.core.buffers.get(buffer).unwrap().terminal().unwrap();
             assert_eq!(terminal.screen(), "shown\n");
+        }
+
+        /// A harness showing a live terminal, collecting effects.
+        fn shown() -> (Harness, TerminalId) {
+            let mut h = Harness::new(&[]);
+            let (id, buffer) = h.core.create_terminal("t", 2, 10);
+            h.core.show_buffer(buffer);
+            h.collect_effects = true;
+            (h, id)
+        }
+
+        /// What `keys` wrote to the shell, joined.
+        fn typed(h: &mut Harness, keys: &str) -> String {
+            h.keys(keys);
+            let bytes: Vec<u8> = writes(h).into_iter().flat_map(|(_, b)| b).collect();
+            String::from_utf8(bytes).unwrap()
+        }
+
+        #[test]
+        fn char_mode_sends_keys_to_the_shell() {
+            let (mut h, id) = shown();
+            h.keys("echo SPC hi RET");
+            let bytes: Vec<u8> = (writes(&mut h).into_iter())
+                .inspect(|(i, _)| assert_eq!(*i, id))
+                .flat_map(|(_, b)| b)
+                .collect();
+            assert_eq!(bytes, b"echo hi\r");
+            let readline = typed(&mut h, "C-a C-e C-r M-b C-g C-u C-y");
+            assert_eq!(readline, "\x01\x05\x12\x1bb\x07\x15\x19");
+            assert_eq!(h.core.message(), None, "no command ran");
+            assert_eq!(typed(&mut h, "C-c C-c"), "\x03");
+            h.send(Msg::Insert {
+                text: "日é".into(),
+                replace: Some(0..1),
+            });
+            assert_eq!(writes(&mut h), [(id, "日é".as_bytes().to_vec())]);
+        }
+
+        #[test]
+        fn arrows_follow_the_cursor_mode() {
+            let (mut h, id) = shown();
+            assert_eq!(typed(&mut h, "<up> C-<left>"), "\x1b[A\x1b[1;5D");
+            output(&mut h, id, "\x1b[?1h");
+            assert_eq!(typed(&mut h, "<up> C-<left>"), "\x1bOA\x1b[1;5D");
+        }
+
+        #[test]
+        fn editor_keys_stay_with_the_editor() {
+            let (mut h, _) = shown();
+            assert_eq!(typed(&mut h, "M-x vterm"), "");
+            h.send(Msg::Insert {
+                text: "!".into(),
+                replace: None,
+            });
+            assert!(writes(&mut h).is_empty());
+            assert_eq!(h.text(), "vterm!", "typed into the minibuffer");
+            h.keys("C-g");
+            assert_eq!(typed(&mut h, "C-x b *scratch*<main> RET"), "");
+            assert_eq!(h.core.current().name, "*scratch*<main>");
+            h.keys("C-x b RET");
+            assert_eq!(h.core.current().name, "t");
+            // Under a prefix, C-g quits it rather than reaching the shell.
+            assert_eq!(typed(&mut h, "C-x C-g"), "");
+            assert_eq!(h.core.message(), Some("Quit"));
+            assert_eq!(typed(&mut h, "s-z C-c a"), "");
+            assert_eq!(h.core.message(), Some("C-c a is undefined"));
         }
     }
 

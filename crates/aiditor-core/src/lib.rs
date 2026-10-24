@@ -513,6 +513,14 @@ impl Ctx<'_> {
                 // The clipboard text was for this key only.
                 self.core.kills.clipboard = None;
             }
+            Msg::Insert { text, .. } if let Some(id) = self.core.char_mode() => {
+                self.core.message = None;
+                // An input method's update can carry no text.
+                if !text.is_empty() {
+                    let bytes = text.into_bytes();
+                    (self.effects).push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+                }
+            }
             Msg::Insert { text, replace } => {
                 if let Some(range) = replace
                     && let Err(err) = self.replace_utf16(range)
@@ -638,6 +646,16 @@ impl Ctx<'_> {
             core.timers.cancel(id);
         }
         core.hint_shown = false;
+        if let Some(id) = core.char_mode()
+            && !terminal::editor_key(key)
+        {
+            let terminal = core.current().terminal().expect("a live terminal's buffer");
+            if let Some(bytes) = terminal.encode(key) {
+                self.effects
+                    .push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+            }
+            return;
+        }
         let point = core.windows.window.point(&core.buffers);
         // Typed chars share an undo group, up to 20 like Emacs; any other key ends the run.
         let self_insert = matches!(key.code, KeyCode::Char(_))

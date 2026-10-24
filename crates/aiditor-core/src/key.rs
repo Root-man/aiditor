@@ -11,6 +11,13 @@ pub enum KeyCode {
     Right,
     Up,
     Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+    /// F1 to F12.
+    F(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +66,12 @@ impl std::fmt::Display for Key {
             KeyCode::Right => f.write_str("<right>"),
             KeyCode::Up => f.write_str("<up>"),
             KeyCode::Down => f.write_str("<down>"),
+            KeyCode::Home => f.write_str("<home>"),
+            KeyCode::End => f.write_str("<end>"),
+            KeyCode::PageUp => f.write_str("<prior>"),
+            KeyCode::PageDown => f.write_str("<next>"),
+            KeyCode::Delete => f.write_str("<delete>"),
+            KeyCode::F(n) => write!(f, "<f{n}>"),
         }
     }
 }
@@ -90,7 +103,15 @@ pub fn parse_keys(s: &str) -> Result<Vec<Key>, String> {
             "<right>" => Some(KeyCode::Right),
             "<up>" => Some(KeyCode::Up),
             "<down>" => Some(KeyCode::Down),
-            _ => None,
+            "<home>" => Some(KeyCode::Home),
+            "<end>" => Some(KeyCode::End),
+            "<prior>" => Some(KeyCode::PageUp),
+            "<next>" => Some(KeyCode::PageDown),
+            "<delete>" => Some(KeyCode::Delete),
+            _ => (rest.strip_prefix("<f"))
+                .and_then(|n| n.strip_suffix('>')?.parse().ok())
+                .filter(|n| (1..=12).contains(n))
+                .map(KeyCode::F),
         };
         let modified = key.ctrl || key.meta || key.shift || key.super_;
         let mut chars = rest.chars();
@@ -147,7 +168,7 @@ mod tests {
 
     #[test]
     fn display_round_trips_through_parse() {
-        let script = "h C-x M-S-a RET SPC C-- TAB DEL ESC <left> C-<down> <up> <right> C-s-a s-z";
+        let script = "h C-x M-S-a RET SPC C-- TAB DEL ESC <left> C-<down> <up> <right> <home> <end> <prior> <next> <delete> <f1> C-<f12> C-s-a s-z";
         let keys = parse_keys(script).unwrap();
         let shown: Vec<String> = keys.iter().map(Key::to_string).collect();
         assert_eq!(shown.join(" "), script);
@@ -158,5 +179,6 @@ mod tests {
     #[test]
     fn rejects_modified_words() {
         assert!(parse_keys("C-xy").is_err());
+        assert!(parse_keys("C-<f13>").is_err());
     }
 }
