@@ -376,7 +376,7 @@ mod tests {
             (5, (Some(2), true)),
             "an active region keeps its mark"
         );
-        assert_eq!(h.core.windows.window.ring(&h.core.buffers), []);
+        assert!(h.core.windows.window.ring(&h.core.buffers).is_empty());
         let mut h = on(&"123456789\n".repeat(10));
         h.keys("C-u 5 M-<");
         assert_eq!(h.point(), 60);

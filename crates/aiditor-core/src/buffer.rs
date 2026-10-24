@@ -4,9 +4,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use ropey::Rope;
 
+use crate::terminal::Terminal;
 use crate::workspace::WorkspaceId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,6 +136,14 @@ impl Buffers {
         id
     }
 
+    /// A new read-only buffer named `name`, made unique, holding `terminal`'s grid.
+    pub fn create_terminal(&mut self, name: &str, terminal: Terminal) -> BufferId {
+        let id = self.create(&unique(name, |n| self.find(n).is_some()));
+        let buffer = self.map.get_mut(&id).expect("just created");
+        (buffer.content, buffer.read_only) = (Content::Terminal(Box::new(terminal)), true);
+        id
+    }
+
     /// Renames buffer `id` to `name`, appending `<2>`, `<3>`, ... while another buffer has it.
     pub(crate) fn rename(&mut self, id: BufferId, name: &str) {
         let taken = |n: &str| (self.map.iter()).any(|(&b, buffer)| b != id && buffer.name == n);
@@ -224,10 +234,14 @@ impl Buffers {
     }
 }
 
-/// The content backend; the terminal grid becomes a second variant.
+/// The content backend.
 pub enum Content {
     Text(Rope),
+    /// A terminal's grid; its text is empty until copy mode builds it from the scrollback.
+    Terminal(Box<Terminal>),
 }
+
+static EMPTY: LazyLock<Rope> = LazyLock::new(Rope::new);
 
 pub struct Buffer {
     pub name: String,
@@ -322,6 +336,21 @@ impl Buffer {
     pub fn text(&self) -> &Rope {
         match &self.content {
             Content::Text(rope) => rope,
+            Content::Terminal(_) => &EMPTY,
+        }
+    }
+
+    pub fn terminal(&self) -> Option<&Terminal> {
+        match &self.content {
+            Content::Terminal(terminal) => Some(terminal),
+            Content::Text(_) => None,
+        }
+    }
+
+    pub(crate) fn terminal_mut(&mut self) -> Option<&mut Terminal> {
+        match &mut self.content {
+            Content::Terminal(terminal) => Some(terminal),
+            Content::Text(_) => None,
         }
     }
 
@@ -424,6 +453,9 @@ impl Buffer {
         }
         match &mut self.content {
             Content::Text(rope) => rope.try_insert(char_idx, text)?,
+            // Not even the paths past read-only edit a grid.
+            Content::Terminal(_) if !text.is_empty() => return Err(Error::ReadOnly),
+            Content::Terminal(_) => {}
         }
         let n = text.chars().count();
         for (pos, kind) in self.markers.values_mut() {
@@ -443,6 +475,8 @@ impl Buffer {
         }
         match &mut self.content {
             Content::Text(rope) => rope.try_remove(range.clone())?,
+            Content::Terminal(_) if changed => return Err(Error::ReadOnly),
+            Content::Terminal(_) => {}
         }
         for (pos, _) in self.markers.values_mut() {
             if *pos > range.start {
