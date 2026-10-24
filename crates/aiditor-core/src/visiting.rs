@@ -345,12 +345,17 @@ impl Ctx<'_> {
 }
 
 impl Core {
-    /// The current buffer's directory: its file's, else the working directory.
+    /// The current buffer's directory: its file's, its terminal's, else the working directory.
     pub(crate) fn directory(&self) -> PathBuf {
-        match self.current().file.as_deref().and_then(Path::parent) {
-            Some(dir) => dir.to_path_buf(),
-            None => std::env::current_dir().unwrap_or_default(),
-        }
+        (self.buffer_directory()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    }
+
+    /// The current buffer's file's directory, or its terminal's.
+    pub(crate) fn buffer_directory(&self) -> Option<PathBuf> {
+        let buffer = self.current();
+        (buffer.file.as_deref().and_then(Path::parent))
+            .or_else(|| buffer.terminal()?.cwd())
+            .map(Path::to_path_buf)
     }
 
     /// Applies the file service's answer to a revert of buffer `id` at `tick` as one undo group,

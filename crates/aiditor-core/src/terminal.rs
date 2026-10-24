@@ -202,7 +202,7 @@ impl Terminal {
         &self.marks
     }
 
-    /// The shell's directory, from its last local OSC 7.
+    /// The shell's directory, from its last local OSC 7, else the one `vterm` spawned it in.
     pub fn cwd(&self) -> Option<&Path> {
         self.cwd.as_deref()
     }
@@ -503,7 +503,7 @@ fn dim(color: u32) -> u32 {
 
 impl Ctx<'_> {
     /// Spawns the login shell in a new `vterm<n><workspace>` shown in the selected window, in the
-    /// current file's directory or the project's primary root.
+    /// current buffer's directory or the project's primary root.
     pub(crate) fn vterm(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
         let workspace = core.current_workspace();
@@ -511,8 +511,8 @@ impl Ctx<'_> {
             .map(|n| format!("vterm{n}<{}>", workspace.name))
             .find(|name| core.buffers.find(name).is_none())
             .expect("a free number");
-        let cwd = match core.current().file.as_deref().and_then(Path::parent) {
-            Some(dir) => dir.to_path_buf(),
+        let cwd = match core.buffer_directory() {
+            Some(dir) => dir,
             None => (core.projects[core.project_at(workspace.project)?]
                 .project
                 .primary
@@ -524,6 +524,8 @@ impl Ctx<'_> {
             .find(|&(id, ..)| id == selected)
             .map_or((24, 80), |(_, _, rows, cols)| (rows, cols));
         let (id, buffer) = core.create_terminal(&name, rows, cols);
+        let terminal = core.buffers.get_mut(buffer).and_then(Buffer::terminal_mut);
+        terminal.expect("a new terminal").cwd = Some(cwd.clone());
         core.switch_to(buffer);
         self.effects.push(Effect::Terminal(TerminalOp::Spawn {
             id,
@@ -1419,6 +1421,27 @@ mod tests {
             h.keys("C-x b *scratch*<work> RET M-x vterm RET");
             let app = h.path("app");
             assert_eq!(ops(&mut h), [format!("spawn 1 {} 24x80", app.display())]);
+        }
+
+        #[test]
+        fn a_terminal_buffers_directory_is_its_shells() {
+            let mut h = work();
+            let app = h.path("app");
+            h.keys("M-x vterm RET");
+            ops(&mut h);
+            // Without OSC 7, the directory the shell started in.
+            h.keys("C-x C-f");
+            assert_eq!(h.text(), format!("{}/", app.display()));
+            h.keys("C-g M-x vterm RET");
+            assert_eq!(ops(&mut h), [format!("spawn 1 {} 24x80", app.display())]);
+            h.send(Msg::TerminalOutput {
+                id: TerminalId(1),
+                bytes: "\x1b]7;file:///tmp\x07".into(),
+            });
+            h.keys("C-x C-f");
+            assert_eq!(h.text(), "/tmp/");
+            h.keys("C-g M-x vterm RET");
+            assert_eq!(ops(&mut h), ["spawn 2 /tmp 24x80"]);
         }
 
         #[test]
