@@ -166,11 +166,15 @@ The display SHALL carry the cursor's row, column, width in cells and shape: bloc
 - **THEN** the display has no cursor, and `\x1b[?25h` brings it back
 
 ### Requirement: Wide chars take two cells
-A wide char SHALL take two columns, its run counting two cells, so the chars after it sit at the same columns as in the rows below.
+A wide char SHALL take two columns, its run counting two cells, so the chars after it sit at the same columns as in the rows below. An emoji such as `🦀` is a wide char.
 
 #### Scenario: Japanese text
 - **WHEN** `日本x\r\nabcde` is fed
 - **THEN** `x` is at column 4 on the first row, the same column as `e` on the second
+
+#### Scenario: Emoji
+- **WHEN** `🦀x\r\nabc` is fed
+- **THEN** `🦀` is a run of two cells at column 0 and `x` is at column 2, the same column as `c` on the second row
 
 ### Requirement: Char mode sends keys to the shell
 While a terminal buffer's shell is live, it isn't in copy mode and no key sequence is pending, every key except `C-x`, `C-c`, `M-x`, keys with super held and, on Linux, `C-S-v` SHALL be written to the shell, encoded as xterm does, instead of running a command. Those and the keys that follow a prefix SHALL go through the keymaps as in any buffer. A key with no encoding SHALL be dropped.
