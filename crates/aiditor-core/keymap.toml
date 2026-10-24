@@ -115,6 +115,7 @@
 # Terminal buffers in char mode, where every key but C-x, C-c, M-x and Cmd keys goes to the shell.
 [vterm-mode]
 "C-c C-c" = "vterm-send-C-c"
+"s-v" = "vterm-yank"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"

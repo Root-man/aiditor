@@ -223,6 +223,16 @@ impl Terminal {
         })
     }
 
+    /// The bytes that paste `text`: between bracketed-paste marks, without ESC, when the program
+    /// turned on mode 2004, as Zed does, else as is.
+    pub fn paste(&self, text: &str) -> Vec<u8> {
+        if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+            format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
+        } else {
+            text.as_bytes().to_vec()
+        }
+    }
+
     /// `color` as 0xRRGGBB: what the program set with OSC 4, 10 or 11, else the theme's palette,
     /// the xterm cube or gray ramp.
     fn color(&self, color: Color, theme: &Theme) -> u32 {
@@ -301,6 +311,22 @@ impl Ctx<'_> {
     pub(crate) fn vterm_send_c_c(&mut self) -> Result<(), String> {
         let id = self.core.char_mode().ok_or("Not in a live terminal")?;
         let bytes = b"\x03".to_vec();
+        self.effects
+            .push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+        Ok(())
+    }
+
+    /// Pastes the newest kill, or clipboard text from another app, into the current buffer's shell.
+    pub(crate) fn vterm_yank(&mut self) -> Result<(), String> {
+        let id = self.core.char_mode().ok_or("Not in a live terminal")?;
+        self.core.kills.take_clipboard();
+        let text = self.core.kills.current_kill(0)?;
+        let terminal = self
+            .core
+            .current()
+            .terminal()
+            .expect("a live terminal's buffer");
+        let bytes = terminal.paste(&text);
         self.effects
             .push(Effect::Terminal(TerminalOp::Write { id, bytes }));
         Ok(())
@@ -587,6 +613,14 @@ mod tests {
     }
 
     #[test]
+    fn paste_is_bracketed_when_asked() {
+        let mut t = Terminal::new(3, 10);
+        assert_eq!(t.paste("a\nb\x1b[201~c"), b"a\nb\x1b[201~c");
+        t.feed(b"\x1b[?2004h");
+        assert_eq!(t.paste("a\nb\x1b[201~c"), b"\x1b[200~a\nb[201~c\x1b[201~");
+    }
+
+    #[test]
     fn keys_encode_as_xterm() {
         let mut t = Terminal::new(2, 10);
         let enc = |t: &Terminal, keys: &str| -> Vec<u8> {
@@ -782,6 +816,18 @@ mod tests {
             assert_eq!(h.core.message(), Some("Quit"));
             assert_eq!(typed(&mut h, "s-z C-c a"), "");
             assert_eq!(h.core.message(), Some("C-c a is undefined"));
+        }
+
+        #[test]
+        fn s_v_pastes_into_the_shell() {
+            let (mut h, id) = shown();
+            assert_eq!(typed(&mut h, "s-v"), "");
+            assert_eq!(h.core.message(), Some("Kill ring is empty"));
+            h.clipboard = Some("ls\n".into());
+            assert_eq!(typed(&mut h, "s-v"), "ls\n");
+            output(&mut h, id, "\x1b[?2004h");
+            assert_eq!(typed(&mut h, "s-v"), "\x1b[200~ls\n\x1b[201~");
+            assert_eq!(h.text(), "", "nothing inserted");
         }
     }
 
