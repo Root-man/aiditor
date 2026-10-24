@@ -138,7 +138,7 @@ impl EntityInputHandler for Editor {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         // shortcut: the cursor's box whatever the range, enough to place an IME's window; lay out the range if an IME needs it.
-        self.painted.iter().find_map(|p| p.cursor)
+        self.painted.iter().find(|p| p.selected)?.cursor
     }
 
     fn character_index_for_point(

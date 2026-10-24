@@ -201,7 +201,11 @@ pub(crate) fn window_display(
         _ => cols.saturating_add(1),
     };
     let shown = left..left.saturating_add(width);
-    display::build(buffer, top, rows, point, mark, settings, shown)
+    let mut display = display::build(buffer, top, rows, point, mark, settings, shown);
+    if let Some(terminal) = buffer.terminal() {
+        (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
+    }
+    display
 }
 
 #[cfg(test)]

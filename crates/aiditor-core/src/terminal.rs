@@ -10,9 +10,11 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, test::TermSize};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color, CursorShape as Shape, NamedColor, Processor, Rgb};
 
 use crate::buffer::{Buffer, BufferId};
+use crate::display::{self, CursorShape, Run};
+use crate::settings::Theme;
 use crate::window::WindowId;
 use crate::{Core, Ctx, Effect, Effects, TerminalId, TerminalOp};
 
@@ -92,6 +94,118 @@ impl Terminal {
         text.truncate(text.trim_end_matches(' ').len());
         text
     }
+
+    /// The screen's rows as runs of styled cells, and the cursor, colors resolved against `theme`.
+    pub fn display(&self, theme: &Theme) -> display::Terminal {
+        let rows = (0..self.term.screen_lines() as i32).map(|line| {
+            let row = &self.term.grid()[Line(line)];
+            let mut runs: Vec<Run> = Vec::new();
+            for col in 0..self.term.columns() {
+                let cell = &row[Column(col)];
+                let flags = cell.flags;
+                if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let (mut fg, mut bg) = (self.color(cell.fg, theme), self.color(cell.bg, theme));
+                if flags.contains(Flags::INVERSE) {
+                    (fg, bg) = (bg, fg);
+                }
+                if flags.contains(Flags::DIM) {
+                    fg = dim(fg);
+                }
+                let bg = (bg != theme.background).then_some(bg);
+                let (bold, italic) = (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC));
+                let underline = flags.intersects(Flags::ALL_UNDERLINES);
+                if cell.c == ' ' && bg.is_none() && !underline {
+                    continue;
+                }
+                let (col, wide) = (col as u16, flags.contains(Flags::WIDE_CHAR));
+                let mut text = String::from(cell.c);
+                text.extend(cell.zerowidth().into_iter().flatten());
+                // A wide char runs alone, so each glyph of a run advances exactly one cell.
+                match runs.last_mut() {
+                    Some(run)
+                        if !wide
+                            && run.col + run.cells == col
+                            && run.cells as usize == run.text.chars().count()
+                            && (run.fg, run.bg, run.bold, run.italic, run.underline)
+                                == (fg, bg, bold, italic, underline) =>
+                    {
+                        run.cells += 1;
+                        run.text += &text;
+                    }
+                    _ => runs.push(Run {
+                        col,
+                        cells: if wide { 2 } else { 1 },
+                        text,
+                        fg,
+                        bg,
+                        bold,
+                        italic,
+                        underline,
+                    }),
+                }
+            }
+            runs
+        });
+        let cursor = self.term.renderable_content().cursor;
+        let shape = match cursor.shape {
+            Shape::Hidden => None,
+            Shape::Beam => Some(CursorShape::Beam),
+            Shape::Underline => Some(CursorShape::Underline),
+            Shape::Block | Shape::HollowBlock => Some(CursorShape::Block),
+        };
+        let wide = self.term.grid()[cursor.point]
+            .flags
+            .contains(Flags::WIDE_CHAR);
+        display::Terminal {
+            rows: rows.collect(),
+            cursor: shape.map(|shape| display::Cursor {
+                row: cursor.point.line.0 as u16,
+                col: cursor.point.column.0 as u16,
+                cells: if wide { 2 } else { 1 },
+                shape,
+            }),
+        }
+    }
+
+    /// `color` as 0xRRGGBB: what the program set with OSC 4, 10 or 11, else the theme's palette,
+    /// the xterm cube or gray ramp.
+    fn color(&self, color: Color, theme: &Theme) -> u32 {
+        let rgb = |c: Rgb| (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
+        let index = match color {
+            Color::Spec(c) => return rgb(c),
+            Color::Indexed(i) => i as usize,
+            Color::Named(n) => n as usize,
+        };
+        if let Some(c) = self.term.colors()[index] {
+            return rgb(c);
+        }
+        let level = |v: usize| if v == 0 { 0 } else { 55 + 40 * v as u32 };
+        match color {
+            Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => theme.foreground,
+            Color::Named(NamedColor::Background) => theme.background,
+            Color::Named(NamedColor::Cursor) => theme.cursor,
+            Color::Named(NamedColor::DimForeground) => dim(theme.foreground),
+            Color::Named(_) if index > 256 => {
+                dim(theme.ansi[index - NamedColor::DimBlack as usize])
+            }
+            _ => match index {
+                0..16 => theme.ansi[index],
+                16..232 => {
+                    let i = index - 16;
+                    level(i / 36) << 16 | level(i / 6 % 6) << 8 | level(i % 6)
+                }
+                _ => 0x010101 * (8 + 10 * (index - 232) as u32),
+            },
+        }
+    }
+}
+
+/// `color` at 2/3 of each channel, as alacritty dims.
+fn dim(color: u32) -> u32 {
+    let channel = |shift: u32| ((color >> shift & 0xff) * 2 / 3) << shift;
+    channel(16) | channel(8) | channel(0)
 }
 
 impl Ctx<'_> {
@@ -216,6 +330,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Settings;
 
     fn fed(rows: u16, cols: u16, bytes: &str) -> Terminal {
         let mut t = Terminal::new(rows, cols);
@@ -261,6 +376,110 @@ mod tests {
     #[test]
     fn wide_chars_take_one_char() {
         assert_eq!(fed(1, 10, "日本x").screen(), "日本x");
+    }
+
+    /// Each run of the display's row `row` as (col, cells, text, fg, bg).
+    fn runs(t: &Terminal, row: usize) -> Vec<(u16, u16, String, u32, Option<u32>)> {
+        let theme = Settings::default().theme;
+        let rows = t.display(&theme).rows;
+        (rows[row].iter())
+            .map(|r| (r.col, r.cells, r.text.clone(), r.fg, r.bg))
+            .collect()
+    }
+
+    #[test]
+    fn runs_sit_at_their_columns() {
+        let fg = Settings::default().theme.foreground;
+        let t = fed(3, 10, "ab\x1b[1;6Hc");
+        let want = vec![(0, 2, "ab".into(), fg, None), (5, 1, "c".into(), fg, None)];
+        assert_eq!(runs(&t, 0), want);
+        assert_eq!(runs(&t, 1), vec![]);
+        let t = fed(3, 10, "1\r\n2\r\n3\r\n4\r\n5");
+        let rows = t.display(&Settings::default().theme).rows;
+        let text: Vec<_> = rows.iter().map(|r| r[0].text.as_str()).collect();
+        assert_eq!(text, ["3", "4", "5"]);
+    }
+
+    #[test]
+    fn colors_resolve_against_the_theme() {
+        let theme = Settings::default().theme;
+        assert_eq!(runs(&fed(1, 10, "\x1b[31mx"), 0)[0].3, theme.ansi[1]);
+        assert_eq!(runs(&fed(1, 10, "\x1b[91mx"), 0)[0].3, theme.ansi[9]);
+        let t = fed(
+            1,
+            10,
+            "\x1b[38;5;196ma\x1b[38;5;244mb\x1b[38;2;1;2;3mc\x1b[38;5;16md",
+        );
+        let fgs: Vec<_> = runs(&t, 0).iter().map(|r| r.3).collect();
+        assert_eq!(fgs, [0xff0000, 0x808080, 0x010203, 0x000000]);
+        let t = fed(1, 10, "\x1b[48;5;21m \x1b[7mx");
+        assert_eq!(
+            runs(&t, 0),
+            vec![
+                (0, 1, " ".into(), theme.foreground, Some(0x0000ff)),
+                (1, 1, "x".into(), 0x0000ff, Some(theme.foreground)),
+            ]
+        );
+        let t = fed(1, 10, "\x1b[7mx");
+        let inverse = (theme.background, Some(theme.foreground));
+        assert_eq!((runs(&t, 0)[0].3, runs(&t, 0)[0].4), inverse);
+        assert_eq!(
+            runs(&fed(1, 10, "\x1b[2;38;2;150;90;30mx"), 0)[0].3,
+            0x643c14
+        );
+        let t = fed(1, 10, "\x1b]4;1;rgb:12/34/56\x07\x1b[31mx");
+        assert_eq!(runs(&t, 0)[0].3, 0x123456, "OSC 4 wins over the theme");
+    }
+
+    #[test]
+    fn attributes_split_runs() {
+        // A curly underline counts as an underline, so `c` and `d` share a run.
+        let t = fed(1, 10, "\x1b[1ma\x1b[0;3mb\x1b[0;4mc\x1b[0;4:3md");
+        let d = t.display(&Settings::default().theme);
+        let flags: Vec<_> = (d.rows[0].iter())
+            .map(|r| (r.text.as_str(), r.bold, r.italic, r.underline))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("a", true, false, false),
+                ("b", false, true, false),
+                ("cd", false, false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_cursor_follows_the_program() {
+        let theme = Settings::default().theme;
+        let cursor =
+            |t: &Terminal| (t.display(&theme).cursor).map(|c| (c.row, c.col, c.cells, c.shape));
+        let mut t = fed(2, 10, "ab");
+        assert_eq!(cursor(&t), Some((0, 2, 1, CursorShape::Block)));
+        t.feed(b"\x1b[6 q");
+        assert_eq!(cursor(&t), Some((0, 2, 1, CursorShape::Beam)));
+        t.feed(b"\x1b[4 q\r\n");
+        assert_eq!(cursor(&t), Some((1, 0, 1, CursorShape::Underline)));
+        t.feed(b"\x1b[?25l");
+        assert_eq!(cursor(&t), None);
+        t.feed(b"\x1b[?25h\x1b[2 q\x1b[1;1H");
+        assert_eq!(cursor(&t), Some((0, 0, 1, CursorShape::Block)));
+        t.feed("日\x1b[1;1H".as_bytes());
+        assert_eq!(cursor(&t), Some((0, 0, 2, CursorShape::Block)));
+    }
+
+    #[test]
+    fn wide_chars_take_two_cells() {
+        let t = fed(2, 10, "日本x\r\nabcde");
+        let cols: Vec<_> = runs(&t, 0)
+            .iter()
+            .map(|r| (r.0, r.1, r.2.clone()))
+            .collect();
+        assert_eq!(
+            cols,
+            [(0, 2, "日".into()), (2, 2, "本".into()), (4, 1, "x".into())]
+        );
+        assert_eq!(runs(&t, 1)[0].2, "abcde", "e at column 4 too");
     }
 
     #[test]
@@ -480,6 +699,29 @@ mod tests {
             assert_eq!(h.core.message(), Some("/x: not a directory"));
             assert!(ops(&mut h).is_empty());
             assert_eq!(name(&h), "*scratch*<work>");
+        }
+
+        #[test]
+        fn the_frame_shows_the_screen() {
+            let mut h = work();
+            h.keys("M-x vterm RET");
+            h.send(Msg::TerminalOutput {
+                id: TerminalId(0),
+                bytes: b"$ ls\r\n".to_vec(),
+            });
+            let frame = h.frame(800., 300.);
+            let terminal = frame.windows[0].display.terminal.as_ref().unwrap();
+            let first: Vec<_> = terminal.rows[0]
+                .iter()
+                .map(|r| (r.col, r.text.as_str()))
+                .collect();
+            assert_eq!(first, [(0, "$"), (2, "ls")], "blanks are not drawn");
+            assert!(terminal.rows[1].is_empty());
+            let cursor = terminal.cursor.as_ref().map(|c| (c.row, c.col));
+            assert_eq!(
+                (cursor, frame.windows[0].display.cursor),
+                (Some((1, 0)), None)
+            );
         }
 
         #[test]

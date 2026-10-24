@@ -18,4 +18,5 @@ WindowDisplay {
         ),
     ),
     mode_line: "-- *scratch*<main>  1:0",
+    terminal: None,
 }
