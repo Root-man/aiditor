@@ -2,8 +2,10 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::ops::Range;
-use std::path::Path;
+use std::os::unix::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -12,6 +14,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode, test::TermSize};
 use alacritty_terminal::vte::ansi::{Color, CursorShape as Shape, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 
 use crate::buffer::{Buffer, BufferId, Face, Prop};
 use crate::display::{self, CursorShape, Run};
@@ -32,28 +35,176 @@ impl EventListener for Replies {
     }
 }
 
+/// Lines of scrollback, alacritty's default.
+const SCROLLBACK: usize = 10_000;
+
+/// An OSC 133 shell integration mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Prompt,
+    Input,
+    Output,
+    /// The command's end, with its exit code when the shell gave one.
+    End(Option<i32>),
+}
+
+/// What `Scan` stops the batch at, to apply once alacritty has seen the bytes before it.
+enum Signal {
+    Mark(Mark),
+    Cwd(PathBuf),
+    ClearHistory,
+    Reset,
+}
+
+/// Finds the sequences alacritty drops or that move the marks; parses nothing else.
+#[derive(Default)]
+struct Scan {
+    signal: Option<Signal>,
+}
+
+impl Perform for Scan {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.signal = match params {
+            [b"133", kind, rest @ ..] => Some(Signal::Mark(match *kind {
+                b"A" => Mark::Prompt,
+                b"B" => Mark::Input,
+                b"C" => Mark::Output,
+                b"D" => Mark::End(
+                    (rest.first()).and_then(|code| std::str::from_utf8(code).ok()?.parse().ok()),
+                ),
+                _ => return,
+            })),
+            [b"7", url @ ..] => local_dir(&url.join(&b';')).map(Signal::Cwd),
+            _ => None,
+        };
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _: bool, action: char) {
+        if action == 'J' && intermediates.is_empty() && params.iter().next() == Some(&[3]) {
+            self.signal = Some(Signal::ClearHistory);
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _: bool, byte: u8) {
+        if byte == b'c' && intermediates.is_empty() {
+            self.signal = Some(Signal::Reset);
+        }
+    }
+
+    fn terminated(&self) -> bool {
+        self.signal.is_some()
+    }
+}
+
+/// OSC 7's `file://host/path` or `kitty-shell-cwd://host/path`, when the host is this machine.
+fn local_dir(url: &[u8]) -> Option<PathBuf> {
+    let rest =
+        (url.strip_prefix(b"file://")).or_else(|| url.strip_prefix(b"kitty-shell-cwd://"))?;
+    let (host, path) = rest.split_at(rest.iter().position(|&b| b == b'/')?);
+    let local = host.is_empty()
+        || host.eq_ignore_ascii_case(b"localhost")
+        || host.eq_ignore_ascii_case(&hostname());
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut i = 0;
+    while i < path.len() {
+        if path[i] == b'%' {
+            let hex = path
+                .get(i + 1..i + 3)
+                .filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
+            decoded.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            decoded.push(path[i]);
+            i += 1;
+        }
+    }
+    (local && !decoded.contains(&0)).then(|| OsString::from_vec(decoded).into())
+}
+
+fn hostname() -> Vec<u8> {
+    let mut name = [0u8; 256];
+    // SAFETY: the buffer outlives the call, which writes at most its length.
+    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+        return Vec::new();
+    }
+    name.split(|&b| b == 0).next().unwrap_or_default().to_vec()
+}
+
 /// One terminal's grid and the parser state between output batches.
 pub struct Terminal {
     term: Term<Replies>,
     parser: Processor,
     replies: Replies,
+    scan_parser: Parser,
+    scan: Scan,
+    /// Each mark with its absolute line: the scrollback's oldest is 0.
+    marks: Vec<(usize, Mark)>,
+    cwd: Option<PathBuf>,
 }
 
 impl Terminal {
     pub fn new(rows: u16, cols: u16) -> Self {
         let replies = Replies::default();
         let size = TermSize::new(cols.max(1).into(), rows.max(1).into());
+        let config = Config {
+            scrolling_history: SCROLLBACK,
+            ..Config::default()
+        };
         Terminal {
-            term: Term::new(Config::default(), &size, replies.clone()),
+            term: Term::new(config, &size, replies.clone()),
             parser: Processor::new(),
             replies,
+            scan_parser: Parser::new(),
+            scan: Scan::default(),
+            marks: Vec::new(),
+            cwd: None,
         }
     }
 
     /// Feeds the program's output into the grid; returns the replies it asked for, in order.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.parser.advance(&mut self.term, bytes);
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            // Both parsers see the same chunks, so their states stay in step across batches.
+            // shortcut: inside a synchronized update (CSI ? 2026 h) alacritty holds bytes back, so a
+            // mark there takes the cursor before the update; flush the sync first if shells do that.
+            let n = (self.scan_parser).advance_until_terminated(&mut self.scan, rest);
+            self.parser.advance(&mut self.term, &rest[..n]);
+            rest = &rest[n..];
+            let main = !self.term.mode().contains(TermMode::ALT_SCREEN);
+            // shortcut: alacritty stops counting lines dropped from a full scrollback, so marks
+            // stop there; count them (as a ring offset) if marks must outlive 10,000 lines.
+            let full = main && self.term.grid().history_size() >= SCROLLBACK;
+            match self.scan.signal.take() {
+                Some(Signal::Mark(mark)) if main && !full => {
+                    let grid = self.term.grid();
+                    let line = grid.history_size() + grid.cursor.point.line.0 as usize;
+                    self.marks.push((line, mark));
+                }
+                Some(Signal::Cwd(path)) => self.cwd = Some(path),
+                Some(Signal::ClearHistory) if main => self.marks.clear(),
+                Some(Signal::Reset) => self.marks.clear(),
+                _ => {}
+            }
+            if full {
+                self.marks.clear();
+            }
+        }
         std::mem::take(&mut *self.replies.0.borrow_mut())
+    }
+
+    /// The OSC 133 marks kept so far, oldest first, each with its absolute line (`history()`
+    /// plus a screen row).
+    // shortcut: a column resize reflows wrapped lines without moving the marks, so a mark below
+    // a rewrapped line is off by the rows it gained or lost; track them through reflow if that
+    // matters.
+    pub fn marks(&self) -> &[(usize, Mark)] {
+        &self.marks
+    }
+
+    /// The shell's directory, from its last local OSC 7.
+    pub fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
     }
 
     /// The grid's rows and columns.
@@ -613,6 +764,77 @@ mod tests {
         let mut t = fed(2, 10, "ab\x1b[1");
         t.feed(b";1Hx");
         assert_eq!(t.screen(), "xb\n");
+    }
+
+    #[test]
+    fn prompt_marks_keep_their_lines() {
+        let mut t = fed(
+            3,
+            10,
+            "\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;2\x07",
+        );
+        use Mark::*;
+        let marks = [(0, Prompt), (0, Input), (1, Output), (2, End(Some(2)))];
+        assert_eq!(t.marks(), marks);
+        t.feed(b"\r\n\r\n\r\n\x1b]13");
+        t.feed(b"3;D\x1b\\");
+        assert_eq!(t.history(), 3);
+        assert_eq!(t.marks()[..4], marks);
+        assert_eq!(t.marks()[4], (5, End(None)));
+    }
+
+    #[test]
+    fn marks_on_the_alternate_screen_are_ignored() {
+        let t = fed(3, 10, "\x1b[?1049h\x1b]133;A\x07\x1b[?1049l");
+        assert_eq!(t.marks(), []);
+    }
+
+    #[test]
+    fn clearing_the_scrollback_drops_the_marks() {
+        let mut t = fed(
+            3,
+            10,
+            "\x1b]133;A\x07\r\n\x1b[H\x1b[2J\x1b[3J\x1b]133;B\x07",
+        );
+        assert_eq!(t.marks(), [(0, Mark::Input)]);
+        t.feed(b"\x1b[?1049h\x1b[3J\x1b[?1049l");
+        assert_eq!(t.marks(), [(0, Mark::Input)]);
+        t.feed(b"\x1bc");
+        assert_eq!(t.marks(), []);
+    }
+
+    #[test]
+    fn a_full_scrollback_stops_the_marks() {
+        let mut t = fed(3, 10, "\x1b]133;A\x07");
+        t.feed(&b"x\r\n".repeat(SCROLLBACK + 3));
+        assert_eq!(t.history(), SCROLLBACK);
+        t.feed(b"\x1b]133;A\x07");
+        assert_eq!(t.marks(), []);
+        t.feed(b"\x1b[3J\x1b]133;A\x07");
+        assert_eq!(t.marks(), [(2, Mark::Prompt)]);
+    }
+
+    #[test]
+    fn osc_7_sets_a_local_cwd() {
+        let mut t = fed(3, 10, "\x1b]7;file://localhost/tmp/a%20b\x07");
+        assert_eq!(t.cwd(), Some(Path::new("/tmp/a b")));
+        t.feed(b"\x1b]7;file:///home\x1b\\");
+        assert_eq!(t.cwd(), Some(Path::new("/home")));
+        let host = String::from_utf8_lossy(&hostname()).into_owned();
+        t.feed(format!("\x1b]7;kitty-shell-cwd://{host}/srv\x07").as_bytes());
+        assert_eq!(t.cwd(), Some(Path::new("/srv")));
+        for url in [
+            "file://elsewhere.example/etc",
+            "file://localhost",
+            "file:tmp",
+            "http://localhost/x",
+            "file:///bad%zz",
+            "file:///bad%+f",
+            "file:///nul%00",
+        ] {
+            t.feed(format!("\x1b]7;{url}\x07").as_bytes());
+            assert_eq!(t.cwd(), Some(Path::new("/srv")), "{url}");
+        }
     }
 
     impl Terminal {

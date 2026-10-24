@@ -6,6 +6,7 @@ edition = "2024"
 # No gpui or tokio here: the core is a plain state machine (CI checks this).
 [dependencies]
 alacritty_terminal = { version = "0.26.0", default-features = false }
+libc = "0.2.189"
 nucleo = "0.5.0"
 regex = "1.13.1"
 # Only LF breaks lines, so line numbers match compilers and grep.

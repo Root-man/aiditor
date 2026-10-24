@@ -71,6 +71,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "insta",
+ "libc",
  "nucleo",
  "proptest",
  "regex",
