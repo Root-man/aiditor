@@ -119,6 +119,8 @@
 # A terminal buffer in copy mode, a read-only buffer over its scrollback.
 [vterm-copy-mode]
 "RET" = "vterm-copy-mode-done"
+"C-c C-p" = "vterm-previous-prompt"
+"C-c C-n" = "vterm-next-prompt"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
