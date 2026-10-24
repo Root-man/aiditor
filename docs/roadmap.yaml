@@ -859,12 +859,13 @@ milestones:
           - key: m2-char-mode
             title: "Type into terminals in char mode"
             body: |
-              A terminal buffer starts in char mode, as vterm-mode: every key except the escape prefix (#89) is encoded as xterm does and sent as `TerminalOp::Write` instead of running a command; the prefix and the keys under it go through the keymaps as usual. Encoding follows Zed's `terminal/src/mappings/keys.rs`: chars as UTF-8, `C-<letter>` as its control byte, `M-` as an ESC prefix, `RET` as `\r`, `DEL` as `\x7f`, `S-TAB` as `\x1b[Z`, arrows, Home and End in normal or application cursor mode (DECCKM) as the program set it, and modified arrows as `\x1b[1;<m>D` and friends. `Key` gains the keys a shell needs that it lacks: Home, End, PageUp, PageDown, Delete and F1 to F12. Text from the platform's input (Option-typed chars on macOS with `option_as_meta` off, IME commits) is sent the same way.
+              A terminal buffer starts in char mode, as vterm-mode: every key except `C-x`, `C-c`, `M-x` and Cmd keys (#89) is encoded as xterm does and sent as `TerminalOp::Write` instead of running a command; those keys and the sequences under them go through the keymaps as usual, and `C-c C-c` sends `^C`. Encoding follows Zed's `terminal/src/mappings/keys.rs`: chars as UTF-8, `C-<letter>` as its control byte, `M-` as an ESC prefix, `RET` as `\r`, `DEL` as `\x7f`, `S-TAB` as `\x1b[Z`, arrows, Home and End in normal or application cursor mode (DECCKM) as the program set it, and modified arrows as `\x1b[1;<m>D` and friends. `Key` gains the keys a shell needs that it lacks: Home, End, PageUp, PageDown, Delete and F1 to F12. Text from the platform's input (Option-typed chars on macOS with `option_as_meta` off, IME commits) is sent the same way.
             acceptance:
               - "Typing `echo hi` then `RET` in a terminal runs it"
               - "`C-a`, `C-e`, `C-r` and `M-b` reach readline in bash and zle in zsh"
               - "Arrows move in `less` and `vim`, which switch to application cursor mode"
-              - "The escape prefix and the keys under it still run editor commands"
+              - "`C-x b`, `C-c` sequences and `M-x` still run editor commands, and `C-g` and `C-u` reach the shell"
+              - "`C-c C-c` interrupts a running `sleep 10`"
               - "Core tests check the bytes each key sends, in both cursor modes"
             blocked_by: [m2-decide-escape]
           - key: m2-term-paste
