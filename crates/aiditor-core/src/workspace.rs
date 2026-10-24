@@ -271,6 +271,9 @@ impl Ctx<'_> {
         let Some(saving) = self.save_some("workspace-kill", args, 1, mine, "kill")? else {
             return Ok(());
         };
+        for &buffer in &saving {
+            self.save(buffer)?;
+        }
         if saving.is_empty() {
             return self.core.kill_workspace(id);
         }

@@ -60,8 +60,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// Kills the buffer `name`, asking first when it is a modified file buffer; an unkillable
-    /// one is refused.
+    /// Kills the buffer `name`, asking first when it is a modified file buffer or a live
+    /// terminal; an unkillable one is refused.
     pub(crate) fn kill_buffer(&mut self, args: Args) -> Result<(), String> {
         let name = &args.strings[0];
         let id =
@@ -70,16 +70,16 @@ impl Ctx<'_> {
         if buffer.unkillable {
             return Err(format!("Can't kill {name}"));
         }
-        if buffer.file.is_some() && buffer.modified() {
+        let prompt = match self.core.live_terminal(id) {
+            true => Some(format!("Buffer {name} has a running process; kill it? ")),
+            false => (buffer.file.is_some() && buffer.modified())
+                .then(|| "Buffer modified; kill anyway? ".into()),
+        };
+        if let Some(prompt) = prompt {
             match args.strings.get(1).map(String::as_str) {
                 None => {
                     let command = self.core.commands["kill-buffer"];
-                    return self.read_string(
-                        command,
-                        args,
-                        "Buffer modified; kill anyway? ".into(),
-                        Some(&["no", "yes"]),
-                    );
+                    return self.read_string(command, args, prompt, Some(&["no", "yes"]));
                 }
                 Some("yes") => {}
                 Some(_) => return Ok(()),
@@ -227,12 +227,39 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Offers to save each modified file buffer, then quits once those saves succeed.
-    pub(crate) fn save_buffers_kill_terminal(&mut self, args: Args) -> Result<(), String> {
+    /// Offers to save each modified file buffer, asks before killing live terminals, then quits
+    /// once those saves succeed.
+    pub(crate) fn save_buffers_kill_terminal(&mut self, mut args: Args) -> Result<(), String> {
         let command = "save-buffers-kill-terminal";
-        let Some(saving) = self.save_some(command, args, 0, |_| true, "exit")? else {
+        // Marks the processes answer, the last string, so `save_some`'s pairs don't shift.
+        const PROCESSES: &str = "\0processes";
+        let n = args.strings.len();
+        let processes = (n >= 2 && args.strings[n - 2] == PROCESSES).then(|| {
+            let answer = args.strings.pop();
+            args.strings.pop();
+            answer.expect("two strings")
+        });
+        let Some(saving) = self.save_some(command, args.clone(), 0, |_| true, "exit")? else {
             return Ok(());
         };
+        if !self.core.terminals.is_empty() {
+            match processes {
+                None => {
+                    args.strings.push(PROCESSES.into());
+                    let prompt = "Active processes exist; kill them and exit anyway? ".into();
+                    let command = self.core.commands[command];
+                    return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
+                }
+                Some(answer) if answer.eq_ignore_ascii_case("yes") => {}
+                Some(_) => {
+                    // As declining to exit anyway, the buffers answered `Yes` are still saved.
+                    return saving.iter().try_for_each(|&id| self.save(id));
+                }
+            }
+        }
+        for &id in &saving {
+            self.save(id)?;
+        }
         match saving.is_empty() {
             true => self.effects.push(Effect::Quit),
             false => (self.core.quitting, self.core.then_kill) = (saving, None),
@@ -243,8 +270,8 @@ impl Ctx<'_> {
     /// Asks `command`'s questions about the modified file buffers `of` takes: whether to save
     /// each, then, if any was declined, whether to `verb` anyway. The strings after the first
     /// `skip` are name/answer pairs for the buffers asked about, then the `verb anyway` answer.
-    /// Starts the saves answered `Yes` and returns them once the command should go ahead;
-    /// `None` while asking or when declined.
+    /// Returns the buffers answered `Yes`, for the caller to save, once the command should go
+    /// ahead; `None` while asking, or when declined, having saved them.
     pub(crate) fn save_some(
         &mut self,
         command: &str,
@@ -280,11 +307,14 @@ impl Ctx<'_> {
             .filter_map(|name| core.buffers.find(name))
             .filter(|&id| core.buffers.get(id).is_some_and(Buffer::modified))
             .collect();
-        for &id in &saving {
-            self.save(id)?;
-        }
+        let go = !declined || last_yes;
         // Declining to go ahead still saves the buffers answered `Yes`.
-        Ok((!declined || last_yes).then_some(saving))
+        if !go {
+            for &id in &saving {
+                self.save(id)?;
+            }
+        }
+        Ok(go.then_some(saving))
     }
 
     pub(crate) fn save(&mut self, id: BufferId) -> Result<(), String> {
