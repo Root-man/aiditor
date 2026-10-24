@@ -776,6 +776,9 @@ mod tests {
             [(0, 2, "日".into()), (2, 2, "本".into()), (4, 1, "x".into())]
         );
         assert_eq!(runs(&t, 1)[0].2, "abcde", "e at column 4 too");
+        let t = fed(2, 10, "🦀x\r\nabc");
+        let row: Vec<_> = runs(&t, 0).iter().map(|r| (r.0, r.1)).collect();
+        assert_eq!(row, [(0, 2), (2, 1)], "x at column 2, as c below");
     }
 
     #[test]

@@ -15,6 +15,7 @@ use editor::Editor;
 
 mod editor;
 mod element;
+mod emoji;
 mod input;
 
 const FONT: &str = if cfg!(target_os = "macos") {
@@ -156,6 +157,7 @@ fn main() {
     tracing::info!("starting");
 
     Application::new().run(|cx: &mut App| {
+        emoji::drop_undrawable(cx);
         let window = cx
             .open_window(WindowOptions::default(), |window, cx| {
                 cx.new(|cx| Editor::new(core, args, channel, window, cx))
