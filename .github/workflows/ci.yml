@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental artifacts bloat the cached target/ and don't help a fresh checkout.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   check:
@@ -30,15 +32,19 @@ jobs:
       - name: Install Metal toolchain
         if: runner.os == 'macOS'
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
-      - uses: Swatinem/rust-cache@v2
-        # rust-cache's own key ignores [profile] edits, so an exact hit kept restoring stale deps and never re-saved.
-        # The environment hash covers every toolchain the runner image preinstalls, so image rollouts missed the cache.
-        # Turning it off also drops the lockfile hash, so the manifests and Cargo.lock go in the key.
+      # Not rust-cache: with its environment hash off (image rollouts kept missing) it has no fallback key,
+      # so every manifest or lockfile change rebuilt all dependencies from scratch.
+      # The manifests go in the key because [profile] edits must invalidate it.
+      # shortcut: target/ is never pruned and grows over time; bump the key prefix if the cache gets too big.
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          key: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/*/Cargo.toml') }}-${{ env.RUST_VERSION }}
-          add-rust-environment-hash-key: false
-          # PR caches are visible only to their own PR and pushed main's caches out of the 10 GB limit.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/*/Cargo.toml') }}
+          restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
       - run: cargo fmt --all --check
       - name: aiditor-core has no GPUI or Tokio dependency
         run: "cargo tree -p aiditor-core > tree.txt && ! grep -E '\\b(gpui|tokio) v' tree.txt"
@@ -47,5 +53,14 @@ jobs:
         run: "! grep -rnE 'panic *=? *\"?abort' Cargo.toml crates/*/Cargo.toml .cargo 2>/dev/null"
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # PR caches are visible only to their own PR and pushed main's caches out of the 10 GB limit.
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Benchmark reporting tests
         run: python3 -m unittest discover -s scripts -p test_benchmarks.py
