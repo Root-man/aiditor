@@ -644,6 +644,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.vterm_next_prompt(args.count()),
         },
         Command {
+            name: "vterm-mark-output",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.vterm_mark_output(),
+        },
+        Command {
             name: "vterm-copy-mode-done",
             spec: ArgSpec {
                 clipboard: true,

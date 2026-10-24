@@ -121,6 +121,7 @@
 "RET" = "vterm-copy-mode-done"
 "C-c C-p" = "vterm-previous-prompt"
 "C-c C-n" = "vterm-next-prompt"
+"C-c C-r" = "vterm-mark-output"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
