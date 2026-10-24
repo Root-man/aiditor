@@ -502,7 +502,12 @@ impl Ctx<'_> {
                     }
                 }
             }
-            Msg::TerminalSpawned { .. } | Msg::TerminalExited { .. } => {}
+            Msg::TerminalSpawned {
+                id,
+                result: Err(err),
+            } => self.end_terminal(id, Some(err)),
+            Msg::TerminalSpawned { .. } => {}
+            Msg::TerminalExited { id, .. } => self.end_terminal(id, None),
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.
@@ -772,7 +777,8 @@ pub struct Core {
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
     focused: BufferId,
-    /// Each terminal's buffer; an entry outlives its killed buffer.
+    /// Each live terminal's buffer, until its shell exits or `sync_terminals` sees the buffer
+    /// killed.
     terminals: BTreeMap<TerminalId, BufferId>,
     next_terminal: u64,
 }
@@ -904,6 +910,7 @@ impl Core {
         self.poll_completion(now, &mut effects);
         self.preview(&mut effects);
         self.watch(&mut effects);
+        self.sync_terminals(&mut effects);
         effects
     }
 

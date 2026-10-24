@@ -44,6 +44,8 @@ pub struct Harness {
     pub watched: WatchSet,
     pub collect_effects: bool,
     pub effects: Effects,
+    /// The terminal work the core asked for, in order.
+    pub terminal_ops: Vec<crate::TerminalOp>,
 }
 
 impl Harness {
@@ -76,6 +78,7 @@ impl Harness {
             watched: WatchSet::default(),
             collect_effects: false,
             effects: Vec::new(),
+            terminal_ops: Vec::new(),
         };
         for (name, text) in files {
             harness.read_reply(name, Some(text.as_bytes()));
@@ -206,7 +209,7 @@ impl Harness {
         }
         for effect in effects {
             match effect {
-                Effect::Terminal(_) => {}
+                Effect::Terminal(op) => self.terminal_ops.push(op),
                 Effect::File(op) => {
                     let reply = match &op {
                         FileOp::Save {
