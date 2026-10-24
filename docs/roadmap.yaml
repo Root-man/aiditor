@@ -898,17 +898,6 @@ milestones:
               - "`RET` copies the region, or the current line without one, to the kill ring and clipboard, and returns to char mode on the live screen"
               - "Output in copy mode doesn't change its text or point, and shows once copy mode ends"
             blocked_by: [m2-decide-escape]
-          - key: m2-term-mouse
-            title: "Mouse in terminals"
-            labels: [frontend]
-            body: |
-              The wheel over a terminal scrolls its scrollback, entering copy mode (as Emacs vterm's mouse wheel) unless the program is on the alternate screen. When the program turned on mouse reporting (modes 1000, 1002, 1003 with SGR 1006), clicks, drags and the wheel are sent to it as xterm encodes them, as Zed's `terminal/src/mappings/mouse.rs` does, so `vim`, `less` and `htop` take the mouse. Drag to select in char mode is out of scope until text buffers have it (#30).
-            acceptance:
-              - "The wheel over a shell with scrollback shows older output"
-              - "With `set mouse=a`, a click in `vim` moves its cursor and the wheel scrolls it"
-              - "The wheel in `less` scrolls it (alternate scroll, mode 1007)"
-              - "Core tests check the bytes each mouse event sends, in SGR and normal encoding"
-            blocked_by: [m2-copy-mode]
       - key: m2-shell-integration
         title: "Shell integration: OSC 133 and OSC 7"
         labels: [terminal]

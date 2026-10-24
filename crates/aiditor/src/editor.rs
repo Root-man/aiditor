@@ -6,8 +6,8 @@ use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
 use aiditor_services::{configuration, files, grep, recovery, terminal, watcher};
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
-    Point, ScrollWheelEvent, Task, Window, div, font, prelude::*, px, rgb,
+    ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, Pixels, Task, Window, div, font,
+    prelude::*, px, rgb,
 };
 use tokio::sync::mpsc;
 
@@ -36,12 +36,10 @@ pub(crate) struct Editor {
     pub(crate) debug: Option<Stats>,
     /// The input method's marked text, drawn at point but not in the buffer.
     pub(crate) marked: Option<String>,
-    /// The windows as last painted, for clicks, the wheel and the input method.
+    /// The windows as last painted, for the input method.
     pub(crate) painted: Vec<Painted>,
     /// The windows area's size and cell width last sent to the core.
     pub(crate) reported: (Pixels, Pixels, Pixels),
-    /// Wheel movement not yet scrolled as a whole line, positive down the buffer.
-    scroll_px: Pixels,
 }
 
 #[derive(Default)]
@@ -95,7 +93,6 @@ impl Editor {
             marked: None,
             painted: Vec::new(),
             reported: Default::default(),
-            scroll_px: px(0.),
         }
     }
 
@@ -186,48 +183,6 @@ impl Editor {
             }
             self.handle(Msg::Key(key), cx);
         }
-    }
-
-    fn on_scroll(&mut self, ev: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(window) = self.painted_at(ev.position).map(|p| p.id) else {
-            return;
-        };
-        let line_height = px(self.core.settings().line_height());
-        // GPUI's delta is negative when the content should move up, that is down the buffer.
-        self.scroll_px -= ev.delta.pixel_delta(line_height).y;
-        let lines = (self.scroll_px / line_height) as i64;
-        if lines != 0 {
-            self.scroll_px -= line_height * lines as f32;
-            self.handle(Msg::Scroll { window, lines }, cx);
-        }
-    }
-
-    fn on_click(&mut self, ev: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(p) = self.painted_at(ev.position) else {
-            return;
-        };
-        let y = ev.position.y - p.bounds.top();
-        if y >= p.bounds.size.height - px(self.core.settings().line_height()) {
-            return; // the mode line
-        }
-        // shortcut: the column in the shown text is taken as the buffer column, wrong after a fold on the line; map through the spans when folds have producers.
-        let (line, col) = match p.rows.iter().find(|row| y < row.top + row.height) {
-            Some(row) => {
-                let byte = row
-                    .text
-                    .closest_index_for_x(ev.position.x - p.bounds.left());
-                (row.number, row.text.text[..byte].chars().count())
-            }
-            // Below the buffer's last line: its end.
-            None => (usize::MAX, 0),
-        };
-        let window = p.id;
-        self.handle(Msg::Click { window, line, col }, cx);
-    }
-
-    /// The window painted under `pos`.
-    fn painted_at(&self, pos: Point<Pixels>) -> Option<&Painted> {
-        self.painted.iter().find(|p| p.bounds.contains(&pos))
     }
 
     /// The buffer font and the width of one of its cells.
@@ -365,18 +320,10 @@ impl Render for Editor {
             .font_family(font.family.clone())
             .text_size(px(settings.font_size))
             .children(stats.map(|s| line().child(s)))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .overflow_hidden()
-                    .on_scroll_wheel(cx.listener(Self::on_scroll))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_click))
-                    .child(FrameElement {
-                        editor: cx.entity(),
-                        windows: frame.windows,
-                    }),
-            )
+            .child(div().flex_1().flex().overflow_hidden().child(FrameElement {
+                editor: cx.entity(),
+                windows: frame.windows,
+            }))
             .children(hint)
             .child(echo);
         if let Some(debug) = &mut self.debug {
@@ -394,7 +341,7 @@ mod tests {
     use aiditor_core::key::{Key, KeyCode};
     use aiditor_core::keymap::{self, Binding, Keymap};
     use gpui::{Bounds, EntityInputHandler, ShapedLine};
-    use gpui::{Modifiers, ScrollDelta, TestAppContext, VisualTestContext, point};
+    use gpui::{TestAppContext, VisualTestContext};
 
     fn editor<'a>(
         cx: &'a mut TestAppContext,
@@ -991,54 +938,17 @@ mod tests {
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "abxyz");
     }
 
-    /// Window `i`'s bounds and its rows' line numbers and laid-out text, as last painted.
+    /// Window `i`'s bounds and its rows' laid-out text, as last painted.
     fn painted(
         editor: &gpui::Entity<Editor>,
         cx: &mut VisualTestContext,
         i: usize,
-    ) -> (Bounds<Pixels>, Vec<(usize, ShapedLine)>) {
+    ) -> (Bounds<Pixels>, Vec<ShapedLine>) {
         editor.read_with(cx, |e, _| {
             let p = &e.painted[i];
-            let rows = p.rows.iter().map(|r| (r.number, r.text.clone()));
+            let rows = p.rows.iter().map(|r| r.text.clone());
             (p.bounds, rows.collect())
         })
-    }
-
-    #[gpui::test]
-    fn the_mouse_scrolls_and_moves_point(cx: &mut TestAppContext) {
-        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
-        let (editor, cx) = editor(cx, &text);
-        let line_height = editor.read_with(cx, |e, _| px(e.core.settings().line_height()));
-        let (bounds, _) = painted(&editor, cx, 0);
-        let inside = bounds.origin + point(px(1.), px(1.));
-        cx.simulate_event(ScrollWheelEvent {
-            position: inside,
-            delta: ScrollDelta::Lines(point(0., -5.)),
-            ..Default::default()
-        });
-        let top_and_point = |cx: &mut VisualTestContext| {
-            let top = painted(&editor, cx, 0).1[0].0;
-            (top, editor.read_with(cx, |e, _| e.core.point()))
-        };
-        assert_eq!(
-            top_and_point(cx),
-            (5, 35),
-            "point moves to the first line shown"
-        );
-        // Half a line twice scrolls one line.
-        for _ in 0..2 {
-            cx.simulate_event(ScrollWheelEvent {
-                position: inside,
-                delta: ScrollDelta::Pixels(point(px(0.), line_height * -0.5)),
-                ..Default::default()
-            });
-        }
-        assert_eq!(top_and_point(cx).0, 6);
-        // Click over the `n` of the second line shown, `line 7`.
-        let x = painted(&editor, cx, 0).1[1].1.x_for_index(2);
-        let click = bounds.origin + point(x + px(1.), line_height * 1.5);
-        cx.simulate_click(click, Modifiers::none());
-        assert_eq!(top_and_point(cx).1, 7 * 7 + 2);
     }
 
     #[gpui::test]
@@ -1102,7 +1012,7 @@ mod tests {
         let cursor = |cx: &mut VisualTestContext| {
             let (bounds, rows) = painted(&editor, cx, 0);
             let x = editor.read_with(cx, |e, _| e.painted[0].cursor.unwrap().left());
-            (rows[0].1.clone(), x - bounds.left())
+            (rows[0].clone(), x - bounds.left())
         };
         for col in [0, 3, 7] {
             cx.simulate_keystrokes(&format!("ctrl-a ctrl-u {col} ctrl-f"));
@@ -1125,27 +1035,5 @@ mod tests {
         let (line, x) = cursor(cx);
         assert_eq!(line.text.as_ref(), "hel´lo world");
         assert_eq!(x, line.x_for_index("hel´".len()));
-    }
-
-    #[gpui::test]
-    fn clicking_another_window_selects_it(cx: &mut TestAppContext) {
-        let (editor, cx) = editor(cx, "abc\ndef");
-        cx.simulate_keystrokes("ctrl-x 3");
-        let ((left, _), (right, rows)) = (painted(&editor, cx, 0), painted(&editor, cx, 1));
-        assert_eq!(left.right(), right.left(), "side by side");
-        let line_height = editor.read_with(cx, |e, _| px(e.core.settings().line_height()));
-        let x = rows[1].1.x_for_index(1);
-        cx.simulate_click(
-            right.origin + point(x + px(1.), line_height * 1.5),
-            Modifiers::none(),
-        );
-        let (point, selected) = editor.update(cx, |e, _| {
-            let frame = e.core.frame();
-            (
-                e.core.point(),
-                frame.windows.iter().map(|w| w.selected).collect::<Vec<_>>(),
-            )
-        });
-        assert_eq!((point, selected), (5, vec![false, true]));
     }
 }

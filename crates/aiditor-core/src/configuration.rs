@@ -107,13 +107,6 @@ mod tests {
             assert_eq!(log(&h), "Configuration reloaded\n");
             h.keys("x");
             assert_eq!((h.text(), h.core.message()), ("x".into(), None));
-            h.keys(keys);
-            h.send(Msg::Click {
-                window: h.core.windows.selected,
-                line: 0,
-                col: 0,
-            });
-            assert_eq!(h.core.message(), None);
         }
     }
 

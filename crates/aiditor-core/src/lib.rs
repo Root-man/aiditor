@@ -71,17 +71,6 @@ pub enum Msg {
         text: String,
         replace: Option<Range<usize>>,
     },
-    /// The wheel scrolled `window` this many lines down its buffer, up when negative.
-    Scroll {
-        window: WindowId,
-        lines: i64,
-    },
-    /// A left click in `window` on the char at this buffer line and column.
-    Click {
-        window: WindowId,
-        line: usize,
-        col: usize,
-    },
     /// The frame's windows area is `width` by `height` px and the font's cells are
     /// `cell_width` px wide.
     Resize {
@@ -531,22 +520,6 @@ impl Ctx<'_> {
                 for c in text.chars() {
                     self.key(Key::plain(KeyCode::Char(c)));
                 }
-            }
-            // A window deleted since the frontend last drew is gone; drop its mouse events.
-            Msg::Scroll { window, .. } | Msg::Click { window, .. }
-                if !self.core.windows.tree.leaves().contains(&window) => {}
-            // At an end the wheel just stops, without C-v's message.
-            Msg::Scroll { window, lines } => {
-                let selected = self.core.windows.selected;
-                self.core.select(window);
-                _ = self.scroll_lines(lines);
-                self.core.select(selected);
-            }
-            Msg::Click { window, line, col } => {
-                // shortcut: a click aborts the minibuffer, losing its text; keep it active once commands can leave it.
-                self.core.close_minibuffer();
-                self.core.select(window);
-                self.click(line, col);
             }
             Msg::Resize {
                 width,
@@ -1021,7 +994,6 @@ mod tests {
     use crate::harness::test_cmd;
     use crate::harness::twenty_lines;
     use crate::key::parse_keys;
-    use crate::window::WindowId;
 
     #[test]
     fn calls_a_command_by_name_with_its_args() {
@@ -1135,24 +1107,14 @@ mod tests {
     }
 
     #[test]
-    fn echo_area_clears_on_click_not_on_scroll_or_timers() {
+    fn echo_area_stays_through_timers() {
         let mut h = twenty_lines();
         h.keys("C-g");
-        h.send(Msg::Scroll {
-            window: WindowId(0),
-            lines: 2,
-        });
         h.start_timer(MS, None, Msg::Tick);
         h.advance(2 * MS);
         assert_eq!(h.core.message(), Some("Quit"));
         h.keys("M-z");
         assert_eq!(h.core.message(), Some("M-z is undefined"));
-        h.send(Msg::Click {
-            window: WindowId(0),
-            line: 0,
-            col: 0,
-        });
-        assert_eq!(h.core.message(), None);
     }
 
     #[test]

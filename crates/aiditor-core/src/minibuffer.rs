@@ -1179,14 +1179,6 @@ mod tests {
             h.core.message(),
             Some("Command attempted to use minibuffer while in minibuffer")
         );
-        h.keys("ab").send(Msg::Click {
-            window: WindowId(0),
-            line: 0,
-            col: 2,
-        });
-        assert!(h.core.minibuffer().is_none());
-        assert_eq!((h.text().as_str(), h.point()), ("text", 2));
-        assert_eq!(h.core.message(), None, "the command did not run");
     }
 
     #[test]
@@ -1346,15 +1338,10 @@ mod tests {
             before,
             "RET runs from the window as it was"
         );
-        h.keys("C-c p C-n").send(Msg::Click {
-            window: WindowId(1),
-            line: 0,
-            col: 0,
-        });
-        assert_eq!(shown(&h), file, "a click restores");
+        h.keys("C-c p C-n C-g C-x o");
         let (main, w) = (h.core.workspace(), h.new_workspace("w", "p"));
         h.core.switch_workspace(main).unwrap();
-        // The click selected window 1, so the prompt opens from it.
+        // Window 1 is selected now, so the prompt opens from it.
         let before = h.core.windows.window.buffer();
         h.keys("C-c p C-n");
         assert_ne!(h.core.windows.others[&WindowId(1)].buffer(), before);

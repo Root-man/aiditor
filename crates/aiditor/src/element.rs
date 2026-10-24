@@ -4,7 +4,6 @@ use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
 use aiditor_core::display::{CursorShape, FrameWindow, Line, Rect, Terminal};
 use aiditor_core::settings::Theme;
-use aiditor_core::window::WindowId;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
     FontStyle, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels, Point,
@@ -16,7 +15,6 @@ use crate::editor::Editor;
 
 /// A window as painted: where, its rows and mode line laid out, and the cursor.
 pub(crate) struct Painted {
-    pub(crate) id: WindowId,
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) selected: bool,
     pub(crate) rows: Vec<Row>,
@@ -38,8 +36,6 @@ pub(crate) struct Cells {
 }
 
 pub(crate) struct Row {
-    /// The buffer line it starts on.
-    pub(crate) number: usize,
     /// Its top, from the window's.
     pub(crate) top: Pixels,
     pub(crate) height: Pixels,
@@ -143,7 +139,6 @@ impl Element for FrameElement {
                         cursor_char = Some(shape(under.to_string(), &[run]));
                     }
                     let row = Row {
-                        number: line.number,
                         top,
                         height,
                         decorations: line.decorations.clone(),
@@ -225,7 +220,6 @@ impl Element for FrameElement {
                     &settings.theme,
                 );
                 Painted {
-                    id: w.id,
                     bounds,
                     selected: w.selected,
                     rows,

@@ -1324,31 +1324,20 @@ mod tests {
     }
 
     #[test]
-    fn click_and_workspace_switch_release_prepared_previews() {
-        for switch in [false, true] {
-            let mut h = findable(&[]);
-            h.keys("origin C-f");
-            let main = h.core.workspace();
-            let other = h.new_workspace("other", "tmp");
-            h.core.switch_workspace(main).unwrap();
-            let original = h.core.windows.window.buffer();
-            let window = h.core.windows.selected;
-            h.keys("C-x p f");
-            let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
-            if switch {
-                h.core.switch_workspace(other).unwrap();
-                h.core.switch_workspace(main).unwrap();
-            } else {
-                h.send(Msg::Click {
-                    window,
-                    line: 0,
-                    col: 0,
-                });
-            }
-            assert_eq!(h.core.windows.window.buffer(), original);
-            assert_eq!(h.text(), "origin");
-            assert!(h.core.buffers.get(peek).is_none());
-        }
+    fn a_workspace_switch_releases_prepared_previews() {
+        let mut h = findable(&[]);
+        h.keys("origin C-f");
+        let main = h.core.workspace();
+        let other = h.new_workspace("other", "tmp");
+        h.core.switch_workspace(main).unwrap();
+        let original = h.core.windows.window.buffer();
+        h.keys("C-x p f");
+        let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
+        h.core.switch_workspace(other).unwrap();
+        h.core.switch_workspace(main).unwrap();
+        assert_eq!(h.core.windows.window.buffer(), original);
+        assert_eq!(h.text(), "origin");
+        assert!(h.core.buffers.get(peek).is_none());
     }
 
     #[test]
