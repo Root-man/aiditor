@@ -903,7 +903,54 @@ milestones:
         labels: [terminal]
         design: "#subsystems"
         body: |
-          Prompt marks for jump-to-prompt and per-command output capture; cwd tracking. Break down when M2 starts.
+          Prompt marks for jump-to-prompt and per-command output capture; cwd tracking.
+        tasks:
+          - key: m2-osc-parse
+            title: "Prompt marks and cwd from terminal output"
+            body: |
+              alacritty_terminal drops OSC 133 and OSC 7 (vte's `osc_dispatch` sends them to `unhandled`). `Terminal::feed` runs vte's low-level `Parser` (re-exported as `alacritty_terminal::vte`) alongside, using `advance_until_terminated` to split the batch after each OSC 133 or OSC 7, feeds alacritty that prefix, then records the event at the cursor. Marks `A` (prompt), `B` (input), `C` (output) and `D` (end, with its exit code) are kept as absolute lines (history plus cursor line). OSC 7's `file://host/path` (and `kitty-shell-cwd://`) is percent-decoded and kept as the terminal's cwd when the host is empty, `localhost` or this machine and the path is absolute; anything else is ignored, since program output is untrusted. Marks are ignored on the alternate screen and dropped when the scrollback is cleared. Once the scrollback reaches its cap, alacritty no longer counts dropped lines, so stored lines would point at the wrong rows: stop keeping marks then (a `shortcut:` comment), as Zed's terminal gives up on its cwd history.
+            acceptance:
+              - "Core tests feed raw bytes with OSC 133 A/B/C/D and read back each mark's line and the exit code"
+              - "OSC 7 with a local host sets the cwd; a remote host, a relative path or garbage leaves it unchanged"
+              - "Marks set on the alternate screen are ignored, and `clear` (ED 3) drops them"
+              - "A 64 KB batch with no OSC parses in about the same time as before (core benchmark)"
+          - key: m2-osc-cwd
+            title: "Terminal buffers follow the shell's directory"
+            body: |
+              A terminal buffer's directory is the last OSC 7 cwd, else the directory its shell started in. `Core::directory()` uses it, so `C-x C-f` from a terminal starts where the shell is, and `vterm` from a terminal buffer starts its shell there too.
+            acceptance:
+              - "After `cd /tmp` in a terminal, `C-x C-f` starts at `/tmp/`"
+              - "`vterm` from that terminal starts its shell in `/tmp`"
+              - "Without OSC 7, both use the directory the shell started in"
+            blocked_by: [m2-osc-parse]
+          - key: m2-osc-jump
+            title: "Jump between prompts in copy mode"
+            body: |
+              In copy mode, `C-c C-p` (`vterm-previous-prompt`) and `C-c C-n` (`vterm-next-prompt`) move point to the start of the previous or next command's input (mark `B`, else `A`), as vterm does, honouring the prefix count. Copy mode maps each mark's grid line to its buffer line, accounting for soft-wrapped rows joined into one line. No marks: echo that no prompt was found.
+            acceptance:
+              - "After three commands, `C-c C-p` three times lands on each command's input, newest first, and `C-c C-n` goes back"
+              - "`C-u 2 C-c C-p` skips one prompt"
+              - "Core tests cover a wrapped command line and a terminal with no marks"
+            blocked_by: [m2-osc-parse]
+          - key: m2-osc-output
+            title: "Select a command's output in copy mode"
+            body: |
+              In copy mode, a command (`vterm-mark-output`, bound under `C-c`) sets the region to the output of the command at point: from its `C` mark to its `D` mark, or to the next prompt when `D` is missing. `RET` then copies it as usual.
+            acceptance:
+              - "With point on `cargo test`'s output or its command line, the command then `RET` copies exactly that output"
+              - "The last command, still running or with no `D`, is selected up to the screen's end"
+              - "Without marks, it echoes that no command is at point"
+            blocked_by: [m2-osc-parse]
+          - key: m2-zsh-integration
+            title: "Inject zsh shell integration"
+            body: |
+              zsh and starship send neither sequence, and Ghostty's integration only loads in shells Ghostty starts. When the shell is zsh, the PTY service starts it with `ZDOTDIR` set to a folder aiditor ships, as Ghostty does: its `.zshenv` restores the user's `ZDOTDIR` and sources their files, then adds hooks that send `133;D;<status>`, `133;A` and `7` before each prompt, `133;B` after it, and `133;C` before a command runs. The hooks run after starship's and add `B` once per prompt. Other shells get nothing (a `shortcut:` comment). Record the decision in `docs/editor.md`.
+            acceptance:
+              - "A zsh terminal sends OSC 133 A/B/C/D and OSC 7, with the user's `.zshenv`, `.zshrc` and starship prompt unchanged"
+              - "Inside it, `$ZDOTDIR` is the user's own value, so nested shells behave as outside aiditor"
+              - "Bash and fish start as before"
+              - "Checked on macOS and Linux"
+              - "Decision recorded in docs/editor.md"
       - key: m2-editor-client
         title: "$EDITOR client for terminal buffers"
         labels: [terminal]
