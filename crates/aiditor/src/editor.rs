@@ -86,7 +86,7 @@ impl Editor {
             timer: None,
             config_dir: args.config_dir,
             grep: grep::Grep::default(),
-            terminals: terminal::Terminals::default(),
+            terminals: terminal::Terminals::new(args.zsh_dir),
             watcher,
             recovery: args.recovery_dir.map(recovery::spawn),
             debug: args.debug.then(Stats::default),

@@ -236,6 +236,132 @@ async fn default_zsh_reads_the_login_profile() {
     );
 }
 
+fn zsh() -> Option<&'static str> {
+    let zsh = ["/bin/zsh", "/usr/bin/zsh"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file());
+    if zsh.is_none() {
+        eprintln!("zsh not installed; skipping");
+    }
+    zsh
+}
+
+/// The output of a default zsh with the integration in `integration`, given `lines` as typeahead.
+async fn integrated_zsh(
+    integration: &Path,
+    zsh: &str,
+    env: Vec<(String, String)>,
+    lines: &[&str],
+) -> String {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::new(Some(integration.into()));
+    let env = [vec![("SHELL".into(), zsh.into())], env].concat();
+    let mut rx = spawn(&mut terminals, cwd.path(), None, env);
+    started(&mut rx).await;
+    for line in lines.iter().chain(&["exit"]) {
+        write(&mut terminals, format!("{line}\r").as_bytes());
+    }
+    String::from_utf8_lossy(&output_until_exit(&mut rx, 0).await).into()
+}
+
+#[tokio::test]
+async fn zsh_integration_sends_marks_and_keeps_the_users_files() {
+    let Some(zsh) = zsh() else { return };
+    let integration = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let user_dir = user.path().display().to_string();
+    std::fs::write(user.path().join(".zshenv"), "ENVV=e\n").unwrap();
+    // A theme's hook: it rewrites PS1 each prompt and reads the command's status.
+    std::fs::write(
+        user.path().join(".zshrc"),
+        "RCV=r\ntheme() { seen=$?; PS1='p> ' }\nprecmd_functions+=(theme)\n",
+    )
+    .unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    // Canonical, so it is zsh's $PWD on macOS, where /var links to /private/var.
+    let cwd = cwd.path().canonicalize().unwrap().join("a é%b");
+    std::fs::create_dir(&cwd).unwrap();
+    let cwd = cwd.display().to_string();
+    let output = integrated_zsh(
+        integration.path(),
+        zsh,
+        vec![
+            ("ZDOTDIR".into(), user_dir.clone()),
+            ("HOME".into(), user_dir.clone()),
+        ],
+        &[
+            &format!("cd '{cwd}'"),
+            "false",
+            "echo Z=$ZDOTDIR $ENVV $RCV S=$seen",
+        ],
+    )
+    .await;
+    assert!(
+        output.contains(&format!("Z={user_dir} e r S=1")),
+        "{output:?}"
+    );
+    let first_a = output.find("\x1b]133;A\x07\x1b]7;file://").unwrap();
+    assert!(!output[..first_a].contains("\x1b]133;"), "{output:?}");
+    let prompt = "\x1b]133;A\x07\x1b]7;file://";
+    let d = output.find(&format!("\x1b]133;D;1\x07{prompt}")).unwrap();
+    assert!(output[..d].contains("\x1b]133;C\x07"), "{output:?}");
+    let encoded = cwd.replace("a é%b", "a%20%C3%A9%25b");
+    assert!(
+        output[d..].contains(&format!("{encoded}\x07")),
+        "{output:?}"
+    );
+    // The theme replaces PS1 after the first prompt's hooks; B is on every later prompt.
+    assert_eq!(output.matches("\x1b]133;B\x07").count(), 3, "{output:?}");
+    assert_eq!(output.matches("p> \x1b]133;B\x07").count(), 3, "{output:?}");
+}
+
+#[tokio::test]
+async fn zsh_integration_leaves_an_unset_zdotdir_unset() {
+    let Some(zsh) = zsh() else { return };
+    if std::env::var_os("ZDOTDIR").is_some() {
+        eprintln!("ZDOTDIR is set in the test's environment; skipping");
+        return;
+    }
+    let integration = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".zshrc"), "RCV=r\n").unwrap();
+    let home = home.path().display().to_string();
+    let output = integrated_zsh(
+        integration.path(),
+        zsh,
+        vec![("HOME".into(), home)],
+        &["echo Z=${ZDOTDIR-unset} $RCV ${AIDITOR_ZDOTDIR-gone}"],
+    )
+    .await;
+    assert!(output.contains("Z=unset r gone"), "{output:?}");
+    // With no hook rewriting PS1, the first prompt has every mark before the first command.
+    let c = output.find("\x1b]133;C\x07").unwrap();
+    let first = &output[..c];
+    assert!(first.contains("\x1b]133;A\x07\x1b]7;file://"), "{output:?}");
+    assert!(first.contains("\x1b]133;B\x07"), "{output:?}");
+}
+
+#[tokio::test]
+async fn bash_starts_without_zsh_integration() {
+    let integration = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".bash_profile"),
+        "echo \"Z=$ZDOTDIR\"; exit\n",
+    )
+    .unwrap();
+    let mut terminals = Terminals::new(Some(integration.path().into()));
+    let env = vec![
+        ("SHELL".into(), "/bin/bash".into()),
+        ("HOME".into(), home.path().display().to_string()),
+    ];
+    let mut rx = spawn(&mut terminals, home.path(), None, env);
+    started(&mut rx).await;
+    let output = String::from_utf8(output_until_exit(&mut rx, 0).await).unwrap();
+    assert_eq!(output.trim(), "Z=");
+    assert!(!integration.path().join(".zshenv").exists());
+}
+
 #[tokio::test]
 async fn backpressure_stalls_only_its_terminal_and_draining_resumes_it() {
     let dir = tempfile::tempdir().unwrap();
