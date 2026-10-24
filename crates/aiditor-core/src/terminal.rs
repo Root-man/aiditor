@@ -35,14 +35,25 @@ impl EventListener for Replies {
     }
 }
 
-/// What `Terminal::copy_text` returns: text, faces, the cursor's line and column, and prompts.
+/// What `Terminal::copy_text` returns: text, faces, the cursor's line and column, and commands.
 pub type CopyText = (
     String,
     Vec<(Range<usize>, Face)>,
     usize,
     usize,
-    Vec<(usize, usize)>,
+    Vec<ShellCommand>,
 );
+
+/// A command's OSC 133 marks as char indices in copy mode's text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellCommand {
+    /// Its `A` mark, else its `B`.
+    pub start: usize,
+    /// Its `B` mark, else its `A`.
+    pub input: usize,
+    pub output: Option<usize>,
+    pub end: Option<usize>,
+}
 
 /// Lines of scrollback, alacritty's default.
 const SCROLLBACK: usize = 10_000;
@@ -266,8 +277,7 @@ impl Terminal {
 
     /// Copy mode's text: the scrollback then the screen, soft-wrapped rows joined and blank rows
     /// below the cursor dropped; the char ranges of its colours resolved against `theme`; the
-    /// cursor's line and char column in it; and each command's input start (its `B` mark, else
-    /// its `A`) as a sorted line and char column.
+    /// cursor's line and char column in it; and each command's marks, sorted by start.
     pub fn copy_text(&self, theme: &Theme) -> CopyText {
         let grid = self.term.grid();
         let (cursor, cols) = (grid.cursor.point, self.term.columns());
@@ -324,27 +334,41 @@ impl Terminal {
         while lines.len() > at.0 + 1 && lines.last().is_some_and(String::is_empty) {
             lines.pop();
         }
-        let mut prompts: Vec<(usize, usize)> = Vec::new();
-        let mut awaits_input = false;
-        for (&(.., mark), place) in self.marks.iter().zip(places) {
-            let place = place.filter(|&(n, _)| n < lines.len());
-            match (mark, place) {
-                (Mark::Prompt, Some(place)) => prompts.push(place),
-                (Mark::Input, Some(place)) if awaits_input => {
-                    *prompts.last_mut().expect("a prompt") = place
-                }
-                (Mark::Input, Some(place)) => prompts.push(place),
-                _ => {}
-            }
-            // A prompt with no place of its own leaves its input to stand alone.
-            awaits_input = mark == Mark::Prompt && place.is_some();
-        }
-        prompts.sort_unstable();
-        prompts.dedup();
         let mut starts = vec![0];
         for line in &lines {
             starts.push(starts.last().expect("a start") + line.chars().count() + 1);
         }
+        let mut commands: Vec<ShellCommand> = Vec::new();
+        let mut awaits_input = false;
+        for (&(.., mark), place) in self.marks.iter().zip(places) {
+            let at = (place.filter(|&(n, _)| n < lines.len()))
+                .map(|(n, col)| (starts[n] + col).min(starts[n + 1] - 1));
+            let last = commands.last_mut();
+            match (mark, at) {
+                (Mark::Input, Some(at)) if awaits_input => last.expect("a prompt").input = at,
+                (Mark::Prompt | Mark::Input, Some(at)) => commands.push(ShellCommand {
+                    start: at,
+                    input: at,
+                    output: None,
+                    end: None,
+                }),
+                (Mark::Output, Some(at)) => {
+                    if let Some(last) = last {
+                        last.output.get_or_insert(at);
+                    }
+                }
+                // A `D` without a `C` ends an empty command line.
+                (Mark::End(_), Some(at)) => {
+                    if let Some(last) = last.filter(|c| c.output.is_some()) {
+                        last.end.get_or_insert(at);
+                    }
+                }
+                _ => {}
+            }
+            // A prompt with no place of its own leaves its input to stand alone.
+            awaits_input = mark == Mark::Prompt && at.is_some();
+        }
+        commands.sort_by_key(|c| c.start);
         // Colour on trimmed blanks or dropped rows has no text to go on.
         let faces = (colors.into_iter())
             .filter(|(n, ..)| *n < lines.len())
@@ -357,7 +381,7 @@ impl Terminal {
             })
             .filter(|(range, _)| !range.is_empty())
             .collect();
-        (lines.join("\n"), faces, at.0, at.1, prompts)
+        (lines.join("\n"), faces, at.0, at.1, commands)
     }
 
     /// The screen's rows as runs of styled cells, and the cursor, colors resolved against `theme`.
@@ -613,14 +637,12 @@ impl Ctx<'_> {
             core.windows.window.set_active(false);
             return Ok(());
         }
-        let (text, faces, line, col, prompts) = terminal.copy_text(&core.settings.theme);
+        let (text, faces, line, col, commands) = terminal.copy_text(&core.settings.theme);
         buffer.set_copy_text(Some(text.as_str().into()));
         for (range, face) in faces {
             buffer.add_property(range, Prop::Face(face))?;
         }
-        buffer.prompts = (prompts.into_iter())
-            .map(|(line, col)| buffer.char_idx(line, col))
-            .collect::<Result<_, _>>()?;
+        buffer.commands = commands;
         let at = buffer.char_idx(line, col)?;
         core.windows.window.set_point(&mut core.buffers, at)?;
         Ok(())
@@ -630,7 +652,10 @@ impl Ctx<'_> {
     /// negative, or the farthest one when fewer exist.
     pub(crate) fn vterm_next_prompt(&mut self, n: i64) -> Result<(), String> {
         let core = &mut *self.core;
-        let (prompts, point) = (&core.current().prompts, core.point());
+        let point = core.point();
+        let mut prompts: Vec<usize> = core.current().commands.iter().map(|c| c.input).collect();
+        prompts.sort_unstable();
+        prompts.dedup();
         let count = n.unsigned_abs() as usize;
         let target = match n > 0 {
             true => prompts.iter().filter(|&&p| p > point).take(count).last(),
@@ -643,6 +668,27 @@ impl Ctx<'_> {
         };
         let at = *target.ok_or("No prompt found")?;
         core.windows.window.set_point(&mut core.buffers, at)?;
+        Ok(())
+    }
+
+    /// Sets an active region over the output of the command at point, from its `C` mark to its
+    /// `D`, else the next command's start, else the text's end, without its last newline.
+    pub(crate) fn vterm_mark_output(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let (buffer, point) = (core.current(), core.point());
+        let commands = &buffer.commands;
+        let i = (commands.iter().rposition(|c| c.start <= point)).ok_or("No command at point")?;
+        let output = commands[i].output.ok_or("No command at point")?;
+        let mut end = (commands[i].end)
+            .or(commands.get(i + 1).map(|c| c.start))
+            .unwrap_or(buffer.len_chars())
+            .max(output);
+        if end > output && buffer.text().get_char(end - 1) == Some('\n') {
+            end -= 1;
+        }
+        let window = &mut core.windows.window;
+        window.push_mark(&mut core.buffers, end, true)?;
+        window.set_point(&mut core.buffers, output)?;
         Ok(())
     }
 
@@ -1144,7 +1190,7 @@ mod tests {
     }
 
     mod in_the_core {
-        use crate::harness::Harness;
+        use crate::harness::{Harness, mark};
         use crate::{Effect, Msg, TerminalId, TerminalOp};
 
         fn output(h: &mut Harness, id: TerminalId, bytes: &str) {
@@ -1402,6 +1448,50 @@ mod tests {
             let (mut h, _, text) = copying();
             h.keys("C-c C-p");
             assert_eq!(h.core.message(), Some("No prompt found"));
+            assert_eq!(h.point(), text.len());
+        }
+
+        #[test]
+        fn marking_output_from_it_or_its_command_line_copies_it() {
+            let (mut h, id) = shown();
+            output(
+                &mut h,
+                id,
+                "\x1b]133;A\x07$ \x1b]133;B\x07t\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;0\x07\
+                 \x1b]133;A\x07$ \x1b]133;B\x07",
+            );
+            h.keys("C-c C-t");
+            assert_eq!(h.text(), "$ t\na\nb\n$");
+            h.keys("C-c C-p C-c C-p C-n C-n C-c C-r");
+            assert_eq!((h.point(), mark(&h)), (4, (Some(7), true)));
+            h.keys("RET");
+            assert_eq!(h.core.kills.current_kill(0).unwrap(), "a\nb");
+            h.keys("C-c C-t C-c C-p C-c C-p C-c C-r RET");
+            assert_eq!(h.core.kills.current_kill(0).unwrap(), "a\nb");
+        }
+
+        #[test]
+        fn output_without_an_end_runs_to_the_next_prompt_or_the_text_end() {
+            let (mut h, id) = shown();
+            output(
+                &mut h,
+                id,
+                "\x1b]133;A\x07$ \x1b]133;B\x07t\r\n\x1b]133;C\x07a\r\n\
+                 \x1b]133;A\x07$ \x1b]133;B\x07u\r\n\x1b]133;C\x07b\r\nc",
+            );
+            h.keys("C-c C-t");
+            assert_eq!(h.text(), "$ t\na\n$ u\nb\nc");
+            h.keys("C-c C-r RET");
+            assert_eq!(h.core.kills.current_kill(0).unwrap(), "b\nc");
+            h.keys("C-c C-t M-< C-c C-r RET");
+            assert_eq!(h.core.kills.current_kill(0).unwrap(), "a");
+        }
+
+        #[test]
+        fn no_marks_no_command() {
+            let (mut h, _, text) = copying();
+            h.keys("C-c C-r");
+            assert_eq!(h.core.message(), Some("No command at point"));
             assert_eq!(h.point(), text.len());
         }
 
