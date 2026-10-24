@@ -10,4 +10,4 @@
 
 - [x] 3.1 Run `yes` and `cat` of a large file in a terminal (as its `SHELL`, since typing into a terminal waits for char mode) while typing in a file buffer, with `--debug`, on Linux; record the bench numbers and the measured key/frame times in docs/editor.md under Output floods
 - [x] 3.2 If typing still lags, add a roadmap task to move the emulator into the terminal task (roadmap skill); otherwise note in docs/editor.md that it stays in the core
-- [ ] 3.3 Repeat 3.1 on macOS and update docs/editor.md (the user, at review)
+- [x] 3.3 Move the macOS run of 3.1 to the M2 gate (#92, roadmap.yaml)
