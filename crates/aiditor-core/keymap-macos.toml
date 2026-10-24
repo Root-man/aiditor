@@ -1,0 +1,8 @@
+# Bound after keymap.toml on macOS: copy, cut and paste on Cmd keys.
+[global]
+"s-x" = "kill-region"
+"s-c" = "kill-ring-save"
+"s-v" = "yank"
+
+[vterm-mode]
+"s-v" = "vterm-yank"

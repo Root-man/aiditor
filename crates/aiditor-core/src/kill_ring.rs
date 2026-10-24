@@ -153,7 +153,7 @@ impl Ctx<'_> {
 impl KillRing {
     /// Pushes clipboard text the editor neither wrote nor took in onto the kill ring, saying
     /// whether it did.
-    fn take_clipboard(&mut self) -> bool {
+    pub(crate) fn take_clipboard(&mut self) -> bool {
         let Some(text) = self.clipboard.take() else {
             return false;
         };
@@ -173,7 +173,7 @@ impl KillRing {
     }
 
     /// Moves the yank pointer `n` round the kill ring and returns that kill.
-    fn current_kill(&mut self, n: i64) -> Result<String, String> {
+    pub(crate) fn current_kill(&mut self, n: i64) -> Result<String, String> {
         let len = self.ring.len() as i64;
         if len == 0 {
             return Err("Kill ring is empty".into());
@@ -211,7 +211,12 @@ mod tests {
         let mut h = on("");
         let key = |s: &str| parse_keys(s).unwrap()[0];
         assert!(h.core.wants_clipboard(key("C-y")));
-        assert!(h.core.wants_clipboard(key("s-c")));
+        let copy = if cfg!(target_os = "macos") {
+            "s-c"
+        } else {
+            "C-S-c"
+        };
+        assert!(h.core.wants_clipboard(key(copy)));
         assert!(!h.core.wants_clipboard(key("C-f")));
         assert!(!h.core.wants_clipboard(key("M-y")));
         bind_mode(&mut h, "global", "C-x y", "yank");

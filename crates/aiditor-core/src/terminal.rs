@@ -223,6 +223,16 @@ impl Terminal {
         })
     }
 
+    /// The bytes that paste `text`: between bracketed-paste marks, without ESC, when the program
+    /// turned on mode 2004, as Zed does, else as is.
+    pub fn paste(&self, text: &str) -> Vec<u8> {
+        if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+            format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
+        } else {
+            text.as_bytes().to_vec()
+        }
+    }
+
     /// `color` as 0xRRGGBB: what the program set with OSC 4, 10 or 11, else the theme's palette,
     /// the xterm cube or gray ramp.
     fn color(&self, color: Color, theme: &Theme) -> u32 {
@@ -306,6 +316,22 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Pastes the newest kill, or clipboard text from another app, into the current buffer's shell.
+    pub(crate) fn vterm_yank(&mut self) -> Result<(), String> {
+        let id = self.core.char_mode().ok_or("Not in a live terminal")?;
+        self.core.kills.take_clipboard();
+        let text = self.core.kills.current_kill(0)?;
+        let terminal = self
+            .core
+            .current()
+            .terminal()
+            .expect("a live terminal's buffer");
+        let bytes = terminal.paste(&text);
+        self.effects
+            .push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+        Ok(())
+    }
+
     /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
         let core = &mut *self.core;
@@ -321,7 +347,7 @@ impl Ctx<'_> {
     }
 }
 
-/// Whether `key` stays with the editor in char mode, as #89 decided.
+/// Whether `key` stays with the editor in char mode, as #89 and #233 decided.
 pub(crate) fn editor_key(key: Key) -> bool {
     let ctrl = |c| {
         key == Key {
@@ -333,7 +359,15 @@ pub(crate) fn editor_key(key: Key) -> bool {
         meta: true,
         ..Key::plain(KeyCode::Char('x'))
     };
-    key.super_ || ctrl('x') || ctrl('c') || key == meta_x
+    // C-S-v pastes on Linux, as in its terminals, where Super belongs to the desktop.
+    let paste = !cfg!(target_os = "macos")
+        && key
+            == Key {
+                ctrl: true,
+                shift: true,
+                ..Key::plain(KeyCode::Char('v'))
+            };
+    key.super_ || ctrl('x') || ctrl('c') || key == meta_x || paste
 }
 
 impl Core {
@@ -587,6 +621,14 @@ mod tests {
     }
 
     #[test]
+    fn paste_is_bracketed_when_asked() {
+        let mut t = Terminal::new(3, 10);
+        assert_eq!(t.paste("a\nb\x1b[201~c"), b"a\nb\x1b[201~c");
+        t.feed(b"\x1b[?2004h");
+        assert_eq!(t.paste("a\nb\x1b[201~c"), b"\x1b[200~a\nb[201~c\x1b[201~");
+    }
+
+    #[test]
     fn keys_encode_as_xterm() {
         let mut t = Terminal::new(2, 10);
         let enc = |t: &Terminal, keys: &str| -> Vec<u8> {
@@ -782,6 +824,31 @@ mod tests {
             assert_eq!(h.core.message(), Some("Quit"));
             assert_eq!(typed(&mut h, "s-z C-c a"), "");
             assert_eq!(h.core.message(), Some("C-c a is undefined"));
+        }
+
+        #[test]
+        fn the_paste_key_pastes_into_the_shell() {
+            let (mut h, id) = shown();
+            let paste = if cfg!(target_os = "macos") {
+                "s-v"
+            } else {
+                "C-S-v"
+            };
+            assert_eq!(typed(&mut h, paste), "");
+            assert_eq!(h.core.message(), Some("Kill ring is empty"));
+            h.clipboard = Some("ls\n".into());
+            assert_eq!(typed(&mut h, paste), "ls\n");
+            output(&mut h, id, "\x1b[?2004h");
+            assert_eq!(typed(&mut h, paste), "\x1b[200~ls\n\x1b[201~");
+            assert_eq!(typed(&mut h, "C-v"), "\x16", "C-v still reaches the shell");
+            // The other platform's paste key is not one here.
+            let (other, sent) = if cfg!(target_os = "macos") {
+                ("C-S-v", "\x16")
+            } else {
+                ("s-v", "")
+            };
+            assert_eq!(typed(&mut h, other), sent);
+            assert_eq!(h.text(), "", "nothing inserted");
         }
     }
 

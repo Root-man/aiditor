@@ -4,20 +4,28 @@ use std::collections::HashMap;
 
 use crate::key::{Key, parse_keys};
 
-pub const BUNDLED: &str = include_str!("../keymap.toml");
+/// The bundled keymap files, bound in order: the shared one, then the platform's clipboard keys.
+pub const BUNDLED: [&str; 2] = [
+    include_str!("../keymap.toml"),
+    if cfg!(target_os = "macos") {
+        include_str!("../keymap-macos.toml")
+    } else {
+        include_str!("../keymap-linux.toml")
+    },
+];
 
-/// Keymaps by name from the `bundled` keymap file with `user`'s entries bound over it, plus
+/// Keymaps by name from the `bundled` keymap files with `user`'s entries bound over it, plus
 /// why each bad entry was skipped. `command` returns the registered name for a command name.
 /// Only text that is not TOML fails the whole load.
 pub fn parse(
-    bundled: &str,
+    bundled: &[&str],
     user: Option<&str>,
     command: impl Fn(&str) -> Option<&'static str>,
 ) -> Result<(HashMap<String, Keymap>, Vec<String>), String> {
     let mut maps: HashMap<String, Keymap> = HashMap::new();
     let mut errors = Vec::new();
     // Bound in order rather than merged as tables, so a user entry wins however it is spelled.
-    for text in [Some(bundled), user].into_iter().flatten() {
+    for text in bundled.iter().copied().chain(user) {
         let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
         for (name, entries) in table {
             let Some(entries) = entries.as_table() else {
@@ -119,7 +127,7 @@ mod tests {
             [mode]
             "C-c d" = "undo"
         "#;
-        let (maps, errors) = parse(bundled, Some(user), known).unwrap();
+        let (maps, errors) = parse(&[bundled], Some(user), known).unwrap();
         let global = &maps["global"];
         assert_eq!(lookup(global, "C-x u"), Some(&Binding::Command("save")));
         assert_eq!(lookup(global, "C-x C-s"), Some(&Binding::Command("save")));
@@ -141,7 +149,7 @@ mod tests {
                 "{needle}: {errors:?}"
             );
         }
-        assert!(parse(bundled, Some("[global"), known).is_err());
+        assert!(parse(&[bundled], Some("[global"), known).is_err());
     }
 
     #[test]

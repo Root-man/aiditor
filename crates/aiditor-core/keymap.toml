@@ -97,9 +97,7 @@
 "s-q" = "save-buffers-kill-terminal"
 "s-z" = "undo"
 "s-s" = "save-buffer"
-"s-x" = "kill-region"
-"s-c" = "kill-ring-save"
-"s-v" = "yank"
+# Copy, cut and paste are in keymap-macos.toml and keymap-linux.toml.
 
 [workspace-list-mode]
 "n" = "workspace-list-next"
@@ -112,7 +110,8 @@
 "q" = "workspace-list-quit"
 "C-g" = "workspace-list-quit"
 
-# Terminal buffers in char mode, where every key but C-x, C-c, M-x and Cmd keys goes to the shell.
+# Terminal buffers in char mode, where every key but C-x, C-c, M-x and Cmd keys (and C-S-v on
+# Linux) goes to the shell.
 [vterm-mode]
 "C-c C-c" = "vterm-send-C-c"
 
