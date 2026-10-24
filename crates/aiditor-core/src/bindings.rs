@@ -16,7 +16,7 @@ impl Core {
         &self,
         user: Option<&str>,
     ) -> Result<(HashMap<String, Keymap>, Vec<String>), String> {
-        keymap::parse(keymap::BUNDLED, user, |name| {
+        keymap::parse(&keymap::BUNDLED, user, |name| {
             self.commands.get_key_value(name).map(|(name, _)| *name)
         })
     }

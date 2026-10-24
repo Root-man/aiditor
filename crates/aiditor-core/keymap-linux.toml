@@ -1,0 +1,9 @@
+# Bound after keymap.toml on Linux, where the desktop takes Super keys: copy, cut and paste on
+# C-S- keys, as in Linux terminals.
+[global]
+"C-S-x" = "kill-region"
+"C-S-c" = "kill-ring-save"
+"C-S-v" = "yank"
+
+[vterm-mode]
+"C-S-v" = "vterm-yank"

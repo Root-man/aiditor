@@ -1,15 +1,15 @@
 ## ADDED Requirements
 
-### Requirement: s-v and C-S-v paste into the shell
-`s-v` and `C-S-v` in a live terminal buffer SHALL write the kill at the yank pointer, the newest unless `M-y` moved it, to its shell, after taking in clipboard text from another app as `yank` does, instead of inserting it. With an empty kill ring and clipboard it SHALL echo `Kill ring is empty` and write nothing.
+### Requirement: The paste key pastes into the shell
+The paste key, `s-v` on macOS and `C-S-v` on Linux, in a live terminal buffer SHALL write the kill at the yank pointer, the newest unless `M-y` moved it, to its shell, after taking in clipboard text from another app as `yank` does, instead of inserting it. With an empty kill ring and clipboard it SHALL echo `Kill ring is empty` and write nothing.
 
 #### Scenario: Paste the clipboard
-- **WHEN** the clipboard holds `ls` from another app and `s-v` is pressed in a terminal
+- **WHEN** the clipboard holds `ls` from another app and the paste key is pressed in a terminal
 - **THEN** the shell receives `ls`
 
-#### Scenario: C-S-v where Super belongs to the desktop
-- **WHEN** `C-S-v` is pressed in a terminal
-- **THEN** it pastes as `s-v` does, and `C-v` still reaches the shell as `\x16`
+#### Scenario: C-v still reaches the shell
+- **WHEN** `C-v` is pressed in a terminal
+- **THEN** the shell receives `\x16`
 
 ### Requirement: Paste is bracketed when the program asks
 While the program has bracketed paste on (mode 2004), pasted text SHALL be sent between `\x1b[200~` and `\x1b[201~` with every ESC in it removed; otherwise it SHALL be sent as is.
@@ -25,7 +25,7 @@ While the program has bracketed paste on (mode 2004), pasted text SHALL be sent 
 ## MODIFIED Requirements
 
 ### Requirement: Char mode sends keys to the shell
-While a terminal buffer's shell is live and no key sequence is pending, every key except `C-x`, `C-c`, `M-x`, `C-S-v` and keys with super held SHALL be written to the shell, encoded as xterm does, instead of running a command. Those and the keys that follow a prefix SHALL go through the keymaps as in any buffer. A key with no encoding SHALL be dropped.
+While a terminal buffer's shell is live and no key sequence is pending, every key except `C-x`, `C-c`, `M-x`, keys with super held and, on Linux, `C-S-v` SHALL be written to the shell, encoded as xterm does, instead of running a command. Those and the keys that follow a prefix SHALL go through the keymaps as in any buffer. A key with no encoding SHALL be dropped.
 
 #### Scenario: Typing a command
 - **WHEN** `echo hi` is typed and `RET` pressed in a terminal

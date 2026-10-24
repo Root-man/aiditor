@@ -470,7 +470,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (editor, cx) = editor(cx, "");
-        let (maps, _) = keymap::parse(keymap::BUNDLED, None, |_| Some("any")).unwrap();
+        let (maps, _) = keymap::parse(&keymap::BUNDLED, None, |_| Some("any")).unwrap();
         let mut script = Vec::new();
         for map in maps.values() {
             sequences(map, "", &mut script);
@@ -976,13 +976,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cmd_c_and_cmd_v_go_through_the_clipboard(cx: &mut TestAppContext) {
+    fn copy_and_paste_go_through_the_clipboard(cx: &mut TestAppContext) {
         let (editor, cx) = editor(cx, "ab");
-        cx.simulate_keystrokes("ctrl-space ctrl-e cmd-c");
+        let (copy, paste) = if cfg!(target_os = "macos") {
+            ("cmd-c", "cmd-v")
+        } else {
+            ("ctrl-shift-c", "ctrl-shift-v")
+        };
+        cx.simulate_keystrokes(&format!("ctrl-space ctrl-e {copy}"));
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("ab"));
         cx.write_to_clipboard(ClipboardItem::new_string("xyz".into()));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes(paste);
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "abxyz");
     }
 

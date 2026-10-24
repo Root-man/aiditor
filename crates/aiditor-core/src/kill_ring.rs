@@ -211,7 +211,12 @@ mod tests {
         let mut h = on("");
         let key = |s: &str| parse_keys(s).unwrap()[0];
         assert!(h.core.wants_clipboard(key("C-y")));
-        assert!(h.core.wants_clipboard(key("s-c")));
+        let copy = if cfg!(target_os = "macos") {
+            "s-c"
+        } else {
+            "C-S-c"
+        };
+        assert!(h.core.wants_clipboard(key(copy)));
         assert!(!h.core.wants_clipboard(key("C-f")));
         assert!(!h.core.wants_clipboard(key("M-y")));
         bind_mode(&mut h, "global", "C-x y", "yank");

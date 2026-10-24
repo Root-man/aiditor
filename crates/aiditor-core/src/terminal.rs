@@ -359,13 +359,15 @@ pub(crate) fn editor_key(key: Key) -> bool {
         meta: true,
         ..Key::plain(KeyCode::Char('x'))
     };
-    // C-S-v pastes, as in Linux terminals, where Super belongs to the desktop.
-    let paste = Key {
-        ctrl: true,
-        shift: true,
-        ..Key::plain(KeyCode::Char('v'))
-    };
-    key.super_ || ctrl('x') || ctrl('c') || key == meta_x || key == paste
+    // C-S-v pastes on Linux, as in its terminals, where Super belongs to the desktop.
+    let paste = !cfg!(target_os = "macos")
+        && key
+            == Key {
+                ctrl: true,
+                shift: true,
+                ..Key::plain(KeyCode::Char('v'))
+            };
+    key.super_ || ctrl('x') || ctrl('c') || key == meta_x || paste
 }
 
 impl Core {
@@ -825,16 +827,27 @@ mod tests {
         }
 
         #[test]
-        fn s_v_pastes_into_the_shell() {
+        fn the_paste_key_pastes_into_the_shell() {
             let (mut h, id) = shown();
-            assert_eq!(typed(&mut h, "s-v"), "");
+            let paste = if cfg!(target_os = "macos") {
+                "s-v"
+            } else {
+                "C-S-v"
+            };
+            assert_eq!(typed(&mut h, paste), "");
             assert_eq!(h.core.message(), Some("Kill ring is empty"));
             h.clipboard = Some("ls\n".into());
-            assert_eq!(typed(&mut h, "s-v"), "ls\n");
+            assert_eq!(typed(&mut h, paste), "ls\n");
             output(&mut h, id, "\x1b[?2004h");
-            assert_eq!(typed(&mut h, "s-v"), "\x1b[200~ls\n\x1b[201~");
-            assert_eq!(typed(&mut h, "C-S-v"), "\x1b[200~ls\n\x1b[201~");
+            assert_eq!(typed(&mut h, paste), "\x1b[200~ls\n\x1b[201~");
             assert_eq!(typed(&mut h, "C-v"), "\x16", "C-v still reaches the shell");
+            // The other platform's paste key is not one here.
+            let (other, sent) = if cfg!(target_os = "macos") {
+                ("C-S-v", "\x16")
+            } else {
+                ("s-v", "")
+            };
+            assert_eq!(typed(&mut h, other), sent);
             assert_eq!(h.text(), "", "nothing inserted");
         }
     }
