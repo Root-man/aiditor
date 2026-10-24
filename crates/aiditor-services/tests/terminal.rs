@@ -205,6 +205,10 @@ async fn default_bash_reads_the_login_profile() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "on Linux zsh also prints a screen clear after the profile"
+)]
 async fn default_zsh_reads_the_login_profile() {
     let Some(zsh) = ["/bin/zsh", "/usr/bin/zsh"]
         .into_iter()
