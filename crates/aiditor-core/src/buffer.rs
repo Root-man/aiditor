@@ -308,11 +308,15 @@ struct History {
     before: Option<usize>,
 }
 
-/// Colors as 0xRRGGBB; `None` keeps whatever is under it.
+/// Colors as 0xRRGGBB, `None` keeping whatever is under it, and font attributes, added to those
+/// under it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Face {
     pub fg: Option<u32>,
     pub bg: Option<u32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
 }
 
 /// Something drawn across a whole line.

@@ -248,6 +248,9 @@ pub fn build(
             {
                 face.fg = f.fg.or(face.fg);
                 face.bg = f.bg.or(face.bg);
+                face.bold |= f.bold;
+                face.italic |= f.italic;
+                face.underline |= f.underline;
             }
         }
         if region.as_ref().is_some_and(|r| r.contains(&(pos - 1))) {
@@ -301,6 +304,9 @@ mod tests {
     const RED: Face = Face {
         fg: Some(0xff0000),
         bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
     };
 
     fn prop(h: &mut Harness, range: std::ops::Range<usize>, prop: Prop) {
@@ -347,6 +353,7 @@ mod tests {
         let blue_bg = Face {
             fg: Some(0x0000ff),
             bg: Some(0x111111),
+            ..Face::default()
         };
         prop(&mut h, 6..11, Prop::Face(RED));
         prop(&mut h, 8..9, Prop::Face(blue_bg));

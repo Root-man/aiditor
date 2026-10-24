@@ -22,11 +22,15 @@
 - **THEN** copy mode ends, the kill ring is unchanged and keys go to the shell again
 
 ### Requirement: Copy mode keeps the terminal's colours
-Copy mode's text SHALL carry each cell's resolved foreground and background colours, as the live screen draws them; bold, italic and underline SHALL NOT carry over. Leaving copy mode SHALL drop them with the text.
+Copy mode's text SHALL carry each cell's resolved foreground and background colours, bold, italic and underline, as the live screen draws them. Leaving copy mode SHALL drop them with the text.
 
 #### Scenario: Coloured output
 - **WHEN** `\x1b[31mred\x1b[0m` is fed into a terminal and copy mode is entered
 - **THEN** the window draws `red` in the theme's ANSI red
+
+#### Scenario: Font attributes
+- **WHEN** a bold, an italic and an underlined char are fed into a terminal and copy mode is entered
+- **THEN** each char of the text is drawn bold, italic or underlined as on the live screen
 
 #### Scenario: Leaving drops the colours
 - **WHEN** copy mode is left

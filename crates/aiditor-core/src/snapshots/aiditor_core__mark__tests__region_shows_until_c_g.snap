@@ -14,6 +14,9 @@ expression: h.display(1).lines
                     bg: Some(
                         2510712,
                     ),
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
                 fold: false,
             },
@@ -22,6 +25,9 @@ expression: h.display(1).lines
                 face: Face {
                     fg: None,
                     bg: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
                 fold: false,
             },

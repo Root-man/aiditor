@@ -137,7 +137,7 @@ impl Element for FrameElement {
                         cursor = Some(Bounds::new(origin, gpui::size(width, height)));
                         let face = Face {
                             fg: Some(settings.theme.background),
-                            bg: None,
+                            ..Face::default()
                         };
                         let run = text_run(under.len(), face, false, &font, &settings.theme);
                         cursor_char = Some(shape(under.to_string(), &[run]));
@@ -204,7 +204,7 @@ impl Element for FrameElement {
                             cursor_char = under_cursor(terminal, c.row, c.col).map(|text| {
                                 let face = Face {
                                     fg: Some(settings.theme.background),
-                                    bg: None,
+                                    ..Face::default()
                                 };
                                 let run = text_run(text.len(), face, false, &font, &settings.theme);
                                 (window.text_system()).shape_line(
@@ -364,10 +364,10 @@ pub(crate) fn text_run(
 ) -> TextRun {
     TextRun {
         len,
-        font: font.clone(),
+        font: styled(font, face.bold, face.italic),
         color: rgb(face.fg.unwrap_or(theme.foreground)).into(),
         background_color: face.bg.map(|bg| rgb(bg).into()),
-        underline: underline.then(|| UnderlineStyle {
+        underline: (underline || face.underline).then(|| UnderlineStyle {
             thickness: px(1.),
             ..Default::default()
         }),

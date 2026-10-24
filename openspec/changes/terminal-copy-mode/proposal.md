@@ -11,7 +11,7 @@ A terminal buffer shows only the live screen and sends nearly every key to the s
 - Output keeps feeding the grid but doesn't change the text or point while copy mode lasts.
 - `RET` (`vterm-copy-mode-done`) copies the region, or the current line without one, to the kill ring and clipboard and leaves. Leaving empties the text and shows the live screen again.
 - On the alternate screen there is no scrollback, so the text is the screen.
-- Copy mode's text keeps the terminal's foreground and background colours.
+- Copy mode's text keeps the terminal's colours, bold, italic and underline; text faces gain those three attributes, which the frontend draws.
 - The mode line shows `[char]` or `[copy]` after a terminal's name; point's position only in copy mode.
 
 ## Capabilities

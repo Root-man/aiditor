@@ -122,12 +122,20 @@ impl Terminal {
                 at = (n, offset + before.chars().count());
             }
             for run in self.runs(line, theme) {
-                if run.fg != theme.foreground || run.bg.is_some() {
+                let face = Face {
+                    fg: Some(run.fg),
+                    bg: run.bg,
+                    bold: run.bold,
+                    italic: run.italic,
+                    underline: run.underline,
+                };
+                if face
+                    != (Face {
+                        fg: Some(theme.foreground),
+                        ..Face::default()
+                    })
+                {
                     let start = offset + self.cells(line, run.col.into()).chars().count();
-                    let face = Face {
-                        fg: Some(run.fg),
-                        bg: run.bg,
-                    };
                     colors.push((n, start..start + run.text.chars().count(), face));
                 }
             }
@@ -645,10 +653,20 @@ mod tests {
         assert_eq!(text, "abcdef g\n\n");
         let red = Face {
             fg: Some(theme.ansi[1]),
-            bg: None,
+            ..Face::default()
         };
         // A run split by the wrap is two faces; the blank blue row has no text to colour.
         assert_eq!(faces, [(1..4, red), (4..6, red)]);
+        let t = fed(1, 10, "\x1b[1mb\x1b[0;3mi\x1b[0;4mu\x1b[0m.");
+        let (text, faces, ..) = t.copy_text(&theme);
+        let fg = Some(theme.foreground);
+        let attrs: Vec<_> = (faces.iter())
+            .inspect(|(_, face)| assert_eq!(face.fg, fg))
+            .map(|(r, f)| (r.clone(), f.bold, f.italic, f.underline))
+            .collect();
+        assert_eq!(text, "biu.");
+        let want = [(0..1, true, false, false), (1..2, false, true, false)];
+        assert_eq!(attrs, [&want[..], &[(2..3, false, false, true)]].concat());
     }
 
     #[test]

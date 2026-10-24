@@ -13,6 +13,9 @@ WindowDisplay {
                     face: Face {
                         fg: None,
                         bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
                     },
                     fold: false,
                 },
@@ -28,6 +31,9 @@ WindowDisplay {
                     face: Face {
                         fg: None,
                         bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
                     },
                     fold: false,
                 },
@@ -43,6 +49,9 @@ WindowDisplay {
                     face: Face {
                         fg: None,
                         bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
                     },
                     fold: false,
                 },

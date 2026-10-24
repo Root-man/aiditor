@@ -12,6 +12,9 @@ expression: h.display(1).lines
                 face: Face {
                     fg: None,
                     bg: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
                 },
                 fold: false,
             },
