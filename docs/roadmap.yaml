@@ -792,7 +792,55 @@ milestones:
         labels: [terminal, frontend]
         design: "#output-floods"
         body: |
-          `alacritty_terminal` grid owned by the core as a buffer content backend; rendering of colours, cursor shapes and wide characters; one redraw per frame. Includes the flood check from the design doc (`yes` in one terminal while typing in another). Break down when M2 starts.
+          `alacritty_terminal` grid owned by the core as a buffer content backend; rendering of colours, cursor shapes and wide characters; one redraw per frame. Includes the flood check from the design doc (`yes` in one terminal while typing in another). Typing into a terminal is char mode's job (#88).
+        tasks:
+          - key: m2-term-grid
+            title: "Terminal grid in the core"
+            body: |
+              Add `alacritty_terminal` to aiditor-core behind a small terminal interface, so the emulator can move off the UI thread later (see Output floods). A terminal buffer's content is a second `Content` variant holding the grid; it is read-only and its `text()` is an empty rope, so rope commands run in it harmlessly until copy mode builds text from the scrollback.
+
+              The core maps each `TerminalId` to its buffer and feeds `Msg::TerminalOutput` into the grid. Replies the emulator writes back (cursor position and device attribute reports) go out as `TerminalOp::Write`, or `vim` and `fzf` hang waiting for them. Title, bell and clipboard requests are ignored. No command or rendering yet: tests create terminals through the core.
+            acceptance:
+              - "Feeding bytes into a terminal buffer's grid and snapshotting its screen text shows what a real terminal would, including cursor moves, clears and scrolling"
+              - "`\\x1b[6n` in the output is answered with a `TerminalOp::Write` of the cursor position"
+              - "Rope commands in a terminal buffer (motion, `C-x h`, swiper) don't panic, and edits fail as in any read-only buffer"
+              - "Output for an unknown terminal is ignored"
+          - key: m2-term-buffers
+            title: "Open, resize and kill terminal buffers"
+            body: |
+              `vterm` (through `M-x`) spawns the user's shell in a new terminal buffer of the current workspace and shows it in the selected window. The working directory is the current buffer's file's directory, or the workspace project's primary root. Buffers are named `vterm<n><workspace>`, `n` the smallest number no buffer of that name has, so indexes count within a workspace and names stay unique across workspaces; they can be renamed like any buffer.
+
+              The terminal's size follows the smallest window showing it, as Emacs's `window-adjust-process-window-size-smallest`: rows and columns from the window's text area and the cell size, sent as `TerminalOp::Resize` when they change. When the shell exits, its buffer is killed, as vterm's `vterm-kill-buffer-on-exit`. A spawn failure kills the buffer and shows the reason in the echo area.
+
+              Killing a live terminal asks first, as Emacs's process query: `kill-buffer` asks `Buffer <name> has a running process; kill it? `, and quitting asks `Active processes exist; kill them and exit anyway? ` after the modified-buffer questions. Killing a workspace kills its terminals.
+            acceptance:
+              - "`M-x vterm` twice in workspace `work` makes `vterm1<work>` and `vterm2<work>`; the first in workspace `fix` is `vterm1<fix>`"
+              - "The shell starts in the current file's directory, or the project's primary root from a buffer with no file"
+              - "Splitting or resizing a window showing a terminal resizes its PTY to the smallest such window"
+              - "`exit` in the shell kills its buffer"
+              - "`kill-buffer` on a live terminal asks, and only yes kills it and its shell"
+              - "Quitting with a live terminal asks, and no keeps the editor open with the terminal running"
+              - "Killing a workspace leaves none of its shells behind"
+            blocked_by: [m2-term-grid]
+          - key: m2-term-render
+            title: "Render the terminal grid"
+            body: |
+              Draw a terminal buffer's screen in its windows. Cells are placed at column × cell width, as Zed's terminal element does, so wide chars and glyphs from fallback fonts stay on the grid instead of shifting the rest of the row. The window shows the live screen; reading scrollback is copy mode's job (#88).
+            acceptance:
+              - "The 16 ANSI colours come from the theme; 256-colour and truecolor cells show their exact colour; default fg and bg are the theme's"
+              - "Bold, italic, underline, dim and inverse cells are drawn as such"
+              - "The cursor is a block, beam or underline as the program sets it (DECSCUSR), hidden when it hides it, and hollow in a window that isn't selected"
+              - "A wide char (`日本`) takes two cells, and the chars after it line up with the row below"
+              - "`htop` or `vim` in a terminal (started from the command line, since typing is char mode's job) draws correctly on macOS and Linux"
+            blocked_by: [m2-term-grid]
+          - key: m2-term-flood
+            title: "Check typing during a terminal flood"
+            body: |
+              The design doc's flood check: with the emulator in the core, VT parsing runs on the UI thread. Run `yes`, and `cat` of a large file, in one terminal while typing in a file buffer in another window, and measure key handling and frame time with the debug timings. GPUI should still draw once per frame however many output batches arrive.
+            acceptance:
+              - "Typing during the flood shows no visible lag on macOS and Linux, with the measured times recorded in docs/editor.md under Output floods"
+              - "If it lags, a follow-up task to move the emulator into the terminal task is added to the roadmap"
+            blocked_by: [m2-term-buffers, m2-term-render]
       - key: m2-modes
         title: "Char mode and copy mode"
         labels: [terminal, keymap]

@@ -29,6 +29,7 @@ pub mod project;
 mod project_commands;
 pub mod settings;
 mod swiper;
+pub mod terminal;
 pub mod timer;
 mod visiting;
 mod watching;
@@ -489,9 +490,19 @@ impl Ctx<'_> {
 
     fn dispatch(&mut self, msg: Msg) {
         match msg {
-            Msg::TerminalSpawned { .. }
-            | Msg::TerminalOutput { .. }
-            | Msg::TerminalExited { .. } => {}
+            Msg::TerminalOutput { id, bytes } => {
+                let core = &mut *self.core;
+                let terminal = (core.terminals.get(&id))
+                    .and_then(|&buffer| core.buffers.get_mut(buffer))
+                    .and_then(Buffer::terminal_mut);
+                if let Some(terminal) = terminal {
+                    let bytes = terminal.feed(&bytes);
+                    if !bytes.is_empty() {
+                        (self.effects).push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+                    }
+                }
+            }
+            Msg::TerminalSpawned { .. } | Msg::TerminalExited { .. } => {}
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.
@@ -761,6 +772,9 @@ pub struct Core {
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
     focused: BufferId,
+    /// Each terminal's buffer; an entry outlives its killed buffer.
+    terminals: BTreeMap<TerminalId, BufferId>,
+    next_terminal: u64,
 }
 
 impl Default for Core {
@@ -831,6 +845,8 @@ impl Default for Core {
             watch_refresh: false,
             watch_refusals: BTreeMap::new(),
             focused: scratch,
+            terminals: BTreeMap::new(),
+            next_terminal: 0,
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
@@ -889,6 +905,16 @@ impl Core {
         self.preview(&mut effects);
         self.watch(&mut effects);
         effects
+    }
+
+    /// A new terminal buffer named `name` in the current workspace, with a `rows` x `cols` grid
+    /// fed by the terminal's output. Spawning its process is the caller's.
+    pub fn create_terminal(&mut self, name: &str, rows: u16, cols: u16) -> (TerminalId, BufferId) {
+        let id = TerminalId(self.next_terminal);
+        self.next_terminal += 1;
+        let buffer = (self.buffers).create_terminal(name, terminal::Terminal::new(rows, cols));
+        self.terminals.insert(id, buffer);
+        (id, buffer)
     }
 
     /// Adds `command`, replacing any command of the same name.

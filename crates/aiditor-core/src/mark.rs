@@ -145,7 +145,7 @@ mod tests {
         h.keys("x C-SPC C-SPC C-SPC");
         h.open("a.txt");
         assert_eq!(mark(&h), (None, false));
-        assert_eq!(h.core.windows.window.ring(&h.core.buffers), []);
+        assert!(h.core.windows.window.ring(&h.core.buffers).is_empty());
     }
 
     #[test]
