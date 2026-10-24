@@ -108,6 +108,8 @@ impl Editor {
                 {
                     break;
                 }
+                // `recv` never pends while messages queue, so a flood would starve keys and frames.
+                tokio::task::yield_now().await;
             }
         })
         .detach();
@@ -1026,6 +1028,33 @@ mod tests {
         let click = bounds.origin + point(x + px(1.), line_height * 1.5);
         cx.simulate_click(click, Modifiers::none());
         assert_eq!(top_and_point(cx).1, 7 * 7 + 2);
+    }
+
+    #[gpui::test]
+    fn a_full_channel_lets_other_ui_work_run(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        let (tx, rx) = mpsc::channel(1000);
+        for _ in 0..1000 {
+            tx.try_send(Msg::Tick).unwrap();
+        }
+        editor.update(cx, |_, cx| Editor::drain(rx, cx));
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen2 = seen.clone();
+        cx.update(|_, cx| {
+            cx.spawn(async move |_| {
+                while tx.capacity() == 0 {
+                    tokio::task::yield_now().await;
+                }
+                seen2.set(tx.capacity());
+            })
+            .detach()
+        });
+        cx.run_until_parked();
+        assert!(
+            seen.get() < 1000,
+            "drained {} before other work ran",
+            seen.get()
+        );
     }
 
     #[gpui::test]

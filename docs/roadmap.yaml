@@ -744,7 +744,7 @@ milestones:
   - key: m2
     title: "M2 · Terminal"
     description: "PTY + VT emulator buffers, char and copy mode, shell integration, $EDITOR client."
-    gate: "Run the test suite and make a git commit in a terminal buffer."
+    gate: "Run the test suite and make a git commit in a terminal buffer, and on macOS type in a file buffer with no visible lag while `yes` and a large `cat` flood a terminal (Linux checked in #226)."
     epics:
       - key: m2-pty
         title: "PTY service"
