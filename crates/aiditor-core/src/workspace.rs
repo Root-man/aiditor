@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_preserves_marks_rings_scroll_and_ignores_an_inactive_window_click() {
+    fn switching_preserves_marks_rings_and_scroll() {
         let mut h = Harness::new(&[("a", "zero\none\ntwo\nthree\nfour\n")]);
         h.open("a").keys("C-x 2 C-x o");
         let origin = h.core.workspace();
@@ -489,11 +489,6 @@ mod tests {
         assert_eq!(window.scroll(&h.core.buffers, 3), 1);
         let left = window.hscroll(20, 5);
         let other = h.new_workspace("other", "home");
-        h.send(Msg::Click {
-            window: selected,
-            line: 0,
-            col: 0,
-        });
         assert_eq!(h.core.workspace(), other);
         assert_eq!(name(&h), "*scratch*<other>");
         h.core.switch_workspace(origin).unwrap();

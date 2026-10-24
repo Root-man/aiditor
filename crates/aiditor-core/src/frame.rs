@@ -210,15 +210,11 @@ pub(crate) fn window_display(
 
 #[cfg(test)]
 mod tests {
-    use crate::Msg;
     use crate::display::FrameDisplay;
     use crate::display::FrameWindow;
     use crate::harness::Harness;
     use crate::harness::ask;
-    use crate::harness::line_start;
     use crate::harness::on;
-    use crate::harness::twenty_lines;
-    use crate::window::WindowId;
 
     /// Each window's (id, point), in tree order, and the selected id.
     fn windows(h: &Harness) -> (Vec<(usize, usize)>, usize) {
@@ -481,51 +477,6 @@ mod tests {
         assert_eq!(
             (text.as_str(), mb.display.cursor),
             ("rstuvwxyzABCD", Some((0, 13)))
-        );
-    }
-
-    #[test]
-    fn a_click_on_the_scrolled_line_lands_on_the_clicked_char() {
-        let long: String = (0..100).map(|i| char::from(b'a' + i % 26)).collect();
-        let mut h = on(&format!("{long}\n{long}"));
-        h.keys("C-e");
-        h.frame(320., 600.);
-        let click = |line| Msg::Click {
-            window: WindowId(0),
-            line,
-            col: 0,
-        };
-        h.send(click(0));
-        assert_eq!(h.point(), 61);
-        h.send(click(1));
-        assert_eq!(h.point(), 101, "another line is not scrolled");
-    }
-
-    #[test]
-    fn clicks_select_and_scrolls_keep_the_selected_window() {
-        let mut h = twenty_lines();
-        h.keys("C-x 3");
-        let right = h.frame(800., 600.).windows[1].id;
-        h.send(Msg::Scroll {
-            window: right,
-            lines: 5,
-        });
-        assert_eq!(windows(&h), (vec![(0, 0), (1, line_start(&h, 5))], 0));
-        h.send(Msg::Click {
-            window: right,
-            line: 7,
-            col: 1,
-        });
-        assert_eq!(windows(&h), (vec![(0, 0), (1, line_start(&h, 7) + 1)], 1));
-        h.keys("C-x 0").send(Msg::Click {
-            window: right,
-            line: 0,
-            col: 0,
-        });
-        assert_eq!(
-            windows(&h),
-            (vec![(0, 0)], 0),
-            "a deleted window's click is dropped"
         );
     }
 

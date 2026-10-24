@@ -142,5 +142,5 @@ After an accepted runtime configuration reload has applied settings, keymaps and
 
 #### Scenario: Completion message clears normally
 - **GIVEN** the echo area shows `Configuration reloaded`
-- **WHEN** the user presses a key or clicks
+- **WHEN** the user presses a key
 - **THEN** the message clears before that action is handled

@@ -295,7 +295,7 @@ In the workspace list, `n`/`p`, `C-n`/`C-p` and the down/up arrows SHALL move se
 - **THEN** `b` becomes active with its saved layout, selected buffer and point, and the invoking list has been dismissed
 
 #### Scenario: An informational row cannot activate
-- **GIVEN** ordinary point movement or a click has placed point on a project or buffer row
+- **GIVEN** ordinary point movement has placed point on a project or buffer row
 - **WHEN** the user presses `RET`
 - **THEN** the current workspace and list stay visible and the echo area says `Select a workspace row`
 

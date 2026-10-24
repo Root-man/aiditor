@@ -131,13 +131,6 @@ Given the window's width in columns, the display SHALL show point's display line
 - **WHEN** the minibuffer's text is wider than the frame less its prompt
 - **THEN** its line scrolls the same way to keep the cursor visible
 
-### Requirement: A click on the scrolled line lands on the clicked char
-A click on point's line SHALL count its column from the line's horizontal scroll offset.
-
-#### Scenario: Click after C-e
-- **WHEN** a line is shown from column 61 and the shown column 0 is clicked
-- **THEN** point moves to buffer column 61 of that line
-
 ### Requirement: The frame title names the buffer, workspace and project
 The frame display's title SHALL be the current buffer's name, followed by ` *` when that buffer is modified, then ` | `, the current workspace's name, ` | ` and the name of the project that workspace is bound to. The frontend SHALL show it as the window title.
 

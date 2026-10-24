@@ -58,15 +58,11 @@ Each returned string SHALL be added to the newest end of its prompt's history, u
 - **THEN** the echo area shows `Beginning of history; no preceding item`
 
 ### Requirement: The minibuffer stays put while active
-A command that prompts while the minibuffer is active SHALL fail with `Command attempted to use minibuffer while in minibuffer`. While the minibuffer is selected, splitting, selecting another window and deleting windows SHALL fail and leave the windows as they were. A click in a window SHALL abort the minibuffer, then act as a click.
+A command that prompts while the minibuffer is active SHALL fail with `Command attempted to use minibuffer while in minibuffer`. While the minibuffer is selected, splitting, selecting another window and deleting windows SHALL fail and leave the windows as they were.
 
 #### Scenario: Split from the minibuffer
 - **WHEN** `C-x 2` is typed at a prompt
 - **THEN** the echo area shows an error and the frame still has one window
-
-#### Scenario: A click aborts
-- **WHEN** a window is clicked at a prompt
-- **THEN** the minibuffer is closed, the command did not run and point moved to the click
 
 ### Requirement: The frame display shows the minibuffer
 While the minibuffer is active the frame display SHALL carry its prompt and the line holding point with the cursor, and the frontend SHALL draw them in the echo area line, any message after them in brackets.
@@ -175,7 +171,7 @@ When a command declares a preview for its prompts, the window the minibuffer was
 - **THEN** the window shows `a` again, with its old point
 
 ### Requirement: Closing the minibuffer restores the previewed window
-Closing a previewing minibuffer in any way (`C-g`, `RET`, a click, switching workspace) SHALL first put the window it was opened from back exactly as it was: its buffer, point, mark, whether the mark is active, mark ring and scroll. `RET` SHALL then run the command as it would without a preview.
+Closing a previewing minibuffer in any way (`C-g`, `RET`, switching workspace) SHALL first put the window it was opened from back exactly as it was: its buffer, point, mark, whether the mark is active, mark ring and scroll. `RET` SHALL then run the command as it would without a preview.
 
 #### Scenario: Preview then C-g
 - **WHEN** a window has point, an active mark and a mark ring, a previewing prompt previews other buffers, and `C-g` is typed

@@ -4,39 +4,6 @@ use crate::Ctx;
 use crate::command::Prefix;
 
 impl Ctx<'_> {
-    /// Moves point to `p` like Emacs's `mouse-set-point`, dropping any pending prefix.
-    pub(crate) fn click(&mut self, line: usize, col: usize) {
-        let core = &mut *self.core;
-        core.pending.clear();
-        core.transient = None;
-        core.prefix_arg = None;
-        if let Some(id) = core.hint_timer.take() {
-            core.timers.cancel(id);
-        }
-        core.hint_shown = false;
-        core.message = None;
-        // So the next typed char starts a new undo group.
-        core.self_inserts = 0;
-        core.windows.window.set_active(false);
-        core.last_command = Some("mouse-set-point");
-        let buffer = core.current();
-        // Point's line is drawn scrolled sideways, so its shown columns start at the window's left.
-        let point_line = buffer
-            .line_col(core.windows.window.point(&core.buffers))
-            .ok()
-            .map(|(l, _)| l);
-        let col = col
-            + if point_line == Some(line) {
-                core.windows.window.left()
-            } else {
-                0
-            };
-        let p = (buffer.char_idx(line, col)).unwrap_or(buffer.len_chars());
-        if let Err(err) = self.goto(p) {
-            tracing::debug!(%err, "click outside the buffer");
-        }
-    }
-
     /// Moves point to `p`, which must be in the buffer.
     pub(crate) fn goto(&mut self, p: usize) -> Result<(), String> {
         let core = &mut *self.core;
@@ -221,13 +188,11 @@ impl Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Msg;
     use crate::harness::Harness;
     use crate::harness::line_start;
     use crate::harness::mark;
     use crate::harness::on;
     use crate::harness::twenty_lines;
-    use crate::window::WindowId;
 
     #[test]
     fn left_and_right_cross_lines_and_stop_at_the_ends() {
@@ -453,50 +418,5 @@ mod tests {
         // Visiting it again shows the same buffer where it was.
         h.open("a.txt");
         assert_eq!((h.point(), h.core.scroll(3)), (2, 1));
-    }
-
-    #[test]
-    fn wheel_scrolls_keeping_point_visible() {
-        let mut h = twenty_lines();
-        h.core.scroll(3);
-        let scroll = |lines| Msg::Scroll {
-            window: WindowId(0),
-            lines,
-        };
-        h.send(scroll(5));
-        assert_eq!((h.core.scroll(3), h.point()), (5, line_start(&h, 5)));
-        h.send(scroll(-2));
-        assert_eq!((h.core.scroll(3), h.point()), (3, line_start(&h, 5)));
-        h.send(scroll(99)).send(scroll(1));
-        assert_eq!((h.core.scroll(3), h.core.message()), (19, None));
-        h.send(scroll(-99));
-        assert_eq!((h.core.scroll(3), h.core.message()), (0, None));
-    }
-
-    #[test]
-    fn click_moves_point_and_drops_mark_and_prefix() {
-        let mut h = on("abc\ndef");
-        h.keys("C-SPC C-f");
-        let click = |line, col| Msg::Click {
-            window: WindowId(0),
-            line,
-            col,
-        };
-        h.send(click(1, 1));
-        assert_eq!((h.point(), mark(&h).1), (5, false));
-        h.send(click(0, 9));
-        assert_eq!(h.point(), 3, "past the line's end");
-        h.send(click(5, 0));
-        assert_eq!(h.point(), 7, "past the buffer's end");
-        h.keys("C-x").send(click(0, 0)).keys("u");
-        assert_eq!(h.text(), "uabc\ndef", "no prefix pending");
-        h.keys("C-u").send(click(1, 0)).keys("x");
-        assert_eq!(h.text(), "uabc\nxdef", "no prefix argument");
-        h.keys("C-/");
-        assert_eq!(
-            h.text(),
-            "uabc\ndef",
-            "typing after a click is its own undo group"
-        );
     }
 }

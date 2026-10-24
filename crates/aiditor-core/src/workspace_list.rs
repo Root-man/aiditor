@@ -138,7 +138,7 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Msg, harness::Harness, project::Loaded};
+    use crate::{harness::Harness, project::Loaded};
 
     fn workspaces() -> Harness {
         let mut h = Harness::new(&[]);
@@ -275,11 +275,9 @@ mod tests {
         let workspace = h.core.workspace();
         let list = h.core.windows.window.buffer();
         for line in [2, 4] {
-            h.send(Msg::Click {
-                window: h.core.windows.selected,
-                line,
-                col: 0,
-            });
+            let at = h.core.current().char_idx(line, 0).unwrap();
+            let window = &h.core.windows.window;
+            window.set_point(&mut h.core.buffers, at).unwrap();
             h.keys("RET");
             assert_eq!(h.core.message(), Some("Select a workspace row"));
             assert_eq!(

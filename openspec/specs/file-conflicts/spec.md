@@ -21,7 +21,7 @@ When a check finds a modified buffer's file present with a hash other than the b
 - **THEN** the save is refused as a change on disk and the buffer becomes conflicted
 
 ### Requirement: Focusing or saving a conflicted buffer asks
-When a conflicted buffer becomes the selected window's buffer, by any command or click, and no minibuffer is open, the editor SHALL ask `<path> changed on disk: ` with the choices `Compare`, `Take disk` and `Keep mine`, once per disk version. It SHALL NOT ask when the conflict arises while the buffer is already selected, until it is selected again. `C-x C-s` in a conflicted buffer SHALL ask the same question every time instead of saving. `M-x resolve-conflict` SHALL ask it for the current buffer. Quitting the question SHALL leave the buffer conflicted.
+When a conflicted buffer becomes the selected window's buffer, by any command, and no minibuffer is open, the editor SHALL ask `<path> changed on disk: ` with the choices `Compare`, `Take disk` and `Keep mine`, once per disk version. It SHALL NOT ask when the conflict arises while the buffer is already selected, until it is selected again. `C-x C-s` in a conflicted buffer SHALL ask the same question every time instead of saving. `M-x resolve-conflict` SHALL ask it for the current buffer. Quitting the question SHALL leave the buffer conflicted.
 
 #### Scenario: Switching to a conflicted buffer
 - **WHEN** a conflicted buffer is switched to with `C-x b`
