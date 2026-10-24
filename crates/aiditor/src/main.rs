@@ -42,6 +42,8 @@ struct Args {
     config_dir: Option<PathBuf>,
     /// `recovery` in the platform data dir, for auto-save files.
     recovery_dir: Option<PathBuf>,
+    /// `shell/zsh` in the platform data dir, for zsh's shell integration.
+    zsh_dir: Option<PathBuf>,
     debug: bool,
 }
 
@@ -64,7 +66,8 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
     let dirs = directories::ProjectDirs::from("", "", "aiditor");
     parsed.config_dir =
         (parsed.config_dir).or_else(|| dirs.as_ref().map(|d| d.config_dir().to_owned()));
-    parsed.recovery_dir = dirs.map(|d| d.data_dir().join("recovery"));
+    parsed.recovery_dir = dirs.as_ref().map(|d| d.data_dir().join("recovery"));
+    parsed.zsh_dir = dirs.map(|d| d.data_dir().join("shell/zsh"));
     Ok(parsed)
 }
 

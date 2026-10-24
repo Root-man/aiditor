@@ -1,11 +1,11 @@
 //! PTY processes, each with its own bounded output channel.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
-use std::fs::File;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,7 +35,11 @@ fn terminal_env(
 
 /// The spawned terminals, each one's PTY master and input queue by id.
 #[derive(Default)]
-pub struct Terminals(HashMap<TerminalId, Handle>);
+pub struct Terminals {
+    handles: HashMap<TerminalId, Handle>,
+    /// The folder zsh starts with as `ZDOTDIR`, for its shell integration; `None` skips it.
+    zsh_dir: Option<PathBuf>,
+}
 
 struct Handle {
     master: Box<dyn MasterPty + Send>,
@@ -93,6 +97,14 @@ fn signal(groups: &[libc::pid_t], signal: libc::c_int) {
 }
 
 impl Terminals {
+    /// Terminals whose zsh gets the shell integration in `zsh_dir`, if there is one.
+    pub fn new(zsh_dir: Option<PathBuf>) -> Self {
+        Terminals {
+            handles: HashMap::new(),
+            zsh_dir,
+        }
+    }
+
     /// Run `op` without blocking; a spawn returns its terminal's receiver: started, then output,
     /// then exit.
     pub fn run(&mut self, op: TerminalOp) -> Option<Receiver<Msg>> {
@@ -106,13 +118,13 @@ impl Terminals {
                 cols,
             } => Some(self.spawn(id, command, cwd, env, size(rows, cols))),
             TerminalOp::Write { id, bytes } => {
-                if let Some(terminal) = self.0.get(&id) {
+                if let Some(terminal) = self.handles.get(&id) {
                     _ = terminal.input.send(bytes);
                 }
                 None
             }
             TerminalOp::Resize { id, rows, cols } => {
-                if let Some(terminal) = self.0.get(&id)
+                if let Some(terminal) = self.handles.get(&id)
                     && let Err(err) = terminal.master.resize(size(rows, cols))
                 {
                     tracing::warn!("resizing terminal: {err}");
@@ -120,7 +132,7 @@ impl Terminals {
                 None
             }
             TerminalOp::Kill { id } => {
-                if let Some(terminal) = self.0.remove(&id) {
+                if let Some(terminal) = self.handles.remove(&id) {
                     let groups = terminal.hang_up();
                     thread::spawn(move || {
                         thread::sleep(GRACE);
@@ -135,7 +147,7 @@ impl Terminals {
     /// Kill every terminal, blocking for one shared grace, so no shell outlives the app.
     pub fn kill_all(&mut self) {
         let hung_up: Vec<_> = self
-            .0
+            .handles
             .drain()
             .map(|(_, terminal)| terminal.hang_up())
             .collect();
@@ -188,7 +200,7 @@ impl Terminals {
         };
         let (input, input_rx) = mpsc::channel::<Vec<u8>>();
         let shell = Arc::new(Mutex::new(Shell::Starting));
-        self.0.insert(
+        self.handles.insert(
             id,
             Handle {
                 master: pair.master,
@@ -197,6 +209,7 @@ impl Terminals {
             },
         );
         let slave = pair.slave;
+        let zsh_dir = self.zsh_dir.clone();
         thread::spawn(move || {
             let start = || {
                 if !cwd.is_dir() {
@@ -213,6 +226,14 @@ impl Terminals {
                 command.env_remove("SHLVL");
                 for (key, value) in terminal_env(std::env::vars_os(), env) {
                     command.env(key, value);
+                }
+                // shortcut: only zsh gets shell integration; add bash and fish scripts when they need marks.
+                if let Some(dir) = zsh_dir.filter(|_| {
+                    command.is_default_prog()
+                        && Path::new(&command.get_shell()).file_name() == Some(OsStr::new("zsh"))
+                }) && let Err(err) = integrate_zsh(&mut command, &dir, id)
+                {
+                    tracing::warn!("zsh shell integration in {}: {err}", dir.display());
                 }
                 slave.spawn_command(command).map_err(|err| err.to_string())
             };
@@ -267,6 +288,21 @@ impl Terminals {
         });
         rx
     }
+}
+
+/// Starts zsh with `ZDOTDIR` at `dir`, whose `.zshenv` restores the user's and adds the hooks.
+fn integrate_zsh(command: &mut CommandBuilder, dir: &Path, id: TerminalId) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    // Renamed into place, so a zsh starting in another terminal never reads a half-written file.
+    let tmp = dir.join(format!(".zshenv.{}.{}", std::process::id(), id.0));
+    fs::write(&tmp, include_str!("zshenv"))?;
+    fs::rename(&tmp, dir.join(".zshenv"))?;
+    match command.get_env("ZDOTDIR").map(OsStr::to_owned) {
+        Some(user) => command.env("AIDITOR_ZDOTDIR", user),
+        None => command.env_remove("AIDITOR_ZDOTDIR"),
+    }
+    command.env("ZDOTDIR", dir);
+    Ok(())
 }
 
 fn size(rows: u16, cols: u16) -> PtySize {

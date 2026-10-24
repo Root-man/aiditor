@@ -1,0 +1,44 @@
+# aiditor's zsh integration: aiditor starts zsh with ZDOTDIR here, so this runs first.
+if [[ -n ${AIDITOR_ZDOTDIR+x} ]]; then
+  builtin export ZDOTDIR=$AIDITOR_ZDOTDIR
+  builtin unset AIDITOR_ZDOTDIR
+else
+  builtin unset ZDOTDIR
+fi
+
+# `always`, so a user file that fails or returns still gets the hooks.
+{
+  [[ ! -r ${ZDOTDIR-$HOME}/.zshenv ]] || builtin source -- ${ZDOTDIR-$HOME}/.zshenv
+} always {
+  if [[ -o interactive ]]; then
+    typeset -gi _aiditor_ran=0
+
+    _aiditor_precmd() {
+      builtin local -i ret=$?
+      builtin emulate -L zsh -o extended_glob
+      (( _aiditor_ran )) && builtin print -rn -- $'\e]133;D;'$ret$'\a'
+      _aiditor_ran=0
+      # Byte by byte, so the percent-encoding matches what the editor decodes.
+      builtin local LC_ALL=C
+      builtin print -rn -- $'\e]133;A\a\e]7;file://'$HOST${PWD//(#m)[^A-Za-z0-9\/._~-]/%${(l:2::0:)$(( [##16] #MATCH ))}}$'\a'
+      [[ $PS1 == *$'\e]133;B\a'* ]] || PS1+=$'%{\e]133;B\a%}'
+    }
+
+    _aiditor_preexec() {
+      _aiditor_ran=1
+      builtin print -rn -- $'\e]133;C\a'
+    }
+
+    # The user's .zshrc runs after this file, so ordering waits for the first prompt. zsh
+    # runs a copy of precmd_functions, so this prompt's marks come from here.
+    _aiditor_deferred() {
+      precmd_functions=(${precmd_functions:#_aiditor_deferred} _aiditor_precmd)
+      preexec_functions+=(_aiditor_preexec)
+      builtin unfunction _aiditor_deferred
+      _aiditor_precmd
+    }
+
+    typeset -ga precmd_functions
+    precmd_functions+=(_aiditor_deferred)
+  fi
+}
