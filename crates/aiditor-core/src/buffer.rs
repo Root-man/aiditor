@@ -347,12 +347,16 @@ impl Buffer {
     }
 
     /// Sets a terminal buffer's copy-mode text, `None` to leave copy mode, past read-only and
-    /// without undo; markers past its end move to it.
+    /// without undo, dropping the old text's properties; markers past its end move to it.
     pub(crate) fn set_copy_text(&mut self, text: Option<Rope>) {
         let Content::Terminal(_, copy) = &mut self.content else {
             return;
         };
         *copy = text;
+        for (start, end, _) in std::mem::take(&mut self.props) {
+            self.markers.remove(&start);
+            self.markers.remove(&end);
+        }
         self.minor_modes.retain(|&m| m != "vterm-copy-mode");
         if self.copy_mode() {
             self.minor_modes.push("vterm-copy-mode");

@@ -142,7 +142,14 @@ pub fn build(
 ) -> WindowDisplay {
     let text = buffer.text();
     // shortcut: every char scans every property, fine for a screenful; index them when buffers get many.
-    let props: Vec<_> = buffer.properties().collect();
+    let mut props: Vec<_> = buffer.properties().collect();
+    // Without folds no line past the window's is reached, so only the properties near it count,
+    // which keeps a coloured scrollback in terminal copy mode cheap to draw.
+    if !(props.iter()).any(|(_, prop)| matches!(prop, Prop::Invisible(_))) {
+        let first = text.line_to_char(top.min(text.len_lines() - 1));
+        let last = text.line_to_char((top + rows + 1).min(text.len_lines()));
+        props.retain(|(range, _)| range.end >= first && range.start <= last);
+    }
     let region = mark.map(|m| m.min(point)..m.max(point));
     let new_line = |number| Line {
         number,
@@ -267,14 +274,20 @@ pub fn build(
         (_, Some(_)) => " [conflict]",
         _ => "",
     };
+    let position = format!("  {}:{c}", l + 1);
+    // A terminal in char mode has no point to show.
+    let (mode, position) = match buffer.terminal() {
+        Some(_) if buffer.copy_mode() => (" [copy]", position),
+        Some(_) => (" [char]", String::new()),
+        None => ("", position),
+    };
     WindowDisplay {
         lines,
         cursor,
         // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
         mode_line: format!(
-            "{state} {}{dos}{disk}  {}:{c}",
+            "{state} {}{dos}{disk}{mode}{position}",
             buffer.name.replace('\n', "^J"),
-            l + 1
         ),
         terminal: None,
     }
