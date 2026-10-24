@@ -143,13 +143,15 @@ pub fn build(
     let text = buffer.text();
     // shortcut: every char scans every property, fine for a screenful; index them when buffers get many.
     let mut props: Vec<_> = buffer.properties().collect();
+    let first = text.line_to_char(top.min(text.len_lines() - 1));
+    let last = text.line_to_char((top + rows + 1).min(text.len_lines()));
     // Without folds no line past the window's is reached, so only the properties near it count,
     // which keeps a coloured scrollback in terminal copy mode cheap to draw.
     if !(props.iter()).any(|(_, prop)| matches!(prop, Prop::Invisible(_))) {
-        let first = text.line_to_char(top.min(text.len_lines() - 1));
-        let last = text.line_to_char((top + rows + 1).min(text.len_lines()));
         props.retain(|(range, _)| range.end >= first && range.start <= last);
     }
+    // shortcut: only the window's buffer lines are highlighted, so lines a fold joins in are drawn uncoloured; highlight display lines when folds get common.
+    let syntax = buffer.highlights(first..last, &settings.theme.syntax);
     let region = mark.map(|m| m.min(point)..m.max(point));
     let new_line = |number| Line {
         number,
@@ -241,7 +243,11 @@ pub fn build(
         if !range.contains(&(col - 1)) {
             continue;
         }
-        let mut face = Face::default();
+        let i = syntax.partition_point(|(range, _)| range.end < pos);
+        let mut face = Face {
+            fg: (syntax.get(i)).and_then(|(range, color)| (range.start < pos).then_some(*color)),
+            ..Face::default()
+        };
         for (range, prop) in &props {
             if let Prop::Face(f) = prop
                 && range.contains(&(pos - 1))
@@ -459,6 +465,73 @@ mod tests {
         h.core.windows.window.set_active(true);
         prop(&mut h, 1..5, Prop::Face(RED));
         insta::assert_debug_snapshot!(h.display(1).lines);
+    }
+
+    /// Each span of the first `rows` lines, as (text, foreground).
+    fn colors(h: &mut Harness, rows: usize) -> Vec<(String, Option<u32>)> {
+        (h.display(rows).lines.into_iter())
+            .flat_map(|l| l.spans)
+            .map(|s| (s.text, s.face.fg))
+            .collect()
+    }
+
+    #[test]
+    fn code_is_coloured_and_follows_edits_undo_and_reverts() {
+        let mut h = Harness::new(&[("a.js", "if (x) f(1);")]);
+        h.open("a.js");
+        let syntax = h.core.settings().theme.syntax.clone();
+        let c = |name: &str| Some(syntax[name]);
+        let code = vec![
+            ("if".into(), c("keyword")),
+            (" (".into(), None),
+            ("x".into(), c("variable")),
+            (") ".into(), None),
+            ("f".into(), c("function")),
+            ("(".into(), None),
+            ("1".into(), c("number")),
+            (");".into(), None),
+        ];
+        assert_eq!(colors(&mut h, 1), code);
+        h.keys("/ / SPC");
+        assert_eq!(
+            colors(&mut h, 1),
+            [("// if (x) f(1);".into(), c("comment"))]
+        );
+        h.keys("C-/");
+        assert_eq!(colors(&mut h, 1), code);
+        h.prepare_revert("a.js", Some(b"'s'"));
+        h.keys("M-x revert-buffer RET y RET");
+        assert_eq!(colors(&mut h, 1), [("'s'".into(), c("string"))]);
+    }
+
+    #[test]
+    fn other_files_and_the_region_over_code() {
+        let mut h = Harness::new(&[("a.txt", "if (x) f(1);"), ("b.ts", "let x")]);
+        h.open("a.txt");
+        assert_eq!(colors(&mut h, 1), [("if (x) f(1);".into(), None)]);
+        h.open("b.ts").keys("C-SPC C-f C-f");
+        let theme = h.core.settings().theme.clone();
+        let spans = h.display(1).lines.remove(0).spans;
+        let faces: Vec<_> = spans.iter().map(|s| (s.face.fg, s.face.bg)).collect();
+        let keyword = Some(theme.syntax["keyword"]);
+        assert_eq!(faces[0], (keyword, Some(theme.region)));
+    }
+
+    #[test]
+    fn a_scrolled_window_is_highlighted_from_its_top_line() {
+        let text = "let a;\n".repeat(1000);
+        let mut h = Harness::new(&[("a.js", &text)]);
+        h.open("a.js").keys("M->");
+        assert_eq!(h.display(3).lines[0].number, 998);
+        let syntax = &h.core.settings().theme.syntax;
+        let (keyword, variable) = (Some(syntax["keyword"]), Some(syntax["variable"]));
+        let line = [
+            ("let".into(), keyword),
+            (" ".into(), None),
+            ("a".into(), variable),
+            (";".into(), None),
+        ];
+        assert_eq!(colors(&mut h, 3), [line.clone(), line].concat());
     }
 
     #[test]

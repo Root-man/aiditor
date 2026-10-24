@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use toml::Table;
 
 pub const BUNDLED: &str = include_str!("../settings.toml");
@@ -54,6 +55,8 @@ pub struct Theme {
     pub mode_line_inactive: u32,
     /// Terminals' ANSI colours 0 to 15.
     pub ansi: [u32; 16],
+    /// Code's colours by tree-sitter capture name; `function.method` falls back to `function`.
+    pub syntax: BTreeMap<String, u32>,
 }
 
 impl Settings {
@@ -117,6 +120,13 @@ mod tests {
         let ansi = (0..16).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let s = Settings::parse(Some(&format!("[theme]\nansi = [{ansi}]"))).unwrap();
         assert_eq!(s.theme.ansi[1], 1);
+        let s = Settings::parse(Some("[theme.syntax]\nkeyword = 0xff0000\nfoo = 1")).unwrap();
+        let bundled = Settings::default().theme.syntax;
+        assert_eq!(s.theme.syntax["keyword"], 0xff0000);
+        assert_eq!(
+            (s.theme.syntax["string"], s.theme.syntax["foo"]),
+            (bundled["string"], 1)
+        );
     }
 
     #[test]

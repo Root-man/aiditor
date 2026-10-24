@@ -86,8 +86,14 @@ impl Core {
     /// It has no width, so point's line never scrolls sideways.
     #[cfg(test)]
     pub fn display(&mut self, height: f32) -> display::WindowDisplay {
-        let (window, buffers, settings) = (&mut self.windows.window, &self.buffers, &self.settings);
-        window_display(window, buffers, settings, height, usize::MAX)
+        let window = &mut self.windows.window;
+        window_display(
+            window,
+            &mut self.buffers,
+            &self.settings,
+            height,
+            usize::MAX,
+        )
     }
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
@@ -116,7 +122,7 @@ impl Core {
                         .expect("tree windows are live"),
                 };
                 let cols = (rect.width / cell_width) as usize;
-                let (buffers, settings) = (&self.buffers, &self.settings);
+                let (buffers, settings) = (&mut self.buffers, &self.settings);
                 let mut display = window_display(window, buffers, settings, rect.height, cols);
                 if unwatched
                     && buffers
@@ -178,7 +184,7 @@ impl Core {
 /// included, point's line shown from the column that keeps point visible.
 pub(crate) fn window_display(
     window: &mut Window,
-    buffers: &Buffers,
+    buffers: &mut Buffers,
     settings: &Settings,
     height: f32,
     cols: usize,
@@ -188,7 +194,13 @@ pub(crate) fn window_display(
         .max(1);
     // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
     let top = window.scroll(buffers, rows);
-    let buffer = buffers.get(window.buffer()).expect("window buffer is live");
+    let id = window.buffer();
+    buffers
+        .get_mut(id)
+        .expect("window buffer is live")
+        .reparse();
+    let buffers = &*buffers;
+    let buffer = buffers.get(id).expect("window buffer is live");
     let point = window.point(buffers);
     let mark = window.mark(buffers).filter(|_| window.active());
     // shortcut: point's column is its char column in the buffer line, so a fold before point on its line shifts the scroll; use the display column when folds get common.

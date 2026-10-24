@@ -630,8 +630,8 @@ impl Core {
         let (width, _, cell_width) = self.frame_size;
         let cols =
             ((width / cell_width) as usize).saturating_sub(count.len() + prompt.chars().count());
-        let (window, buffers, settings) = (&mut self.windows.window, &self.buffers, &self.settings);
-        let display = window_display(window, buffers, settings, height, cols);
+        let (window, buffers) = (&mut self.windows.window, &mut self.buffers);
+        let display = window_display(window, buffers, &self.settings, height, cols);
         Some(display::Minibuffer {
             count,
             prompt,
