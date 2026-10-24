@@ -79,9 +79,16 @@ impl Terminal {
 
     /// Row `line`'s text, trailing blanks trimmed; 0 is the screen's top, negative is scrollback.
     pub fn row(&self, line: i32) -> String {
+        let mut text = self.cells(line, self.term.columns());
+        text.truncate(text.trim_end_matches(' ').len());
+        text
+    }
+
+    /// The text of row `line`'s cells before column `end`, untrimmed.
+    fn cells(&self, line: i32, end: usize) -> String {
         let row = &self.term.grid()[Line(line)];
         let mut text = String::new();
-        for col in 0..self.term.columns() {
+        for col in 0..end {
             let cell = &row[Column(col)];
             if cell
                 .flags
@@ -92,8 +99,37 @@ impl Terminal {
             text.push(cell.c);
             text.extend(cell.zerowidth().into_iter().flatten());
         }
-        text.truncate(text.trim_end_matches(' ').len());
         text
+    }
+
+    /// Copy mode's text: the scrollback then the screen, soft-wrapped rows joined and blank rows
+    /// below the cursor dropped, with the cursor's line and char column in it.
+    pub fn copy_text(&self) -> (String, usize, usize) {
+        let grid = self.term.grid();
+        let (cursor, cols) = (grid.cursor.point, self.term.columns());
+        let mut lines = vec![String::new()];
+        let mut at = (0, 0);
+        for line in -(self.history() as i32)..self.term.screen_lines() as i32 {
+            let n = lines.len() - 1;
+            let current = &mut lines[n];
+            if line == cursor.line.0 {
+                let before = self.cells(line, cursor.column.0);
+                at = (n, current.chars().count() + before.chars().count());
+            }
+            if grid[Line(line)][Column(cols - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
+            {
+                *current += &self.cells(line, cols);
+            } else {
+                *current += &self.row(line);
+                lines.push(String::new());
+            }
+        }
+        while lines.len() > at.0 + 1 && lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        (lines.join("\n"), at.0, at.1)
     }
 
     /// The screen's rows as runs of styled cells, and the cursor, colors resolved against `theme`.
@@ -332,6 +368,44 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Enters copy mode in the current terminal buffer, with point at the terminal's cursor, or
+    /// leaves it without copying.
+    pub(crate) fn vterm_copy_mode(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let buffer = core.current_mut();
+        let terminal = buffer.terminal().ok_or("Not in a terminal")?;
+        if buffer.copy_mode() {
+            buffer.set_copy_text(None);
+            core.windows.window.set_active(false);
+            return Ok(());
+        }
+        let (text, line, col) = terminal.copy_text();
+        buffer.set_copy_text(Some(text.as_str().into()));
+        let at = buffer.char_idx(line, col)?;
+        core.windows.window.set_point(&mut core.buffers, at)?;
+        Ok(())
+    }
+
+    /// Copies the region, or point's line without one, to the kill ring and the clipboard and
+    /// leaves copy mode.
+    pub(crate) fn vterm_copy_mode_done(&mut self) -> Result<(), String> {
+        let core = &*self.core;
+        let buffer = core.current();
+        if !buffer.copy_mode() {
+            return Err("Not in copy mode".into());
+        }
+        let (window, point) = (&core.windows.window, core.point());
+        let range = match window.mark(&core.buffers).filter(|_| window.active()) {
+            Some(mark) => point.min(mark)..point.max(mark),
+            None => {
+                let (line, _) = buffer.line_col(point)?;
+                buffer.char_idx(line, 0)?..buffer.char_idx(line, usize::MAX)?
+            }
+        };
+        self.kill_region(Some(range), true)?;
+        self.vterm_copy_mode()
+    }
+
     /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
         let core = &mut *self.core;
@@ -371,11 +445,11 @@ pub(crate) fn editor_key(key: Key) -> bool {
 }
 
 impl Core {
-    /// The current buffer's terminal while it takes keys: its shell is live and no key
-    /// sequence is pending.
+    /// The current buffer's terminal while it takes keys: its shell is live, it isn't in copy
+    /// mode and no key sequence is pending.
     pub(crate) fn char_mode(&self) -> Option<TerminalId> {
         let buffer = self.windows.window.buffer();
-        (self.pending.is_empty())
+        (self.pending.is_empty() && !self.current().copy_mode())
             .then(|| self.terminals.iter().find(|&(_, &b)| b == buffer))
             .flatten()
             .map(|(&id, _)| id)
@@ -493,6 +567,32 @@ mod tests {
         let mut t = fed(2, 10, "ab\x1b[1");
         t.feed(b";1Hx");
         assert_eq!(t.screen(), "xb\n");
+    }
+
+    #[test]
+    fn copy_text_is_the_scrollback_then_the_screen() {
+        let t = fed(3, 10, "1\r\n2\r\n3\r\n4\r\n$ ");
+        assert_eq!(t.copy_text(), ("1\n2\n3\n4\n$".into(), 4, 2));
+        // Blank rows below the cursor go; the cursor's own row stays.
+        assert_eq!(fed(4, 10, "a\r\n").copy_text(), ("a\n".into(), 1, 0));
+        let t = fed(2, 4, "abcdefghij\r\nx");
+        assert_eq!(
+            t.copy_text(),
+            ("abcdefghij\nx".into(), 1, 1),
+            "wrapped rows join"
+        );
+        let t = fed(2, 4, "abcdef");
+        assert_eq!(
+            t.copy_text(),
+            ("abcdef".into(), 0, 6),
+            "the cursor on a continuation row"
+        );
+        let t = fed(2, 10, "1\r\n2\r\n3\x1b[?1049h\x1b[Hvim");
+        assert_eq!(
+            t.copy_text(),
+            ("vim".into(), 0, 3),
+            "the alternate screen alone"
+        );
     }
 
     #[test]
@@ -824,6 +924,96 @@ mod tests {
             assert_eq!(h.core.message(), Some("Quit"));
             assert_eq!(typed(&mut h, "s-z C-c a"), "");
             assert_eq!(h.core.message(), Some("C-c a is undefined"));
+        }
+
+        /// A shown live terminal holding `seq 1 5000`'s output and a `$ ` prompt, in copy mode.
+        fn copying() -> (Harness, TerminalId, String) {
+            let (mut h, id) = shown();
+            let seq: String = (1..=5000).map(|n| format!("{n}\r\n")).collect();
+            output(&mut h, id, &(seq + "$ "));
+            assert_eq!(typed(&mut h, "C-c C-t"), "");
+            let text = (1..=5000).map(|n| format!("{n}\n")).collect::<String>() + "$";
+            (h, id, text)
+        }
+
+        /// The clipboard text set since the last drain of effects, if any.
+        fn clipboard(h: &Harness) -> Option<String> {
+            (h.effects.iter().rev()).find_map(|e| match e {
+                Effect::SetClipboard(text) => Some(text.clone()),
+                _ => None,
+            })
+        }
+
+        fn line(h: &Harness) -> usize {
+            h.core.current().line_col(h.point()).unwrap().0
+        }
+
+        #[test]
+        fn copy_mode_shows_the_scrollback_as_text() {
+            let (mut h, _, text) = copying();
+            assert_eq!((h.text(), h.point()), (text.clone(), text.len()));
+            let frame = h.frame(800., 300.);
+            let display = &frame.windows[0].display;
+            assert!(display.terminal.is_none() && display.cursor.is_some());
+            // Motion, swiper and the mark work; inserting fails; the shell hears nothing.
+            h.keys("M-< C-n C-SPC C-e M-w");
+            assert_eq!(clipboard(&h).as_deref(), Some("2"));
+            assert!(writes(&mut h).is_empty());
+            assert_eq!(typed(&mut h, "C-s 4999 RET"), "");
+            assert_eq!(line(&h), 4998);
+            assert_eq!(typed(&mut h, "x"), "");
+            assert_eq!(h.core.message(), Some("Buffer is read-only"));
+            assert_eq!(h.text(), text);
+        }
+
+        #[test]
+        fn a_wrapped_command_is_one_line() {
+            let (mut h, id) = shown();
+            output(&mut h, id, "$ echo 0123456789abc\r\n0123456789abc\r\n$ ");
+            h.keys("C-c C-t");
+            assert_eq!(h.text(), "$ echo 0123456789abc\n0123456789abc\n$");
+        }
+
+        #[test]
+        fn copy_mode_on_the_alternate_screen_is_the_screen() {
+            let (mut h, id) = shown();
+            output(&mut h, id, "1\r\n2\r\n3\x1b[?1049h\x1b[Hvim");
+            h.keys("C-c C-t");
+            assert_eq!((h.text(), h.point()), ("vim".into(), 3));
+        }
+
+        #[test]
+        fn output_waits_for_copy_mode_to_end() {
+            let (mut h, id, text) = copying();
+            h.keys("M-<");
+            output(&mut h, id, "new\r\n");
+            assert_eq!((h.text(), h.point()), (text, 0));
+            assert_eq!(typed(&mut h, "C-c C-t"), "", "leaves without copying");
+            assert_eq!((h.text(), h.point()), (String::new(), 0));
+            assert!(h.core.kills.current_kill(0).is_err());
+            let screen = h.core.current().terminal().unwrap().screen();
+            assert_eq!(screen, "$ new\n");
+            let frame = h.frame(800., 300.);
+            assert!(frame.windows[0].display.terminal.is_some());
+            assert_eq!(typed(&mut h, "a"), "a", "char mode again");
+        }
+
+        #[test]
+        fn ret_copies_the_region_or_the_line_and_leaves() {
+            let (mut h, _, _) = copying();
+            h.keys("M-< C-SPC C-f C-f RET");
+            assert_eq!(clipboard(&h).as_deref(), Some("1\n"));
+            assert!(writes(&mut h).is_empty());
+            assert_eq!(h.core.kills.current_kill(0).unwrap(), "1\n");
+            assert!(!h.core.current().copy_mode() && h.text().is_empty());
+            assert!(h.frame(800., 300.).windows[0].display.terminal.is_some());
+            assert_eq!(typed(&mut h, "RET"), "\r", "char mode again");
+            h.keys("C-c C-t M-< C-n C-f RET");
+            assert_eq!(
+                clipboard(&h).as_deref(),
+                Some("2"),
+                "the line, without a region"
+            );
         }
 
         #[test]

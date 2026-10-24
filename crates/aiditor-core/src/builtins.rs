@@ -629,6 +629,19 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.vterm_yank(),
         },
         Command {
+            name: "vterm-copy-mode",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.vterm_copy_mode(),
+        },
+        Command {
+            name: "vterm-copy-mode-done",
+            spec: ArgSpec {
+                clipboard: true,
+                ..ArgSpec::default()
+            },
+            handler: |ctx, _| ctx.vterm_copy_mode_done(),
+        },
+        Command {
             name: "revert-buffer",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.revert_buffer(args),

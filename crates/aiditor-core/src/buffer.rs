@@ -140,7 +140,7 @@ impl Buffers {
     pub fn create_terminal(&mut self, name: &str, terminal: Terminal) -> BufferId {
         let id = self.create(&unique(name, |n| self.find(n).is_some()));
         let buffer = self.map.get_mut(&id).expect("just created");
-        (buffer.content, buffer.read_only) = (Content::Terminal(Box::new(terminal)), true);
+        (buffer.content, buffer.read_only) = (Content::Terminal(Box::new(terminal), None), true);
         buffer.major_mode = "vterm-mode";
         id
     }
@@ -238,8 +238,8 @@ impl Buffers {
 /// The content backend.
 pub enum Content {
     Text(Rope),
-    /// A terminal's grid; its text is empty until copy mode builds it from the scrollback.
-    Terminal(Box<Terminal>),
+    /// A terminal's grid, and copy mode's text built from its scrollback while in copy mode.
+    Terminal(Box<Terminal>, Option<Rope>),
 }
 
 static EMPTY: LazyLock<Rope> = LazyLock::new(Rope::new);
@@ -337,20 +337,43 @@ impl Buffer {
     pub fn text(&self) -> &Rope {
         match &self.content {
             Content::Text(rope) => rope,
-            Content::Terminal(_) => &EMPTY,
+            Content::Terminal(_, copy) => copy.as_ref().unwrap_or(&EMPTY),
         }
+    }
+
+    /// Whether this terminal buffer is in copy mode.
+    pub fn copy_mode(&self) -> bool {
+        matches!(self.content, Content::Terminal(_, Some(_)))
+    }
+
+    /// Sets a terminal buffer's copy-mode text, `None` to leave copy mode, past read-only and
+    /// without undo; markers past its end move to it.
+    pub(crate) fn set_copy_text(&mut self, text: Option<Rope>) {
+        let Content::Terminal(_, copy) = &mut self.content else {
+            return;
+        };
+        *copy = text;
+        self.minor_modes.retain(|&m| m != "vterm-copy-mode");
+        if self.copy_mode() {
+            self.minor_modes.push("vterm-copy-mode");
+        }
+        let len = self.len_chars();
+        for (pos, _) in self.markers.values_mut() {
+            *pos = (*pos).min(len);
+        }
+        self.tick += 1;
     }
 
     pub fn terminal(&self) -> Option<&Terminal> {
         match &self.content {
-            Content::Terminal(terminal) => Some(terminal),
+            Content::Terminal(terminal, _) => Some(terminal),
             Content::Text(_) => None,
         }
     }
 
     pub(crate) fn terminal_mut(&mut self) -> Option<&mut Terminal> {
         match &mut self.content {
-            Content::Terminal(terminal) => Some(terminal),
+            Content::Terminal(terminal, _) => Some(terminal),
             Content::Text(_) => None,
         }
     }
@@ -455,8 +478,8 @@ impl Buffer {
         match &mut self.content {
             Content::Text(rope) => rope.try_insert(char_idx, text)?,
             // Not even the paths past read-only edit a grid.
-            Content::Terminal(_) if !text.is_empty() => return Err(Error::ReadOnly),
-            Content::Terminal(_) => {}
+            Content::Terminal(..) if !text.is_empty() => return Err(Error::ReadOnly),
+            Content::Terminal(..) => {}
         }
         let n = text.chars().count();
         for (pos, kind) in self.markers.values_mut() {
@@ -476,8 +499,8 @@ impl Buffer {
         }
         match &mut self.content {
             Content::Text(rope) => rope.try_remove(range.clone())?,
-            Content::Terminal(_) if changed => return Err(Error::ReadOnly),
-            Content::Terminal(_) => {}
+            Content::Terminal(..) if changed => return Err(Error::ReadOnly),
+            Content::Terminal(..) => {}
         }
         for (pos, _) in self.markers.values_mut() {
             if *pos > range.start {
