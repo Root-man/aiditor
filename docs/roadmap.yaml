@@ -743,7 +743,7 @@ milestones:
   # ───────────────────────────────────────────── M2 ─────────────────────────────────────────────
   - key: m2
     title: "M2 · Terminal"
-    description: "PTY + VT emulator buffers, char and copy mode, shell integration, $EDITOR client."
+    description: "PTY + VT emulator buffers, char and copy mode, shell integration."
     gate: "Run the test suite and make a git commit in a terminal buffer, and on macOS type in a file buffer with no visible lag while `yes` and a large `cat` flood a terminal (Linux checked in #226)."
     epics:
       - key: m2-pty
@@ -951,12 +951,6 @@ milestones:
               - "Bash and fish start as before"
               - "Checked on macOS and Linux"
               - "Decision recorded in docs/editor.md"
-      - key: m2-editor-client
-        title: "$EDITOR client for terminal buffers"
-        labels: [terminal]
-        design: "#subsystems"
-        body: |
-          Terminals set `EDITOR`/`VISUAL` to a small client that opens the file in a buffer in the terminal's workspace and blocks until the edit is finished or aborted. Mechanism to be decided (likely a Unix socket). Break down when M2 starts.
 
   # ───────────────────────────────────────────── M3 ─────────────────────────────────────────────
   - key: m3
@@ -1060,7 +1054,7 @@ milestones:
   # ───────────────────────────────────────────── M5 ─────────────────────────────────────────────
   - key: m5
     title: "M5 · Polish"
-    description: "Tree-sitter for four languages, TAB indentation, formatters, registers, macros, navigation features."
+    description: "Tree-sitter for four languages, TAB indentation, formatters, registers, macros, navigation features, $EDITOR client for terminals."
     gate: "Daily driver for real work, without LSP (knowingly deferred)."
     epics:
       - key: m5-treesitter
@@ -1273,6 +1267,41 @@ milestones:
         design: "#projects"
         body: |
           Doom's dashboard for aiditor: a launch with no argument shows a welcome buffer in the `$HOME` workspace (see "Decide: launching without a project"), with quick commands such as recent files, recent projects and open project. Needs a recent files and projects history, which doesn't exist yet (see "Decide: C-s and the remaining editing commands"). Break down when M5 starts.
+      - key: m5-editor-client
+        title: "$EDITOR client for terminal buffers"
+        labels: [terminal]
+        design: "#subsystems"
+        body: |
+          Terminals set `EDITOR`/`VISUAL` to a small client that opens the file in a buffer in the terminal's workspace and blocks until the edit is finished or aborted. Mechanism to be decided (likely a Unix socket).
+        tasks:
+          - key: m2-decide-editor-client
+            title: "Decide: $EDITOR client mechanism"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Settle how the client reaches the editor and what an edit looks like. Likely answer: one Unix socket per editor process (mode 0600 in a 0700 directory under the runtime dir), its path and the terminal's id passed to each shell in `AIDITOR_SOCKET` and `AIDITOR_TERMINAL`; the client is the `aiditor` binary itself, run as `EDITOR="<current_exe> --wait"` and handled before GPUI starts, so nothing extra ships; it sends its cwd and the files (`+LINE` too, as `git` never passes it but other tools do) and exits with the code the editor replies. Also decide: the finish and abort keys (`C-c C-c` and `C-c C-k` as with-editor, `C-x #` as `server-edit`), which window shows the file and what it shows after, whether finishing saves, and what killing the buffer, killing the terminal or quitting does to a waiting client (abort). Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+          - key: m2-edit-server
+            title: "Edit server and client command"
+            body: |
+              The services side of the decision: the editor listens on its socket and removes it on quit; terminals get `EDITOR`, `VISUAL` and the client variables in their environment; the client sends its request, blocks for the reply and exits with its code. Requests reach the core as a message carrying the terminal id and absolute paths; the core's reply goes back over the same connection. Requests are untrusted input: a malformed one or an unknown terminal is refused, never crashes the editor.
+            acceptance:
+              - "Services test: a client request reaches the core channel, and the client exits 0 or 1 with the reply"
+              - "The client with no editor socket, or a dead one, prints an error and exits non-zero"
+              - "Socket permissions are 0600, and it is gone after quit"
+              - "`echo $EDITOR` in a terminal buffer shows the client command"
+            blocked_by: [m2-decide-editor-client, m2-pty-spawn]
+          - key: m2-edit-buffers
+            title: "Finish and abort client edits"
+            body: |
+              The core opens each requested file in the terminal's workspace, in the window showing that terminal, with a minor mode whose keys finish or abort the edit, as decided. Finishing saves (if decided) and replies success; aborting, killing the buffer, killing its terminal or quitting replies failure. The window then goes back to the terminal.
+            acceptance:
+              - "`git commit` in a terminal buffer opens COMMIT_EDITMSG; finishing commits, aborting leaves no commit"
+              - "`git rebase -i` works the same way"
+              - "Killing the buffer or quitting while git waits makes git abort, not hang"
+              - "Core tests cover finish, abort and kill-buffer replies"
+            blocked_by: [m2-edit-server, m2-term-buffers]
 
   # ───────────────────────────────────────────── M6 ─────────────────────────────────────────────
   - key: m6

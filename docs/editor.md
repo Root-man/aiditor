@@ -424,10 +424,10 @@ Build the editor core first and add the agent at M3, so agent features land on a
 | --- | --- | --- |
 | M0 · Skeleton | Rope buffers, undo; window splits, keymap trie; minibuffer, find-file, save; auto-save and recovery | Edit and save a file using Emacs keys only |
 | M1 · Projects + workspaces | Primary repo + extra roots, project commands; finder + grep across repos; workspaces with their own layouts and buffers | In two workspaces on different projects, find a file from an additional root, grep across two roots and jump to a hit, then keep editing while an external write auto-reverts another open buffer |
-| M2 · Terminal | PTY + VT emulator buffers; char mode and copy mode; shell integration marks; `$EDITOR` client | Run the test suite and make a git commit in a terminal buffer |
+| M2 · Terminal | PTY + VT emulator buffers; char mode and copy mode; shell integration marks | Run the test suite and make a git commit in a terminal buffer |
 | M3 · First agent | Claude Code via ACP; session buffer (with soft wrap) and modes; process environment; agent terminals as buffers (if the adapter uses `terminal/create`) | Land one real change with an agent, in the editor |
 | M4 · Sessions | Resume after restart via `session/load`; Claude + Codex side by side; extra roots, project preamble | One session makes a change across two repos |
-| M5 · Polish | Tree-sitter for 4 languages, TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results | Daily driver for real work, without LSP (knowingly deferred) |
+| M5 · Polish | Tree-sitter for 4 languages, TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results; `$EDITOR` client for terminals | Daily driver for real work, without LSP (knowingly deferred) |
 
 Phases are in order of dependency, not to scale; no dates are set. LSP, multiple cursors, ACP prompt features (`@file`, slash commands, image paste, tool-call diffs), block rows and proportional faces in the session buffer, agent status in the mode line, a dashboard with notifications, diff review, dired and worktree workflows come after M5.
 
