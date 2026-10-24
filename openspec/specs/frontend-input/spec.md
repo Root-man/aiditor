@@ -90,3 +90,10 @@ A left click on a window's text SHALL select that window and move its point to t
 #### Scenario: Click cancels a prefix
 - **WHEN** `C-x` is pressed and the text is clicked
 - **THEN** no prefix is pending and the next key runs on its own
+
+### Requirement: Navigation and function keys reach the core
+Home, End, PageUp, PageDown, Delete and F1 to F12 SHALL be sent to the core as keys with their modifiers.
+
+#### Scenario: F1 and Home
+- **WHEN** `f1` and `shift-home` are pressed
+- **THEN** the core receives `<f1>` and `S-<home>`
