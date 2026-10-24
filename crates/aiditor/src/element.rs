@@ -2,13 +2,14 @@ use std::time::Instant;
 
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
-use aiditor_core::display::{FrameWindow, Line, Rect};
+use aiditor_core::display::{CursorShape, FrameWindow, Line, Rect, Terminal};
 use aiditor_core::settings::Theme;
 use aiditor_core::window::WindowId;
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
-    GlobalElementId, InspectorElementId, LayoutId, Pixels, Point, ShapedLine, Style, TextRun,
-    UnderlineStyle, Window, fill, point, prelude::*, px, rgb, size,
+    App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
+    FontStyle, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels, Point,
+    ShapedLine, Style, TextRun, UnderlineStyle, Window, fill, outline, point, prelude::*, px, rgb,
+    size,
 };
 
 use crate::editor::Editor;
@@ -17,12 +18,23 @@ use crate::editor::Editor;
 pub(crate) struct Painted {
     pub(crate) id: WindowId,
     pub(crate) bounds: Bounds<Pixels>,
-    selected: bool,
+    pub(crate) selected: bool,
     pub(crate) rows: Vec<Row>,
+    /// A terminal's runs, each placed on its grid column.
+    pub(crate) cells: Vec<Cells>,
     mode_line: ShapedLine,
     pub(crate) cursor: Option<Bounds<Pixels>>,
     /// The char under the cursor, shaped in the background color to show through the block.
     cursor_char: Option<ShapedLine>,
+    /// A terminal cursor in a window that isn't selected, drawn as an outline.
+    pub(crate) hollow: bool,
+}
+
+/// A terminal run as painted: where, its cells' background and its text.
+pub(crate) struct Cells {
+    pub(crate) origin: Point<Pixels>,
+    background: Option<(Bounds<Pixels>, u32)>,
+    pub(crate) text: ShapedLine,
 }
 
 pub(crate) struct Row {
@@ -106,6 +118,7 @@ impl Element for FrameElement {
             let shape = |text: String, runs: &[TextRun]| {
                 (window.text_system()).shape_line(text.into(), font_size, runs, None)
             };
+            let line_height = px(settings.line_height());
             let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
                 let bounds = to_bounds(w.rect, bounds.origin);
                 let mut top = px(0.);
@@ -140,6 +153,70 @@ impl Element for FrameElement {
                     row
                 });
                 let rows = rows.collect();
+                let mut cells = Vec::new();
+                let mut hollow = false;
+                if let Some(terminal) = &w.display.terminal {
+                    let grid = |row: u16, col: u16| {
+                        bounds.origin + point(cell * col as f32, line_height * row as f32)
+                    };
+                    for (row, runs) in terminal.rows.iter().enumerate() {
+                        for r in runs {
+                            let origin = grid(row as u16, r.col);
+                            let run = TextRun {
+                                len: r.text.len(),
+                                font: styled(&font, r.bold, r.italic),
+                                color: rgb(r.fg).into(),
+                                ..text_run(0, Face::default(), r.underline, &font, &settings.theme)
+                            };
+                            let width = cell * r.cells as f32;
+                            cells.push(Cells {
+                                origin,
+                                background: r.bg.map(|bg| {
+                                    (Bounds::new(origin, gpui::size(width, line_height)), bg)
+                                }),
+                                // Each glyph advances one cell, so fallback fonts stay on the grid.
+                                text: window.text_system().shape_line(
+                                    r.text.clone().into(),
+                                    font_size,
+                                    &[run],
+                                    Some(cell),
+                                ),
+                            });
+                        }
+                    }
+                    if let Some(c) = &terminal.cursor {
+                        let block = Bounds::new(
+                            grid(c.row, c.col),
+                            gpui::size(cell * c.cells as f32, line_height),
+                        );
+                        hollow = !w.selected;
+                        cursor = Some(match (hollow, c.shape) {
+                            (false, CursorShape::Beam) => {
+                                Bounds::new(block.origin, gpui::size(px(2.), line_height))
+                            }
+                            (false, CursorShape::Underline) => Bounds::new(
+                                block.bottom_left() - point(px(0.), px(2.)),
+                                gpui::size(block.size.width, px(2.)),
+                            ),
+                            _ => block,
+                        });
+                        if !hollow && c.shape == CursorShape::Block {
+                            cursor_char = under_cursor(terminal, c.row, c.col).map(|text| {
+                                let face = Face {
+                                    fg: Some(settings.theme.background),
+                                    bg: None,
+                                };
+                                let run = text_run(text.len(), face, false, &font, &settings.theme);
+                                (window.text_system()).shape_line(
+                                    text.into(),
+                                    font_size,
+                                    &[run],
+                                    Some(cell),
+                                )
+                            });
+                        }
+                    }
+                }
                 let run = text_run(
                     w.display.mode_line.len(),
                     Face::default(),
@@ -153,8 +230,10 @@ impl Element for FrameElement {
                     selected: w.selected,
                     rows,
                     mode_line: shape(w.display.mode_line, &[run]),
+                    cells,
                     cursor,
                     cursor_char,
+                    hollow,
                 }
             });
             let painted = painted.collect();
@@ -203,7 +282,17 @@ impl Element for FrameElement {
                         .ok();
                     row.text.paint(origin, row.height, window, cx).ok();
                 }
-                if let Some(cursor) = p.cursor {
+                for c in &p.cells {
+                    if let Some((bounds, color)) = c.background {
+                        window.paint_quad(fill(bounds, rgb(color)));
+                    }
+                }
+                for c in &p.cells {
+                    c.text.paint(c.origin, line_height, window, cx).ok();
+                }
+                if let Some(cursor) = p.cursor.filter(|_| p.hollow) {
+                    window.paint_quad(outline(cursor, rgb(theme.cursor), BorderStyle::Solid));
+                } else if let Some(cursor) = p.cursor {
                     window.paint_quad(fill(cursor, rgb(theme.cursor)));
                     if let Some(under) = &p.cursor_char {
                         under
@@ -237,6 +326,27 @@ pub(crate) fn block(line: &ShapedLine, byte: usize, cell: Pixels) -> (Pixels, Pi
         false => line.x_for_index(byte + under.len()) - x,
     };
     (x, width, under)
+}
+
+/// The char a terminal's block cursor at `row`, `col` covers, if any is drawn there.
+fn under_cursor(terminal: &Terminal, row: u16, col: u16) -> Option<String> {
+    let run =
+        (terminal.rows[row as usize].iter()).find(|r| (r.col..r.col + r.cells).contains(&col))?;
+    // A wide char runs alone and the cursor sits on its first cell; combining marks only end a run.
+    Some(run.text.chars().nth((col - run.col) as usize)?.to_string())
+}
+
+/// `font` in bold weight and italic style as asked.
+fn styled(font: &Font, bold: bool, italic: bool) -> Font {
+    Font {
+        weight: if bold { FontWeight::BOLD } else { font.weight },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            font.style
+        },
+        ..font.clone()
+    }
 }
 
 /// `rect` from the frame display, placed at `origin`.

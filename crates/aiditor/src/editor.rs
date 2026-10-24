@@ -1029,6 +1029,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn terminal_cells_sit_on_the_grid(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            let (id, _) = e.core.create_terminal("term", 3, 20);
+            let bytes = "日本x\r\nabcde".as_bytes().to_vec();
+            e.handle(Msg::TerminalOutput { id, bytes }, cx);
+        });
+        cx.simulate_keystrokes("ctrl-x b");
+        cx.simulate_input("term");
+        cx.simulate_keystrokes("enter ctrl-x 2");
+        cx.run_until_parked();
+        let (x, e, hollow) = editor.read_with(cx, |ed, _| {
+            let cells = &ed.painted[0].cells;
+            let at = |text: &str| cells.iter().find(|c| c.text.text.as_ref() == text).unwrap();
+            let abcde = at("abcde");
+            let e = abcde.origin.x + abcde.text.x_for_index(4);
+            let hollow = ed.painted.iter().map(|p| p.hollow).collect::<Vec<_>>();
+            (at("x").origin.x, e, hollow)
+        });
+        assert!((x - e).abs() < px(0.01), "x at {x:?}, e at {e:?}");
+        assert_eq!(
+            hollow,
+            [false, true],
+            "the unselected window's cursor is hollow"
+        );
+    }
+
+    #[gpui::test]
     fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
         let (editor, cx) = editor(cx, "hello world");
         let cursor = |cx: &mut VisualTestContext| {

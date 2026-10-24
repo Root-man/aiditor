@@ -10,6 +10,45 @@ pub struct WindowDisplay {
     /// Point as (index into `lines`, char column in that line's text), if it is shown.
     pub cursor: Option<(usize, usize)>,
     pub mode_line: String,
+    /// A terminal buffer's screen, drawn instead of `lines` and `cursor`.
+    pub terminal: Option<Terminal>,
+}
+
+/// A terminal's live screen: its rows' runs and its cursor.
+#[derive(Debug, PartialEq)]
+pub struct Terminal {
+    pub rows: Vec<Vec<Run>>,
+    pub cursor: Option<Cursor>,
+}
+
+/// Adjacent cells of one style, from grid column `col`; a wide char is a run of its own.
+#[derive(Debug, PartialEq)]
+pub struct Run {
+    pub col: u16,
+    pub cells: u16,
+    pub text: String,
+    /// Colors as 0xRRGGBB; no background is the default one.
+    pub fg: u32,
+    pub bg: Option<u32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Cursor {
+    pub row: u16,
+    pub col: u16,
+    /// Two on a wide char.
+    pub cells: u16,
+    pub shape: CursorShape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CursorShape {
+    Block,
+    Beam,
+    Underline,
 }
 
 /// A rectangle of the frame in pixels.
@@ -237,6 +276,7 @@ pub fn build(
             buffer.name.replace('\n', "^J"),
             l + 1
         ),
+        terminal: None,
     }
 }
 

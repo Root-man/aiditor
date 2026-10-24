@@ -52,6 +52,8 @@ pub struct Theme {
     pub mode_line: u32,
     /// Every other window's mode line background.
     pub mode_line_inactive: u32,
+    /// Terminals' ANSI colours 0 to 15.
+    pub ansi: [u32; 16],
 }
 
 impl Settings {
@@ -112,6 +114,9 @@ mod tests {
         let inactive = Settings::default().theme.mode_line_inactive;
         assert_eq!(s.theme.mode_line_inactive, inactive);
         assert_eq!(s.theme.background, Settings::default().theme.background);
+        let ansi = (0..16).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let s = Settings::parse(Some(&format!("[theme]\nansi = [{ansi}]"))).unwrap();
+        assert_eq!(s.theme.ansi[1], 1);
     }
 
     #[test]
