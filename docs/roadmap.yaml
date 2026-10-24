@@ -1054,7 +1054,7 @@ milestones:
   # ───────────────────────────────────────────── M5 ─────────────────────────────────────────────
   - key: m5
     title: "M5 · Polish"
-    description: "Tree-sitter for four languages, TAB indentation, formatters, registers, macros, navigation features, $EDITOR client for terminals."
+    description: "Tree-sitter for five languages, TAB indentation, formatters, registers, macros, navigation features, $EDITOR client for terminals."
     gate: "Daily driver for real work, without LSP (knowingly deferred)."
     epics:
       - key: m5-treesitter
@@ -1062,7 +1062,31 @@ milestones:
         labels: [text]
         design: "#subsystems"
         body: |
-          Incremental parsing off the core thread for Elixir, Rust, JS/TS and Markdown; highlighting, folding and structural motion. Break down when M5 starts.
+          Incremental parsing for Elixir (with HEEx), Rust, JS/TS, YAML and Markdown; highlighting, folding and structural motion. Highlighting comes first, parsed on the core thread; moving parsing off it, inline Markdown, injections (code fences, `~H` sigils), folding and structural motion follow.
+        tasks:
+          - key: m5-highlight-js
+            title: "Highlight JavaScript and TypeScript"
+            body: |
+              The highlighting pipeline, built for JS/TS first. Visiting a file picks its language by extension (`.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`) and parses it with `tree-sitter`; each edit is applied to the tree with `Tree::edit` and reparsed incrementally on the core thread (a `shortcut:` until parsing moves off it). The display builder runs the grammar's highlights query over the visible lines only and maps capture names (keyword, string, comment, function, type, constant, number, operator, property, variable.builtin, …) to faces from a `syntax` palette in the bundled theme; highlights are not stored as text properties. TypeScript's query extends JavaScript's, so both are combined, as Zed and Helix do.
+            acceptance:
+              - "JS, TS and TSX files open highlighted, and highlighting follows edits, undo and reverts"
+              - "Only the visible lines are queried for highlights"
+              - "The theme has a `syntax` palette that settings.toml can override"
+              - "A test checks a snippet's faces"
+          - key: m5-highlight-langs
+            title: "Highlight Rust, Elixir, HEEx and YAML"
+            body: |
+              Add the grammars and their highlights queries to the pipeline: Rust (`.rs`), Elixir (`.ex`, `.exs`), HEEx (`.heex`) and YAML (`.yml`, `.yaml`). `~H` sigils inside Elixir files wait for injections.
+            acceptance:
+              - "Files in each language open highlighted"
+            blocked_by: [m5-highlight-js]
+          - key: m5-highlight-markdown
+            title: "Highlight Markdown blocks"
+            body: |
+              Highlight `.md` files with `tree-sitter-md`'s block grammar: headings, code fences, lists, quotes and thematic breaks. Inline emphasis, code spans and links (the inline grammar) and code inside fences wait for injections.
+            acceptance:
+              - "Markdown files open with their block structure highlighted"
+            blocked_by: [m5-highlight-js]
       - key: m5-indent
         title: "TAB indentation"
         labels: [text]
