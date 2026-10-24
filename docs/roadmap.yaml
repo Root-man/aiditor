@@ -846,7 +846,7 @@ milestones:
         labels: [terminal, keymap]
         design: "#subsystems"
         body: |
-          Char mode sends almost every key to the shell; copy mode turns scrollback into a read-only buffer with Emacs motion, search and kill. Break down when M2 starts.
+          Char mode sends almost every key to the shell; copy mode turns scrollback into a read-only buffer with Emacs motion, search and kill.
         tasks:
           - key: m2-decide-escape
             title: "Decide: escape prefix key in char mode"
@@ -856,6 +856,38 @@ milestones:
               Which key stays with the editor in char mode, given readline's use of `C-a`, `C-e`, `C-x` and friends. Record the answer in `docs/editor.md`.
             acceptance:
               - "Decision recorded in docs/editor.md"
+          - key: m2-char-mode
+            title: "Type into terminals in char mode"
+            body: |
+              A terminal buffer starts in char mode, as vterm-mode: every key except the escape prefix (#89) is encoded as xterm does and sent as `TerminalOp::Write` instead of running a command; the prefix and the keys under it go through the keymaps as usual. Encoding follows Zed's `terminal/src/mappings/keys.rs`: chars as UTF-8, `C-<letter>` as its control byte, `M-` as an ESC prefix, `RET` as `\r`, `DEL` as `\x7f`, `S-TAB` as `\x1b[Z`, arrows, Home and End in normal or application cursor mode (DECCKM) as the program set it, and modified arrows as `\x1b[1;<m>D` and friends. `Key` gains the keys a shell needs that it lacks: Home, End, PageUp, PageDown, Delete and F1 to F12. Text from the platform's input (Option-typed chars on macOS with `option_as_meta` off, IME commits) is sent the same way.
+            acceptance:
+              - "Typing `echo hi` then `RET` in a terminal runs it"
+              - "`C-a`, `C-e`, `C-r` and `M-b` reach readline in bash and zle in zsh"
+              - "Arrows move in `less` and `vim`, which switch to application cursor mode"
+              - "The escape prefix and the keys under it still run editor commands"
+              - "Core tests check the bytes each key sends, in both cursor modes"
+            blocked_by: [m2-decide-escape]
+          - key: m2-term-paste
+            title: "Paste into terminals"
+            body: |
+              In char mode, `s-v` (and `C-y` if #89 keeps it with the editor) sends the clipboard text, or the newest kill, to the shell instead of inserting it. When the program turned on bracketed paste (mode 2004), the text goes between `\x1b[200~` and `\x1b[201~` with every ESC removed, as Zed does, so a pasted multi-line command isn't run line by line and can't end the paste early.
+            acceptance:
+              - "`s-v` at a shell prompt pastes the clipboard"
+              - "Two pasted lines in bash or zsh stay at the prompt, unrun"
+              - "Without bracketed paste (into `cat`), the text is sent as is"
+              - "A bracketed paste carries no ESC from the pasted text"
+            blocked_by: [m2-char-mode]
+          - key: m2-copy-mode
+            title: "Copy mode over the scrollback"
+            body: |
+              A key under the escape prefix (#89) toggles copy mode, as vterm's `vterm-copy-mode`. Entering builds the buffer's text from the scrollback and the screen, joining the rows the terminal soft-wrapped so a long command is one line, and puts point at the terminal's cursor. The window then draws that text like any read-only buffer, so motion, the mark, swiper and `M-w` work unchanged. Output keeps feeding the grid, but the text stays as it was on entry. `RET` copies the region, or the current line without one, to the kill ring and the clipboard and leaves, as `vterm-copy-mode-done`; the toggle key leaves without copying. Leaving empties the text and shows the live screen again. On the alternate screen (`vim`, `less`) there is no scrollback, so the text is the screen.
+            acceptance:
+              - "After `seq 1 5000`, copy mode's text is the scrollback then the screen, with point at the shell's cursor"
+              - "A command wider than the window is one line in copy mode"
+              - "`M-<`, swiper and `C-SPC` … `M-w` work in copy mode, and inserting fails as in any read-only buffer"
+              - "`RET` copies the region, or the current line without one, to the kill ring and clipboard, and returns to char mode on the live screen"
+              - "Output in copy mode doesn't change its text or point, and shows once copy mode ends"
+            blocked_by: [m2-decide-escape]
       - key: m2-shell-integration
         title: "Shell integration: OSC 133 and OSC 7"
         labels: [terminal]
