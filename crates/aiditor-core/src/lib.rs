@@ -201,6 +201,8 @@ pub enum Msg {
         project: ProjectId,
         request: u64,
         result: Result<Vec<(String, String)>, String>,
+        /// Why loading direnv into the captured variables failed, if it did.
+        direnv: Option<String>,
     },
 }
 
@@ -627,7 +629,8 @@ impl Ctx<'_> {
                 project,
                 request,
                 result,
-            } => self.environment_captured(project, request, result),
+                direnv,
+            } => self.environment_captured(project, request, result, direnv),
             Msg::Tick => {}
         }
     }

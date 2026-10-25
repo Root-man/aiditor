@@ -163,11 +163,20 @@ impl Editor {
                 } => {
                     let tx = self.tx.clone();
                     tokio::spawn(async move {
-                        let result = environment::run(&dir).await;
+                        let mut result = environment::run(&dir).await;
+                        let direnv = match &mut result {
+                            Ok(vars) => {
+                                environment::direnv(vars, &dir, environment::DIRENV_TIMEOUT)
+                                    .await
+                                    .err()
+                            }
+                            Err(_) => None,
+                        };
                         _ = (tx.send(Msg::EnvironmentCaptured {
                             project,
                             request,
                             result,
+                            direnv,
                         }))
                         .await;
                     });
