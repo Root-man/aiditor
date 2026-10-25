@@ -1027,6 +1027,35 @@ milestones:
               Time-box: 1 day. Are the `agent-client-protocol` crate's connection types `!Send`? Decide whether the ACP client runs on GPUI's foreground executor or a dedicated single-threaded runtime, and record it in `docs/editor.md`. Cheap enough to do any time before M3.
             acceptance:
               - "Answer and choice recorded in docs/editor.md"
+          - key: m3-acp-registry
+            title: "Agent registry in settings"
+            labels: [core]
+            body: |
+              An `[agents.<name>]` table in settings.toml: `command`, `args`, `env`, `default_mode`, merged like any other setting. The bundled settings define `claude` (claude-agent-acp). A bad entry is reported like any other settings error. A project file's `default_agent` that names no registered agent is reported like any other project file error.
+            acceptance:
+              - "The bundled registry has a claude entry; a user entry overrides or adds agents"
+              - "An unknown `default_agent` is reported as `project <file>: <reason>` and the rest of the file still loads"
+              - "Decision recorded in docs/editor.md"
+          - key: m3-acp-service
+            title: "ACP service: spawn an agent and open a session"
+            labels: [infra]
+            body: |
+              `aiditor-services/src/agents.rs`, on the runtime the spike decides. The core depends on `agent-client-protocol-schema`, and `Msg` and `Effect` carry its types as they are. On `AgentOp::Spawn` the service starts the command in the primary repo with the captured env, the registry's `env` on top, then the project file's `env`. It sends `initialize` advertising no fs or terminal capabilities, then `session/new` with `cwd`, and answers with `Msg::AgentStarted` (session id, modes) or a failure. Stderr lines and the exit come back as messages. Agent-to-client requests are kept by request id so a later `AgentOp::Reply` can answer them; until the modes epic they're rejected. Kill and kill-all follow `Terminals`. Tests run a minimal agent built on the ACP crate, which the fake agent epic grows into the scripted fake.
+            acceptance:
+              - "A test agent is initialized and a session is opened with `cwd` set to the primary repo and no fs capabilities"
+              - "The agent's stderr and exit arrive as messages; a spawn failure is reported, not panicked on"
+              - "Kill and quit leave no agent process behind"
+            blocked_by: [m3-spike-acp, m3-acp-registry]
+          - key: m3-acp-sessions
+            title: "Start an agent session from the editor"
+            body: |
+              A command starts an agent session in the current workspace: it takes an agent name, with completion over the registry, and defaults to the project's `default_agent`. While the project's environment is being captured, the spawn waits for the answer. Each session gets a read-only stderr log buffer. Messages notes `<agent> session ready (modes: ...)`, a failure, or a crash, and a crash ends only that session. Killing a workspace or quitting stops its agents, and quitting asks about them as it asks about terminals. Session updates are kept for the session buffer and not rendered.
+            acceptance:
+              - "Starting claude from the Dock waits for the capture and finds `claude-agent-acp` on the captured PATH"
+              - "The log buffer shows the agent's stderr; Messages shows ready with its modes"
+              - "A crashing agent ends its own session only, with a note in Messages"
+              - "Checked against the real claude-agent-acp on macOS and Linux"
+            blocked_by: [m3-acp-service]
       - key: m3-fake-agent
         title: "Fake agent and transcript replay tests"
         labels: [acp, infra]
