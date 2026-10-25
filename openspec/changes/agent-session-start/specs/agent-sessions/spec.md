@@ -40,11 +40,11 @@ Each session SHALL get a new read-only buffer named `*<agent> stderr*<<workspace
 - **THEN** its log buffer's text is `hello\nworld\n` and the buffer is read-only
 
 ### Requirement: Session notes in Messages
-When the agent's session opens, `*Messages*` SHALL get `<agent> session ready (modes: <ids>)`, the advertised mode ids joined by `, `, or `none` when it advertises no modes. When the agent fails to start, `*Messages*` and the echo area SHALL get `<agent> session failed to start: <reason>`. When the agent exits after its session opened and was not stopped by the editor, `*Messages*` SHALL get `<agent> session exited with code <code>`, or `<agent> session killed by <signal>`.
+When the agent's session opens, `*Messages*` and the echo area, replacing `Starting <agent>...`, SHALL get `<agent> session ready (modes: <ids>)`, the advertised mode ids joined by `, `, or `none` when it advertises no modes. When the agent fails to start, `*Messages*` and the echo area SHALL get `<agent> session failed to start: <reason>`. When the agent exits after its session opened and was not stopped by the editor, `*Messages*` SHALL get `<agent> session exited with code <code>`, or `<agent> session killed by <signal>`.
 
 #### Scenario: Ready with modes
 - **WHEN** the agent answers `session/new` with modes `auto` and `plan`
-- **THEN** `*Messages*` has `claude session ready (modes: auto, plan)`
+- **THEN** `*Messages*` has `claude session ready (modes: auto, plan)` and the echo area shows it
 
 #### Scenario: A failed start
 - **WHEN** the agent's command cannot be found

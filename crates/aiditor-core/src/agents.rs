@@ -159,7 +159,7 @@ impl Ctx<'_> {
                     false => modes.join(", "),
                 };
                 session.session = Some(response);
-                core.log(&format!("{agent} session ready (modes: {modes})"));
+                core.echo(format!("{agent} session ready (modes: {modes})"));
             }
             Err(err) => {
                 session.ended = true;
@@ -439,6 +439,11 @@ mod tests {
         assert_eq!(log_text(&h, "*claude stderr*<work>"), "hello\nworld\n");
         ready(&mut h, 0);
         assert!(messages(&h).contains("claude session ready (modes: auto, plan)\n"));
+        // It replaces `Starting claude...` in the echo area.
+        assert_eq!(
+            h.core.message(),
+            Some("claude session ready (modes: auto, plan)")
+        );
         h.keys("M-x agent-start RET claude RET");
         h.send(Msg::AgentStarted {
             id: AgentId(1),
