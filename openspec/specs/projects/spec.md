@@ -146,7 +146,7 @@ The editor SHALL provide `project-create`, `project-add-root`, `project-remove-r
 - **THEN** the directory is made and the file written in it
 
 ### Requirement: Edit a project's roots, roles and default agent
-`project-add-root` SHALL add a directory, completing file names, with a role as an additional root; a relative one is taken from the current buffer's directory and a trailing `/` dropped. `project-remove-root` SHALL remove one of the additional roots, never the primary. `project-set-role` SHALL set any root's role. `project-set-default-agent` SHALL set the default agent, empty text removing it.
+`project-add-root` SHALL add a directory, completing file names, with a role as an additional root; a relative one is taken from the current buffer's directory and a trailing `/` dropped. `project-remove-root` SHALL remove one of the additional roots, never the primary. `project-set-role` SHALL set any root's role. `project-set-default-agent` SHALL set the default agent, completing over the registered agents' names, empty text removing it; a name that is not a registered agent SHALL leave the project unchanged and say so in the echo area.
 
 #### Scenario: Add a root
 - **WHEN** `project-add-root` adds `/r/zed` with role `GPUI source` to a project
@@ -159,6 +159,10 @@ The editor SHALL provide `project-create`, `project-add-root`, `project-remove-r
 #### Scenario: Clear the default agent
 - **WHEN** `project-set-default-agent` is answered with empty text
 - **THEN** the project has no default agent
+
+#### Scenario: Unregistered default agent
+- **WHEN** `project-set-default-agent` is answered with `gemini` and no agent `gemini` is registered
+- **THEN** the project is unchanged and the echo area names `gemini` as not a registered agent
 
 ### Requirement: Edits are checked and keep the rest of the file
 An edit to a project that has a file SHALL rewrite that file, keeping its comments, key order and every part the edit does not change. An edit SHALL be refused, with the file unchanged and the reason in the echo area, when the result would be rejected as a project file (an overlapping root, a missing directory, a role on more than one line) or when an existing file on disk differs from the text last loaded or written. A file that has been deleted SHALL be recreated with the checked edited definition, since no existing disk content is lost. A refused edit SHALL leave the loaded project unchanged. A disk conflict SHALL direct the user to reload with `C-x C-r`; other failures SHALL retain their specific cause. Project creation and saving an ad-hoc project SHALL continue to refuse an existing target file.
@@ -257,3 +261,15 @@ Loaded projects SHALL retain identity independently of their display name for th
 - **GIVEN** a project write is pending and a newer definition has already been reconciled
 - **WHEN** the pending write replies successfully
 - **THEN** its old definition does not replace the newer in-memory definition and a fresh read reconciles the actual file content
+
+### Requirement: An unknown default agent is reported without rejecting the project
+When project files load, at launch or on `C-x C-r`, a project whose `default_agent` names no agent in the settings in effect SHALL be reported as `project <file>: <reason>` naming the agent, in the echo area and `*Messages*`, sharing the line with other errors. The project SHALL still load with everything else in the file, and SHALL keep the `default_agent` value so writing the project back leaves it in the file.
+
+#### Scenario: Unknown default agent
+- **WHEN** a project file sets `default_agent = "gemini"` and no agent `gemini` is registered
+- **THEN** the echo area shows `project <file>: ` with a reason naming `gemini`, and the project is loaded with its roots
+
+#### Scenario: Agent added later
+- **GIVEN** a project file's `default_agent` named an unregistered agent `codex`
+- **WHEN** the user adds `[agents.codex]` to settings and presses `C-x C-r`
+- **THEN** no error about the project is shown
