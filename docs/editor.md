@@ -300,6 +300,8 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 **`$EDITOR` in terminals.** Git runs in terminal buffers, so `git commit` and `git rebase -i` launch `$EDITOR`. Terminal buffers set `EDITOR` and `VISUAL` to a small client command, like `emacsclient`, that opens the file in a buffer in the terminal's workspace and blocks until you finish or abort the edit. The mechanism is to be decided (likely a Unix socket the editor listens on).
 
+**App bundle** (built in [#266](https://github.com/Root-man/aiditor/issues/266)). `scripts/bundle.sh` builds the release binary and installs it for the current user. On macOS it installs `~/Applications/aiditor.app` (Info.plist with bundle id `io.github.root-man.aiditor` and name `aiditor`, an icon made from `crates/aiditor/resources/aiditor.png` with `sips` and `iconutil`, the binary in `Contents/MacOS`) and signs it ad hoc; there is no notarization. It is assembled in a temp dir and replaces an earlier install only once it is complete. On Linux it copies the binary to `~/.local/bin/aiditor` and installs `aiditor.desktop` (which runs that binary by absolute path) and the scalable icon under `$XDG_DATA_HOME`, `~/.local/share` by default; the window's app id is `aiditor`, matching the entry. `aiditor .` from a shell still runs the binary directly. The icon is a placeholder, kept as an SVG source and a 1024 px PNG.
+
 **Process environment.** An app launched from the macOS Dock or a Linux desktop launcher does not get the shell's environment, so agents and formatters would not find `claude`, `codex`, `node`, `mix` or `cargo`, nor the asdf/mise shims behind `.tool-versions`.
 
 (Decided in [#267](https://github.com/Root-man/aiditor/issues/267).)

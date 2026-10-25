@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Placeholder: a rounded square inside the macOS icon grid's margin, with a prompt and a cursor. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#1e2433"/>
+  <path d="M300 380 L450 512 L300 644" fill="none" stroke="#8fb4ff" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="520" y="610" width="200" height="64" rx="16" fill="#e8ecf4"/>
+</svg>
