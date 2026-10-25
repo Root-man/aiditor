@@ -1062,6 +1062,39 @@ milestones:
         design: "#testing"
         body: |
           A fake agent built on the ACP crate, scripted to stream updates, request permissions, write files to disk and create terminals; recorded Claude Code and Codex transcripts replayed against the client. Break down when M3 starts.
+        tasks:
+          - key: m3-fake-script
+            title: "Scripted fake agent"
+            body: |
+              Grow `aiditor-test-agent` into the fake: instead of `AIDITOR_TEST_AGENT` behaviors, `AIDITOR_FAKE_AGENT` names a script file of steps to run after `session/new` and on each `session/prompt`. Steps: send a `session/update` (written as ACP JSON, so any update the schema has needs no new code), ask a permission and wait for the answer, write a file relative to `cwd` on disk, sleep, write to stderr, exit with a code, and end the turn with a stop reason. It answers `session/set_mode` with a `current_mode_update` and stops the turn on `session/cancel`. Record the script format in `docs/editor.md` under Testing. Creating terminals is added by the agent terminals epic if #100 finds the adapters use it. Port the agent service tests to scripts.
+            acceptance:
+              - "The agent service tests run against scripts and the `AIDITOR_TEST_AGENT` behaviors are gone"
+              - "A script streams updates, asks a permission, writes a file and ends a turn"
+              - "Script format recorded in docs/editor.md"
+          - key: m3-fake-record
+            title: "Record Claude Code and Codex ACP transcripts"
+            body: |
+              A small `aiditor-acp-record OUT -- COMMAND ARGS` binary that runs the agent, passes stdio through and appends every JSON-RPC line with its direction to OUT as JSON lines. Put it in front of `claude-agent-acp` or `codex-acp` with a registry entry. Record a short session with each agent from aiditor, so the client capabilities are ours: a reply with markdown, a tool call that reads, one that edits a file, a permission prompt and a mode change. Scrub them before committing: home directory and `cwd` become placeholders, and nothing secret is left (tokens, emails, private paths). Commit them under `crates/aiditor-services/tests/transcripts/` with how to re-record. Needs prompting from the session buffer epic (#97).
+            acceptance:
+              - "The recorder passes traffic through unchanged and writes both directions"
+              - "A scrubbed Claude Code and a scrubbed Codex transcript are committed"
+              - "How to record and scrub is written next to them"
+            blocked_by: [m3-acp-sessions]
+          - key: m3-fake-replay
+            title: "Replay recorded transcripts against the client"
+            body: |
+              A replay mode of the fake agent: given a transcript, it answers each client message with the agent messages recorded after it, matching by method and remapping request ids, puts the real `cwd` back in place of the placeholder, and exits with an error on a client message the transcript doesn't expect. A test replays every committed transcript through the agent service into the core and asserts that every update reaches the core typed, every agent request is answered, and the turn ends. Later epics add their own assertions (a snapshot of the session buffer, permission answers) to the same test.
+            acceptance:
+              - "Every committed transcript replays to the end under `cargo test` on macOS and Linux"
+              - "An unexpected client message fails the test with the message shown"
+            blocked_by: [m3-fake-script, m3-fake-record]
+          - key: m3-fake-scenario
+            title: "Whole-app scenario with the fake agent"
+            body: |
+              One end-to-end test of the core with the real services, as `tests/file_sync.rs` does for files: a temporary project whose registry points at the fake agent, a key script that runs `agent-start` and sends a prompt, and a fake script that streams a reply and writes a file the project has open. It asserts that the reply reaches the session, the open buffer reverts to the new contents, and killing the workspace leaves no agent process. Needs prompting from the session buffer epic (#97).
+            acceptance:
+              - "The scenario passes under `cargo test` on macOS and Linux"
+            blocked_by: [m3-fake-script]
       - key: m3-session-buffer
         title: "Session buffer"
         labels: [acp, frontend]
