@@ -276,6 +276,7 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 - **Agent registry.** Claude Code (claude-agent-acp) and Codex (the maintained @agentclientprotocol/codex-acp) in TOML: command, args, env, and a default mode per agent. Processes start with the environment described under Process environment.
 - **One process per session.** A crash ends only that session; the agent's stderr goes to a log buffer.
+- **Threading (decided in [#95](https://github.com/Root-man/aiditor/issues/95)).** The ACP client is a service on the existing Tokio runtime, like the PTY and file services; no single-threaded executor or dedicated thread. `agent-client-protocol` 3.x is `Send` throughout: request and notification handlers, connection handles and the `connect_with` future must all be `Send + 'static`, and the crate depends on no runtime (it drives its own tasks inside that future with `futures`). A throwaway client and fake agent on `Channel::duplex`, each in a `tokio::spawn` on a multi-thread runtime, initialized and streamed a `session/update` with the handler running on a Tokio worker (3.5.0, the version Zed pins). Handlers only forward each request (with its responder) and notification onto the service channel; the core decides and the service sends the reply, so no core state crosses threads. Zed does the same: the connection future runs on GPUI's background executor and its handlers enqueue onto a foreground dispatch queue. The crate's optional `process` feature spawns agents with `async-process`, which brings its own reactor thread; spawning with `tokio::process` and wrapping its pipes with `tokio-util`'s compat layer into `ByteStreams` avoids that, at the cost of killing the agent's process group ourselves, which `process` does for `npx`-style wrappers.
 - **Session manager.** Keeps an index of sessions: ACP session id, agent, project, `cwd` and additional directories, title, last activity, status. It stores no transcript. The index is the only state that survives a restart. A resume command lists the project's past sessions and continues the chosen one in the current workspace with `session/load`, which replays the history into the session buffer; `session/resume` does not replay history, so it isn't used. Both adapters support loading across processes ([ConnectOnion's adapter matrix](https://docs.connectonion.com/useful-tools/acp-agent)). If the agent can list its own sessions, the resume list also shows sessions started outside the editor, such as in the Claude Code CLI; adapter support is to be checked.
 - **Session buffer.** A rich chat view like the Claude Code and Codex apps: rendered markdown, collapsible tool calls, the agent's plan, the current mode, and a multi-line prompt area at the bottom with Emacs editing. Swiper search, mark and kill, and copying all work with Emacs keys.
   - **Display model (decided in [#8](https://github.com/Root-man/aiditor/issues/8)).** The session buffer is a rope like any other buffer. The structured transcript is the source of truth; the core renders it into the rope as markdown text with properties: faces, `read-only`, `invisible` (hidden markup and folded tool calls) and line decorations (code-block background, a rule beside tool calls). The markup stays in the text and is only hidden, so search matches it and kill or copy yield markdown. Permission prompts and plan entries are text with key-bound buttons.
@@ -381,7 +382,6 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 - Whether the Claude Code and Codex adapters call `terminal/create`. If they don't, agent shell commands run inside the agent and never become terminal buffers.
 - Whether sessions started outside the editor can be listed for resume.
-- Whether the `agent-client-protocol` crate's connection types are `!Send`. If so, the ACP client runs on a single-threaded executor: GPUI's foreground executor or a dedicated thread.
 
 ## Testing
 
@@ -407,7 +407,7 @@ All MVP choices are settled. Check each crate's current version and maintenance 
 
 | Area | Choice | Alternatives | Notes |
 | --- | --- | --- | --- |
-| ACP | `agent-client-protocol` | Hand-rolled JSON-RPC | Official Rust crate; also used to build the fake agent for tests |
+| ACP | `agent-client-protocol` 3.x | Hand-rolled JSON-RPC | Official Rust crate, `Send` and runtime-agnostic; also used to build the fake agent for tests |
 | Async runtime | `tokio` | — | For the services; GPUI runs its own executors |
 | GUI | GPUI | `iced`, `floem`, custom `wgpu` + `cosmic-text` | Decided; Zed's framework, strong on macOS, also runs on Linux |
 | Text storage | `ropey` | `crop` | Rope with line/char indexing; undo built on top |
