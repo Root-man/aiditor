@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 
 use ropey::Rope;
 
+use crate::syntax::{self, Syntax};
 use crate::terminal::{ShellCommand, Terminal};
 use crate::workspace::WorkspaceId;
 
@@ -127,6 +128,7 @@ impl Buffers {
             workspace_rows: Vec::new(),
             point: MarkerId(0),
             commands: Vec::new(),
+            syntax: None,
         })
     }
 
@@ -163,6 +165,7 @@ impl Buffers {
     pub(crate) fn create_for_prepared_file(&mut self, path: &Path, text: Rope) -> BufferId {
         let id = self.create(&file_name(path));
         let buffer = self.map.get_mut(&id).expect("just created");
+        buffer.syntax = Syntax::for_file(path, &text);
         buffer.content = Content::Text(text);
         buffer.file = Some(path.to_path_buf());
         id
@@ -284,6 +287,8 @@ pub struct Buffer {
     pub point: MarkerId,
     /// In copy mode, each command's marks in the text, sorted by start.
     pub(crate) commands: Vec<ShellCommand>,
+    /// The parse of a file in a language aiditor highlights.
+    syntax: Option<Syntax>,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.
@@ -487,6 +492,8 @@ impl Buffer {
         if self.read_only && !text.is_empty() {
             return Err(Error::ReadOnly);
         }
+        let start = (self.syntax.is_some() && char_idx <= self.len_chars())
+            .then(|| syntax::position(self.text(), char_idx));
         match &mut self.content {
             Content::Text(rope) => rope.try_insert(char_idx, text)?,
             // Not even the paths past read-only edit a grid.
@@ -494,6 +501,12 @@ impl Buffer {
             Content::Terminal(..) => {}
         }
         let n = text.chars().count();
+        if let Some(start) = start {
+            let new_end = syntax::position(self.text(), char_idx + n);
+            if let Some(syntax) = &mut self.syntax {
+                syntax.edit(start, start, new_end);
+            }
+        }
         for (pos, kind) in self.markers.values_mut() {
             if *pos > char_idx || (*pos == char_idx && *kind == InsertionType::Advance) {
                 *pos += n;
@@ -509,10 +522,21 @@ impl Buffer {
         if self.read_only && changed {
             return Err(Error::ReadOnly);
         }
+        let ends =
+            (self.syntax.is_some() && range.start <= range.end && range.end <= self.len_chars())
+                .then(|| {
+                    (
+                        syntax::position(self.text(), range.start),
+                        syntax::position(self.text(), range.end),
+                    )
+                });
         match &mut self.content {
             Content::Text(rope) => rope.try_remove(range.clone())?,
             Content::Terminal(..) if changed => return Err(Error::ReadOnly),
             Content::Terminal(..) => {}
+        }
+        if let (Some(syntax), Some((start, old_end))) = (&mut self.syntax, ends) {
+            syntax.edit(start, old_end, start);
         }
         for (pos, _) in self.markers.values_mut() {
             if *pos > range.start {
@@ -567,6 +591,22 @@ impl Buffer {
             let range = self.marker(*s)?..self.marker(*e)?;
             (!range.is_empty()).then_some((range, prop))
         })
+    }
+
+    /// Brings the syntax tree up to date with the text's edits.
+    pub(crate) fn reparse(&mut self) {
+        if let (Some(syntax), Content::Text(rope)) = (&mut self.syntax, &self.content) {
+            syntax.reparse(rope);
+        }
+    }
+
+    /// The syntax colours `palette` gives chars `range`, as sorted, disjoint char ranges.
+    pub(crate) fn highlights(
+        &self,
+        range: Range<usize>,
+        palette: &BTreeMap<String, u32>,
+    ) -> Vec<(Range<usize>, u32)> {
+        (self.syntax.as_ref()).map_or(Vec::new(), |s| s.highlights(self.text(), range, palette))
     }
 
     pub fn remove_marker(&mut self, id: MarkerId) {

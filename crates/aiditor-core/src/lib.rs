@@ -29,6 +29,7 @@ pub mod project;
 mod project_commands;
 pub mod settings;
 mod swiper;
+mod syntax;
 pub mod terminal;
 pub mod timer;
 mod visiting;

@@ -21,3 +21,24 @@ ansi = [
   0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5,
   0x666666, 0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xe5e5e5,
 ]
+
+# Code colours by tree-sitter capture name; one without an entry takes its longest dotted
+# prefix's (`function.method` falls back to `function`), and none means the foreground.
+[theme.syntax]
+attribute = 0x9cdcfe
+comment = 0x6a9955
+constant = 0x4fc1ff
+"constant.builtin" = 0x569cd6
+constructor = 0x4ec9b0
+function = 0xdcdcaa
+keyword = 0x569cd6
+number = 0xb5cea8
+operator = 0xd4d4d4
+property = 0x9cdcfe
+string = 0xce9178
+"string.special" = 0xd16969
+tag = 0x569cd6
+type = 0x4ec9b0
+variable = 0x9cdcfe
+"variable.builtin" = 0x569cd6
+"variable.parameter" = 0x9cdcfe
