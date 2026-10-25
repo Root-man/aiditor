@@ -6,7 +6,7 @@ Colouring source code by its syntax: choosing a buffer's language from its file,
 ## Requirements
 
 ### Requirement: Language from the file extension
-A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `.cjs` and `.jsx`, as TypeScript for `.ts`, `.mts` and `.cts`, and as TSX for `.tsx`. Any other file, and a buffer with no file, SHALL be drawn without syntax colours.
+A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `.cjs` and `.jsx`, as TypeScript for `.ts`, `.mts` and `.cts`, as TSX for `.tsx`, as Rust for `.rs`, as Elixir for `.ex` and `.exs`, as HEEx for `.heex`, and as YAML for `.yml` and `.yaml`. An EEx template (a file ending in `.eex`) SHALL be highlighted by the extension before `.eex`, as the file it generates. Any other file, and a buffer with no file, SHALL be drawn without syntax colours.
 
 #### Scenario: TypeScript file
 - **WHEN** the user visits `a.ts` holding `const x: number = 1;`
@@ -19,6 +19,30 @@ A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `
 #### Scenario: JSX in a TSX file
 - **WHEN** the user visits `a.tsx` holding `const a = <div />;`
 - **THEN** `div` is drawn in the palette's `tag` colour
+
+#### Scenario: Rust file
+- **WHEN** the user visits `a.rs` holding `fn main() {}`
+- **THEN** `fn` is drawn in the `keyword` colour and `main` in the `function` colour
+
+#### Scenario: Elixir file
+- **WHEN** the user visits `a.ex` holding `defmodule Foo do end`
+- **THEN** `defmodule`, `do` and `end` are drawn in the `keyword` colour and `Foo` in the `module` colour
+
+#### Scenario: HEEx file
+- **WHEN** the user visits `a.heex` holding `<div class="a"></div>`
+- **THEN** `div` is drawn in the `tag` colour, `class` in the `attribute` colour and `"a"` in the `string` colour
+
+#### Scenario: YAML file
+- **WHEN** the user visits `a.yaml` holding `a: true`
+- **THEN** `a` is drawn in the `property` colour and `true` in the `boolean` colour
+
+#### Scenario: EEx template of a HEEx file
+- **WHEN** the user visits `a.html.heex.eex` holding `<div class="a"></div>`
+- **THEN** it is highlighted as HEEx, `div` drawn in the `tag` colour
+
+#### Scenario: EEx template with no highlighted inner language
+- **WHEN** the user visits `a.eex` or `a.html.eex`
+- **THEN** it is drawn without syntax colours
 
 ### Requirement: Highlighting follows the text
 Highlighting SHALL reflect the buffer's current text whenever it is drawn, after any edit, undo, redo or revert from disk.
