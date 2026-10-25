@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -130,6 +131,10 @@ fn main() {
         return;
     }
     let mut core = Core::default();
+    // A Dock or desktop-launcher start has no terminal and only a minimal environment.
+    if !std::io::stdout().is_terminal() {
+        core.capture_environments();
+    }
     let dir = args.config_dir.as_deref();
     core.handle(
         Instant::now(),

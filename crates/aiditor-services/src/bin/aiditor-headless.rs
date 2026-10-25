@@ -76,9 +76,10 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
                 std::process::exit(0);
             }
             // Key scripts run against files nothing else touches.
-            Effect::SetClipboard(_) | Effect::LoadConfiguration { .. } | Effect::Watch(_) => {
-                continue;
-            }
+            Effect::SetClipboard(_)
+            | Effect::LoadConfiguration { .. }
+            | Effect::Watch(_)
+            | Effect::CaptureEnvironment { .. } => continue,
         };
         send(core, service, reply);
     }

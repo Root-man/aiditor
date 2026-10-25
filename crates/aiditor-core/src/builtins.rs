@@ -350,6 +350,19 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.index_project(args.project.expect("project argument"), false),
         },
         Command {
+            name: "project-capture-environment",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.recapture_environment(),
+        },
+        Command {
+            name: "getenv",
+            spec: ArgSpec {
+                prompts: &["Get value of environment variable: "],
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.getenv(args),
+        },
+        Command {
             name: "project-find-file",
             // Asks its own question, so it can start indexing before the prompt opens.
             spec: ArgSpec {
