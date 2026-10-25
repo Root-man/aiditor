@@ -305,7 +305,17 @@ impl Element for FrameElement {
             });
         }
         let painted = std::mem::take(painted);
-        self.editor.update(cx, |editor, _| editor.painted = painted);
+        self.editor.update(cx, |editor, _| {
+            if let Some(benchmark) = &mut editor.benchmark {
+                let text = painted
+                    .iter()
+                    .find(|p| p.selected)
+                    .and_then(|p| p.rows.first())
+                    .map(|r| r.text.text.as_ref());
+                benchmark.painted(Instant::now(), text);
+            }
+            editor.painted = painted;
+        });
     }
 }
 

@@ -24,7 +24,8 @@ const FONT: &str = if cfg!(target_os = "macos") {
     "Noto Sans Mono"
 };
 
-const USAGE: &str = "usage: aiditor [--config-dir DIR] [--debug] [FILE | FOLDER]";
+const USAGE: &str =
+    "usage: aiditor [--config-dir DIR] [--debug] [FILE | FOLDER] | --bench-ui OUTPUT";
 
 /// The ad-hoc project root for `file`: the nearest directory above it holding `.git`, else its
 /// folder.
@@ -45,6 +46,7 @@ struct Args {
     /// `shell/zsh` in the platform data dir, for zsh's shell integration.
     zsh_dir: Option<PathBuf>,
     debug: bool,
+    benchmark: Option<PathBuf>,
 }
 
 fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
@@ -52,6 +54,10 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--debug") => parsed.debug = true,
+            Some("--bench-ui") => {
+                parsed.benchmark =
+                    Some(args.next().ok_or("--bench-ui needs an output file")?.into());
+            }
             Some("--config-dir") => {
                 parsed.config_dir = Some(PathBuf::from(
                     args.next().ok_or("--config-dir needs a DIR")?,
@@ -119,6 +125,10 @@ fn main() {
         eprintln!("aiditor: {err}\n{USAGE}");
         std::process::exit(2);
     });
+    if let Some(output) = args.benchmark.take() {
+        editor::benchmark::run(output);
+        return;
+    }
     let mut core = Core::default();
     let dir = args.config_dir.as_deref();
     core.handle(
