@@ -55,19 +55,21 @@ impl Ctx<'_> {
         });
     }
 
-    /// Keeps the answer to the latest capture of `project`, noting it in `*Messages*`.
+    /// Keeps the answer to the latest capture of `project`, noting it and any direnv failure in
+    /// `*Messages*`.
     pub(crate) fn environment_captured(
         &mut self,
         project: ProjectId,
         request: u64,
         result: Result<Vec<(String, String)>, String>,
+        direnv: Option<String>,
     ) {
         let core = &mut *self.core;
         let latest = core.environments.get(&project).and_then(|e| e.capturing) == Some(request);
         if !latest || core.project_at(project).is_err() {
             return;
         }
-        let name = core.project_name(project);
+        let name = core.project_name(project).to_string();
         let (line, vars) = match result {
             Ok(vars) => (
                 format!(
@@ -82,6 +84,11 @@ impl Ctx<'_> {
             ),
         };
         core.log(&line);
+        if let Some(err) = direnv {
+            core.log(&format!(
+                "Couldn't load direnv for {name}, using the shell environment without it: {err}"
+            ));
+        }
         let environment = Environment {
             capturing: None,
             vars,
@@ -156,6 +163,15 @@ mod tests {
         (project, request): (ProjectId, u64),
         result: Result<&[(&str, &str)], &str>,
     ) {
+        reply_direnv(h, (project, request), result, None);
+    }
+
+    fn reply_direnv(
+        h: &mut Harness,
+        (project, request): (ProjectId, u64),
+        result: Result<&[(&str, &str)], &str>,
+        direnv: Option<&str>,
+    ) {
         let result = result
             .map(|vars| {
                 vars.iter()
@@ -167,6 +183,7 @@ mod tests {
             project,
             request,
             result,
+            direnv: direnv.map(str::to_string),
         });
     }
 
@@ -241,6 +258,20 @@ mod tests {
         assert_eq!(call(&mut h, "getenv", &["PATH"]), inherited("PATH"));
         h.send(Msg::Tick);
         assert_eq!(captures(&mut h), [], "a fallback is kept too");
+    }
+
+    #[test]
+    fn a_direnv_failure_keeps_the_capture_with_a_note() {
+        let mut h = Harness::new(&[]);
+        h.core.capture_environments();
+        h.send(Msg::Tick);
+        let [(home, request, _)] = captures(&mut h).try_into().unwrap();
+        let blocked = "direnv exit status: 1: direnv: error .envrc is blocked";
+        reply_direnv(&mut h, (home, request), Ok(&[("A", "1")]), Some(blocked));
+        assert!(messages(&h).contains(&format!(
+            "Captured home's shell environment: 1 variables\nCouldn't load direnv for home, using the shell environment without it: {blocked}"
+        )));
+        assert_eq!(call(&mut h, "getenv", &["A"]), "1");
     }
 
     #[test]

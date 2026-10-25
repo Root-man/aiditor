@@ -1,7 +1,9 @@
 //! A project's environment, captured from the user's interactive login shell.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -83,6 +85,60 @@ pub async fn capture(
     })
 }
 
+/// How long `direnv export json` may take; `use flake` can build on first load.
+pub const DIRENV_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Applies `direnv export json` in `dir` to `vars` when `direnv` is on their `PATH`, within
+/// `timeout`; on an error `vars` are left as they were.
+pub async fn direnv(
+    vars: &mut Vec<(String, String)>,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let path = vars
+        .iter()
+        .find(|(n, _)| n == "PATH")
+        .map(|(_, v)| v.as_str());
+    let Some(direnv) = std::env::split_paths(path.unwrap_or_default())
+        .map(|d| d.join("direnv"))
+        .find(|p| {
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    else {
+        return Ok(());
+    };
+    let mut cmd = Command::new(&direnv);
+    (cmd.args(["export", "json"]).current_dir(dir))
+        .env_clear()
+        .envs(vars.iter().map(|(n, v)| (n, v)))
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        // shortcut: kills direnv alone, so a hung `.envrc`'s children outlive it; give it its
+        // own group, as `capture` does, if that shows up.
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| format!("direnv took over {} s", timeout.as_secs_f32()))?
+        .map_err(|err| format!("can't start {}: {err}", direnv.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("direnv {}: {}", output.status, stderr.trim()));
+    }
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    let changes: BTreeMap<String, Option<String>> = serde_json::from_slice(&output.stdout)
+        .map_err(|err| format!("bad direnv output: {err}"))?;
+    for (name, value) in changes {
+        vars.retain(|(n, _)| *n != name);
+        if let Some(value) = value {
+            vars.push((name, value));
+        }
+    }
+    Ok(())
+}
+
 /// What lies between the start marker and the first end marker after it.
 fn between(out: &[u8]) -> Option<&[u8]> {
     let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle);
@@ -102,7 +158,6 @@ fn parse(vars: &[u8]) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -197,5 +252,66 @@ FISH=1 sh -c "${4#*; }""#;
             (unsafe { libc::kill(pid, 0) }) == -1
         });
         assert!(gone, "the shell's background job outlived it");
+    }
+
+    /// Runs `direnv` from a `PATH` holding a fake one with `body`, over `A=1` and `OLD=x`.
+    async fn run_direnv(body: &str) -> (Result<(), String>, Vec<(String, String)>, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        shell(&bin, "direnv", body);
+        let path = format!("/nowhere:{}", bin.display());
+        let mut vars = vec![
+            ("PATH".into(), path),
+            ("A".into(), "1".into()),
+            ("OLD".into(), "x".into()),
+        ];
+        let timeout = Duration::from_secs(1);
+        let result = direnv(&mut vars, tmp.path(), timeout).await;
+        (result, vars, tmp.path().canonicalize().unwrap())
+    }
+
+    #[tokio::test]
+    async fn direnv_sets_and_unsets_with_the_captured_environment() {
+        let body = r#"[ "$1 $2 $TERM $A" = "export json dumb 1" ] || exit 2
+[ -z "$HOME" ] || exit 3
+printf '{"HERE":"%s","OLD":null,"A":"2"}' "$(pwd -P)""#;
+        let (result, vars, dir) = run_direnv(body).await;
+        result.unwrap();
+        assert_eq!(get(&vars, "HERE"), dir.to_str());
+        assert_eq!(get(&vars, "A"), Some("2"));
+        assert_eq!(get(&vars, "OLD"), None);
+    }
+
+    #[tokio::test]
+    async fn direnv_without_changes_or_on_path_changes_nothing() {
+        let (result, vars, _) = run_direnv("exit 0").await;
+        result.unwrap();
+        assert_eq!(get(&vars, "OLD"), Some("x"));
+        let mut vars = vec![("PATH".to_string(), "/nowhere".to_string())];
+        let tmp = tempfile::tempdir().unwrap();
+        direnv(&mut vars, tmp.path(), TIMEOUT).await.unwrap();
+        assert_eq!(vars.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_direnv_keeps_the_environment() {
+        let blocked = "echo 'direnv: error .envrc is blocked. Run `direnv allow` to approve its content' >&2; exit 1";
+        let (result, vars, _) = run_direnv(blocked).await;
+        let err = result.unwrap_err();
+        assert!(err.contains(".envrc is blocked"), "{err}");
+        assert_eq!(get(&vars, "OLD"), Some("x"));
+        for bad in [r#"echo '{"A":2}'"#, "echo not json", "echo '[]'"] {
+            let (result, vars, _) = run_direnv(bad).await;
+            assert!(
+                result.unwrap_err().starts_with("bad direnv output"),
+                "{bad}"
+            );
+            assert_eq!(get(&vars, "A"), Some("1"));
+        }
+        // `exec` so the killed direnv is the sleep itself.
+        let (result, vars, _) = run_direnv("exec /bin/sleep 30").await;
+        assert_eq!(result.unwrap_err(), "direnv took over 1 s");
+        assert_eq!(get(&vars, "A"), Some("1"));
     }
 }
