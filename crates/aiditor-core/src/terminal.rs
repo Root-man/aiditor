@@ -577,13 +577,11 @@ impl Ctx<'_> {
             .map(|n| format!("vterm{n}<{}>", workspace.name))
             .find(|name| core.buffers.find(name).is_none())
             .expect("a free number");
+        let project = &core.projects[core.project_at(workspace.project)?].project;
+        let env = project.env.clone().into_iter().collect();
         let cwd = match core.buffer_directory() {
             Some(dir) => dir,
-            None => (core.projects[core.project_at(workspace.project)?]
-                .project
-                .primary
-                .path)
-                .clone(),
+            None => project.primary.path.clone(),
         };
         let selected = core.windows.selected;
         let (rows, cols) = (core.window_cells().into_iter())
@@ -597,7 +595,7 @@ impl Ctx<'_> {
             id,
             command: None,
             cwd,
-            env: Vec::new(),
+            env,
             rows,
             cols,
         }));

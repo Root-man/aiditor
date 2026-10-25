@@ -288,6 +288,7 @@ impl Ctx<'_> {
             max_watched_files: None,
             default_agent: None,
             ignore: Vec::new(),
+            env: Default::default(),
             primary: Root {
                 path: self.core.root_path(primary),
                 role: String::new(),
@@ -756,6 +757,7 @@ mod tests {
             max_watched_files: None,
             default_agent: None,
             ignore: Vec::new(),
+            env: Default::default(),
             primary: Root {
                 path: h.path("a"),
                 role: String::new(),
@@ -837,8 +839,9 @@ mod tests {
             h.path("a").display().to_string(),
             h.path("b").display().to_string(),
         );
-        let text =
-            format!("# Mine\nname = \"app\"\nwatch = true # quiet\n\n[primary]\npath = \"{a}\"\n");
+        let text = format!(
+            "# Mine\nname = \"app\"\nwatch = true # quiet\n\n[env]\nA = \"1\" # one\n\n[primary]\npath = \"{a}\"\n"
+        );
         h.read_reply("projects/app.toml", Some(text.as_bytes()));
         let loaded = Loaded {
             project: Project::parse(&text).unwrap(),
@@ -855,6 +858,7 @@ mod tests {
         let disk = project_text(&h, "app");
         assert!(disk.starts_with("# Mine\n"), "{disk}");
         assert!(disk.contains("watch = false # quiet"), "{disk}");
+        assert!(disk.contains("[env]\nA = \"1\" # one\n"), "{disk}");
         let p = Project::parse(&disk).unwrap();
         assert_eq!(p, project(&h, "app"));
         assert!(!p.watch);

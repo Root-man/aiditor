@@ -555,6 +555,7 @@ mod tests {
             max_watched_files: None,
             default_agent: None,
             ignore: vec!["*.log".into()],
+            env: Default::default(),
             primary: Root {
                 path: h.path("a"),
                 role: String::new(),

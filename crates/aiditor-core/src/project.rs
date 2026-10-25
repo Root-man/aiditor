@@ -1,5 +1,6 @@
 //! Project files: a primary repo and additional roots, each with a role line.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,9 @@ pub struct Project {
     /// and the watcher; `aiditor-services` checks them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore: Vec<String>,
+    /// Variables set on top of the project's environment for the processes it starts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     pub primary: Root,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<Root>,
@@ -99,6 +103,7 @@ impl Loaded {
             max_watched_files: None,
             default_agent: None,
             ignore: Vec::new(),
+            env: BTreeMap::new(),
             primary,
             roots: Vec::new(),
         };
@@ -132,6 +137,14 @@ impl Project {
                     "the role of {} is not one line",
                     root.path.display()
                 ));
+            }
+        }
+        for (name, value) in &project.env {
+            if name.is_empty() || name.contains(['=', '\0']) {
+                return Err(format!("env {name:?}: not a variable name"));
+            }
+            if value.contains('\0') {
+                return Err(format!("env {name}: the value holds a NUL"));
             }
         }
         // shortcut: paths are compared as written, so symlinks and `..` can hide an overlap; canonicalize in the services check if that bites.
@@ -226,6 +239,9 @@ name = "aiditor"
 default_agent = "claude"
 ignore = ["*", "!notes/"]
 
+[env]
+MIX_ENV = "test"
+
 [primary]
 path = "/r/aiditor"
 role = "The editor itself"
@@ -244,6 +260,7 @@ path = "/r/notes"
         assert_eq!(p.name, "aiditor");
         assert_eq!(p.default_agent.as_deref(), Some("claude"));
         assert_eq!(p.ignore, ["*", "!notes/"]);
+        assert_eq!(p.env, BTreeMap::from([("MIX_ENV".into(), "test".into())]));
         assert_eq!(p.primary.role, "The editor itself");
         let paths: Vec<_> = p.roots.iter().map(|r| r.path.to_str().unwrap()).collect();
         assert_eq!(paths, ["/r/zed", "/r/notes"]);
@@ -257,7 +274,7 @@ path = "/r/notes"
         let p = Project::parse("name = \"x\"\n[primary]\npath = \"/r/x\"").unwrap();
         assert!(p.watch);
         assert_eq!((p.default_agent.as_ref(), p.roots.len()), (None, 0));
-        assert!(p.ignore.is_empty());
+        assert!(p.ignore.is_empty() && p.env.is_empty());
         assert_eq!(p.primary.role, "");
         assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
     }
@@ -329,6 +346,22 @@ path = "/r/notes"
                 "defualt_agent",
             ),
             (&format!("name = \" \"\n{primary}"), "name is empty"),
+            (
+                &format!("name = \"x\"\n{primary}\n[env]\nPORT = 4000"),
+                "PORT",
+            ),
+            (
+                &format!("name = \"x\"\n{primary}\n[env]\n\"A=B\" = \"c\""),
+                "env \"A=B\": not a variable name",
+            ),
+            (
+                &format!("name = \"x\"\n{primary}\n[env]\n\"\" = \"c\""),
+                "env \"\": not a variable name",
+            ),
+            (
+                &format!("name = \"x\"\n{primary}\n[env]\nA = \"\\u0000\""),
+                "env A: the value holds a NUL",
+            ),
             ("name = \"x\"", "primary"),
             (primary, "name"),
             (
