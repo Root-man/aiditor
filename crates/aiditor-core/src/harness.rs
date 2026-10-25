@@ -46,6 +46,8 @@ pub struct Harness {
     pub effects: Effects,
     /// The terminal work the core asked for, in order.
     pub terminal_ops: Vec<crate::TerminalOp>,
+    /// The agent work the core asked for, in order.
+    pub agent_ops: Vec<crate::AgentOp>,
 }
 
 impl Harness {
@@ -79,6 +81,7 @@ impl Harness {
             collect_effects: false,
             effects: Vec::new(),
             terminal_ops: Vec::new(),
+            agent_ops: Vec::new(),
         };
         for (name, text) in files {
             harness.read_reply(name, Some(text.as_bytes()));
@@ -210,6 +213,7 @@ impl Harness {
         for effect in effects {
             match effect {
                 Effect::Terminal(op) => self.terminal_ops.push(op),
+                Effect::Agent(op) => self.agent_ops.push(op),
                 Effect::File(op) => {
                     let reply = match &op {
                         FileOp::Save {

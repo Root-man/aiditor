@@ -1,0 +1,52 @@
+## ADDED Requirements
+
+### Requirement: Spawning an agent and opening a session
+An agent SHALL be spawned from an agent id chosen by the core, a command with its arguments, a working directory (the project's primary repo) and environment variables. Spawning SHALL return once the process has started, without waiting for the handshake. The agent's process SHALL inherit the editor's environment with the spawn's variables on top, applied in order so a later variable overrides an earlier one with the same name; the core lists the captured environment first, then the registry's `env`, then the project file's `env`. The command SHALL be looked up on the resulting `PATH`. Once started, the client SHALL send ACP `initialize` advertising neither file system capability nor the terminal capability, then `session/new` with `cwd` set to the working directory and no MCP servers. The core SHALL get one started message for the agent id with the `session/new` response, holding the session id and the agent's modes, or with why the agent could not start: a command that cannot be found or run, a working directory that is not a directory, an error answer to either request, or the agent exiting before it answered.
+
+#### Scenario: A session is opened
+- **WHEN** the test agent is spawned in a temporary directory
+- **THEN** the core gets a started message with the session id and modes the agent answered, and the agent saw `cwd` equal to that directory, `fs.readTextFile` and `fs.writeTextFile` false and `terminal` false
+
+#### Scenario: Later variables win
+- **WHEN** the test agent is spawned with variables `A=1`, `A=2`
+- **THEN** the agent sees `A=2`
+
+#### Scenario: The command is found on the given PATH
+- **WHEN** the test agent is spawned by its bare file name with `PATH` set to its directory
+- **THEN** the core gets a started message with the session
+
+#### Scenario: A missing program
+- **WHEN** an agent is spawned with the command `/nonexistent/agent`
+- **THEN** the core gets a failure started message for that id with the reason, and the service does not panic
+
+#### Scenario: The agent exits before answering
+- **WHEN** an agent is spawned with a command that exits at once without speaking ACP
+- **THEN** the core gets a failure started message for that id, then its exit message
+
+### Requirement: Stderr and exit stream to the core
+Each line the agent writes to stderr SHALL reach the core as one message tagged with the agent id, without its line ending, in order. When the process exits, the core SHALL get one exit message with its exit code, or the signal that ended it, after every stderr line.
+
+#### Scenario: Stderr then exit
+- **WHEN** the test agent writes two lines to stderr and exits with code 3
+- **THEN** the core gets both lines in order, then an exit message with code 3
+
+### Requirement: Agent requests wait for the core's reply
+Each request the agent sends to the client SHALL reach the core as a message with the agent id, the request id and the request. The request SHALL stay pending until the core replies to that agent and request id with a response or an error, which SHALL then be sent to the agent. A reply for an unknown agent or request id SHALL be ignored. Until permissions and terminals are handled, the core SHALL reply to every agent request with a "method not found" error.
+
+#### Scenario: A request is rejected
+- **WHEN** the test agent sends `session/request_permission` after its session opened and the core gets it
+- **THEN** the core replies with a "method not found" error, and the agent receives that error
+
+### Requirement: Killing an agent
+Killing an agent SHALL send SIGTERM to the agent's process group, which it leads, and SIGKILL to it 100 ms later, so wrappers such as `npx` and the processes they start do not outlive it. Killing SHALL return to the caller at once and drop the agent's pending requests. The core SHALL still get the exit message. A kill of an unknown agent SHALL be ignored.
+
+#### Scenario: Killed agent is gone
+- **WHEN** a running test agent is killed
+- **THEN** the core gets its exit message and within seconds its process no longer exists
+
+### Requirement: No agents left behind on quit
+When the app quits, every live agent SHALL be killed before the process exits, waiting once for the 100 ms grace before SIGKILL.
+
+#### Scenario: Quitting kills every agent
+- **WHEN** two test agents are running, one ignoring SIGTERM, and all agents are killed for quitting
+- **THEN** it returns after the grace, and within seconds neither agent's process exists
