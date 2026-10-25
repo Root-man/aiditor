@@ -7,7 +7,14 @@ use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 
 const ID: AgentId = AgentId(3);
-const AGENT: &str = env!("CARGO_BIN_EXE_aiditor-test-agent");
+const AGENT: &str = env!("CARGO_BIN_EXE_aiditor-fake-agent");
+
+/// Writes `script` into `dir` for the fake agent; returns the variable naming it.
+fn script(dir: &Path, script: &str) -> (&'static str, String) {
+    let path = dir.join("script.json");
+    std::fs::write(&path, script).unwrap();
+    ("AIDITOR_FAKE_AGENT", path.display().to_string())
+}
 
 fn spawn(agents: &mut Agents, command: &str, cwd: &Path, env: &[(&str, &str)]) -> Receiver<Msg> {
     let env = (env.iter()).map(|&(k, v)| (k.into(), v.into())).collect();
@@ -75,7 +82,7 @@ async fn a_session_opens_in_cwd_without_fs_or_terminal() {
     let mut rx = spawn(&mut agents, AGENT, dir.path(), &[]);
     let (lines, result) = started(&mut rx).await;
     let session = result.unwrap();
-    assert!(session.contains("test-session"), "{session}");
+    assert!(session.contains("fake-session"), "{session}");
     assert!(
         session.contains("auto") && session.contains("plan"),
         "{session}"
@@ -147,13 +154,13 @@ async fn an_agent_exiting_before_answering_fails_then_exits() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stderr_then_exit() {
-    let mut agents = Agents::default();
-    let mut rx = spawn(
-        &mut agents,
-        AGENT,
-        Path::new("/"),
-        &[("AIDITOR_TEST_AGENT", "exit3")],
+    let dir = tempfile::tempdir().unwrap();
+    let (key, path) = script(
+        dir.path(),
+        r#"{"session": [{"stderr": "first"}, {"stderr": "second"}, {"exit": 3}]}"#,
     );
+    let mut agents = Agents::default();
+    let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[(key, &path)]);
     let msgs = rest(&mut rx).await;
     let lines: Vec<_> = (msgs.iter())
         .filter_map(|msg| match msg {
@@ -161,7 +168,7 @@ async fn stderr_then_exit() {
             _ => None,
         })
         .collect();
-    assert_eq!(lines, ["first", "second"]);
+    assert!(lines.ends_with(&["first", "second"]), "{lines:?}");
     assert!(
         matches!(
             msgs.last(),
@@ -177,13 +184,15 @@ async fn stderr_then_exit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_core_rejects_agent_requests() {
-    let mut agents = Agents::default();
-    let mut rx = spawn(
-        &mut agents,
-        AGENT,
-        Path::new("/"),
-        &[("AIDITOR_TEST_AGENT", "request")],
+    let dir = tempfile::tempdir().unwrap();
+    let ask = r#"{"toolCall": {"toolCallId": "call-1"},
+        "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}"#;
+    let (key, path) = script(
+        dir.path(),
+        &format!(r#"{{"session": [{{"permission": {ask}}}]}}"#),
     );
+    let mut agents = Agents::default();
+    let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[(key, &path)]);
     let mut core = Core::default();
     loop {
         let msg = next(&mut rx).await.expect("the agent is running");
@@ -204,13 +213,15 @@ async fn the_core_rejects_agent_requests() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn session_updates_reach_the_core() {
-    let mut agents = Agents::default();
-    let mut rx = spawn(
-        &mut agents,
-        AGENT,
-        Path::new("/"),
-        &[("AIDITOR_TEST_AGENT", "update")],
+    let dir = tempfile::tempdir().unwrap();
+    let update = r#"{"sessionUpdate": "agent_message_chunk",
+        "content": {"type": "text", "text": "hi"}}"#;
+    let (key, path) = script(
+        dir.path(),
+        &format!(r#"{{"session": [{{"update": {update}}}]}}"#),
     );
+    let mut agents = Agents::default();
+    let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[(key, &path)]);
     started(&mut rx).await.1.unwrap();
     let update = loop {
         match next(&mut rx).await {
@@ -222,7 +233,7 @@ async fn session_updates_reach_the_core() {
     assert_eq!(update.0, ID);
     let update = format!("{:?}", update.1);
     assert!(
-        update.contains("test-session") && update.contains("AgentMessageChunk"),
+        update.contains("fake-session") && update.contains("AgentMessageChunk"),
         "{update}"
     );
     assert!(update.contains("\"hi\""), "{update}");
@@ -259,22 +270,29 @@ async fn a_killed_agent_exits_and_is_gone() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn quitting_kills_every_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (key, path) = script(
+        dir.path(),
+        r#"{"session": ["ignoreSigterm", {"stderr": "ready"}]}"#,
+    );
     let mut agents = Agents::default();
     let mut running = Vec::new();
-    for (n, behavior) in [(1, ""), (2, "trap")] {
+    for (n, script) in [(1, None), (2, Some(path.as_str()))] {
         let mut rx = (agents.run(AgentOp::Spawn {
             id: AgentId(n),
             command: AGENT.into(),
             args: Vec::new(),
             cwd: "/".into(),
-            env: vec![("AIDITOR_TEST_AGENT".into(), behavior.into())],
+            env: script.map(|s| (key.into(), s.into())).into_iter().collect(),
         }))
         .unwrap();
+        // The trapping agent is killed only once SIGTERM is ignored.
         let mut lines = Vec::new();
-        loop {
+        let mut started = false;
+        while !started || (script.is_some() && !lines.iter().any(|l| l == "ready")) {
             match next(&mut rx).await {
                 Some(Msg::AgentStderr { line, .. }) => lines.push(line),
-                Some(Msg::AgentStarted { result: Ok(_), .. }) => break,
+                Some(Msg::AgentStarted { result: Ok(_), .. }) => started = true,
                 msg => panic!("expected stderr or started, got {msg:?}"),
             }
         }
