@@ -1080,6 +1080,13 @@ milestones:
             acceptance:
               - "Files in each language open highlighted"
             blocked_by: [m5-highlight-js]
+          - key: m5-highlight-toml
+            title: "Highlight TOML"
+            body: |
+              Add the TOML grammar and its highlights query to the pipeline for `.toml` files, so `Cargo.toml` and aiditor's own `settings.toml` open highlighted.
+            acceptance:
+              - "TOML files open highlighted"
+            blocked_by: [m5-highlight-js]
           - key: m5-highlight-markdown
             title: "Highlight Markdown blocks"
             body: |
