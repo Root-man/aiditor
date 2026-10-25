@@ -107,7 +107,12 @@ fn color(palette: &BTreeMap<String, u32>, mut name: &str) -> Option<u32> {
 impl Syntax {
     /// `text` parsed in the language `path`'s extension names, if aiditor has its grammar.
     pub(crate) fn for_file(path: &Path, text: &Rope) -> Option<Syntax> {
-        let grammar: &'static Grammar = match path.extension()?.to_str()? {
+        let mut ext = path.extension()?.to_str()?;
+        // An EEx template (`a.html.heex.eex`) is highlighted as the file it generates.
+        if ext == "eex" {
+            ext = Path::new(path.file_stem()?).extension()?.to_str()?;
+        }
+        let grammar: &'static Grammar = match ext {
             "js" | "mjs" | "cjs" | "jsx" => &JAVASCRIPT,
             "ts" | "mts" | "cts" => &TYPESCRIPT,
             "tsx" => &TSX,
@@ -233,6 +238,11 @@ mod tests {
             let path = format!("a.{ext}");
             assert!(Syntax::for_file(Path::new(&path), &rope).is_some(), "{ext}");
         }
+        for file in ["a.html.heex.eex", "a.ex.eex", "a.js.eex"] {
+            assert!(Syntax::for_file(Path::new(file), &rope).is_some(), "{file}");
+        }
+        assert!(Syntax::for_file(Path::new("a.eex"), &rope).is_none());
+        assert!(Syntax::for_file(Path::new("a.html.eex"), &rope).is_none());
         assert!(Syntax::for_file(Path::new("a.txt"), &rope).is_none());
         assert!(Syntax::for_file(Path::new("Makefile"), &rope).is_none());
     }

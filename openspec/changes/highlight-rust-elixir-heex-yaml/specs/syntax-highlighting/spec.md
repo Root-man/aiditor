@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Language from the file extension
-A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `.cjs` and `.jsx`, as TypeScript for `.ts`, `.mts` and `.cts`, as TSX for `.tsx`, as Rust for `.rs`, as Elixir for `.ex` and `.exs`, as HEEx for `.heex`, and as YAML for `.yml` and `.yaml`. Any other file, and a buffer with no file, SHALL be drawn without syntax colours.
+A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `.cjs` and `.jsx`, as TypeScript for `.ts`, `.mts` and `.cts`, as TSX for `.tsx`, as Rust for `.rs`, as Elixir for `.ex` and `.exs`, as HEEx for `.heex`, and as YAML for `.yml` and `.yaml`. An EEx template (a file ending in `.eex`) SHALL be highlighted by the extension before `.eex`, as the file it generates. Any other file, and a buffer with no file, SHALL be drawn without syntax colours.
 
 #### Scenario: TypeScript file
 - **WHEN** the user visits `a.ts` holding `const x: number = 1;`
@@ -30,3 +30,11 @@ A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `
 #### Scenario: YAML file
 - **WHEN** the user visits `a.yaml` holding `a: true`
 - **THEN** `a` is drawn in the `property` colour and `true` in the `boolean` colour
+
+#### Scenario: EEx template of a HEEx file
+- **WHEN** the user visits `a.html.heex.eex` holding `<div class="a"></div>`
+- **THEN** it is highlighted as HEEx, `div` drawn in the `tag` colour
+
+#### Scenario: EEx template with no highlighted inner language
+- **WHEN** the user visits `a.eex` or `a.html.eex`
+- **THEN** it is drawn without syntax colours
