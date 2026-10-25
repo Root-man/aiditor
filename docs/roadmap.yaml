@@ -964,6 +964,55 @@ milestones:
         design: "#subsystems"
         body: |
           Inherit the environment when launched from a shell; otherwise capture it per project with an interactive login shell in the primary repo, with a marker, a timeout and a fallback; env overrides from the agent registry and project file; a re-capture command. Break down when M3 starts.
+        tasks:
+          - key: m3-env-bundle
+            title: "Bundle as a macOS app and a Linux desktop entry"
+            labels: [infra]
+            body: |
+              A script builds `aiditor.app`: Info.plist with a bundle id and name, a placeholder icon, the release binary in `Contents/MacOS`, ad-hoc signed. On Linux it installs a `.desktop` file and icon under `~/.local/share`. `aiditor .` from a shell still runs the binary directly. A Dock or launcher start gets launchd's minimal environment, which the rest of this epic fixes. The bundle id is what system notifications (agent finished, permission needed) need later. No notarization: it's built locally.
+            acceptance:
+              - "aiditor launches from the Dock and Spotlight with its name and icon in Cmd-Tab"
+              - "aiditor launches from the desktop launcher on Linux"
+              - "How to build and install the bundle is recorded in docs/editor.md"
+          - key: m3-env-decide
+            title: "Decide: process environment capture details"
+            labels: [decision]
+            body: |
+              Settle what the spec leaves open, using Zed's `util/src/shell_env.rs` and `project/src/environment.rs` as prior art:
+              - Launch detection: stdout is a terminal (Zed's check) or something else.
+              - What prints the environment: `env -0`, or `aiditor --print-env` redirected to fd 0 as Zed does, so profile output can't mix with it.
+              - Capture once per project on first use, or eagerly when a project opens, with spawns waiting for it.
+              - Override order: captured < agent registry < project file, or registry last.
+              - direnv and `mise activate` hook into the prompt, which `-c` never draws, so "running it in the project's directory also picks up direnv" is wrong. Fix the wording; direnv is loaded by its own task.
+            acceptance:
+              - "Answers recorded in docs/editor.md under Process environment"
+          - key: m3-env-capture
+            title: "Capture the login shell environment per project"
+            body: |
+              When not launched from a shell, run `$SHELL -l -i -c` in the project's primary repo off the UI thread: new session (`setsid`), stdin closed to the shell's input, the printer and launch check as decided. Parse only the printed environment, even if the shell exits non-zero; drop `SHLVL`; fish gets `emit fish_prompt` first. Give up after a few seconds, killing the process group, and fall back to the app's environment with a note in the Messages buffer. Keep the result per project for the session. A command re-captures it for new processes. Tests use a fake `$SHELL` script that prints noise, hangs or fails.
+            acceptance:
+              - "Launched from the Dock, a project's captured environment has the PATH an interactive login shell in its primary repo has"
+              - "Launched from a shell, nothing is captured and the inherited environment is used"
+              - "A hanging or failing shell falls back within the timeout with a note in Messages"
+              - "The re-capture command picks up a changed shell profile"
+            blocked_by: [m3-env-bundle, m3-env-decide]
+          - key: m3-env-project-overrides
+            title: "Project file env overrides"
+            labels: [project]
+            body: |
+              An optional `env` table in the project file, set on top of the captured (or inherited) environment in the order decided. The agent registry's `env` is merged by the registry epic, in the same order.
+            acceptance:
+              - "A variable set in the project file reaches processes started for that project"
+              - "A bad `env` value is reported like any other project file error and the rest still loads"
+            blocked_by: [m3-env-capture]
+          - key: m3-env-direnv
+            title: "Load direnv into the captured environment"
+            body: |
+              After capturing, if `direnv` is on the captured PATH, run `direnv export json` in the primary repo with the captured environment and apply its result, as Zed does. A failure (`.envrc` not allowed, bad output) keeps the captured environment and notes it in the Messages buffer.
+            acceptance:
+              - "A project whose primary repo has an allowed `.envrc` gets its variables"
+              - "A blocked `.envrc` leaves the captured environment unchanged with a note in Messages"
+            blocked_by: [m3-env-capture]
       - key: m3-acp-client
         title: "Agent registry and ACP client"
         labels: [acp]
