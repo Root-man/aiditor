@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{configuration, environment, files, grep, recovery, terminal, watcher};
+use aiditor_services::{
+    agents, configuration, environment, files, grep, recovery, terminal, watcher,
+};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, Pixels, Task, Window, div, font,
     prelude::*, px, rgb,
@@ -29,6 +31,7 @@ pub(crate) struct Editor {
     config_dir: Option<PathBuf>,
     grep: grep::Grep,
     terminals: terminal::Terminals,
+    agents: agents::Agents,
     watcher: watcher::Watcher,
     /// The recovery service, when there is a data dir.
     recovery: Option<(
@@ -91,6 +94,7 @@ impl Editor {
             config_dir: args.config_dir,
             grep: grep::Grep::default(),
             terminals: terminal::Terminals::new(args.zsh_dir),
+            agents: agents::Agents::default(),
             watcher,
             recovery: args.recovery_dir.map(recovery::spawn),
             debug: args.debug.then(Stats::default),
@@ -133,6 +137,11 @@ impl Editor {
                         Self::drain(rx, cx)
                     }
                 }
+                Effect::Agent(op) => {
+                    if let Some(rx) = self.agents.run(op) {
+                        Self::drain(rx, cx)
+                    }
+                }
                 Effect::File(op) => {
                     let tx = self.tx.clone();
                     tokio::task::spawn_blocking(move || _ = tx.blocking_send(files::run(op)));
@@ -154,6 +163,7 @@ impl Editor {
                         _ = thread.join();
                     }
                     self.terminals.kill_all();
+                    self.agents.kill_all();
                     cx.quit()
                 }
                 Effect::CaptureEnvironment {

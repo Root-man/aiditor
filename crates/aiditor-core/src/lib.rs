@@ -51,6 +51,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_client_protocol_schema::v1::{
+    AgentRequest, ClientResponse, Error, NewSessionResponse, RequestId,
+};
 use ropey::Rope;
 
 use bindings::HINT_DELAY;
@@ -160,6 +163,29 @@ pub enum Msg {
     /// The terminal service's child exit status, after its buffered output.
     TerminalExited {
         id: TerminalId,
+        code: u32,
+        signal: Option<String>,
+    },
+    /// The agent service's spawn answer: the `session/new` response, with the session id and
+    /// modes, or why the agent didn't start.
+    AgentStarted {
+        id: AgentId,
+        result: Result<NewSessionResponse, String>,
+    },
+    /// One line of the agent's stderr, without its line ending.
+    AgentStderr {
+        id: AgentId,
+        line: String,
+    },
+    /// A request from the agent, pending until `AgentOp::Reply` answers `request`.
+    AgentRequest {
+        id: AgentId,
+        request: RequestId,
+        body: Request,
+    },
+    /// The agent's exit status, after its stderr.
+    AgentExited {
+        id: AgentId,
         code: u32,
         signal: Option<String>,
     },
@@ -274,6 +300,8 @@ pub enum Effect {
     Grep(GrepOp),
     /// A terminal spawn, answered with started, output and exit messages.
     Terminal(TerminalOp),
+    /// An agent spawn, answered with started, stderr, request and exit messages.
+    Agent(AgentOp),
     /// Watch this set from now on, answered with `Msg::FilesChanged` reports.
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
@@ -381,6 +409,43 @@ pub enum TerminalOp {
     /// Hang up the shell and its foreground job, SIGKILL after 100 ms; ignored for an unknown
     /// terminal. The exit message still follows.
     Kill { id: TerminalId },
+}
+
+/// A request from an agent, as ACP parses it.
+#[derive(Clone, Debug)]
+pub struct Request(pub Box<AgentRequest>);
+
+/// ACP's `AgentRequest` has no `PartialEq`; its derived `Debug` shows every field.
+impl PartialEq for Request {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{:?}", self.0) == format!("{:?}", other.0)
+    }
+}
+
+/// An agent identity chosen by the core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId(pub u64);
+
+/// Work for the agent service.
+pub enum AgentOp {
+    /// Start `command` in `cwd` with `env` on top of the editor's environment, later pairs
+    /// winning, then `initialize` and `session/new` in `cwd`; answered with `Msg::AgentStarted`.
+    Spawn {
+        id: AgentId,
+        command: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+    },
+    /// Answer the agent's pending `request`; ignored for an unknown agent or request.
+    Reply {
+        id: AgentId,
+        request: RequestId,
+        result: Result<ClientResponse, Error>,
+    },
+    /// SIGTERM the agent's process group, SIGKILL after 100 ms; ignored for an unknown agent.
+    /// The exit message still follows.
+    Kill { id: AgentId },
 }
 
 /// Work for the grep service.
@@ -519,6 +584,16 @@ impl Ctx<'_> {
             } => self.end_terminal(id, Some(err)),
             Msg::TerminalSpawned { .. } => {}
             Msg::TerminalExited { id, .. } => self.end_terminal(id, None),
+            // shortcut: every agent request is refused; the modes epic answers permissions.
+            Msg::AgentRequest { id, request, .. } => {
+                (self.effects).push(Effect::Agent(AgentOp::Reply {
+                    id,
+                    request,
+                    result: Err(Error::method_not_found()),
+                }))
+            }
+            // The agent session task (#280) keeps these.
+            Msg::AgentStarted { .. } | Msg::AgentStderr { .. } | Msg::AgentExited { .. } => {}
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.
@@ -1338,5 +1413,39 @@ mod tests {
         h.keys("C-x k RET");
         assert_eq!(h.core.message(), Some("Can't kill *Messages*"));
         assert_eq!(name(&h), "*Messages*");
+    }
+
+    #[test]
+    fn agent_requests_are_refused_as_unknown_methods() {
+        use agent_client_protocol_schema::v1::{
+            AgentRequest, Error, RequestId, RequestPermissionRequest, ToolCallUpdate,
+            ToolCallUpdateFields,
+        };
+
+        use crate::{AgentId, AgentOp, Request};
+
+        let mut h = Harness::new(&[]);
+        let ask = RequestPermissionRequest::new(
+            "s",
+            ToolCallUpdate::new("c", ToolCallUpdateFields::new()),
+            Vec::new(),
+        );
+        h.send(Msg::AgentRequest {
+            id: AgentId(1),
+            request: RequestId::Number(4),
+            body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
+        });
+        let [
+            AgentOp::Reply {
+                id,
+                request,
+                result,
+            },
+        ] = &h.agent_ops[..]
+        else {
+            panic!("expected one reply");
+        };
+        assert_eq!((*id, request), (AgentId(1), &RequestId::Number(4)));
+        assert_eq!(result.as_ref().unwrap_err(), &Error::method_not_found());
     }
 }

@@ -217,7 +217,7 @@ mod tests {
         h.keys("C-x C-r");
         let first = requests(&mut h)[0];
         h.keys("C-x C-r C-x C-r");
-        assert_eq!(requests(&mut h), []);
+        assert!(requests(&mut h).is_empty());
         let before = h.core.settings().font_size;
         h.send(Msg::ConfigurationLoaded {
             request: first,
@@ -241,6 +241,6 @@ mod tests {
             bundle: bundle(22),
         });
         assert_eq!(log(&h), "Configuration reloaded\n");
-        assert_eq!(requests(&mut h), []);
+        assert!(requests(&mut h).is_empty());
     }
 }
