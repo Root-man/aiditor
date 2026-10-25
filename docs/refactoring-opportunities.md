@@ -1,4 +1,4 @@
-Scope: The whole project at `d3c9565` (`Performance benchmarks (#264)`), refreshing the scan made before #108 and M2; recorded on 2026-10-25, with the reported macOS/Linux grep comparison investigated from source without rerunning benchmarks.
+Scope: The whole project at `d3c9565` (`Performance benchmarks (#264)`), refreshing the scan made before #108 and M2; recorded on 2026-10-25, with the reported macOS/Linux grep comparison investigated through source inspection, targeted macOS measurements, profiling, and a temporary throughput prototype.
 
 What this code does: aiditor is a keyboard-first Rust editor, with editor state in `aiditor-core`, filesystem/process work in `aiditor-services`, and a GPUI frontend in `aiditor`.
 
@@ -8,7 +8,7 @@ What this code does: aiditor is a keyboard-first Rust editor, with editor state 
 | 2 | Recovery panics when the visited disk file has become binary/read-only. | Bug | [core/autosave.rs:60](../crates/aiditor-core/src/autosave.rs#L60) | high | med | Use the existing undoable `Buffer::replace` operation, which supports replacing read-only content, and cover recovery into a refused disk file. |
 | 3 | Long-line redraw scans the hidden prefix and builds highlights outside the horizontal viewport. | Performance | [core/display.rs:154](../crates/aiditor-core/src/display.rs#L154), [core/display.rs:234](../crates/aiditor-core/src/display.rs#L234), [core/syntax.rs:209](../crates/aiditor-core/src/syntax.rs#L209) | high | med | Skip hidden prefixes directly where folds permit; limit highlight painting and conversion to the displayed ranges while retaining syntax context. |
 | 4 | Terminal copy mode repeatedly counts an increasingly long soft-wrapped logical line. | Performance | [core/terminal.rs:296](../crates/aiditor-core/src/terminal.rs#L296) | high | med | Track the logical line's character count as rows are appended, resetting at a hard newline; preserve Unicode positions and colours. |
-| 5 | Project grep serializes traversal and file searches; the reported 10k-file completion takes about 1 s on macOS. | Performance | [services/grep.rs:88](../crates/aiditor-services/src/grep.rs#L88), [services/files.rs:212](../crates/aiditor-services/src/files.rs#L212), [services bench:59](../crates/aiditor-services/benches/services.rs#L59) | high | med | Proposed: retain the ordered walker and overlap file searches with a small bounded worker set, reusing one searcher per worker and streaming results through an ordered coordinator. Validate the benefit before adopting; details below. |
+| 5 | Serial file opens dominate the roughly 960 ms complete grep on this Mac: opening alone takes about 844 ms. | Performance | [services/grep.rs:88](../crates/aiditor-services/src/grep.rs#L88), [services/files.rs:212](../crates/aiditor-services/src/files.rs#L212), [services bench:59](../crates/aiditor-services/benches/services.rs#L59) | high | high | Deferred to M5 in [#265](https://github.com/Root-man/aiditor/issues/265): add parallel file searches controlled by `grep_workers` in `settings.toml`, default `1`, preserving order, streaming, cancellation, and bounded queues. The prototype measured 439 ms with 4 workers and 380 ms with 8. |
 | 6 | A failed replacement recovery write can be followed by deletion of the old recovery file. | Risk | [core/autosave.rs:25](../crates/aiditor-core/src/autosave.rs#L25), [core/autosave.rs:73](../crates/aiditor-core/src/autosave.rs#L73), [services/recovery.rs:21](../crates/aiditor-services/src/recovery.rs#L21) | high | high | Acknowledge successful persistence before marking a buffer tick auto-saved or deleting its previous recovery copy; retain the old copy and allow retry after failure. |
 | 7 | `char_idx` walks the whole line just to inspect its final character. | Performance | [core/buffer.rs:639](../crates/aiditor-core/src/buffer.rs#L639) | low | low | Read the final character by index, handling an empty slice, instead of calling `chars().last()`. |
 
@@ -26,45 +26,92 @@ One smaller opportunity omitted: display construction collects all copy-mode pro
 
 ## Grep investigation (#5)
 
-The supplied macOS result for `grep/10k-hits-two-roots-complete-warm-cache` is **999.674 ms median, 932.436 ms minimum, 1191.942 ms maximum**. Linux was reported at approximately **95 ms**, giving roughly a **10.5×** difference using the supplied median. No benchmark, timing probe, or profiler was run for this investigation. The platform cause and the proposed speedup remain unmeasured.
+**Status:** Deferred to **M5 · Polish**, tracked by [#265 — Parallel project grep with configurable workers](https://github.com/Root-man/aiditor/issues/265), under Minibuffer polish. The planned `grep_workers` setting is a positive integer in `settings.toml`, defaulting to `1`; parallel searching will be opt-in. This report records the investigation, not an implemented fix.
 
-### What the source establishes
+**Measured conclusion:** opening files is the dominant bottleneck on this Mac. The original complete-search scenario reproduced at **965.7 ms median**. Instrumentation attributed **843.6 ms** to file opens out of a **959.8 ms** search; sampling located **91.6% of samples inside `__open`**. Reading bytes, regex work, traversal, and result handling are much smaller. This identifies the expensive operation; it does not identify which kernel component or security product makes that operation expensive.
 
-- [The fixture](../crates/aiditor-services/benches/services.rs#L11) contains two roots, each with 5,000 source files in 50 directories, plus ignore files and excluded files. Each source file is 1,063 bytes with one hit after 50 ordinary lines. This is about 10 MB distributed across 10,000 small files.
-- [The timed operation](../crates/aiditor-services/benches/services.rs#L59) calls `grep::search` directly. It includes regex construction, ignore-aware traversal, sorting, opening and reading files, matching, hit allocation, clock checks, and consuming/validating batches. It excludes Tokio task/channel scheduling, the prompt debounce, and GUI rendering. Python launches Cargo's benchmark target and formats its results; Python is outside the Rust operation timer.
-- [The search loop](../crates/aiditor-services/src/grep.rs#L88) walks and searches one file at a time, across roots in order. The matcher and searcher are already reused across files within each query. In locked `grep-searcher` 0.1.17, `Searcher::search_path` opens a file and uses buffered reader search with this configuration; memory mapping defaults to disabled on both platforms. Enabling mmap is not a macOS fix: that version also explicitly declines mmap on macOS.
-- [The benchmark helper](../benches/support.rs#L3) performs warm-up and then 21 measured batches on the same fixture, after an initial complete validation search. Creation is outside timing. Dividing 999.674 ms by 10,000 gives about **100 µs per source file for the whole workload**, not a measured open/read/close duration. The repeated measurements do not rule out ongoing filesystem/security overhead, but they weaken a simple first-read-only explanation. Running the wrapper again would create a new fixture and would not isolate security scanning.
-- [The specification](editor.md#subsystems) and [tests](../crates/aiditor-services/src/grep.rs#L203) require root order, the existing walk order, and line order. Locked `ignore` 0.4.33 documents that `sort_by_file_name` is ignored by `build_parallel`. Simply changing that builder would violate current behavior. The existing serial-walk shortcut is worth revisiting because a slow target-platform workload has now been reported.
+A temporary parallel-file prototype reduced complete-search time from **933.4 ms with one worker to 379.6 ms with eight workers**, a **2.46× improvement**. Every ordered `Hit` matched production on this fixture. This supports bounded parallel file search as a refactor, but neither demonstrates a 10× improvement nor validates the production streaming/cancellation design.
 
-The dependency checks above used the installed source matching [Cargo.lock](../Cargo.lock): `grep-searcher`'s `src/searcher/mod.rs` and `src/searcher/mmap.rs`, and `ignore`'s `src/walk.rs`.
+### Environment and measurement boundaries
 
-### Candidate explanations and distinguishing evidence
+Measured on 2026-10-25 at `d3c9565`: Apple M5 Pro, 18 logical CPUs, ARM64, macOS 27.0.1 (26A434), Rust 1.99.0 (`b940084d7`), optimized release build with the repository's locked dependencies. Linux's approximately 95 ms remains the user's supplied comparison; no Linux execution or matching hardware/compiler comparison was performed here.
 
-These are investigation priorities, not established causes; none was tested by a new run:
+The temporary harness copied [the service benchmark](../crates/aiditor-services/benches/services.rs), retained its fixture and validation, and removed the **timed index and first-batch scenarios**. Production runs call the existing `grep::search`. All reported benchmark medians use [the existing helper](../benches/support.rs): warm-up followed by 21 batches. No unrelated benchmark was run. Temporary harnesses were built offline using installed dependencies; nothing was installed.
 
-1. **Serial per-file I/O overhead.** If opening/reading/closing dominates, a profile will spend most elapsed time there, and searching an already enumerated path list will retain most of the cost. This is the strongest code-level candidate given many small files and serialized searches, but it does not identify why the two machines differ.
-2. **Traversal and ignore-processing overhead.** If this dominates, walking the same fixture without opening file contents will retain much of the delay. The existing index result is a useful clue, though it is not an exact subtraction because indexing also collects directories and sorts its final lists.
-3. **Matching, allocation, or machine/build differences.** If the gap persists when searching preloaded bytes, investigate CPU work and verify compiler, architecture, build settings, and system load before attributing it to filesystem calls. The supplied output alone does not control these differences.
-4. **Temporary-directory or security-software effects.** If these dominate, a filesystem trace/profile and a controlled change of fixture location should expose them. There is no captured evidence identifying Endpoint Security or XProtect as the cause. A faster second invocation alone would not establish that attribution.
+The fixture has two roots with 5,000 source files each, in 100 source directories total. Every source file is 1,063 bytes, with one Unicode hit after 50 ordinary lines. Including the two searched `.gitignore` files, the instrumented query read **10,630,018 bytes through 30,005 read calls**. Fixture construction and initial validation are outside timing, and the same files are reused across all repetitions within each invocation.
+
+The timed search includes traversal, ignore rules, regex construction, file access, matching, result allocation, clock checks, and batch validation. It excludes prompt debounce, Tokio channel/task scheduling, and GUI rendering. The Python wrapper is outside the Rust operation timer.
+
+### Reproduction and stage attribution
+
+| Check | Median | Evidence / interpretation |
+|---|---:|---|
+| User's original macOS result | 999.674 ms | Supplied minimum 932.436 ms, maximum 1191.942 ms; Linux reported approximately 95 ms. |
+| Isolated production scenario | 965.662 ms | Minimum 926.228 ms, maximum 1096.506 ms; reproduces the reported delay. |
+| Production outside the execution sandbox, with sampling | 964.935 ms | Similar median; profiler overhead affects individual samples, so this is a control rather than the primary timing. |
+| Production with fixture under `/private/tmp` | 912.757 ms | Minimum 879.069 ms, maximum 1014.202 ms; changing the default `/var/folders/...` location does not remove the large delay. |
+| Instrumented production search | 959.906 ms | Similar to the uninstrumented baseline; component timings below include instrumentation overhead. |
+
+The instrumented version kept the production walk and sink, splitting `search_path` into `File::open`, reader search, and explicit close. Its reader wrapper timed each read. With this configuration, locked `grep-searcher` 0.1.17 already uses reader search: mmap is disabled by default on both platforms. That dependency also declines mmap explicitly on macOS, so enabling it is not a fix here.
+
+| Stage | Median per complete query | Interpretation |
+|---|---:|---|
+| File opens | 843.592 ms | About 88% of the instrumented query; roughly 84 µs per searched file. |
+| File closes | 55.410 ms | About 6%. |
+| Directory traversal and ignore processing | 27.838 ms | About 3%; parallelizing only the walker misses the dominant cost. |
+| Search, including reads and result callbacks | 30.252 ms | About 3%. |
+| Reads, included in the search row | 21.742 ms | Do not add this row again; only about 8.5 ms of the search row remains for decoding, matching, callbacks, and associated overhead. |
+
+These are component medians over the 21 measured queries; they need not sum exactly to the median total. The uninstrumented eight-second `sample` profile recorded 5,370 main-thread samples: **4,920 in `__open` (91.6%)**, **201 in `close` (3.7%)**, and **72 in `read` (1.3%)**. The dominant call chain was `search_with_clock → Searcher::search_path → File::open → open → __open`. Sampling proportions are statistical evidence, not exact duration accounting.
+
+### Security-software attribution
+
+Read-only checks found active **Microsoft Defender Endpoint Security** and **Elastic Endpoint Security** extensions. Defender reported real-time protection enabled. This makes endpoint-security overhead a concrete hypothesis, but neither extension presence nor the `__open` stack attributes the measured latency to a particular product. There is no evidence specifically implicating XProtect.
+
+Defender's scan-statistics query returned `No Data`. [Microsoft's diagnostic guide](https://learn.microsoft.com/en-ie/defender-endpoint/mac-support-perf) describes separately enabling scan statistics and notes their collection limits; no Defender diagnostic configuration, exclusion, or protection setting was changed. A deeper Instruments System Trace attempt timed out and produced no usable attribution; the successful application sampling remains the profiling evidence.
+
+The repeated warmed measurements and the alternate temporary directory rule out neither ongoing security checks nor ordinary filesystem overhead. They do show that another ordinary invocation, or moving the fixture to `/private/tmp`, does not make this a Linux-speed search. Attribution to Defender versus Elastic versus another kernel/filesystem cost would require additional targeted telemetry or a separately approved controlled security-policy comparison. No protection was disabled.
+
+### Parallel-search experiment
+
+The diagnostic prototype enumerated the same ordered file set, distributed file searches across workers, reused one matcher/searcher per worker, and restored file order before delivering the results. Its single-worker control uses the same prototype path. Before timing each worker count, all fields of all 10,000 ordered hits were compared with production and matched.
+
+| Workers | Median | Minimum | Maximum | Speedup over prototype with 1 worker |
+|---|---:|---:|---:|---:|
+| 1 | 933.371 ms | 909.003 ms | 949.731 ms | 1.00× |
+| 2 | 565.392 ms | 542.680 ms | 650.487 ms | 1.65× |
+| 4 | 439.049 ms | 372.427 ms | 506.944 ms | 2.13× |
+| 8 | 379.555 ms | 359.662 ms | 403.987 ms | 2.46× |
+
+This experiment measures **complete-search throughput only**. It buffers results until completion and does not implement production streaming, cancellation, or early global-limit termination. It is not a replacement implementation. The measurements were sequential on one machine, not randomized cross-platform trials; their large improvement supports the direction, while exact ratios can vary. The diminishing return above four workers also means worker count should remain bounded.
 
 ### Proposed change and acceptance criteria
 
-Keep the current ignore-aware ordered walk initially. Feed a bounded number of upcoming files to a small worker set; each worker reuses its searcher. A coordinator emits results in the existing order and owns the public `cancelled` and `send` callbacks, keeping `search` usable by its current production, headless, benchmark, and test callers. Bound both in-flight files and result queues. Workers must send incremental chunks: collecting an entire file's hits before delivery would regress the existing streaming behavior. This overlaps file work without requiring a new dependency, content cache, or change to the core protocol.
+Implement this later in M5 through [#265](https://github.com/Root-man/aiditor/issues/265). Expose the worker count as the positive integer `grep_workers` in `settings.toml`, with bundled default `1`. One worker preserves serial searching; a higher configured count bounds concurrent file searches. Use the existing settings validation and reload path, with changes applying to the next search and an active search retaining its captured count.
 
-This proposal targets serialized file work; it cannot remove a traversal bottleneck. Ordered delivery can also wait for an earlier slow file. Choose the worker count and retain the change only after approved measurements show a completion-time improvement without harming first-result latency or resource use. A 10× speedup is not established.
+Keep the existing ordered, ignore-aware walk initially and overlap file searches within that configured bound. Retain a searcher per worker. A coordinator should own the public `cancelled` and `send` callbacks and deliver incremental chunks in current root/walk/line order. Bound in-flight files and result queues, and stop outstanding work when cancelled or when the ordered global cap is reached. The setting crosses the core configuration and service boundary, so this row's complexity is now high.
 
+Locked `ignore` 0.4.33 ignores `sort_by_file_name` when using `build_parallel`, so a direct builder substitution would break [the specified order](editor.md#subsystems) and [its test](../crates/aiditor-services/src/grep.rs#L203). The proposal needs parallel **file searching**, not just a parallel directory walk. Keeping every file open or caching all file contents would introduce descriptor limits or invalidation responsibilities; neither is needed for this refactor.
+
+- **Given** `grep_workers` is omitted or set to `1`, **when** project grep runs, **then** it uses one file-search worker and preserves serial behavior.
+- **Given** a valid `grep_workers = N` greater than one and enough files, **when** project grep runs, **then** file searches overlap with at most N workers and deliver the same ordered hits as a one-worker search.
+- **Given** the worker setting changes and is reloaded, **when** the next search starts, **then** it uses the new count; an already-running search keeps its captured count.
+- **Given** a zero, negative, or non-integer worker setting, **when** settings load or reload, **then** the existing error path reports it and retains the last valid settings, or bundled defaults at startup.
 - **Given** files in several roots whose searches finish out of order, **when** results are delivered, **then** their root, walk, and line order matches today's service.
 - **Given** one large matching file, **when** it is still being searched, **then** hits stream at the existing approximate 50 ms checks rather than waiting for file completion.
 - **Given** a superseding query or cancellation, **when** workers and the coordinator observe it at their file/match/send checks, **then** they stop work and the coordinator emits no further results for that search.
-- **Given** more than 10,000 hits, **when** the default search reaches its cap, **then** exactly the first 10,000 ordered hits and one final completion are delivered.
-- [ ] Keep ignore rules, binary handling, Unicode columns, unreadable-file handling, and the existing callback API behavior covered by the service tests.
-- [ ] Bound worker count, queued work, and buffered results, including cancellation while a queue is full.
-- [ ] After explicit approval to measure, compare complete-search and first-batch timings on each platform with a single-worker baseline and a few bounded worker counts; keep fixture and build conditions constant within each comparison.
+- **Given** more than 10,000 hits, **when** the default search reaches its cap, **then** exactly the first 10,000 ordered hits and one final completion are delivered, and unnecessary work stops.
+- [ ] Preserve ignore rules, binary handling, Unicode columns, unreadable-file handling, and the existing callback API for production, headless, benchmark, and test callers.
+- [ ] Bound worker count, queued work, and buffered results; cover cancellation while queues are full and an earlier file is slow.
+- [ ] Validate production streaming and cancellation through behavioral tests; the throughput prototype does not establish these properties.
+- [ ] Repeat complete-search measurements after implementation; separately obtain approval before running other benchmark scenarios, including first-batch latency. Validate on Linux before treating this as a cross-platform improvement.
+
+Temporary diagnostic artifacts are under `/private/tmp/aiditor-grep-investigation-20261025/`: `baseline.rs`, `src/main.rs`, `src/parallel.rs`, `src/instrumented.rs`, `src/stats.rs`, `baseline.sample.txt`, per-run TSV/log files, and `summary.json`. They are investigation artifacts, not repository implementation code. The table and component measurements above preserve the results if that temporary directory is later removed.
 
 ## Verification and limits
 
-The earlier scan on this revision passed 570 Rust core/service tests with one ignored, plus 21 Python benchmark-reporting tests. Focused probes established the cases described above; they were not rerun for the grep investigation. The new investigation checked the benchmark boundaries, locked dependency implementations, callers, ordering tests, and cancellation/streaming tests from source. Only this report was added; no proposed fix was implemented.
+The earlier scan on this revision passed 570 Rust core/service tests with one ignored, plus 21 Python benchmark-reporting tests. Those tests and the earlier non-grep probes were not rerun for this investigation. The new work reproduced the authorized grep scenario, cross-checked application sampling against per-stage timing, changed fixture location, and compared the parallel prototype against every ordered production hit. The deferred task is recorded in `docs/roadmap.yaml` and GitHub issue #265. Repository implementation code is unchanged.
 
-Start with: **1 and 2**, because existing cleanup/replacement operations address concrete bugs with limited changes. **6** also deserves early attention because failed recovery persistence can remove the remaining on-disk copy; **5** is the proposed response to the reported macOS grep delay, subject to measurement.
+Start with: **1 and 2**, because existing cleanup/replacement operations address concrete bugs with limited changes. **6** also deserves early attention because failed recovery persistence can remove the remaining on-disk copy. **5 is deferred to M5 in [#265](https://github.com/Root-man/aiditor/issues/265)**, with configurable parallelism defaulting to one worker.
 
-Not checked: GUI runtime behavior, Linux execution, or a new macOS benchmark/profile; the optional `ponytail-audit` skill was unavailable. The actual cause of the macOS/Linux gap and the benefit of parallel search are unverified.
+Not checked: GUI runtime behavior, Linux execution, other benchmark scenarios, or production parallel-search streaming/cancellation; the optional `ponytail-audit` skill was unavailable. File-open latency is measured, but attribution to a specific security product or kernel component remains unproven.
