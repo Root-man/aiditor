@@ -55,3 +55,10 @@ When the app quits, every live agent SHALL be killed before the process exits, w
 #### Scenario: Quitting kills every agent
 - **WHEN** two test agents are running, one ignoring SIGTERM, and all agents are killed for quitting
 - **THEN** it returns after the grace, and within seconds neither agent's process exists
+
+### Requirement: Session updates stream to the core
+Each `session/update` notification the agent sends SHALL reach the core as one message tagged with the agent id, holding the notification as ACP parses it, in the order the agent sent them.
+
+#### Scenario: An update reaches the core
+- **WHEN** the test agent sends one session update after its session opened
+- **THEN** the core gets an update message for that agent id with the update's session id and content

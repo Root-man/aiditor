@@ -46,7 +46,7 @@ A request to close the window SHALL NOT close it; it SHALL run `save-buffers-kil
 - **THEN** the window stays open and the minibuffer asks `Save file <path>? `
 
 ### Requirement: Quitting asks before killing live terminals
-When any terminal's shell has not exited, `save-buffers-kill-terminal` SHALL ask `Active processes exist; kill them and exit anyway? `, completing over `No` then `Yes`, after the modified-buffer questions and before starting the saves they chose. Only `Yes` SHALL go on to quit; any other answer SHALL keep the editor open with its terminals running, still saving the buffers answered `Yes`.
+When any terminal's shell has not exited, or any agent session is live (waiting for its environment, starting or ready), `save-buffers-kill-terminal` SHALL ask `Active processes exist; kill them and exit anyway? `, completing over `No` then `Yes`, after the modified-buffer questions and before starting the saves they chose. Only `Yes` SHALL go on to quit; any other answer SHALL keep the editor open with its terminals and agents running, still saving the buffers answered `Yes`.
 
 #### Scenario: No keeps the terminal running
 - **WHEN** a terminal is live and `C-x C-c RET` is typed (the default `No`)
@@ -59,3 +59,7 @@ When any terminal's shell has not exited, `save-buffers-kill-terminal` SHALL ask
 #### Scenario: After the save questions
 - **WHEN** a file buffer is modified, a terminal is live and `C-x C-c RET` is typed
 - **THEN** the next prompt is `Active processes exist; kill them and exit anyway? `, and `yes RET` saves the file and then quits
+
+#### Scenario: A live agent session asks too
+- **WHEN** an agent session is ready, no terminal is live and `C-x C-c RET` is typed
+- **THEN** the app does not quit and no `AgentOp::Kill` is sent
