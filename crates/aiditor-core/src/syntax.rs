@@ -64,6 +64,12 @@ static YAML: LazyLock<Grammar> = LazyLock::new(|| {
         &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
     )
 });
+static MARKDOWN: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_md::LANGUAGE.into(),
+        &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+    )
+});
 
 /// A buffer's syntax tree, kept in step with its text.
 // shortcut: parses on the core thread, so a huge file stalls visiting and big edits; move it to the syntax service when that shows.
@@ -120,6 +126,7 @@ impl Syntax {
             "ex" | "exs" => &ELIXIR,
             "heex" => &HEEX,
             "yml" | "yaml" => &YAML,
+            "md" | "markdown" => &MARKDOWN,
             _ => return None,
         };
         let mut parser = Parser::new();
@@ -233,7 +240,7 @@ mod tests {
         let exts = ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
         for ext in exts
             .into_iter()
-            .chain(["rs", "ex", "exs", "heex", "yml", "yaml"])
+            .chain(["rs", "ex", "exs", "heex", "yml", "yaml", "md", "markdown"])
         {
             let path = format!("a.{ext}");
             assert!(Syntax::for_file(Path::new(&path), &rope).is_some(), "{ext}");
@@ -300,6 +307,35 @@ mod tests {
         assert_eq!(
             r("a.yaml", "a: true"),
             [("a".into(), 7), ("true".into(), 8)]
+        );
+    }
+
+    #[test]
+    fn markdown_blocks() {
+        let p = palette(&[
+            ("text.title", 1),
+            ("text.literal", 2),
+            ("punctuation.special", 3),
+            ("text.reference", 4),
+            ("text.uri", 5),
+        ]);
+        assert_eq!(
+            runs(
+                "a.md",
+                "# Title\n\n- item\n\n> quote\n\n---\n\n```rs\nfn x\n```\n\n[a]: http://x\n",
+                &p
+            ),
+            [
+                ("#".into(), 3),
+                ("Title".into(), 1),
+                // Markers' nodes take the space or newline after them.
+                ("- ".into(), 3),
+                ("> ".into(), 3),
+                ("---\n".into(), 3),
+                ("```rs\nfn x\n```\n".into(), 2),
+                ("[a]".into(), 4),
+                ("http://x".into(), 5),
+            ]
         );
     }
 
