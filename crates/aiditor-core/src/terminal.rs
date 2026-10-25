@@ -290,10 +290,11 @@ impl Terminal {
             on_line.entry(line).or_default().push(i);
         }
         let mut places = vec![None; self.marks.len()];
+        // The current logical line's length in chars, kept so wrapped rows aren't recounted.
+        let mut offset = 0;
         for line in -(self.history() as i32)..self.term.screen_lines() as i32 {
             let n = lines.len() - 1;
             let current = &mut lines[n];
-            let offset = current.chars().count();
             if line == cursor.line.0 {
                 let before = self.cells(line, cursor.column.0);
                 at = (n, offset + before.chars().count());
@@ -325,10 +326,13 @@ impl Terminal {
                 .flags
                 .contains(Flags::WRAPLINE)
             {
-                *current += &self.cells(line, cols);
+                let row = self.cells(line, cols);
+                offset += row.chars().count();
+                *current += &row;
             } else {
                 *current += &self.row(line);
                 lines.push(String::new());
+                offset = 0;
             }
         }
         while lines.len() > at.0 + 1 && lines.last().is_some_and(String::is_empty) {
@@ -712,13 +716,17 @@ impl Ctx<'_> {
         self.vterm_copy_mode()
     }
 
-    /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`.
+    /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`, and
+    /// sends the terminal its one kill, which releases it.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
         let core = &mut *self.core;
-        // Removed first, so `sync_terminals` sends no kill to a shell that is gone.
-        if let Some(buffer) = core.terminals.remove(&id)
-            && core.buffers.get(buffer).is_some()
-        {
+        // Removed first, so `sync_terminals` sends no second kill; this one sends no signal, it
+        // only has the service release the PTY and input thread.
+        let Some(buffer) = core.terminals.remove(&id) else {
+            return;
+        };
+        self.effects.push(Effect::Terminal(TerminalOp::Kill { id }));
+        if core.buffers.get(buffer).is_some() {
             core.kill_buffer(buffer);
             if let Some(err) = err {
                 core.echo(err);
@@ -1710,13 +1718,14 @@ mod tests {
                 signal: None,
             });
             assert!(!exists(&h, "vterm1<work>"));
+            assert_eq!(ops(&mut h), ["kill 0"]);
             h.send(Msg::TerminalSpawned {
                 id: TerminalId(1),
                 result: Err("/x: not a directory".into()),
             });
             assert!(!exists(&h, "vterm2<work>"));
             assert_eq!(h.core.message(), Some("/x: not a directory"));
-            assert!(ops(&mut h).is_empty());
+            assert_eq!(ops(&mut h), ["kill 1"]);
             assert_eq!(name(&h), "*scratch*<work>");
         }
 

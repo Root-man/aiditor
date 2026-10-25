@@ -122,6 +122,7 @@ impl Buffers {
             markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
             next_marker: 1,
             props: Vec::new(),
+            props_disjoint: true,
             history: History::default(),
             major_mode: "fundamental-mode",
             minor_modes: Vec::new(),
@@ -277,6 +278,9 @@ pub struct Buffer {
     next_marker: u64,
     /// Text properties as (start, end) marker pairs, oldest first.
     props: Vec<(MarkerId, MarkerId, Prop)>,
+    /// Each property starts at or after the previous one's end, which edits keep, so
+    /// `properties_near` can bisect.
+    props_disjoint: bool,
     history: History,
     /// Names the major mode's keymap in `Core`.
     pub major_mode: &'static str,
@@ -366,6 +370,7 @@ impl Buffer {
         };
         *copy = text;
         self.commands.clear();
+        self.props_disjoint = true;
         for (start, end, _) in std::mem::take(&mut self.props) {
             self.markers.remove(&start);
             self.markers.remove(&end);
@@ -579,10 +584,37 @@ impl Buffer {
         if range.start > range.end || range.end > self.len_chars() {
             return Err(Error::OutOfRange);
         }
+        if (self.props.last()).is_some_and(|(_, end, _)| self.marker(*end) > Some(range.start)) {
+            self.props_disjoint = false;
+        }
         let start = self.add_marker(range.start, InsertionType::Advance)?;
         let end = self.add_marker(range.end, InsertionType::Stay)?;
         self.props.push((start, end, prop));
         Ok(())
+    }
+
+    /// The non-empty property ranges touching `range`, from at its start to at its end, oldest
+    /// first.
+    pub fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
+        let touches = |r: &Range<usize>| r.end >= range.start && r.start <= range.end;
+        if !self.props_disjoint {
+            return self.properties().filter(|(r, _)| touches(r)).collect();
+        }
+        let at = |id| {
+            self.marker(id)
+                .expect("a property's markers live as long as it")
+        };
+        let from = (self.props).partition_point(|&(_, end, _)| at(end) < range.start);
+        let to = (self.props).partition_point(|&(start, ..)| at(start) <= range.end);
+        (self.props[from..to.max(from)].iter())
+            .map(|(s, e, prop)| (at(*s)..at(*e), prop))
+            .filter(|(r, _)| !r.is_empty())
+            .collect()
+    }
+
+    /// Whether any property hides text.
+    pub(crate) fn has_folds(&self) -> bool {
+        (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_)))
     }
 
     /// The non-empty property ranges, oldest first.
@@ -600,13 +632,19 @@ impl Buffer {
         }
     }
 
-    /// The syntax colours `palette` gives chars `range`, as sorted, disjoint char ranges.
+    /// Whether it has a syntax tree to colour its text with.
+    pub(crate) fn highlighted(&self) -> bool {
+        self.syntax.is_some()
+    }
+
+    /// The syntax colours `palette` gives the chars of sorted, disjoint `ranges`, as sorted,
+    /// disjoint char ranges.
     pub(crate) fn highlights(
         &self,
-        range: Range<usize>,
+        ranges: &[Range<usize>],
         palette: &BTreeMap<String, u32>,
     ) -> Vec<(Range<usize>, u32)> {
-        (self.syntax.as_ref()).map_or(Vec::new(), |s| s.highlights(self.text(), range, palette))
+        (self.syntax.as_ref()).map_or(Vec::new(), |s| s.highlights(self.text(), ranges, palette))
     }
 
     pub fn remove_marker(&mut self, id: MarkerId) {
@@ -636,7 +674,8 @@ impl Buffer {
         }
         let start = rope.line_to_char(line);
         let slice = rope.line(line);
-        let len = slice.len_chars() - usize::from(slice.chars().last() == Some('\n'));
+        let len = slice.len_chars();
+        let len = len - usize::from(len > 0 && slice.char(len - 1) == '\n');
         Ok(start + col.min(len))
     }
 
@@ -1078,6 +1117,51 @@ mod tests {
             }
             proptest::prop_assert_eq!(b.text().to_string(), end);
         }
+    }
+
+    #[test]
+    fn char_idx_clamps_before_the_newline() {
+        let (buffers, id) = with_text("ab\ncd");
+        let b = buffers.get(id).unwrap();
+        assert_eq!(b.char_idx(0, 9), Ok(2), "a line with LF");
+        assert_eq!(b.char_idx(1, 9), Ok(5), "a last line without");
+        let (buffers, id) = with_text("ab\n");
+        assert_eq!(
+            buffers.get(id).unwrap().char_idx(1, 9),
+            Ok(3),
+            "an empty last line"
+        );
+    }
+
+    #[test]
+    fn properties_near_a_range() {
+        let (mut buffers, id) = with_text(&"x".repeat(100));
+        let b = buffers.get_mut(id).unwrap();
+        let face = |n| {
+            Prop::Face(Face {
+                fg: Some(n),
+                ..Face::default()
+            })
+        };
+        for start in (0..100).step_by(10) {
+            b.add_property(start..start + 5, face(start as u32))
+                .unwrap();
+        }
+        let near = |b: &Buffer, r| -> Vec<_> {
+            b.properties_near(r).into_iter().map(|(r, _)| r).collect()
+        };
+        assert_eq!(near(b, 23..41), [20..25, 30..35, 40..45]);
+        assert_eq!(near(b, 25..29), [20..25], "touching its end");
+        b.insert(0, "yy").unwrap();
+        b.delete(50..60).unwrap();
+        assert_eq!(
+            near(b, 40..52),
+            [42..47, 52..57],
+            "after edits, the emptied one gone"
+        );
+        // A long overlapping one makes the list unsorted by end; the full scan still finds it.
+        b.add_property(0..90, face(1)).unwrap();
+        assert_eq!(near(b, 68..70), [0..90]);
     }
 
     #[test]

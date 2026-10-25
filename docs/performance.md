@@ -38,7 +38,8 @@ Fixtures are deterministic and include Unicode. Setup is outside the timed opera
 | `syntax-edit-frame/*` | Insert a space or `/*` at the middle of a Rust/TSX buffer, build a frame, dispatch undo through the key handler, build another frame; 10k/100k lines |
 | `syntax-display/*-stationary` | Build a 50-row frame in an already parsed Rust/TSX buffer |
 | `syntax-display/*-scroll-pair` | Scroll forward and back by a page, building both frames |
-| `syntax-display/js/100kb-single-line` | Display a 100 KB JS string literal through a 120-column viewport, including the current whole-line highlight query |
+| `syntax-display/js/100kb-single-line` | Display a 100 KB JS string literal through a 120-column viewport, highlighting only the shown columns |
+| `syntax-display/rs/1mb-single-line-at-end` | Display the end of a 1 MB Rust string literal, point at the line's end, so the hidden columns before the viewport are skipped |
 | `finder/*-open-close` | Open and settle the project finder, then close it, with 10k/100k pre-indexed paths across two roots |
 | `finder/*-narrow-broaden-pair` | Narrow to two matching paths, then broaden to all paths, waiting for results and completion polling to settle each time |
 | `revert-diff/*` | Compute line edits between two 100k-line strings: one line, 1,000 scattered lines, or a contiguous 1,000-line replacement |
@@ -49,6 +50,8 @@ Fixtures are deterministic and include Unicode. Setup is outside the timed opera
 | `terminal-display/ansi-unicode-50x120` | Build runs for a densely styled, Unicode terminal screen |
 | `terminal-resize/*` | Resize a fresh terminal with full scrollback from 120 to 80 columns, then build its display |
 | `frame/*-panes-*` | Build a frame with 1/2/4 panes sharing one Rust buffer or showing distinct buffers; total width grows with pane count |
+
+Rust and TSX fixtures nest their items 100 to a `mod` or component, each line still one item with Unicode. Before the refactor-scan fixes every item sat at the tree's root, and a revert's changed lines keep their code and gain a trailing comment, so the nesting stays intact. Earlier Rust/TSX `syntax-*`, `revert-*` and `frame/*-rust` results are not comparable.
 
 Highlight load timings use **warm grammars**: lazy query compilation is completed before measurement. They measure full file parsing, not first-ever language initialization. Edit timings include deferred parsing through `Core::frame`; a direct buffer edit alone would miss it. Finder results include matching, polling and frame construction, with repoll deadlines advanced rather than sleeping for the UI's 16 ms timer. File preview reads are not answered in the finder benchmark; it measures in-memory completion, not disk preview latency.
 
@@ -62,7 +65,7 @@ The service suite creates two roots with 5,000 source files each, plus `.gitigno
 | --- | --- |
 | `index/10k-files-two-roots-warm-cache` | Walk and sort both roots; assert 5,001 indexed entries per root including `.gitignore` |
 | `grep/10k-hits-two-roots-complete-warm-cache` | Search both roots to the production 10k hit cap, consuming result batches |
-| `grep/first-batch-two-roots-warm-cache` | Search until the first nonempty emitted batch, then cancel; includes cancellation/unwinding overhead |
+| `grep/first-batch-two-roots-warm-cache` | Search until the first nonempty emitted batch, then cancel; includes cancellation/unwinding overhead. The first hit is sent at once, so this is time to the first hit; results before the refactor-scan fixes include the 50 ms batch deadline and are not comparable |
 
 Fixture creation and initial validation run before measurement. These are **warm filesystem-cache** workloads; they do not flush OS caches or claim cold-disk performance. First-result timing includes the service's batching policy, but excludes the prompt's 200 ms input debounce, channel scheduling and GUI painting. The complete search verifies hit counts, text and positions.
 

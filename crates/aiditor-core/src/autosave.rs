@@ -29,6 +29,7 @@ impl Ctx<'_> {
                     path: b.file.clone(),
                     hash: b.disk,
                     text: b.text().clone(),
+                    replaces: None,
                 }));
             }
         }
@@ -57,16 +58,23 @@ impl Ctx<'_> {
                 let buffer = core.buffers.get_mut(id).expect("just shown");
                 let len = buffer.len_chars();
                 buffer.undo_boundary(point);
-                // Past read-only too: a file refused since keeps its text, though not auto-saved.
-                buffer.delete(0..len).expect("in range");
-                buffer.insert(0, &r.text).expect("in range");
+                // Past read-only too: a file refused since keeps its text.
+                (buffer.replace(&[(0..len, r.text.clone())])).expect("in range");
                 if r.path.is_some() {
                     buffer.disk = r.hash;
                 }
-                // Written under this session first, so the old file goes only once a copy exists;
-                // a buffer with no file is not auto-saved, so its file just goes.
                 keep = r.path.is_some() && !autosaves(buffer);
                 self.write_autosaves();
+                // The old file goes once this session's copy is written; a buffer with no file is
+                // not auto-saved, so its file just goes.
+                if let Some(Effect::Recovery(RecoveryOp::AutoSave { replaces, .. })) =
+                    (self.effects.iter_mut()).find(|e| {
+                        matches!(e, Effect::Recovery(RecoveryOp::AutoSave { buffer, .. }) if *buffer == id)
+                    })
+                {
+                    *replaces = Some(r.file.clone());
+                    keep = true;
+                }
             }
             if !keep {
                 self.effects
@@ -134,8 +142,8 @@ mod tests {
     use crate::buffer::hash;
     use crate::harness::Harness;
     use crate::key::parse_keys;
-    use crate::{Effect, FileOp};
-    use std::path::PathBuf;
+    use crate::{Effect, FileOp, RecoveryOp};
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     const SEC: Duration = Duration::from_secs(1);
@@ -266,6 +274,36 @@ mod tests {
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a"), "1\nx\n");
         assert!(h.recovery.is_empty());
+    }
+
+    #[test]
+    fn recovering_into_a_file_that_became_binary_keeps_the_text() {
+        let mut h = Harness::new(&[]);
+        h.read_reply("a", Some(&[0, 1, 2]));
+        let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        h.send(Msg::Recover(vec![r])).keys("RET");
+        let b = h.core.current();
+        assert!(b.read_only && b.modified() && h.text() == "1\nx\n");
+        assert_eq!(h.deleted, [PathBuf::from("/recovery/1\nx\n")]);
+    }
+
+    #[test]
+    fn the_old_recovery_file_goes_with_this_sessions_write() {
+        let mut h = Harness::new(&[("a", "1\n")]);
+        let r = left(&h, Some("a"), "1\n", "2\n");
+        h.collect_effects = true;
+        h.send(Msg::Recover(vec![r])).keys("RET");
+        let ops: Vec<_> = (h.effects.drain(..))
+            .filter_map(|e| match e {
+                Effect::Recovery(op) => Some(op),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(&ops[..], [RecoveryOp::AutoSave { replaces: Some(file), .. }] if file == Path::new("/recovery/2\n")),
+            "no separate delete that could run after a failed write: {} ops",
+            ops.len()
+        );
     }
 
     #[test]

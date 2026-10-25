@@ -324,8 +324,12 @@ impl Harness {
                     name,
                     path,
                     text,
+                    replaces,
                     ..
-                }) => _ = (self.recovery).insert(buffer, (name, path, text.to_string())),
+                }) => {
+                    (self.recovery).insert(buffer, (name, path, text.to_string()));
+                    self.deleted.extend(replaces);
+                }
                 Effect::Recovery(RecoveryOp::DeleteAutoSave(buffer)) => {
                     assert!(!self.quit, "deleted after the quit");
                     self.recovery
