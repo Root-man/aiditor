@@ -42,7 +42,7 @@
 ## 8. Integration
 
 - [x] 8.1 Run `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --check` on Linux, and `python3 -m pytest` for the bench-reporting scripts if any changed. Verify that all pass.
-- [ ] 8.2 Run `cargo bench -p aiditor-core` and `cargo bench -p aiditor-services` once. Compare `terminal-copy/colored/*`, `syntax-edit-frame/*` and `grep/first-batch` against the numbers in `docs/perf-scan-2026-10-25.md`, and record the results in the PR description.
+- [x] 8.2 Run `cargo bench -p aiditor-core` and `cargo bench -p aiditor-services` once. Compare `terminal-copy/colored/*`, `syntax-edit-frame/*` and `grep/first-batch` against the numbers in `docs/perf-scan-2026-10-25.md`, and record the results in the PR description.
 
 ## Workflow follow-up
 
