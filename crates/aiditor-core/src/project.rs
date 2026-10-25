@@ -14,7 +14,7 @@ pub struct Project {
     pub watch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_watched_files: Option<usize>,
-    /// shortcut: any string is accepted; check it against the agent registry once there is one.
+    /// Checked against the agent registry when the core loads the file, which reports but keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
     /// Gitignore-syntax patterns, relative to each root, leaving files out of the index, grep
@@ -139,14 +139,7 @@ impl Project {
                 ));
             }
         }
-        for (name, value) in &project.env {
-            if name.is_empty() || name.contains(['=', '\0']) {
-                return Err(format!("env {name:?}: not a variable name"));
-            }
-            if value.contains('\0') {
-                return Err(format!("env {name}: the value holds a NUL"));
-            }
-        }
+        crate::settings::check_env(&project.env)?;
         // shortcut: paths are compared as written, so symlinks and `..` can hide an overlap; canonicalize in the services check if that bites.
         let roots: Vec<_> = project.all_roots().map(|r| &r.path).collect();
         for (i, a) in roots.iter().enumerate() {

@@ -28,6 +28,19 @@ fn merge(base: &mut Table, over: Table) {
     }
 }
 
+/// Checks the variables of an `env` table can be set on a process.
+pub(crate) fn check_env(env: &BTreeMap<String, String>) -> Result<(), String> {
+    for (name, value) in env {
+        if name.is_empty() || name.contains(['=', '\0']) {
+            return Err(format!("env {name:?}: not a variable name"));
+        }
+        if value.contains('\0') {
+            return Err(format!("env {name}: the value holds a NUL"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -38,6 +51,22 @@ pub struct Settings {
     pub option_as_meta: bool,
     pub max_watched_files: usize,
     pub theme: Theme,
+    /// The agents sessions can start, by name.
+    pub agents: BTreeMap<String, Agent>,
+}
+
+/// How to start an agent: its ACP adapter's command line and environment.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Variables set on top of the captured environment, under the project file's.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// The session mode to switch to once the agent advertises its modes.
+    pub default_mode: Option<String>,
 }
 
 /// Colors as 0xRRGGBB.
@@ -68,6 +97,12 @@ impl Settings {
                 "font_size {} is outside 6 to 72",
                 settings.font_size
             ));
+        }
+        for (name, agent) in &settings.agents {
+            if agent.command.trim().is_empty() {
+                return Err(format!("agents.{name}: command is empty"));
+            }
+            check_env(&agent.env).map_err(|err| format!("agents.{name}: {err}"))?;
         }
         Ok(settings)
     }
@@ -130,6 +165,22 @@ mod tests {
     }
 
     #[test]
+    fn bundled_claude_agent_and_user_overrides_or_additions() {
+        let claude = &Settings::default().agents["claude"];
+        assert_eq!(claude.command, "claude-agent-acp");
+        assert!(claude.args.is_empty() && claude.env.is_empty());
+        assert_eq!(claude.default_mode.as_deref(), Some("auto"));
+        let s = Settings::parse(Some(
+            "[agents.claude]\ncommand = \"/opt/claude\"\n[agents.codex]\ncommand = \"codex-acp\"\nargs = [\"-v\"]",
+        ))
+        .unwrap();
+        assert_eq!(s.agents["claude"].command, "/opt/claude");
+        assert_eq!(s.agents["claude"].default_mode.as_deref(), Some("auto"));
+        assert_eq!(s.agents["codex"].args, ["-v"]);
+        assert_eq!(s.agents["codex"].default_mode, None);
+    }
+
+    #[test]
     fn bad_files_are_rejected() {
         for (user, needle) in [
             ("font_size = \"big\"", "font_size"),
@@ -139,6 +190,25 @@ mod tests {
             ("font_size = ", ""),
             ("max_watched_files = -1", "max_watched_files"),
             ("max_watched_files = \"many\"", "max_watched_files"),
+            ("[agents.claude]\ncomand = \"x\"", "agents.claude"),
+            ("[agents.mine]\nargs = []", "agents.mine"),
+            (
+                "[agents.mine]\ncommand = \"\"",
+                "agents.mine: command is empty",
+            ),
+            (
+                "[agents.mine]\ncommand = \"  \"",
+                "agents.mine: command is empty",
+            ),
+            ("[agents.claude]\nargs = \"-v\"", "args"),
+            (
+                "[agents.claude.env]\n\"A=B\" = \"c\"",
+                "agents.claude: env \"A=B\"",
+            ),
+            (
+                "[agents.claude.env]\nA = \"\\u0000\"",
+                "agents.claude: env A",
+            ),
         ] {
             let err = Settings::parse(Some(user)).unwrap_err();
             assert!(err.contains(needle), "{user:?}: {err}");

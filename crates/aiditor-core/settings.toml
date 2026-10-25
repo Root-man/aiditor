@@ -8,6 +8,12 @@ option_as_meta = true
 # Maximum kept files and directories per watched project; project files can override it.
 max_watched_files = 10000
 
+# Agents by name: an ACP adapter's command, args, env (on top of the captured environment, under a
+# project file's) and the session mode to start in. A user table changes single keys or adds an agent.
+[agents.claude]
+command = "claude-agent-acp"  # found on PATH; set a full path, or npx and args, to run it otherwise
+default_mode = "auto"
+
 [theme]
 background = 0x1e1e1e
 foreground = 0xd4d4d4

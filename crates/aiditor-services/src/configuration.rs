@@ -88,7 +88,7 @@ mod tests {
             core.handle(Instant::now(), read_projects(Some(root)));
             let id = core.project_id("p").unwrap();
             core.new_workspace("task", id);
-            let edit = call(&mut core, "project-set-default-agent", &["p", "codex"])
+            let edit = call(&mut core, "project-set-default-agent", &["p", "claude"])
                 .into_iter()
                 .find_map(|e| match e {
                     Effect::File(op @ FileOp::WriteProject { .. }) => Some(op),
@@ -107,7 +107,7 @@ mod tests {
                         .unwrap()
                         .default_agent
                         .as_deref(),
-                    Some("codex")
+                    Some("claude")
                 );
                 let effects = core.handle(Instant::now(), old);
                 assert_eq!(
@@ -117,7 +117,7 @@ mod tests {
                         .unwrap()
                         .default_agent
                         .as_deref(),
-                    Some("codex")
+                    Some("claude")
                 );
                 request(effects)
             } else {
@@ -133,9 +133,9 @@ mod tests {
                     .unwrap()
                     .default_agent
                     .as_deref(),
-                Some("codex")
+                Some("claude")
             );
-            assert!(fs::read_to_string(file).unwrap().contains("codex"));
+            assert!(fs::read_to_string(file).unwrap().contains("claude"));
         }
     }
 

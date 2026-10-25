@@ -39,7 +39,18 @@ impl Core {
         let mut valid = Vec::new();
         for result in loaded {
             match result {
-                Ok(loaded) => valid.push(loaded),
+                Ok(loaded) => {
+                    if let (Some(agent), Some((path, _))) =
+                        (&loaded.project.default_agent, &loaded.file)
+                        && !self.settings.agents.contains_key(agent)
+                    {
+                        let file = file_name(path);
+                        self.report(format!(
+                            "project {file}: {agent:?} is not a registered agent"
+                        ));
+                    }
+                    valid.push(loaded);
+                }
                 Err(err) => self.report(format!("project {err}")),
             }
         }
@@ -402,6 +413,9 @@ impl Ctx<'_> {
 
     pub(crate) fn set_default_agent(&mut self, args: &Args) -> Result<(), String> {
         let agent = &args.strings[1];
+        if !agent.is_empty() && !self.core.settings.agents.contains_key(agent) {
+            return Err(format!("{agent:?} is not a registered agent"));
+        }
         self.edit_project(args, |p| {
             p.default_agent = (!agent.is_empty()).then(|| agent.clone());
             Ok(())
@@ -877,6 +891,8 @@ mod tests {
         assert_eq!(err, Some(format!("{a}/x is inside {a}")));
         let err = call(&mut h, "project-remove-root", &["app", &a]);
         assert_eq!(err, Some(format!("{a} is not an additional root of app")));
+        let err = call(&mut h, "project-set-default-agent", &["app", "gemini"]);
+        assert_eq!(err.as_deref(), Some("\"gemini\" is not a registered agent"));
         assert_eq!(project_text(&h, "app"), disk, "refusals write nothing");
         let before = project(&h, "app");
         h.collect_effects = true;
@@ -973,6 +989,49 @@ mod tests {
             call(&mut h, "project-set-watch", &["missing", "false"]).as_deref(),
             Some("No project named missing")
         );
+    }
+
+    #[test]
+    fn an_unknown_default_agent_is_reported_and_the_project_still_loads() {
+        let mut h = with(Vec::new());
+        let mut gemini = saved(&h, "projects/gemini.toml", "a");
+        gemini.project.default_agent = Some("gemini".into());
+        let mut claude = saved(&h, "projects/claude.toml", "b");
+        claude.project.default_agent = Some("claude".into());
+        h.send(Msg::ProjectsLoaded {
+            dir: Some(h.path("projects")),
+            projects: vec![Ok(gemini.clone()), Ok(claude)],
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project gemini.toml: \"gemini\" is not a registered agent")
+        );
+        assert_eq!(project(&h, "a").default_agent.as_deref(), Some("gemini"));
+        h.core.message = None;
+        h.send(Msg::SettingsLoaded(Ok(Some(
+            "[agents.gemini]\ncommand = \"gemini\"".into(),
+        ))));
+        h.send(Msg::ProjectsLoaded {
+            dir: Some(h.path("projects")),
+            projects: vec![Ok(gemini)],
+        });
+        assert_eq!(h.core.message(), None);
+    }
+
+    #[test]
+    fn default_agent_prompt_completes_registered_agents() {
+        let mut h = with(Vec::new());
+        h.core.add_project(ad_hoc(&h));
+        h.send(Msg::SettingsLoaded(Ok(Some(
+            "[agents.codex]\ncommand = \"codex-acp\"".into(),
+        ))));
+        h.keys("M-x project-set-default-agent RET tmp RET");
+        let (agents, _) = crate::harness::listed(&mut h);
+        assert_eq!(agents, ["claude", "codex"]);
+        h.keys("C-n RET");
+        assert_eq!(project(&h, "tmp").default_agent.as_deref(), Some("codex"));
+        h.keys("M-x project-set-default-agent RET tmp RET M-RET");
+        assert_eq!(project(&h, "tmp").default_agent, None);
     }
 
     #[test]
