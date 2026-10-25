@@ -12,6 +12,13 @@ fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
     }
 }
 
+fn projects_then_agents(core: &Core, args: &Args) -> Vec<String> {
+    match args.strings.len() {
+        0 => core.project_names(false),
+        _ => core.settings.agents.keys().cloned().collect(),
+    }
+}
+
 /// The file a file prompt's candidate names; a directory gives none.
 fn preview_file(core: &Core, candidate: &str) -> Option<Preview> {
     let base = core.prompts.completion_base()?;
@@ -293,7 +300,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             spec: ArgSpec {
                 project: true,
                 prompts: &["Project: ", "Default agent: "],
-                completion: Some(projects_then_free),
+                completion: Some(projects_then_agents),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.set_default_agent(&args),
