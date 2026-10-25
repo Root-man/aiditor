@@ -14,7 +14,7 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentRequest, ClientCapabilities, Implementation, InitializeRequest, NewSessionRequest,
-    RequestId,
+    RequestId, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Request};
@@ -196,7 +196,7 @@ async fn connect(
     pending: Pending,
     tx: Sender<Msg>,
 ) {
-    let requests = tx.clone();
+    let (requests, updates) = (tx.clone(), tx.clone());
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
     let mut started = false;
     let result = Client
@@ -214,6 +214,14 @@ async fn connect(
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |update: SessionNotification, _| {
+                let update = Box::new(update);
+                _ = updates.send(Msg::AgentUpdate { id, update }).await;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(transport, async |agent: ConnectionTo<Agent>| {
             // The default capabilities offer neither fs nor terminals: agents use the disk.

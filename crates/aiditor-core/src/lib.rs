@@ -7,6 +7,7 @@
 #[cfg(panic = "abort")]
 compile_error!("aiditor needs panic = \"unwind\": commands are contained with catch_unwind");
 
+mod agents;
 mod autosave;
 mod bindings;
 pub mod buffer;
@@ -52,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, ClientResponse, Error, NewSessionResponse, RequestId,
+    AgentRequest, ClientResponse, Error, NewSessionResponse, RequestId, SessionNotification,
 };
 use ropey::Rope;
 
@@ -182,6 +183,11 @@ pub enum Msg {
         id: AgentId,
         request: RequestId,
         body: Request,
+    },
+    /// A `session/update` notification from the agent.
+    AgentUpdate {
+        id: AgentId,
+        update: Box<SessionNotification>,
     },
     /// The agent's exit status, after its stderr.
     AgentExited {
@@ -592,8 +598,10 @@ impl Ctx<'_> {
                     result: Err(Error::method_not_found()),
                 }))
             }
-            // The agent session task (#280) keeps these.
-            Msg::AgentStarted { .. } | Msg::AgentStderr { .. } | Msg::AgentExited { .. } => {}
+            Msg::AgentStarted { id, result } => self.agent_started(id, result),
+            Msg::AgentStderr { id, line } => self.agent_stderr(id, line),
+            Msg::AgentUpdate { id, update } => self.agent_update(id, *update),
+            Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.
@@ -875,6 +883,9 @@ pub struct Core {
     /// killed.
     terminals: BTreeMap<TerminalId, BufferId>,
     next_terminal: u64,
+    /// Each agent session, until its log buffer is killed.
+    agents: BTreeMap<AgentId, agents::Session>,
+    next_agent: u64,
     /// Whether projects' environments are captured: the app was not launched from a shell.
     capture: bool,
     environments: HashMap<ProjectId, environment::Environment>,
@@ -951,6 +962,8 @@ impl Default for Core {
             focused: scratch,
             terminals: BTreeMap::new(),
             next_terminal: 0,
+            agents: BTreeMap::new(),
+            next_agent: 0,
             capture: false,
             environments: HashMap::new(),
             environment_requests: 0,
@@ -1013,6 +1026,7 @@ impl Core {
         self.preview(&mut effects);
         self.watch(&mut effects);
         self.sync_terminals(&mut effects);
+        self.sync_agents(&mut effects);
         effects
     }
 

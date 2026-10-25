@@ -2,14 +2,15 @@
 //! and opens a session with two modes.
 //!
 //! `AIDITOR_TEST_AGENT` picks a behavior: `request` asks for a permission once the session is
-//! open and reports the answer; `exit3` writes two stderr lines and exits with code 3; `trap`
+//! open and reports the answer; `update` sends one agent message chunk once the session is open;
+//! `exit3` writes two stderr lines and exits with code 3; `trap`
 //! ignores SIGTERM.
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, RequestPermissionRequest, SessionMode, SessionModeState, ToolCallUpdate,
-    ToolCallUpdateFields,
+    ContentChunk, InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionMode,
+    SessionModeState, SessionNotification, SessionUpdate, ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -56,6 +57,11 @@ async fn main() -> agent_client_protocol::Result<()> {
                     NewSessionResponse::new("test-session")
                         .modes(SessionModeState::new("auto", modes)),
                 )?;
+                if behavior == "update" {
+                    let chunk = ContentChunk::new("hi".into());
+                    let update = SessionUpdate::AgentMessageChunk(chunk);
+                    client.send_notification(SessionNotification::new("test-session", update))?;
+                }
                 if behavior == "request" {
                     let ask = RequestPermissionRequest::new(
                         "test-session",

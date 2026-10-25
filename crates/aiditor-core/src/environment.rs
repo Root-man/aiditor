@@ -19,6 +19,21 @@ impl Core {
     pub fn capture_environments(&mut self) {
         self.capture = true;
     }
+
+    /// The variables processes of `project` start with, before their own: the captured ones, or
+    /// none when nothing is captured or the capture fell back; `None` while a capture is running
+    /// or about to start.
+    pub(crate) fn captured(&self, project: ProjectId) -> Option<Vec<(String, String)>> {
+        match self.environments.get(&project) {
+            Some(Environment {
+                capturing: Some(_), ..
+            }) => None,
+            Some(Environment { vars, .. }) => Some(vars.clone().unwrap_or_default()),
+            // `ensure_environments` starts it at the end of this message.
+            None if self.capture => None,
+            None => Some(Vec::new()),
+        }
+    }
 }
 
 impl Ctx<'_> {
@@ -94,6 +109,7 @@ impl Ctx<'_> {
             vars,
         };
         core.environments.insert(project, environment);
+        self.release_agents(project);
     }
 
     /// `project-capture-environment`: captures the current project's environment again.

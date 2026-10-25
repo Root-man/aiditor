@@ -60,8 +60,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// Kills the buffer `name`, asking first when it is a modified file buffer or a live
-    /// terminal; an unkillable one is refused.
+    /// Kills the buffer `name`, asking first when it is a modified file buffer, a live terminal
+    /// or a live agent session's log; an unkillable one is refused.
     pub(crate) fn kill_buffer(&mut self, args: Args) -> Result<(), String> {
         let name = &args.strings[0];
         let id =
@@ -70,7 +70,7 @@ impl Ctx<'_> {
         if buffer.unkillable {
             return Err(format!("Can't kill {name}"));
         }
-        let prompt = match self.core.live_terminal(id) {
+        let prompt = match self.core.live_terminal(id) || self.core.live_agent(id) {
             true => Some(format!("Buffer {name} has a running process; kill it? ")),
             false => (buffer.file.is_some() && buffer.modified())
                 .then(|| "Buffer modified; kill anyway? ".into()),
@@ -227,8 +227,8 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Offers to save each modified file buffer, asks before killing live terminals, then quits
-    /// once those saves succeed.
+    /// Offers to save each modified file buffer, asks before killing live terminals and agents,
+    /// then quits once those saves succeed.
     pub(crate) fn save_buffers_kill_terminal(&mut self, mut args: Args) -> Result<(), String> {
         let command = "save-buffers-kill-terminal";
         // Marks the processes answer, the last string, so `save_some`'s pairs don't shift.
@@ -242,7 +242,7 @@ impl Ctx<'_> {
         let Some(saving) = self.save_some(command, args.clone(), 0, |_| true, "exit")? else {
             return Ok(());
         };
-        if !self.core.terminals.is_empty() {
+        if !self.core.terminals.is_empty() || self.core.live_agents() {
             match processes {
                 None => {
                     args.strings.push(PROCESSES.into());

@@ -1,0 +1,80 @@
+# Spec Delta
+
+## Purpose
+
+Starts ACP agent sessions from the editor in the current workspace, with the project's environment, a stderr log buffer per session, and notes in `*Messages*` as sessions open, fail and end.
+
+## ADDED Requirements
+
+### Requirement: Starting an agent session
+`agent-start` SHALL prompt `Agent: `, completing over the registered agent names with the current workspace project's `default_agent` preselected when it names a registered agent, else the first name. A name that is not registered SHALL be refused with `"<name>" is not a registered agent` and start nothing. Otherwise it SHALL start the agent's command and args in the project's primary repo, with the environment variables in this order, later ones winning: the project's captured environment (none when nothing is captured or the capture fell back), the agent's `env` from the registry, the project file's `env`. The echo area SHALL show `Starting <agent>...`.
+
+#### Scenario: The default agent is preselected
+- **WHEN** the project's `default_agent` is `codex`, the registry has `claude` and `codex`, and `M-x agent-start RET RET` is typed
+- **THEN** a spawn of `codex`'s command is requested in the primary repo
+
+#### Scenario: The environment layers
+- **WHEN** the captured environment has `PATH=/a` and `A=1`, the agent's `env` sets `A=2`, the project file sets `B=3`, and the agent is started
+- **THEN** the spawn's variables are the captured ones, then `A=2`, then `B=3`, in that order
+
+#### Scenario: An unknown agent
+- **WHEN** `agent-start` is answered with a name that is not registered
+- **THEN** the echo area shows `"<name>" is not a registered agent` and no spawn is requested
+
+### Requirement: The spawn waits for the environment capture
+When the project's environment is being captured as the session starts, the spawn SHALL wait and SHALL be requested once that capture answers, with the captured variables, or with none when it failed. A session whose log buffer is killed while it waits SHALL never be spawned.
+
+#### Scenario: Waiting for the capture
+- **WHEN** the editor was launched from the Dock, the project's capture is running and `claude` is started
+- **THEN** no spawn is requested until the capture answers with `PATH=/opt/bin`, and then the spawn carries `PATH=/opt/bin`
+
+#### Scenario: Killed while waiting
+- **WHEN** a session waits for the capture and its log buffer is killed before the capture answers
+- **THEN** no spawn is requested when the capture answers
+
+### Requirement: The stderr log buffer
+Each session SHALL get a new read-only buffer named `*<agent> stderr*<<workspace>>`, made unique, owned by the current workspace and not shown. Each stderr line of the agent SHALL be appended to it as a line. The buffer SHALL stay after the agent exits.
+
+#### Scenario: Stderr is logged
+- **WHEN** a started agent writes `hello` then `world` to stderr
+- **THEN** its log buffer's text is `hello\nworld\n` and the buffer is read-only
+
+### Requirement: Session notes in Messages
+When the agent's session opens, `*Messages*` and the echo area, replacing `Starting <agent>...`, SHALL get `<agent> session ready (modes: <ids>)`, the advertised mode ids joined by `, `, or `none` when it advertises no modes. When the agent fails to start, `*Messages*` and the echo area SHALL get `<agent> session failed to start: <reason>`. When the agent exits after its session opened and was not stopped by the editor, `*Messages*` SHALL get `<agent> session exited with code <code>`, or `<agent> session killed by <signal>`.
+
+#### Scenario: Ready with modes
+- **WHEN** the agent answers `session/new` with modes `auto` and `plan`
+- **THEN** `*Messages*` has `claude session ready (modes: auto, plan)` and the echo area shows it
+
+#### Scenario: A failed start
+- **WHEN** the agent's command cannot be found
+- **THEN** `*Messages*` has `claude session failed to start: ` followed by the reason
+
+#### Scenario: A crash
+- **WHEN** a ready agent exits with code 3
+- **THEN** `*Messages*` has `claude session exited with code 3`
+
+### Requirement: A session ends on its own
+An agent's exit or failed start SHALL end only its own session: other sessions, their agents and their log buffers SHALL be unaffected, and the ended session SHALL no longer count as live.
+
+#### Scenario: One of two crashes
+- **WHEN** two sessions are ready and the first agent exits
+- **THEN** the second session is still live and no kill is sent to its agent
+
+### Requirement: Killing the log buffer stops the agent
+Killing a live session's log buffer SHALL first ask `Buffer <name> has a running process; kill it? `, completing over `no` then `yes`, as for a live terminal; on `yes` the buffer SHALL be killed and the agent stopped, with no crash note. Killing a workspace SHALL stop the agents of the log buffers it kills.
+
+#### Scenario: Killing a workspace stops its agent
+- **WHEN** a workspace with a live session is killed
+- **THEN** a kill is sent to that session's agent and `*Messages*` gets no crash note when it exits
+
+#### Scenario: Killing the log buffer asks
+- **WHEN** `C-x k` names a live session's log buffer
+- **THEN** the minibuffer asks `Buffer <name> has a running process; kill it? `
+
+### Requirement: Session updates are kept
+Each `session/update` notification from a session's agent SHALL be kept in that session, in order, and SHALL NOT change any buffer's text. Updates for an unknown or ended session SHALL be dropped.
+
+#### Scenario: An update is kept
+- **WHEN** a ready agent sends an agent message chunk update
+- **THEN** the session holds that update and no buffer's text changed

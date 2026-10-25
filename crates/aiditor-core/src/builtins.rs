@@ -631,6 +631,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.kill_buffer(args),
         },
         Command {
+            name: "agent-start",
+            spec: ArgSpec {
+                prompts: &["Agent: "],
+                completion: Some(|core, _| core.agent_names()),
+                preselect: Some(|core, _| core.default_agent_index()),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.agent_start(args),
+        },
+        Command {
             name: "vterm",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.vterm(),
