@@ -203,6 +203,33 @@ async fn the_core_rejects_agent_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn session_updates_reach_the_core() {
+    let mut agents = Agents::default();
+    let mut rx = spawn(
+        &mut agents,
+        AGENT,
+        Path::new("/"),
+        &[("AIDITOR_TEST_AGENT", "update")],
+    );
+    started(&mut rx).await.1.unwrap();
+    let update = loop {
+        match next(&mut rx).await {
+            Some(Msg::AgentStderr { .. }) => {}
+            Some(Msg::AgentUpdate { id, update }) => break (id, update),
+            msg => panic!("expected an update, got {msg:?}"),
+        }
+    };
+    assert_eq!(update.0, ID);
+    let update = format!("{:?}", update.1);
+    assert!(
+        update.contains("test-session") && update.contains("AgentMessageChunk"),
+        "{update}"
+    );
+    assert!(update.contains("\"hi\""), "{update}");
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_killed_agent_exits_and_is_gone() {
     let mut agents = Agents::default();
     let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[]);
