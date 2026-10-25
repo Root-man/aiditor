@@ -6,7 +6,7 @@ Colouring source code by its syntax: choosing a buffer's language from its file,
 ## Requirements
 
 ### Requirement: Language from the file extension
-A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `.cjs` and `.jsx`, as TypeScript for `.ts`, `.mts` and `.cts`, as TSX for `.tsx`, as Rust for `.rs`, as Elixir for `.ex` and `.exs`, as HEEx for `.heex`, as YAML for `.yml` and `.yaml`, and as Markdown (its block grammar) for `.md` and `.markdown`. An EEx template (a file ending in `.eex`) SHALL be highlighted by the extension before `.eex`, as the file it generates. Any other file, and a buffer with no file, SHALL be drawn without syntax colours.
+A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `.cjs` and `.jsx`, as TypeScript for `.ts`, `.mts` and `.cts`, as TSX for `.tsx`, as Rust for `.rs`, as Elixir for `.ex` and `.exs`, as HEEx for `.heex`, as YAML for `.yml` and `.yaml`, as Markdown (its block grammar) for `.md` and `.markdown`, and as TOML for `.toml`. An EEx template (a file ending in `.eex`) SHALL be highlighted by the extension before `.eex`, as the file it generates. Any other file, and a buffer with no file, SHALL be drawn without syntax colours.
 
 #### Scenario: TypeScript file
 - **WHEN** the user visits `a.ts` holding `const x: number = 1;`
@@ -47,6 +47,10 @@ A buffer visiting a file SHALL be highlighted as JavaScript for `.js`, `.mjs`, `
 #### Scenario: Markdown file
 - **WHEN** the user visits `a.md` holding `# Title`, a `- item` list line, a `> quote` line, a `---` break and a fenced code block
 - **THEN** `#`, `-`, `>` and `---` are drawn in the `punctuation.special` colour, `Title` in the `text.title` colour and the code block, fences and content, in the `text.literal` colour
+
+#### Scenario: TOML file
+- **WHEN** the user visits `a.toml` holding `[package]`, `name = "a"` and `x.y = true`
+- **THEN** `package` is drawn in the `type` colour, `name`, `x` and `y` in the `property` colour, `"a"` in the `string` colour and `true` in the `boolean` colour
 
 ### Requirement: Highlighting follows the text
 Highlighting SHALL reflect the buffer's current text whenever it is drawn, after any edit, undo, redo or revert from disk.
