@@ -7,7 +7,7 @@ The project file: a TOML file in the editor's config dir naming a primary repo, 
 ## Requirements
 
 ### Requirement: Project file format
-A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional boolean `watch` defaulting to true, an optional `ignore` list of gitignore-syntax patterns, a `primary` table and zero or more `roots` tables. Each root SHALL have a `path` and a `role`; a missing role SHALL mean an empty one, and a missing `ignore` an empty list. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore` as it is in the file.
+A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional boolean `watch` defaulting to true, an optional `ignore` list of gitignore-syntax patterns, an optional `env` table of string variables, a `primary` table and zero or more `roots` tables. Each root SHALL have a `path` and a `role`; a missing role SHALL mean an empty one, a missing `ignore` an empty list, and a missing `env` no variables. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore` and `env` as they are in the file.
 
 #### Scenario: Full file
 - **WHEN** a project file sets a name, a default agent, a primary root and two additional roots
@@ -19,14 +19,22 @@ A project SHALL be a TOML file in the `projects` directory of the editor's confi
 
 #### Scenario: Minimal file
 - **WHEN** a project file sets only a name and a primary path
-- **THEN** the project has no default agent, no ignore patterns, no additional roots and an empty primary role
+- **THEN** the project has no default agent, no ignore patterns, no env variables, no additional roots and an empty primary role
 
 #### Scenario: Ignore patterns
 - **WHEN** a project file sets `ignore = ["*", "!notes/"]`
 - **THEN** the loaded project has those two patterns, in that order
 
+#### Scenario: Env variables
+- **WHEN** a project file has an `[env]` table setting `MIX_ENV = "test"`
+- **THEN** the loaded project has the variable `MIX_ENV` with value `test`
+
+#### Scenario: Project commands keep env
+- **WHEN** a project file with an `[env]` table and a comment on one of its lines has a root added by a project command
+- **THEN** the file still holds the `[env]` table and its comment
+
 ### Requirement: Invalid project files are rejected with a clear error
-A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, a role spanning more than one line, or an ignore pattern that is not a valid gitignore pattern SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
+A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, a role spanning more than one line, an ignore pattern that is not a valid gitignore pattern, or an `env` variable whose value is not a string, whose name is empty or holds `=` or NUL, or whose value holds NUL SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
 
 #### Scenario: Relative path
 - **WHEN** a project file's primary path is `src`
@@ -63,6 +71,10 @@ A project file that is not valid TOML, has a value of the wrong type, a key the 
 #### Scenario: Bad ignore pattern
 - **WHEN** a project file sets `ignore = ["src/[z-a]"]`
 - **THEN** the project is not loaded and the error names the file and the pattern
+
+#### Scenario: Bad env variable
+- **WHEN** a project file's `[env]` table sets `PORT = 4000` or `"A=B" = "c"`
+- **THEN** the project is not loaded, the error names the file and the variable, and the other project files still load
 
 ### Requirement: Projects load at launch and on C-x C-r
 The editor SHALL read every `*.toml` file in the projects directory at launch and again when `C-x C-r` reloads settings, reconciling the saved projects it had by their project-file paths. A valid replacement at the same path SHALL update the same project even when its name changes. Ad-hoc projects SHALL stay. A saved project whose file is absent or invalid SHALL retain its last valid definition while a live workspace is bound to it; otherwise it SHALL be removed. A retained definition SHALL keep its file association and last-loaded text for normal checked project edits. Invalid files SHALL still report their errors. A missing projects directory at launch SHALL mean no saved projects and no error. During reload it SHALL retain only saved definitions still bound to live workspaces, in addition to ad-hoc projects.

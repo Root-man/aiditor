@@ -85,9 +85,11 @@ mod tests {
         file("a", &root.to_string());
         file("b", &format!("{root}/gone"));
         file("c", "rel");
+        let bad_env = format!("name = \"d\"\n[env]\nPORT = 4000\n[primary]\npath = \"{root}\"");
+        fs::write(dir.join("d.toml"), bad_env).unwrap();
         fs::write(dir.join("notes.txt"), "not a project").unwrap();
         let got = read(&dir);
-        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got.len(), 4, "{got:?}");
         let a = got[0].as_ref().unwrap();
         assert_eq!(a.project.name, "a");
         assert_eq!(
@@ -102,6 +104,8 @@ mod tests {
             Err(format!("b.toml: {root}/gone is not a directory"))
         );
         assert_eq!(got[2], Err("c.toml: rel is not absolute".into()));
+        let err = got[3].as_ref().unwrap_err();
+        assert!(err.starts_with("d.toml: ") && err.contains("PORT"), "{err}");
     }
 
     /// Feeds `script` to `core`, carrying out file effects at once as the headless binary does.

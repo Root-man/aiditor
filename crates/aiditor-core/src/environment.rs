@@ -104,12 +104,15 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// `getenv`: echoes a variable's value in the current project's environment.
+    /// `getenv`: echoes a variable's value in the current project's environment, the project
+    /// file's `env` on top.
     pub(crate) fn getenv(&mut self, args: Args) -> Result<(), String> {
         let core = &mut *self.core;
         let name = &args.strings[0];
         let project = core.current_workspace().project;
+        let overrides = &core.projects[core.project_at(project)?].project.env;
         let value = match core.environments.get(&project) {
+            _ if overrides.contains_key(name) => overrides.get(name).cloned(),
             Some(Environment {
                 vars: Some(vars), ..
             }) => (vars.iter().find(|(n, _)| n == name)).map(|(_, v)| v.clone()),
@@ -268,5 +271,58 @@ mod tests {
         reply(&mut h, (home, third), Ok(&[("A", "3")]));
         reply(&mut h, (home, second), Ok(&[("A", "2")]));
         assert_eq!(call(&mut h, "getenv", &["A"]), "3");
+    }
+
+    fn set_env(h: &mut Harness, name: &str, value: &str) {
+        let env = &mut h.core.projects[0].project.env;
+        env.insert(name.into(), value.into());
+    }
+
+    /// The extra variables of the terminals spawned since the last call.
+    fn spawned_env(h: &mut Harness) -> Vec<Vec<(String, String)>> {
+        (h.terminal_ops.drain(..))
+            .filter_map(|op| match op {
+                crate::TerminalOp::Spawn { env, .. } => Some(env),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_project_files_env_reaches_its_terminals_only() {
+        let mut h = Harness::new(&[]);
+        set_env(&mut h, "MIX_ENV", "test");
+        call(&mut h, "vterm", &[]);
+        let env = [("MIX_ENV".to_string(), "test".to_string())];
+        assert_eq!(spawned_env(&mut h), [env]);
+        h.new_workspace("other", "other");
+        call(&mut h, "vterm", &[]);
+        assert_eq!(spawned_env(&mut h), [[]]);
+    }
+
+    #[test]
+    fn getenv_puts_the_project_files_env_on_top() {
+        let mut h = Harness::new(&[]);
+        set_env(&mut h, "PATH", "/b");
+        assert_eq!(
+            call(&mut h, "getenv", &["PATH"]),
+            "/b",
+            "over the inherited"
+        );
+        h.core.capture_environments();
+        h.send(Msg::Tick);
+        let [(home, request, _)] = captures(&mut h).try_into().unwrap();
+        assert_eq!(call(&mut h, "getenv", &["PATH"]), "/b", "while capturing");
+        assert_eq!(
+            call(&mut h, "getenv", &["HOME"]),
+            "Still capturing home's shell environment"
+        );
+        reply(
+            &mut h,
+            (home, request),
+            Ok(&[("PATH", "/a"), ("HOME", "/h")]),
+        );
+        assert_eq!(call(&mut h, "getenv", &["PATH"]), "/b", "over the captured");
+        assert_eq!(call(&mut h, "getenv", &["HOME"]), "/h");
     }
 }
