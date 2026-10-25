@@ -399,6 +399,40 @@ Core tests use in-memory text and prepared protocol replies, collecting effects 
 | Frontend | GPUI input, display and dispatch tests; rendering checked by hand, no screenshot tests (see [docs/spikes/gpui.md](spikes/gpui.md)) |
 | Whole app | Launch with a test project and the fake agent, drive it with a key script, assert on files, buffers and workspaces; a manual smoke run against the real agents before each milestone gate |
 
+### Fake agent script
+
+Decided in [#285](https://github.com/Root-man/aiditor/issues/285). `aiditor-fake-agent` (a binary of `aiditor-services`) runs the JSON script that `AIDITOR_FAKE_AGENT` names, relative to its working directory; without it the script is empty, and a script that doesn't parse exits with code 2 and the reason on stderr. It always reports `pid=`, the advertised `fs.readTextFile`/`fs.writeTextFile`/`terminal` capabilities, `cwd=` and `A=` on stderr, and answers `session/new` with session `fake-session` and modes `auto` (current) and `plan`.
+
+```json
+{
+  "session": [{"stderr": "ready"}],
+  "prompts": [
+    [
+      {"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}},
+      {"permission": {"toolCall": {"toolCallId": "call-1"},
+                      "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}},
+      {"write": {"path": "src/a.rs", "text": "fn main() {}\n"}},
+      {"stop": "end_turn"}
+    ]
+  ]
+}
+```
+
+`session` runs once after `session/new` is answered; the n-th `session/prompt` runs the n-th list of `prompts`, and a turn that runs out of steps, or a prompt past the end, ends with `end_turn`. Steps run in order:
+
+| Step | Does |
+| --- | --- |
+| `{"update": <SessionUpdate>}` | Sends a `session/update` with the update as ACP JSON, so any update the schema has works |
+| `{"permission": {"toolCall": ..., "options": [...]}}` | Sends `session/request_permission`, waits, then writes `permission answered: <outcome JSON>` or `permission error: <message>` to stderr |
+| `{"write": {"path": ..., "text": ...}}` | Writes the file relative to the session's `cwd`, creating parent directories; `write error: ...` on stderr if it fails |
+| `{"sleep": <ms>}` | Waits |
+| `{"stderr": <line>}` | Writes the line to stderr |
+| `{"exit": <code>}` | Exits at once; ACP messages not yet written are lost, so `sleep` first when they matter |
+| `{"stop": <StopReason>}` | Ends the turn with that reason (`end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`), skipping the rest |
+| `"ignoreSigterm"` | Ignores SIGTERM from then on |
+
+`session/set_mode` to `auto` or `plan` succeeds and sends a `current_mode_update`; any other mode is an invalid-params error. `session/cancel` ends the running turn at once, even mid-`sleep` or mid-`permission`, with `cancelled`. Terminals are added with the agent terminals epic if [#100](https://github.com/Root-man/aiditor/issues/100) finds the adapters use them.
+
 Optional release-mode benchmarks cover core editing, syntax parsing/highlighting, display, completion, reverts and terminals, plus warm-cache indexing and grep services. An explicit local GUI suite measures scheduled synthetic input through matching frame paint during terminal floods. A manually started Actions workflow retains results and compares compatible previous runs, with an optional PR comment; see [Performance benchmarks](performance.md). Timings are informational, not CI gates.
 
 ## Crate shortlist
