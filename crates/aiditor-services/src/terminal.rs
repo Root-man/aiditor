@@ -491,6 +491,77 @@ mod tests {
         assert!(result.expect("ready output extended the exit grace") > 0);
     }
 
+    /// The process's open PTY master fds, where `/proc` names them; counting only these keeps
+    /// files other tests open meanwhile out of it.
+    fn open_fds() -> Option<usize> {
+        let fds = fs::read_dir("/proc/self/fd").ok()?.flatten();
+        Some(
+            fds.filter(|fd| fs::read_link(fd.path()).is_ok_and(|l| l.ends_with("ptmx")))
+                .count(),
+        )
+    }
+
+    #[tokio::test]
+    async fn killing_an_exited_or_unstarted_terminal_releases_it() {
+        let mut terminals = Terminals::default();
+        let spawn = |terminals: &mut Terminals, id, cwd: &Path| {
+            let op = TerminalOp::Spawn {
+                id: TerminalId(id),
+                command: Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]),
+                cwd: cwd.into(),
+                env: Vec::new(),
+                rows: 24,
+                cols: 80,
+            };
+            terminals.run(op).expect("a receiver")
+        };
+        let last = |mut rx: Receiver<Msg>| async move {
+            let mut last = None;
+            while let Some(msg) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("the terminal ends")
+            {
+                last = Some(msg);
+            }
+            last
+        };
+        let before = open_fds();
+        for id in 0..12 {
+            let rx = spawn(&mut terminals, id, Path::new("/"));
+            let exited = last(rx).await;
+            assert!(
+                matches!(exited, Some(Msg::TerminalExited { .. })),
+                "{exited:?}"
+            );
+            terminals.run(TerminalOp::Kill { id: TerminalId(id) });
+        }
+        let rx = spawn(&mut terminals, 12, Path::new("/dev/null"));
+        let failed = last(rx).await;
+        assert!(matches!(
+            failed,
+            Some(Msg::TerminalSpawned { result: Err(_), .. })
+        ));
+        let shell = terminals.handles[&TerminalId(12)].shell.clone();
+        terminals.run(TerminalOp::Kill { id: TerminalId(12) });
+        assert!(
+            matches!(*shell.lock().unwrap(), Shell::Killed),
+            "no group to signal"
+        );
+        assert!(terminals.handles.is_empty());
+        // The input threads end once their senders drop, closing their PTY writers.
+        if let Some(before) = before {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while open_fds().unwrap() > before {
+                assert!(
+                    Instant::now() < deadline,
+                    "leaked fds: {:?} > {before}",
+                    open_fds()
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
     #[test]
     fn environment_applies_overrides_and_terminal_defaults() {
         let build = |base: &[(&str, &str)], extra: &[(&str, &str)]| {

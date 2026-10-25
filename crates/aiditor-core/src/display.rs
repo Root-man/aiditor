@@ -141,17 +141,47 @@ pub fn build(
     shown: Range<usize>,
 ) -> WindowDisplay {
     let text = buffer.text();
-    // shortcut: every char scans every property, fine for a screenful; index them when buffers get many.
-    let mut props: Vec<_> = buffer.properties().collect();
-    let first = text.line_to_char(top.min(text.len_lines() - 1));
-    let last = text.line_to_char((top + rows + 1).min(text.len_lines()));
+    let (top_line, end_line) = (
+        top.min(text.len_lines() - 1),
+        (top + rows + 1).min(text.len_lines()),
+    );
+    let (first, last) = (text.line_to_char(top_line), text.line_to_char(end_line));
+    let folds = buffer.has_folds();
     // Without folds no line past the window's is reached, so only the properties near it count,
     // which keeps a coloured scrollback in terminal copy mode cheap to draw.
-    if !(props.iter()).any(|(_, prop)| matches!(prop, Prop::Invisible(_))) {
-        props.retain(|(range, _)| range.end >= first && range.start <= last);
-    }
+    let props = match folds {
+        true => buffer.properties().collect(),
+        false => buffer.properties_near(first..last),
+    };
+    // shortcut: point's line is the display line starting on point's buffer line, so one joined by a fold from an earlier line is not scrolled; compare display lines when folds get common.
+    let point_line = buffer.line_col(point).ok().map(|(l, _)| l);
+    // Without folds a column is a char, so only each line's drawn chars are highlighted.
     // shortcut: only the window's buffer lines are highlighted, so lines a fold joins in are drawn uncoloured; highlight display lines when folds get common.
-    let syntax = buffer.highlights(first..last, &settings.theme.syntax);
+    let mut drawn: Vec<Range<usize>> = Vec::new();
+    if buffer.highlighted() && folds {
+        drawn.push(first..last);
+    } else if buffer.highlighted() {
+        for l in top_line..end_line {
+            let start = text.line_to_char(l);
+            let Ok(end) = buffer.char_idx(l, usize::MAX) else {
+                continue;
+            };
+            let cols = match Some(l) == point_line {
+                true => shown.clone(),
+                false => 0..shown.len(),
+            };
+            let len = end - start;
+            let chars = start + cols.start.min(len)..start + cols.end.min(len);
+            // A line drawn to its end and the next drawn from its start are one query, as a
+            // query per line costs more than the newline between them.
+            match drawn.last_mut() {
+                Some(last) if last.end + 1 == start && chars.start == start => last.end = chars.end,
+                _ if !chars.is_empty() => drawn.push(chars),
+                _ => {}
+            }
+        }
+    }
+    let syntax = buffer.highlights(&drawn, &settings.theme.syntax);
     let region = mark.map(|m| m.min(point)..m.max(point));
     let new_line = |number| Line {
         number,
@@ -177,8 +207,19 @@ pub fn build(
         }
         lines.push(std::mem::replace(line, new_line(next)));
     };
-    // shortcut: point's line is the display line starting on point's buffer line, so one joined by a fold from an earlier line is not scrolled; compare display lines when folds get common.
-    let point_line = buffer.line_col(point).ok().map(|(l, _)| l);
+    // Where a run of plain chars from `pos` ends: at its line's newline, or a fold that may join
+    // the next line.
+    let stop = |pos: usize| {
+        let l = text.char_to_line(pos);
+        let newline = match l + 1 < text.len_lines() {
+            true => text.line_to_char(l + 1) - 1,
+            false => text.len_chars(),
+        };
+        (props.iter())
+            .filter(|(r, p)| matches!(p, Prop::Invisible(_)) && (pos..newline).contains(&r.start))
+            .map(|(r, _)| r.start)
+            .fold(newline, usize::min)
+    };
     // Display columns of `line` consumed so far, the skipped ones included.
     let mut col: usize = 0;
     while lines.len() < rows {
@@ -215,18 +256,20 @@ pub fn build(
         }
         if col >= range.end {
             // The line is full: skip to its newline, or to a fold that may join the next line.
-            let l = text.char_to_line(pos);
-            let newline = match l + 1 < text.len_lines() {
-                true => text.line_to_char(l + 1) - 1,
-                false => text.len_chars(),
-            };
-            let target = (props.iter())
-                .filter(|(r, p)| {
-                    matches!(p, Prop::Invisible(_)) && (pos..newline).contains(&r.start)
-                })
-                .map(|(r, _)| r.start)
-                .fold(newline, usize::min);
+            let target = stop(pos);
             if target > pos {
+                pos = target;
+                continue;
+            }
+        }
+        if col < range.start {
+            // Columns scrolled off to the left: skip them too, stopping at point to place the cursor.
+            let mut target = stop(pos).min(pos + range.start - col);
+            if point > pos {
+                target = target.min(point);
+            }
+            if target > pos {
+                col += target - pos;
                 pos = target;
                 continue;
             }
@@ -532,6 +575,69 @@ mod tests {
             (";".into(), None),
         ];
         assert_eq!(colors(&mut h, 3), [line.clone(), line].concat());
+    }
+
+    /// Each line's text and the cursor, built with point's line showing columns `shown`.
+    fn scrolled(
+        h: &Harness,
+        point: usize,
+        shown: std::ops::Range<usize>,
+    ) -> (Vec<String>, Option<(usize, usize)>) {
+        let d = super::build(
+            h.core.current(),
+            0,
+            2,
+            point,
+            None,
+            h.core.settings(),
+            shown,
+        );
+        let texts = (d.lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        (texts, d.cursor)
+    }
+
+    #[test]
+    fn a_scrolled_line_skips_its_hidden_columns_and_folds() {
+        let mut h = Harness::new(&[]);
+        h.keys("abcdefghij RET xyz");
+        prop(&mut h, 2..4, Prop::Invisible("…".into()));
+        // Columns: a b … e f g h i j, the fold one wide.
+        let lines = vec!["ghi".to_string(), "xyz".into()];
+        assert_eq!(scrolled(&h, 8, 5..8), (lines.clone(), Some((0, 2))));
+        assert_eq!(
+            scrolled(&h, 0, 5..8),
+            (lines, Some((0, 0))),
+            "point scrolled off"
+        );
+        let (texts, cursor) = scrolled(&h, 3, 1..4);
+        assert_eq!(
+            (texts[0].as_str(), cursor),
+            ("b…e", Some((0, 1))),
+            "point in the fold"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_long_line_keeps_its_strings_colour() {
+        let text = format!("let s = \"{}\"; let t;", "x".repeat(1000));
+        let mut h = Harness::new(&[("a.js", &text)]);
+        h.open("a.js");
+        let string = Some(h.core.settings().theme.syntax["string"]);
+        let d = super::build(
+            h.core.current(),
+            0,
+            1,
+            500,
+            None,
+            h.core.settings(),
+            495..505,
+        );
+        let spans: Vec<_> = (d.lines[0].spans.iter())
+            .map(|s| (s.text.as_str(), s.face.fg))
+            .collect();
+        assert_eq!(spans, [("xxxxxxxxxx", string)]);
     }
 
     #[test]

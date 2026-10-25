@@ -44,11 +44,19 @@ A buffer's recovery file SHALL be deleted when the buffer is saved, is killed, o
 - **THEN** its recovery file is gone before the app exits
 
 ### Requirement: Recovery files are offered on launch
-At launch the editor SHALL offer each recovery file left by an earlier session, oldest first, asking whether to recover it. Recovering SHALL open the recovered text as a modified buffer: for a file buffer, one visiting the original file, whose save refuses to overwrite a file changed on disk since the text was auto-saved; for a buffer with no file, one with the recorded name. A recovered file buffer's text SHALL be auto-saved by the current session before the old recovery file is deleted; a buffer with no file is not auto-saved, so its old recovery file is deleted once recovered. Declining SHALL delete the recovery file. Quitting the prompt SHALL keep the remaining files, and the `recover-buffers` command SHALL offer them again.
+At launch the editor SHALL offer each recovery file left by an earlier session, oldest first, asking whether to recover it. Recovering SHALL open the recovered text as a modified buffer: for a file buffer, one visiting the original file, whose save refuses to overwrite a file changed on disk since the text was auto-saved; for a buffer with no file, one with the recorded name. Recovering SHALL succeed even when the visited file now opens read-only, such as a file that became binary. A recovered file buffer's text SHALL be auto-saved by the current session before the old recovery file is deleted, and the old file SHALL be kept if that auto-save fails; a buffer with no file is not auto-saved, so its old recovery file is deleted once recovered. Declining SHALL delete the recovery file. Quitting the prompt SHALL keep the remaining files, and the `recover-buffers` command SHALL offer them again.
 
 #### Scenario: Recover a file buffer
 - **WHEN** a recovery file for a visited file exists at launch and the user answers `Yes`
 - **THEN** the current buffer visits that file, holds the recovered text and is modified, and the old recovery file is gone
+
+#### Scenario: Recover into a file that became read-only
+- **WHEN** a recovery file holds valid text for a file whose bytes are now `[0, 1, 2]`, and the user answers `Yes`
+- **THEN** the editor does not panic, and the buffer holds the recovered text, is modified and stays read-only
+
+#### Scenario: The current session's auto-save fails
+- **WHEN** a recovered file buffer's auto-save cannot be written, for example because its temp path is a directory
+- **THEN** the old recovery file is kept
 
 #### Scenario: Save after recovering
 - **WHEN** a recovered file buffer is saved and the file is unchanged on disk since the auto-save

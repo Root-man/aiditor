@@ -1,6 +1,7 @@
 //! Tree-sitter parsing of a visited file and highlighting of the lines a window shows.
 
 use ropey::Rope;
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -89,7 +90,12 @@ pub(crate) struct Syntax {
     tree: Tree,
     /// Edits since the last parse.
     stale: bool,
+    /// The last highlights: their ranges, palette and runs, reused while the tree is unchanged.
+    cache: RefCell<Option<Highlights>>,
 }
+
+type Runs = Vec<(Range<usize>, u32)>;
+type Highlights = (Vec<Range<usize>>, BTreeMap<String, u32>, Runs);
 
 /// The byte offset and tree-sitter point of char `char_idx`.
 pub(crate) fn position(text: &Rope, char_idx: usize) -> (usize, Point) {
@@ -148,6 +154,7 @@ impl Syntax {
             parser,
             tree,
             stale: false,
+            cache: RefCell::default(),
         })
     }
 
@@ -167,61 +174,74 @@ impl Syntax {
             new_end_position: new_end.1,
         });
         self.stale = true;
+        self.cache.take();
     }
 
     /// Reparses `text`, reusing the old tree, if it was edited since the last parse.
     pub(crate) fn reparse(&mut self, text: &Rope) {
         if std::mem::take(&mut self.stale) {
             self.tree = parse(&mut self.parser, text, Some(&self.tree));
+            self.cache.take();
         }
     }
 
-    /// The colours `palette` gives chars `range` of `text`, as sorted, disjoint char ranges.
+    /// The colours `palette` gives the chars of sorted, disjoint `ranges` of `text`, as sorted,
+    /// disjoint char ranges. Each range is queried alone, so a long line's unseen chars cost
+    /// nothing, while nodes reaching in from outside it still colour it.
     pub(crate) fn highlights(
         &self,
         text: &Rope,
-        range: Range<usize>,
+        ranges: &[Range<usize>],
         palette: &BTreeMap<String, u32>,
-    ) -> Vec<(Range<usize>, u32)> {
-        let bytes = text.char_to_byte(range.start)..text.char_to_byte(range.end);
+    ) -> Runs {
+        if let Some((cached, colors, runs)) = &*self.cache.borrow()
+            && cached == ranges
+            && colors == palette
+        {
+            return runs.clone();
+        }
         let query = &self.grammar.highlights;
         let colors: Vec<_> = (query.capture_names().iter())
             .map(|name| color(palette, name))
             .collect();
         let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(bytes.clone());
-        let source = |node: Node| {
-            text.byte_slice(node.byte_range())
-                .chunks()
-                .map(str::as_bytes)
-        };
-        let mut matches = cursor.matches(query, self.tree.root_node(), source);
-        let mut captures = Vec::new();
-        while let Some(m) = matches.next() {
-            for capture in m.captures() {
-                if let Some(color) = colors[capture.index as usize] {
-                    captures.push((capture.node.byte_range(), m.pattern_index, color));
+        let mut runs: Runs = Vec::new();
+        for range in ranges {
+            let bytes = text.char_to_byte(range.start)..text.char_to_byte(range.end);
+            cursor.set_byte_range(bytes.clone());
+            let source = |node: Node| {
+                text.byte_slice(node.byte_range())
+                    .chunks()
+                    .map(str::as_bytes)
+            };
+            let mut matches = cursor.matches(query, self.tree.root_node(), source);
+            let mut captures = Vec::new();
+            while let Some(m) = matches.next() {
+                for capture in m.captures() {
+                    if let Some(color) = colors[capture.index as usize] {
+                        captures.push((capture.node.byte_range(), m.pattern_index, color));
+                    }
                 }
             }
-        }
-        // Painted in order, so the innermost node wins, then the later pattern on one node.
-        captures.sort_by_key(|(r, pattern, _)| (Reverse(r.len()), *pattern));
-        let mut painted = vec![None; bytes.len()];
-        for (r, _, color) in captures {
-            let clamp = |b: usize| b.clamp(bytes.start, bytes.end) - bytes.start;
-            painted[clamp(r.start)..clamp(r.end).max(clamp(r.start))].fill(Some(color));
-        }
-        let mut runs: Vec<(Range<usize>, u32)> = Vec::new();
-        let mut byte = 0;
-        for (i, c) in text.slice(range.clone()).chars().enumerate() {
-            let at = range.start + i;
-            match (painted[byte], runs.last_mut()) {
-                (Some(color), Some((r, last))) if r.end == at && *last == color => r.end += 1,
-                (Some(color), _) => runs.push((at..at + 1, color)),
-                (None, _) => {}
+            // Painted in order, so the innermost node wins, then the later pattern on one node.
+            captures.sort_by_key(|(r, pattern, _)| (Reverse(r.len()), *pattern));
+            let mut painted = vec![None; bytes.len()];
+            for (r, _, color) in captures {
+                let clamp = |b: usize| b.clamp(bytes.start, bytes.end) - bytes.start;
+                painted[clamp(r.start)..clamp(r.end).max(clamp(r.start))].fill(Some(color));
             }
-            byte += c.len_utf8();
+            let mut byte = 0;
+            for (i, c) in text.slice(range.clone()).chars().enumerate() {
+                let at = range.start + i;
+                match (painted[byte], runs.last_mut()) {
+                    (Some(color), Some((r, last))) if r.end == at && *last == color => r.end += 1,
+                    (Some(color), _) => runs.push((at..at + 1, color)),
+                    (None, _) => {}
+                }
+                byte += c.len_utf8();
+            }
         }
+        *self.cache.borrow_mut() = Some((ranges.to_vec(), palette.clone(), runs.clone()));
         runs
     }
 }
@@ -239,7 +259,7 @@ mod tests {
         let rope = Rope::from_str(text);
         let syntax = Syntax::for_file(Path::new(file), &rope).unwrap();
         (syntax
-            .highlights(&rope, 0..rope.len_chars(), palette)
+            .highlights(&rope, &[0..rope.len_chars()], palette)
             .into_iter())
         .map(|(r, c)| (rope.slice(r).to_string(), c))
         .collect()
@@ -412,7 +432,40 @@ mod tests {
         let rope = Rope::from_str("let a;\nlet b;\nlet c;");
         let syntax = Syntax::for_file(Path::new("a.js"), &rope).unwrap();
         let p = palette(&[("keyword", 1)]);
-        assert_eq!(syntax.highlights(&rope, 7..14, &p), [(7..10, 1)]);
+        assert_eq!(syntax.highlights(&rope, &[7..14], &p), [(7..10, 1)]);
+    }
+
+    #[test]
+    fn each_range_keeps_the_context_before_it() {
+        let rope = Rope::from_str("let s = \"abcdef\"; let t;");
+        let syntax = Syntax::for_file(Path::new("a.js"), &rope).unwrap();
+        let p = palette(&[("keyword", 1), ("string", 4)]);
+        // Inside a string opened before the range; the `let` past the ranges is not coloured.
+        let runs = syntax.highlights(&rope, &[11..13, 15..17], &p);
+        assert_eq!(runs, [(11..13, 4), (15..16, 4)]);
+    }
+
+    #[test]
+    fn highlights_are_reused_until_an_edit_or_another_palette() {
+        let mut rope = Rope::from_str("let a;");
+        let mut syntax = Syntax::for_file(Path::new("a.js"), &rope).unwrap();
+        let p = palette(&[("keyword", 1)]);
+        assert_eq!(syntax.highlights(&rope, &[0..6], &p), [(0..3, 1)]);
+        // A tree swapped without `edit` isn't queried: the cached runs come back.
+        syntax.tree = parse(&mut syntax.parser, &Rope::from_str("a; let b;"), None);
+        assert_eq!(syntax.highlights(&rope, &[0..6], &p), [(0..3, 1)]);
+        assert_eq!(
+            syntax.highlights(&rope, &[0..6], &palette(&[("keyword", 2)])),
+            [(3..6, 2)]
+        );
+        let start = position(&rope, 0);
+        rope.insert(0, "// ");
+        syntax.edit(start, start, position(&rope, 3));
+        syntax.reparse(&rope);
+        let p = palette(&[("keyword", 1), ("comment", 7)]);
+        assert_eq!(syntax.highlights(&rope, &[0..9], &p), [(0..9, 7)]);
+        syntax.edit(start, start, start);
+        assert_eq!(syntax.cache.borrow().as_ref(), None, "an edit drops them");
     }
 
     #[test]
@@ -425,7 +478,7 @@ mod tests {
         syntax.reparse(&rope);
         let p = palette(&[("keyword", 1), ("comment", 7)]);
         let all = 0..rope.len_chars();
-        assert_eq!(syntax.highlights(&rope, all, &p), [(0..13, 7)]);
+        assert_eq!(syntax.highlights(&rope, &[all], &p), [(0..13, 7)]);
     }
 
     #[test]
@@ -438,9 +491,9 @@ mod tests {
         b.reparse();
         let p = palette(&[("keyword", 1), ("string", 4)]);
         assert_eq!(b.text().to_string(), "let x;");
-        assert_eq!(b.highlights(0..6, &p), [(0..3, 1)]);
+        assert_eq!(b.highlights(&[0..6], &p), [(0..3, 1)]);
         b.undo();
         b.reparse();
-        assert_eq!(b.highlights(0..b.len_chars(), &p), [(0..3, 4)]);
+        assert_eq!(b.highlights(&[0..b.len_chars()], &p), [(0..3, 4)]);
     }
 }

@@ -1219,6 +1219,29 @@ milestones:
               - "Typing `pff` in `M-x` highlights the `p`, `f` and `f` that matched in `project-find-file`"
               - "Every completing prompt highlights its matches, and annotations stay dimmed"
             blocked_by: [m1-find-in-project]
+          - key: m5-parallel-grep
+            title: "Parallel project grep with configurable workers"
+            labels: [project, files]
+            design: "#subsystems"
+            body: |
+              Add optional parallel file searching to project grep in M5. Configure the worker count with the positive integer `grep_workers` in `settings.toml`, defaulting to `1`. One worker keeps serial searching; higher values bound the number of concurrent file-search workers. Use the existing settings loading, validation, and reload path, with a reloaded value applying to the next search.
+
+              The 2026-10-25 investigation reproduced the complete 10k-hit/two-root search at about 966 ms on the Mac. File opens accounted for about 844 ms of a 960 ms instrumented search. A temporary throughput prototype measured 933/565/439/380 ms with 1/2/4/8 workers, with all 10,000 ordered hits matching production. The prototype buffered results until completion, so its speedup does not validate production streaming or cancellation. See `docs/refactoring-opportunities.md`, "Grep investigation (#5)", for the measurements and limits.
+
+              Parallelize file searches while preserving the existing root, walk, and line order. Retain a searcher per worker, bound queued work and buffered results, and deliver incremental batches through an ordered coordinator. A direct switch to `ignore::WalkBuilder::build_parallel` is insufficient: it ignores the configured sort order, and directory traversal was only about 28 ms of the measured query. Keep the existing grep semantics and avoid retaining every file handle or caching file contents between queries.
+            acceptance:
+              - "Given `grep_workers` is omitted or set to `1`, when project grep runs, then it uses one file-search worker and preserves the current ordered results."
+              - "Given `grep_workers = N` for a valid integer greater than one and enough files, when project grep runs, then file searches overlap with at most N workers and return the same ordered hits as a one-worker search."
+              - "Given the worker count is changed and settings are successfully reloaded, when the next search starts, then it uses the new count; an already-running search keeps its captured count."
+              - "Given a zero, negative, or non-integer worker count, when settings load or reload, then the existing configuration error path reports the invalid value and retains the last valid settings, or bundled defaults at startup."
+              - "Given a large matching file or files that finish out of order, when hits become eligible for ordered delivery, then the service streams batches using its existing approximate 50 ms checks instead of waiting for the complete search."
+              - "Given a superseding query or cancellation, when workers and the coordinator observe it at their file/match/send checks, then outstanding work stops and no more batches for that search are emitted, including when result queues are full."
+              - "Given more than the configured hit limit, when the ordered limit is reached, then exactly that many hits and one completion are delivered and unnecessary worker work stops."
+              - "Bundled settings document `grep_workers = 1`; configuration and service behavior are covered by tests on macOS and Linux."
+              - "Worker count, queued files, buffered results, and open handles remain bounded; ignore rules, smart case, binary handling, unreadable-file handling, and Unicode positions retain their existing behavior."
+              - "Record complete-search and first-batch measurements for one and several workers on each platform, without introducing timing thresholds into ordinary CI."
+              - "Document the implemented setting and search behavior in docs/editor.md."
+            blocked_by: [m1-grep-service, m0-config]
       - key: m5-crash
         title: "Crash safety beyond commands"
         labels: [frontend]

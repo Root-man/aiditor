@@ -72,7 +72,10 @@ fn search_with_clock(
         .line_number(true)
         .binary_detection(BinaryDetection::quit(b'\0'))
         .build();
-    let (mut hits, mut found, mut sent) = (Vec::new(), 0, now());
+    // As if a batch went out a deadline ago, so the first hit is sent at once; one `now()` call,
+    // since a test clock advances on each.
+    let t = now();
+    let (mut hits, mut found, mut sent) = (Vec::new(), 0, t.checked_sub(BATCH).unwrap_or(t));
     let mut flush = |hits: &mut Vec<Hit>, done| {
         if cancelled() {
             return false;
@@ -324,7 +327,10 @@ mod tests {
             |m| msgs.push(m),
             now,
         );
-        assert_eq!(batches(&msgs), [(2, false), (2, false), (0, true)]);
+        assert_eq!(
+            batches(&msgs),
+            [(1, false), (2, false), (1, false), (0, true)]
+        );
         let positions: Vec<_> = msgs
             .into_iter()
             .flat_map(|m| match m {

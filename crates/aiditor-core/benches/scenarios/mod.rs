@@ -54,12 +54,37 @@ fn open(path: &str, text: &str) -> Core {
     core
 }
 
+/// `lines` lines of `ext` code, one item each; Rust and TSX items are nested 100 to a module or
+/// component, as real files are, so the tree's root doesn't hold every item.
 fn source(ext: &str, lines: usize) -> String {
+    let group = |i: usize, open: String, close: &str| {
+        let open = if i.is_multiple_of(100) {
+            open
+        } else {
+            String::new()
+        };
+        let close = if i % 100 == 99 || i + 1 == lines {
+            close
+        } else {
+            ""
+        };
+        (open, close.to_string())
+    };
     (0..lines)
         .map(|i| match ext {
-            "rs" => format!("fn item_{i}() -> usize {{ let café = {i}; café + 1 }}\n"),
+            "rs" => {
+                let (open, close) = group(i, format!("mod m{} {{ ", i / 100), " }");
+                format!("{open}fn item_{i}() -> usize {{ let café = {i}; café + 1 }}{close}\n")
+            }
             "tsx" => {
-                format!("export const Item{i} = () => <div title=\"été\">{{{i} + 1}}</div>;\n")
+                let (open, close) = group(
+                    i,
+                    format!("export function Group{}() {{ ", i / 100),
+                    " return null; }",
+                );
+                format!(
+                    "{open}const Item{i} = () => <div title=\"été\">{{{i} + 1}}</div>;{close}\n"
+                )
             }
             "js" => format!("export function item{i}() {{ return \"été\" + {i}; }}\n"),
             "ts" => format!("export const item{i}: string = \"été {i}\";\n"),
@@ -166,6 +191,24 @@ fn syntax(output: &mut String) {
         .collect();
     assert!(shown.starts_with("const data = "));
     assert!(shown.len() <= 121);
+    let text = format!("const DATA: &str = \"{}\";\n", "x".repeat(1_000_000));
+    let mut core = open("/long.rs", &text);
+    command(&mut core, "move-end-of-line");
+    let frame = core.frame();
+    let shown: String = (frame.windows[0].display.lines[0].spans.iter())
+        .map(|s| s.text.as_str())
+        .collect();
+    assert!(
+        shown.ends_with("xx\";") && colored(&frame),
+        "the line's end, highlighted"
+    );
+    measure(
+        "syntax-display/rs/1mb-single-line-at-end",
+        || {
+            black_box(core.frame());
+        },
+        output,
+    );
 }
 
 fn settle(core: &mut Core, matches: usize) {
@@ -284,7 +327,7 @@ fn reverts(output: &mut String) {
                     if (every == 1 && (49_500..50_500).contains(&i))
                         || (every != 1 && i % every == 0)
                     {
-                        format!("// changed {i}\n")
+                        format!("{l} // changed {i}\n")
                     } else {
                         format!("{l}\n")
                     }

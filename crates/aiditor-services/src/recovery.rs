@@ -35,6 +35,7 @@ fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
             path,
             hash,
             text,
+            replaces,
         } => {
             // Mode 0700: the files hold unsaved text.
             DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
@@ -52,7 +53,8 @@ fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
                 out.write_all(chunk.as_bytes())?;
             }
             out.sync_all()?;
-            fs::rename(&tmp, &file)
+            fs::rename(&tmp, &file)?;
+            replaces.map_or(Ok(()), |old| delete_recovery(&old))
         }
         RecoveryOp::DeleteAutoSave(buffer) => {
             match fs::remove_file(dir.join(format!("{}-{}", std::process::id(), buffer.number()))) {
@@ -60,17 +62,20 @@ fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
                 _ => Ok(()),
             }
         }
-        RecoveryOp::DeleteRecovery(file) => {
-            // A pid reused from the crashed session names this session's own files too.
-            let own = format!("{}-", std::process::id());
-            match file
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with(&own))
-            {
-                true => Ok(()),
-                false => fs::remove_file(file),
-            }
-        }
+        RecoveryOp::DeleteRecovery(file) => delete_recovery(&file),
+    }
+}
+
+/// Deletes an earlier session's recovery file.
+fn delete_recovery(file: &Path) -> io::Result<()> {
+    // A pid reused from the crashed session names this session's own files too.
+    let own = format!("{}-", std::process::id());
+    match file
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with(&own))
+    {
+        true => Ok(()),
+        false => fs::remove_file(file),
     }
 }
 
@@ -187,6 +192,32 @@ mod tests {
             vec![Effect::Recovery(RecoveryOp::DeleteAutoSave(buffer))],
         );
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_replaced_recovery_file_goes_only_after_the_write() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("recovery");
+        let old = root.path().join("1-1");
+        fs::write(&old, "old").unwrap();
+        let buffer = aiditor_core::buffer::Buffers::default().create("a");
+        let save = || {
+            Effect::Recovery(RecoveryOp::AutoSave {
+                buffer,
+                name: "a".into(),
+                path: None,
+                hash: None,
+                text: "new".into(),
+                replaces: Some(old.clone()),
+            })
+        };
+        let tmp = dir.join(format!("{}-{}.tmp", std::process::id(), buffer.number()));
+        fs::create_dir_all(&tmp).unwrap();
+        run_all(&dir, vec![save()]);
+        assert!(old.exists(), "kept after a failed write");
+        fs::remove_dir(&tmp).unwrap();
+        run_all(&dir, vec![save()]);
+        assert!(!old.exists());
     }
 
     #[test]

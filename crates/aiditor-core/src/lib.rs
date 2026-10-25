@@ -1,5 +1,8 @@
 //! Editor state. A plain state machine with no GPUI or Tokio dependency.
 
+// Highlights take a list of char ranges, and one range is a list of one, not a mistake.
+#![allow(clippy::single_range_in_vec_init)]
+
 // Commands are contained with `catch_unwind`, which aborting would silently disable.
 #[cfg(panic = "abort")]
 compile_error!("aiditor needs panic = \"unwind\": commands are contained with catch_unwind");
@@ -384,13 +387,15 @@ pub struct GrepSearch {
 
 /// Recovery file work for the recovery thread.
 pub enum RecoveryOp {
-    /// Write `buffer`'s recovery file: its `name`, visited `path`, base disk `hash` and `text`.
+    /// Write `buffer`'s recovery file: its `name`, visited `path`, base disk `hash` and `text`;
+    /// once written, delete the earlier session's recovery file it `replaces`.
     AutoSave {
         buffer: BufferId,
         name: String,
         path: Option<PathBuf>,
         hash: Option<u64>,
         text: Rope,
+        replaces: Option<PathBuf>,
     },
     /// Delete `buffer`'s recovery file.
     DeleteAutoSave(BufferId),
