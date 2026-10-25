@@ -26,12 +26,14 @@ ansi = [
 # prefix's (`function.method` falls back to `function`), and none means the foreground.
 [theme.syntax]
 attribute = 0x9cdcfe
+boolean = 0x569cd6
 comment = 0x6a9955
 constant = 0x4fc1ff
 "constant.builtin" = 0x569cd6
 constructor = 0x4ec9b0
 function = 0xdcdcaa
 keyword = 0x569cd6
+module = 0x4ec9b0
 number = 0xb5cea8
 operator = 0xd4d4d4
 property = 0x9cdcfe

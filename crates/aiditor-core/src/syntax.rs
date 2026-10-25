@@ -40,6 +40,30 @@ static TYPESCRIPT: LazyLock<Grammar> = LazyLock::new(|| {
 });
 static TSX: LazyLock<Grammar> =
     LazyLock::new(|| grammar(tree_sitter_typescript::LANGUAGE_TSX.into(), &[JS, JSX, TS]));
+static RUST: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_rust::LANGUAGE.into(),
+        &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+    )
+});
+static ELIXIR: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_elixir::LANGUAGE.into(),
+        &[tree_sitter_elixir::HIGHLIGHTS_QUERY],
+    )
+});
+static HEEX: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_heex::LANGUAGE.into(),
+        &[tree_sitter_heex::HIGHLIGHTS_QUERY],
+    )
+});
+static YAML: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_yaml::LANGUAGE.into(),
+        &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
+    )
+});
 
 /// A buffer's syntax tree, kept in step with its text.
 // shortcut: parses on the core thread, so a huge file stalls visiting and big edits; move it to the syntax service when that shows.
@@ -87,6 +111,10 @@ impl Syntax {
             "js" | "mjs" | "cjs" | "jsx" => &JAVASCRIPT,
             "ts" | "mts" | "cts" => &TYPESCRIPT,
             "tsx" => &TSX,
+            "rs" => &RUST,
+            "ex" | "exs" => &ELIXIR,
+            "heex" => &HEEX,
+            "yml" | "yaml" => &YAML,
             _ => return None,
         };
         let mut parser = Parser::new();
@@ -197,7 +225,11 @@ mod tests {
     #[test]
     fn languages_by_extension() {
         let rope = Rope::from_str("x");
-        for ext in ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"] {
+        let exts = ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
+        for ext in exts
+            .into_iter()
+            .chain(["rs", "ex", "exs", "heex", "yml", "yaml"])
+        {
             let path = format!("a.{ext}");
             assert!(Syntax::for_file(Path::new(&path), &rope).is_some(), "{ext}");
         }
@@ -217,6 +249,47 @@ mod tests {
                 ("let".into(), 1),
                 ("\"hi\"".into(), 4),
             ]
+        );
+    }
+
+    #[test]
+    fn rust_elixir_heex_and_yaml_snippets() {
+        let p = palette(&[
+            ("keyword", 1),
+            ("function", 2),
+            ("module", 3),
+            ("tag", 4),
+            ("attribute", 5),
+            ("string", 6),
+            ("property", 7),
+            ("boolean", 8),
+        ]);
+        let r = |file, text| runs(file, text, &p);
+        assert_eq!(
+            r("a.rs", "fn main() {}"),
+            [("fn".into(), 1), ("main".into(), 2)]
+        );
+        assert_eq!(
+            r("a.ex", "defmodule Foo do end"),
+            [
+                ("defmodule".into(), 1),
+                ("Foo".into(), 3),
+                ("do".into(), 1),
+                ("end".into(), 1),
+            ]
+        );
+        assert_eq!(
+            r("a.heex", "<div class=\"a\"></div>"),
+            [
+                ("div".into(), 4),
+                ("class".into(), 5),
+                ("\"a\"".into(), 6),
+                ("div".into(), 4),
+            ]
+        );
+        assert_eq!(
+            r("a.yaml", "a: true"),
+            [("a".into(), 7), ("true".into(), 8)]
         );
     }
 
