@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{configuration, files, grep, recovery, terminal, watcher};
+use aiditor_services::{configuration, environment, files, grep, recovery, terminal, watcher};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, Pixels, Task, Window, div, font,
     prelude::*, px, rgb,
@@ -155,6 +155,22 @@ impl Editor {
                     }
                     self.terminals.kill_all();
                     cx.quit()
+                }
+                Effect::CaptureEnvironment {
+                    project,
+                    request,
+                    dir,
+                } => {
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        let result = environment::run(&dir).await;
+                        _ = (tx.send(Msg::EnvironmentCaptured {
+                            project,
+                            request,
+                            result,
+                        }))
+                        .await;
+                    });
                 }
                 Effect::LoadConfiguration { request } => {
                     let dir = self.config_dir.clone();

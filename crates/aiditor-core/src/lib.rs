@@ -15,6 +15,7 @@ pub mod command;
 pub mod configuration;
 pub mod display;
 mod editing;
+mod environment;
 mod file_index;
 mod frame;
 mod grep;
@@ -194,6 +195,13 @@ pub enum Msg {
     AutoSave,
     /// Recovery files an earlier session left, found at launch: offer each one.
     Recover(Vec<Recovered>),
+    /// The answer to `Effect::CaptureEnvironment`: the login shell's variables, or why there
+    /// are none.
+    EnvironmentCaptured {
+        project: ProjectId,
+        request: u64,
+        result: Result<Vec<(String, String)>, String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -268,6 +276,12 @@ pub enum Effect {
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
+    /// Capture the login shell's environment in `dir` and send `Msg::EnvironmentCaptured`.
+    CaptureEnvironment {
+        project: ProjectId,
+        request: u64,
+        dir: PathBuf,
+    },
     /// Read one configuration bundle and send `Msg::ConfigurationLoaded`.
     LoadConfiguration { request: u64 },
     /// Put this text on the system clipboard.
@@ -609,6 +623,11 @@ impl Ctx<'_> {
                 self.call("recover-buffers", Args::default());
             }
             Msg::Recover(_) => {}
+            Msg::EnvironmentCaptured {
+                project,
+                request,
+                result,
+            } => self.environment_captured(project, request, result),
             Msg::Tick => {}
         }
     }
@@ -778,6 +797,10 @@ pub struct Core {
     /// killed.
     terminals: BTreeMap<TerminalId, BufferId>,
     next_terminal: u64,
+    /// Whether projects' environments are captured: the app was not launched from a shell.
+    capture: bool,
+    environments: HashMap<ProjectId, environment::Environment>,
+    environment_requests: u64,
 }
 
 impl Default for Core {
@@ -850,6 +873,9 @@ impl Default for Core {
             focused: scratch,
             terminals: BTreeMap::new(),
             next_terminal: 0,
+            capture: false,
+            environments: HashMap::new(),
+            environment_requests: 0,
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
@@ -901,6 +927,7 @@ impl Core {
             }
         }
         ctx.ensure_watch_indexes();
+        ctx.ensure_environments();
         ctx.ask_on_focus();
         let mut effects = ctx.effects;
         self.autosave(now, input, &mut effects);

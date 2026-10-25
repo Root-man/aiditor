@@ -1,6 +1,7 @@
 //! Async I/O services. They run on the Tokio runtime and message the core.
 
 pub mod configuration;
+pub mod environment;
 pub mod files;
 pub mod grep;
 pub mod projects;
