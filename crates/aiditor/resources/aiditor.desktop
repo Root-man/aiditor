@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=aiditor
+Comment=Keyboard-first editor with coding agents
+Exec="@BIN@" %f
+Icon=aiditor
+Terminal=false
+Categories=Development;TextEditor;Utility;
+StartupWMClass=aiditor

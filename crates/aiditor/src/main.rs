@@ -171,8 +171,13 @@ fn main() {
 
     Application::new().run(|cx: &mut App| {
         emoji::drop_undrawable(cx);
+        // The app id matches the Linux desktop entry, so the launcher groups the window under it.
+        let options = WindowOptions {
+            app_id: Some("aiditor".into()),
+            ..Default::default()
+        };
         let window = cx
-            .open_window(WindowOptions::default(), |window, cx| {
+            .open_window(options, |window, cx| {
                 cx.new(|cx| Editor::new(core, args, channel, window, cx))
             })
             .expect("failed to open a window");
