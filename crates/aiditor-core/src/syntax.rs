@@ -70,6 +70,16 @@ static MARKDOWN: LazyLock<Grammar> = LazyLock::new(|| {
         &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
     )
 });
+static TOML: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_toml_ng::LANGUAGE.into(),
+        // The bundled query colours a plain key as a type; keys in a pair are properties.
+        &[
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            "(pair (bare_key) @property)",
+        ],
+    )
+});
 
 /// A buffer's syntax tree, kept in step with its text.
 // shortcut: parses on the core thread, so a huge file stalls visiting and big edits; move it to the syntax service when that shows.
@@ -127,6 +137,7 @@ impl Syntax {
             "heex" => &HEEX,
             "yml" | "yaml" => &YAML,
             "md" | "markdown" => &MARKDOWN,
+            "toml" => &TOML,
             _ => return None,
         };
         let mut parser = Parser::new();
@@ -238,10 +249,9 @@ mod tests {
     fn languages_by_extension() {
         let rope = Rope::from_str("x");
         let exts = ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
-        for ext in exts
-            .into_iter()
-            .chain(["rs", "ex", "exs", "heex", "yml", "yaml", "md", "markdown"])
-        {
+        for ext in exts.into_iter().chain([
+            "rs", "ex", "exs", "heex", "yml", "yaml", "md", "markdown", "toml",
+        ]) {
             let path = format!("a.{ext}");
             assert!(Syntax::for_file(Path::new(&path), &rope).is_some(), "{ext}");
         }
@@ -337,6 +347,40 @@ mod tests {
                 ("http://x".into(), 5),
             ]
         );
+    }
+
+    #[test]
+    fn toml_keys_and_values() {
+        let p = palette(&[
+            ("type", 1),
+            ("property", 2),
+            ("string", 3),
+            ("boolean", 4),
+            ("operator", 5),
+        ]);
+        assert_eq!(
+            runs("a.toml", "[package]\nname = \"a\"\nx.y = true\n", &p),
+            [
+                ("package".into(), 1),
+                // The bundled query captures the whole pair, so its spaces take the key's colour.
+                ("name ".into(), 2),
+                ("=".into(), 5),
+                (" ".into(), 2),
+                ("\"a\"".into(), 3),
+                ("x".into(), 2),
+                ("y".into(), 2),
+                ("=".into(), 5),
+                ("true".into(), 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn bundled_toml_files_parse_cleanly() {
+        for text in [crate::settings::BUNDLED, include_str!("../Cargo.toml")] {
+            let syntax = Syntax::for_file(Path::new("a.toml"), &Rope::from_str(text)).unwrap();
+            assert!(!syntax.tree.root_node().has_error());
+        }
     }
 
     #[test]
