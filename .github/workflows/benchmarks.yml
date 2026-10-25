@@ -30,10 +30,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: benchmarks-${{ hashFiles('Cargo.toml') }}
-      - name: Benchmark the core
-        env:
-          BENCH_OUTPUT: ${{ runner.temp }}/benchmarks.tsv
-        run: cargo bench --locked -p aiditor-core --bench core
+      - name: Benchmark the core and services
+        run: python3 scripts/bench_local.py --output "${{ runner.temp }}/benchmarks.tsv"
       - name: Record results and environment
         env:
           BENCH_RUNNER: ubuntu-24.04

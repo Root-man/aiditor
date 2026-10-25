@@ -1,17 +1,4 @@
-# Core performance benchmarks
-
-The initial suite measures CPU work in `aiditor-core`, without the GUI or disk I/O:
-
-| Benchmark | One operation |
-| --- | --- |
-| `buffer-load/100k-lines` | Create a buffer and its Rope from an existing UTF-8 string, then drop it |
-| `edit-undo/100k-lines` | Insert one Unicode character at line 50,000, then undo it |
-| `display/50-rows-in-100k-lines` | Build 50 visible display-model lines at line 50,000, including their drop |
-| `swiper/two-queries-in-100k-lines` | Replace the open search query with `needle`, then `needle !skip`, including filtering and preview |
-
-All cases use the same deterministic 100,000-line text, containing Unicode and an excluded line every fifth line. Swiper opening and fixture construction are outside the measured query loop. Observable self-checks verify line counts, displayed text, search counts and edit/undo restoration.
-
-Each case warms up by doubling its iteration count until a batch takes at least 10 ms, then measures 21 batches with that iteration count. Results are the median, minimum and maximum of those batch averages, in nanoseconds per operation. These ranges are not per-event latency percentiles or statistical confidence intervals. No timing threshold fails ordinary CI.
+# Performance benchmarks
 
 ## Run locally
 
@@ -19,23 +6,83 @@ On macOS or Linux, using Python 3 and the Rust version in `.tool-versions`:
 
 ```sh
 python3 scripts/bench_local.py
+python3 scripts/bench_local.py --suite core
+python3 scripts/bench_local.py --suite services
+python3 scripts/bench_local.py --output /tmp/aiditor-benchmarks.tsv
 ```
 
-The script builds and runs the core benchmarks, then prints an aligned table of median, minimum and maximum times, choosing ns, µs or ms for readability. Cargo's progress and diagnostics remain on stderr, so stdout can be redirected to save the formatted report. It works from any directory when invoked with the script's full path, uses a temporary results file that is cleaned up automatically, and needs no GitHub credentials or extra Python packages.
+The default runs both headless suites in release mode and prints median, minimum and maximum times per operation. Cargo diagnostics remain on stderr. Generated files live in a temporary directory and are removed afterwards. No GitHub credentials, additional Python packages or hosted workflow are needed. `--output` retains the combined raw TSV accepted by the CI reporting helper.
 
-The direct Cargo command remains available:
+Direct Cargo invocations remain available:
 
 ```sh
 cargo bench --locked -p aiditor-core --bench core
+cargo bench --locked -p aiditor-services --bench services
 ```
 
-To save tab-separated results as well as print them, set `BENCH_OUTPUT` to an absolute path:
+Set `BENCH_OUTPUT` to a separate absolute TSV path for each invocation to retain its results. Ordinary `cargo test` does not run these targets; `cargo clippy --all-targets` compiles them on Linux and macOS.
+
+## Core workloads
+
+Fixtures are deterministic and include Unicode. Setup is outside the timed operation unless specified below. `pair` in a name means the time covers both operations, not one half. Rendering here means building the core display model, without GPUI shaping or painting.
+
+| Family | One measured operation |
+| --- | --- |
+| `buffer-load/100k-lines` | Create a plain-text buffer and Rope, then drop it |
+| `edit-undo/100k-lines` | Insert one Unicode character at line 50,000, then undo |
+| `display/50-rows-in-100k-lines` | Build and drop 50 visible plain-text lines |
+| `swiper/two-queries-in-100k-lines` | Replace the query with `needle`, then `needle !skip`, including filtering and preview; opening is outside the loop |
+| `terminal-output/64k-batch-*` | Deliver one approximately 64 KB `yes` or `cat` batch through the core |
+| `terminal-display/50x120-screen` | Build runs for a plain terminal screen |
+| `syntax-load/*` | Create and drop a highlighted buffer: 10k lines for Rust, TSX, JS, TS, Elixir, HEEx, YAML, TOML and Markdown; also 100k for Rust/TSX |
+| `syntax-edit-frame/*` | Insert a space or `/*` at the middle of a Rust/TSX buffer, build a frame, dispatch undo through the key handler, build another frame; 10k/100k lines |
+| `syntax-display/*-stationary` | Build a 50-row frame in an already parsed Rust/TSX buffer |
+| `syntax-display/*-scroll-pair` | Scroll forward and back by a page, building both frames |
+| `syntax-display/js/100kb-single-line` | Display a 100 KB JS string literal through a 120-column viewport, including the current whole-line highlight query |
+| `finder/*-open-close` | Open and settle the project finder, then close it, with 10k/100k pre-indexed paths across two roots |
+| `finder/*-narrow-broaden-pair` | Narrow to two matching paths, then broaden to all paths, waiting for results and completion polling to settle each time |
+| `revert-diff/*` | Compute line edits between two 100k-line strings: one line, 1,000 scattered lines, or a contiguous 1,000-line replacement |
+| `revert-apply-frame/*` | Deliver a prepared revert to a fresh clean plain/Rust buffer and build its next frame, including reparse; preparing the buffer and diff is outside timing |
+| `terminal-copy/*-enter-exit-pair` | Enter and leave copy mode with 10k lines of plain or coloured scrollback, including text and property creation/removal |
+| `terminal-copy/*-display`, `*-scroll-pair` | Display the copy buffer or scroll forward/back with frames |
+| `terminal-output/ansi-tui-osc-trace` | Feed a fixed trace with colour, cursor movement, Unicode, alternate screens, OSC 7 and OSC 133; clearing history is included so marks remain active across repetitions |
+| `terminal-display/ansi-unicode-50x120` | Build runs for a densely styled, Unicode terminal screen |
+| `terminal-resize/*` | Resize a fresh terminal with full scrollback from 120 to 80 columns, then build its display |
+| `frame/*-panes-*` | Build a frame with 1/2/4 panes sharing one Rust buffer or showing distinct buffers; total width grows with pane count |
+
+Highlight load timings use **warm grammars**: lazy query compilation is completed before measurement. They measure full file parsing, not first-ever language initialization. Edit timings include deferred parsing through `Core::frame`; a direct buffer edit alone would miss it. Finder results include matching, polling and frame construction, with repoll deadlines advanced rather than sleeping for the UI's 16 ms timer. File preview reads are not answered in the finder benchmark; it measures in-memory completion, not disk preview latency.
+
+Observable self-checks cover text restoration, highlighted spans, visible text, completion counts, revert results, scrollback contents, terminal marks/cwd/size and pane counts. These checks fail the benchmark if it measures the wrong operation.
+
+## Filesystem services
+
+The service suite creates two roots with 5,000 source files each, plus `.gitignore` and excluded files. Both gitignore and project ignore patterns are exercised. Each source file contains 50 ordinary lines followed by one Unicode search hit.
+
+| Benchmark | One measured operation |
+| --- | --- |
+| `index/10k-files-two-roots-warm-cache` | Walk and sort both roots; assert 5,001 indexed entries per root including `.gitignore` |
+| `grep/10k-hits-two-roots-complete-warm-cache` | Search both roots to the production 10k hit cap, consuming result batches |
+| `grep/first-batch-two-roots-warm-cache` | Search until the first nonempty emitted batch, then cancel; includes cancellation/unwinding overhead |
+
+Fixture creation and initial validation run before measurement. These are **warm filesystem-cache** workloads; they do not flush OS caches or claim cold-disk performance. First-result timing includes the service's batching policy, but excludes the prompt's 200 ms input debounce, channel scheduling and GUI painting. The complete search verifies hit counts, text and positions.
+
+## Sampling
+
+Reusable operations warm up by doubling the iteration count until a batch takes at least 10 ms, then measure 21 equal-sized batches. Revert application and terminal resize require fresh state: they use three warm-ups followed by 21 single-operation batches, with setup and teardown outside timing. First-batch grep also uses this single-operation sampling mode.
+
+Results are median/minimum/maximum batch averages in ns/op. These ranges are not per-event latency percentiles or statistical confidence intervals. Self-checks inside an operation contribute to its timing. No timing threshold fails ordinary CI. Avoid other builds and heavy applications when collecting results for comparison.
+
+## GUI input during terminal floods
 
 ```sh
-BENCH_OUTPUT=/tmp/aiditor-benchmarks.tsv cargo bench --locked -p aiditor-core --bench core
+python3 scripts/bench_local.py --suite ui --output /tmp/aiditor-ui-samples.tsv
 ```
 
-This uses Cargo's optimized bench profile and no additional dependencies. Ordinary `cargo test` does not run this target; the existing `cargo clippy --all-targets` CI step compiles it on Linux and macOS. The older ignored Swiper baseline test remains available for its more detailed query matrix.
+This opens an isolated real GPUI window with a 10k-line highlighted Rust buffer. It uses default settings, no user configuration/recovery, and a temporary cat fixture. It runs three sequential scenarios: no flood, a real PTY running `yes`, and a real PTY repeatedly running `cat` on an approximately 32 MB file. The terminal buffer is hidden while the source buffer stays visible. Each scenario warms for two seconds and collects 120 synthetic input samples, scheduling the next input 50 ms after the previous sample is painted. Keep the window visible and do not interact with it. Processes are killed between scenarios; the app exits after writing the report. A 90-second watchdog fails a run that cannot paint.
+
+The start timestamp is the intended input delivery time on the background task. The end is completion of the editor element's paint callback for the frame containing the matching probe text. This includes scheduler delay, core work, frame construction and text shaping/paint submission. It **excludes OS keyboard delivery, GPU completion and display scanout**. One input is outstanding at a time, so superseded edits are not counted as displayed inputs.
+
+The separate report shows sample count and nearest-rank p50/p95/p99/max for input-to-paint latency and consecutive paint gaps. Gaps include the input cadence and idle periods; they are not GPU frame durations. Processed terminal byte counts verify that each flood produced output. Raw GUI TSV uses `scenario`, `metric`, `value` (ns for timings; bytes for output counts); it cannot be mixed with the headless TSV or passed to the batch comparison helper. Record OS, hardware, display refresh rate, window size and power mode alongside results. GUI measurements are local-only and do not run in hosted CI.
 
 ## Run in GitHub Actions
 
@@ -49,15 +96,15 @@ gh workflow run benchmarks.yml --ref your-branch -f pr=123
 
 Omit `-f pr=123` for a summary without a PR comment. The tested commit is the selected branch's commit when dispatched. Fork PRs are not supported: the optional PR must be open, in this repository, and still have that tested commit as its head when reporting. Invalid or stale targets fail reporting after retaining the summary; they receive no comment.
 
-The workflow uses `ubuntu-24.04`, builds only the core benchmark target, and caches its build artifacts separately from ordinary CI. The benchmark job has read-only repository permissions. A separate reporting job can read Actions artifacts and write PR comments. No hosted workflow is dispatched by local development commands.
+The workflow uses `ubuntu-24.04`, builds and runs the core and service benchmark targets, and caches its build artifacts separately from ordinary CI. The benchmark job has read-only repository permissions. A separate reporting job can read Actions artifacts and write PR comments. No hosted workflow is dispatched by local development commands.
 
 Every successful benchmark job uploads `results.json` as `core-benchmarks`, retained for 90 days (subject to repository retention policy). The report always goes in the reporting job's summary; providing a PR number also creates a new PR comment. Re-running a workflow can create another comment.
 
 The baseline is the previous successful `Benchmarks` workflow run on the **same branch**, excluding the current and later run IDs. It is not the PR's base branch. Failed runs are skipped. The first run, a missing/expired artifact, or changed benchmark definitions/environment establishes a new baseline with no percentage comparison. Other API or malformed-artifact errors fail reporting rather than silently claiming there is no baseline.
 
-Comparisons require matching runner label, architecture, CPU model, full Rust compiler version and a fingerprint of the benchmark source and workspace build profiles. Results also record the tested commit, run ID and runner image version; dependency or production-code changes can therefore be measured without changing the benchmark fingerprint. The runner image version is informational and does not prevent comparisons. Positive changes mean slower; negative changes mean faster.
+Comparisons require matching runner label, architecture, CPU model, full Rust compiler version and a fingerprint of both benchmark suites, shared helpers, local runner, crate manifests and workspace build profiles. Results also record the tested commit, run ID and runner image version; dependency or production-code changes can therefore be measured without changing the benchmark fingerprint. The runner image version is informational and does not prevent comparisons. Positive changes mean slower; negative changes mean faster.
 
-Hosted runners vary even with matching metadata. Treat changes as clues, repeat suspect measurements, and confirm meaningful regressions on consistent hardware. These benchmarks do not measure GUI rendering, input latency, filesystem services or terminal throughput.
+Hosted runners vary even with matching metadata. Treat changes as clues, repeat suspect measurements, and confirm meaningful regressions on consistent hardware. The headless suites measure core operations and warm-cache filesystem services; they do not establish GUI latency. The explicit GUI suite below measures scheduled synthetic input through frame paint, not physical key-to-photon latency.
 
 ## Reporting checks
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record core benchmark results and report a manual Actions run using gh."""
+"""Record core and service benchmark results and report a manual Actions run using gh."""
 
 import argparse
 import hashlib
@@ -69,6 +69,18 @@ def validate(data):
     return data
 
 
+def suite_fingerprint():
+    paths = [ROOT / "Cargo.toml", ROOT / "scripts/bench_local.py"]
+    paths += sorted((ROOT / "benches").rglob("*.rs"))
+    for crate in ("aiditor-core", "aiditor-services"):
+        paths.append(ROOT / "crates" / crate / "Cargo.toml")
+        paths += sorted((ROOT / "crates" / crate / "benches").rglob("*.rs"))
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path.relative_to(ROOT)).encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
 def record(source, destination):
     measurements = read_measurements(source)
     cpu = next(
@@ -76,10 +88,7 @@ def record(source, destination):
         for line in Path("/proc/cpuinfo").read_text().splitlines()
         if line.startswith("model name")
     )
-    suite = hashlib.sha256(
-        (ROOT / "crates/aiditor-core/benches/core.rs").read_bytes()
-        + (ROOT / "Cargo.toml").read_bytes()
-    ).hexdigest()
+    suite = suite_fingerprint()
     data = validate({
         "version": 1,
         "commit": os.environ["GITHUB_SHA"],
@@ -128,7 +137,7 @@ def baseline(repo, run):
 
 def render(current, previous, run, repository_url):
     lines = [
-        "## Core benchmarks", "",
+        "## Core and service benchmarks", "",
         f"Tested commit: [`{current['commit'][:7]}`]({repository_url}/commit/{current['commit']}). "
         f"[Current run]({repository_url}/actions/runs/{current['run_id']}).",
     ]

@@ -1,3 +1,5 @@
+pub(crate) mod benchmark;
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -17,6 +19,7 @@ use crate::{Args, FONT};
 
 pub(crate) struct Editor {
     pub(crate) core: Core,
+    pub(crate) benchmark: Option<benchmark::Run>,
     pub(crate) focus: FocusHandle,
     /// Services send their results to the core on this.
     tx: mpsc::Sender<Msg>,
@@ -81,6 +84,7 @@ impl Editor {
         watcher.set(core.watch_set());
         Editor {
             core,
+            benchmark: None,
             focus: cx.focus_handle(),
             tx,
             timer: None,
@@ -115,6 +119,9 @@ impl Editor {
     /// Every message reaches the core here, so the timer is always re-armed.
     pub(crate) fn handle(&mut self, msg: Msg, cx: &mut Context<Self>) {
         let start = Instant::now();
+        if let Some(benchmark) = &mut self.benchmark {
+            benchmark.output(&msg, start);
+        }
         let effects = self.core.handle(start, msg);
         if let Some(debug) = &mut self.debug {
             debug.handle = start.elapsed();

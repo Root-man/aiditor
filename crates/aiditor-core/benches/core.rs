@@ -1,38 +1,15 @@
 use std::hint::black_box;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aiditor_core::{
     Core, Msg, buffer::Buffers, display, key::parse_keys, settings::Settings, terminal::Terminal,
 };
 
-fn measure(name: &str, mut operation: impl FnMut(), output: &mut String) {
-    let mut iterations = 1;
-    loop {
-        let start = Instant::now();
-        for _ in 0..iterations {
-            operation();
-        }
-        if start.elapsed() >= Duration::from_millis(10) {
-            break;
-        }
-        iterations *= 2;
-    }
-    let mut samples = Vec::new();
-    for _ in 0..21 {
-        let start = Instant::now();
-        for _ in 0..iterations {
-            operation();
-        }
-        samples.push(start.elapsed().as_secs_f64() * 1e9 / iterations as f64);
-    }
-    samples.sort_by(f64::total_cmp);
-    println!("{name}: {:.0} ns/op (median of 21 batches)", samples[10]);
-    output.push_str(&format!(
-        "{name}\t{}\t{}\t{}\n",
-        samples[10], samples[0], samples[20]
-    ));
-}
+mod scenarios;
+#[path = "../../../benches/support.rs"]
+mod support;
+use support::measure;
 
 fn main() {
     let fixture: String = (0..100_000)
@@ -166,6 +143,7 @@ fn main() {
         },
         &mut output,
     );
+    scenarios::run(&mut output);
     if let Some(path) = std::env::var_os("BENCH_OUTPUT") {
         std::fs::write(path, output).expect("write benchmark results");
     }

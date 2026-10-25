@@ -69,6 +69,26 @@ class BenchmarkReporting(unittest.TestCase):
         with self.assertRaises(ValueError):
             benchmarks.validate(data)
 
+    def test_fingerprint_tracks_shared_helpers_and_both_suites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = ["Cargo.toml", "scripts/bench_local.py", "benches/support.rs",
+                     "crates/aiditor-core/Cargo.toml", "crates/aiditor-core/benches/core.rs",
+                     "crates/aiditor-core/benches/scenarios/mod.rs",
+                     "crates/aiditor-services/Cargo.toml", "crates/aiditor-services/benches/services.rs"]
+            for name in files:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name)
+            with patch.object(benchmarks, "ROOT", root):
+                before = benchmarks.suite_fingerprint()
+                for name in files:
+                    path = root / name
+                    path.write_text(name + " changed")
+                    self.assertNotEqual(benchmarks.suite_fingerprint(), before, name)
+                    path.write_text(name)
+                self.assertEqual(benchmarks.suite_fingerprint(), before)
+
     @patch("benchmarks.subprocess.check_output", return_value="rustc 1.99.0")
     def test_records_tsv_with_environment_and_rejects_duplicates(self, rustc):
         cpuinfo = "processor: 0\nmodel name: Test CPU\n"
@@ -207,21 +227,72 @@ class LocalBenchmarks(unittest.TestCase):
                         benchmarks.read_measurements(source)
 
     @patch("bench_local.subprocess.run")
-    def test_runs_core_from_repository_and_prints_table(self, run):
+    def test_runs_both_suites_and_retains_combined_results(self, run):
         def cargo(command, **kwargs):
-            self.assertEqual(command, ["cargo", "bench", "--locked", "-p", "aiditor-core", "--bench", "core"])
+            suite = command[-1]
+            self.assertEqual(command, ["cargo", "bench", "--locked", "-p", f"aiditor-{suite}", "--bench", suite])
             self.assertEqual(kwargs["cwd"], benchmarks.ROOT)
             self.assertEqual(kwargs["env"]["BENCH_LOCAL_TEST"], "inherited")
-            Path(kwargs["env"]["BENCH_OUTPUT"]).write_text("edit-undo/100k-lines\t1000\t900\t1100\n")
+            Path(kwargs["env"]["BENCH_OUTPUT"]).write_text(f"{suite}/example\t1000\t900\t1100\n")
             return subprocess.CompletedProcess(command, 0, stdout="raw benchmark output\n")
 
         run.side_effect = cargo
         output = io.StringIO()
         with patch.dict(os.environ, BENCH_LOCAL_TEST="inherited"), redirect_stdout(output):
-            self.assertEqual(bench_local.main(), 0)
-        self.assertIn("aiditor core benchmarks", output.getvalue())
-        self.assertIn("edit-undo/100k-lines", output.getvalue())
+            self.assertEqual(bench_local.main([]), 0)
+        self.assertIn("aiditor core and service benchmarks", output.getvalue())
+        self.assertIn("core/example", output.getvalue())
+        self.assertIn("services/example", output.getvalue())
+        self.assertEqual(run.call_count, 2)
         self.assertIn("1.000 µs", output.getvalue())
+
+    def test_gui_percentiles_use_individual_samples_and_require_actual_floods(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ui.tsv"
+            rows = []
+            for scenario in ("baseline", "yes", "cat"):
+                for metric in ("input-to-paint", "paint-gap"):
+                    rows += [f"{scenario}\t{metric}\t{i * 1000}\n" for i in range(1, 121)]
+                rows.append(f"{scenario}\toutput-bytes\t{0 if scenario == 'baseline' else 65536}\n")
+            path.write_text("".join(rows))
+            report = bench_local.ui_table(path)
+            self.assertIn("baseline / input-to-paint | 120 | 60.000 µs | 114.000 µs | 119.000 µs | 120.000 µs", report)
+            path.write_text("".join(rows).replace("yes\toutput-bytes\t65536", "yes\toutput-bytes\t0"))
+            with self.assertRaisesRegex(ValueError, "Missing terminal flood output"):
+                bench_local.ui_table(path)
+            path.write_text("".join(rows[1:]))
+            with self.assertRaisesRegex(ValueError, "Incomplete GUI benchmark"):
+                bench_local.ui_table(path)
+
+    @patch("bench_local.subprocess.run")
+    def test_gui_run_uses_its_own_report_schema(self, run):
+        def cargo(command, **kwargs):
+            self.assertEqual(command[:8], ["cargo", "run", "--locked", "--release", "-p", "aiditor", "--", "--bench-ui"])
+            rows = []
+            for scenario in ("baseline", "yes", "cat"):
+                for metric in ("input-to-paint", "paint-gap"):
+                    rows += [f"{scenario}\t{metric}\t1000000\n"] * 120
+                rows += [f"{scenario}\toutput-bytes\t65536\n"]
+            Path(command[-1]).write_text("".join(rows))
+            return subprocess.CompletedProcess(command, 0, stdout="")
+        run.side_effect = cargo
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as report:
+            output = Path(directory) / "samples.tsv"
+            self.assertEqual(bench_local.main(["--suite", "ui", "--output", str(output)]), 0)
+            self.assertIn("yes / input-to-paint | 120", report.getvalue())
+            self.assertIn("cat\tpaint-gap\t1000000", output.read_text())
+
+    @patch("bench_local.subprocess.run")
+    def test_core_only_output_can_be_read_by_ci(self, run):
+        def cargo(command, **kwargs):
+            Path(kwargs["env"]["BENCH_OUTPUT"]).write_text("core/example\t1000\t900\t1100\n")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+        run.side_effect = cargo
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+            output = Path(directory) / "results.tsv"
+            self.assertEqual(bench_local.main(["--suite", "core", "--output", str(output)]), 0)
+            self.assertEqual(benchmarks.read_measurements(output)["core/example"]["median_ns"], 1000)
+            self.assertEqual(run.call_count, 1)
 
     @patch("bench_local.subprocess.run")
     def test_cargo_failure_preserves_exit_status_and_diagnostics(self, run):
@@ -230,14 +301,14 @@ class LocalBenchmarks(unittest.TestCase):
                 run.return_value = subprocess.CompletedProcess(["cargo"], returncode, stdout="benchmark failed\n")
                 error = io.StringIO()
                 with redirect_stderr(error):
-                    self.assertEqual(bench_local.main(), expected)
+                    self.assertEqual(bench_local.main([]), expected)
                 self.assertIn("benchmark failed", error.getvalue())
 
     @patch("bench_local.subprocess.run", side_effect=FileNotFoundError("cargo unavailable"))
     def test_missing_cargo_has_readable_error(self, run):
         error = io.StringIO()
         with redirect_stderr(error):
-            self.assertEqual(bench_local.main(), 1)
+            self.assertEqual(bench_local.main([]), 1)
         self.assertIn("Benchmark run failed: cargo unavailable", error.getvalue())
 
 

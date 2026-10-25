@@ -391,7 +391,7 @@ Core tests use in-memory text and prepared protocol replies, collecting effects 
 | Frontend | GPUI input, display and dispatch tests; rendering checked by hand, no screenshot tests (see [docs/spikes/gpui.md](spikes/gpui.md)) |
 | Whole app | Launch with a test project and the fake agent, drive it with a key script, assert on files, buffers and workspaces; a manual smoke run against the real agents before each milestone gate |
 
-Optional release-mode core benchmarks cover buffer loading, edit/undo, visible display construction and large-buffer Swiper queries. A manually started Actions workflow retains results and compares compatible previous runs, with an optional PR comment; see [Performance benchmarks](performance.md). Timings are informational, not CI gates.
+Optional release-mode benchmarks cover core editing, syntax parsing/highlighting, display, completion, reverts and terminals, plus warm-cache indexing and grep services. An explicit local GUI suite measures scheduled synthetic input through matching frame paint during terminal floods. A manually started Actions workflow retains results and compares compatible previous runs, with an optional PR comment; see [Performance benchmarks](performance.md). Timings are informational, not CI gates.
 
 ## Crate shortlist
 
