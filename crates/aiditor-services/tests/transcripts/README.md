@@ -7,6 +7,10 @@ Both sessions run in a scratch project holding `notes.md` and send the same prom
 - **Claude Code** (claude-agent-acp 0.95.0) starts in `default`, so its edit asks permission and is refused. It is then asked to enter plan mode, which it reports as `current_mode_update`. A project's `.claude/settings.json` can't start it in `acceptEdits`, because the adapter ignores an escalating `defaultMode` from an untrusted project.
 - **Codex** (codex-acp 2.2.2) starts in `workspace-write` (`INITIAL_AGENT_MODE`), so its edit goes through and `curl` asks permission; the refusal ends that turn `cancelled`. In its default `agent` mode a reviewer model approves instead of the client. Codex can't change its own mode, so it records no mode change.
 
+## Replaying
+
+`committed_transcripts_replay_through_the_core` replays every transcript here through `aiditor-fake-agent` with `AIDITOR_FAKE_AGENT_REPLAY`, the agent service and the core, and types the prompts it reads from each transcript, so a re-recorded one needs no code change. Client messages match by method (responses by id), not by params. A failure shows the fake's stderr, with the unexpected message and the recorded one it expected.
+
 ## Recording again
 
 Log in to both agents first. The adapters must be current: codex-acp 1.13 bundled a Codex too old for the account's model, and every turn failed.

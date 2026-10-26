@@ -1,11 +1,12 @@
-//! The ACP recorder, and the transcripts it recorded from the real adapters. The ignored
-//! `record_*` tests re-record them; see tests/transcripts/README.md.
+//! The ACP recorder, the transcripts it recorded from the real adapters, and their replay through
+//! the fake agent. The ignored `record_*` tests re-record them; see tests/transcripts/README.md.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{Error, PromptRequest};
-use aiditor_core::{AgentId, AgentOp, Msg};
+use aiditor_core::key::{Key, KeyCode, parse_keys};
+use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
 use aiditor_services::agents::Agents;
 use serde_json::Value;
 use tokio::sync::mpsc::Receiver;
@@ -216,6 +217,224 @@ fn committed_transcripts_parse_and_are_scrubbed() {
         found += 1;
     }
     assert_eq!(found, 2, "a Claude Code and a Codex transcript");
+}
+
+/// Every committed transcript's path.
+fn committed() -> Vec<PathBuf> {
+    let paths = std::fs::read_dir(transcripts())
+        .unwrap()
+        .map(|e| e.unwrap().path());
+    let mut paths: Vec<_> = paths
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// A core running the agent service on the fake agent replaying a transcript, counting what
+/// reaches it.
+struct Replay {
+    core: Core,
+    agents: Agents,
+    rx: Option<Receiver<Msg>>,
+    stderr: Vec<String>,
+    updates: usize,
+    requests: usize,
+    replies: usize,
+}
+
+impl Replay {
+    fn new(transcript: &Path) -> Self {
+        let mut replay = Replay {
+            core: Core::default(),
+            agents: Agents::default(),
+            rx: None,
+            stderr: Vec::new(),
+            updates: 0,
+            requests: 0,
+            replies: 0,
+        };
+        let path = transcript.display().to_string();
+        let settings = format!(
+            "[agents.replay]\ncommand = {FAKE:?}\nenv = {{ AIDITOR_FAKE_AGENT_REPLAY = {path:?} }}"
+        );
+        replay.send(Msg::SettingsLoaded(Ok(Some(settings))));
+        replay
+    }
+
+    fn send(&mut self, msg: Msg) {
+        for effect in self.core.handle(Instant::now(), msg) {
+            if let Effect::Agent(op) = effect {
+                self.replies += matches!(op, AgentOp::Reply { .. }) as usize;
+                if let Some(rx) = self.agents.run(op) {
+                    self.rx = Some(rx);
+                }
+            }
+        }
+    }
+
+    fn keys(&mut self, script: &str) {
+        for key in parse_keys(script).unwrap() {
+            self.send(match key.code {
+                KeyCode::Char(c) if key == Key::plain(key.code) => Msg::Insert {
+                    text: c.into(),
+                    replace: None,
+                },
+                _ => Msg::Key(key),
+            });
+        }
+    }
+
+    /// Types `text` into the session buffer and sends it.
+    fn prompt(&mut self, text: &str) {
+        let text = text.into();
+        self.send(Msg::Insert {
+            text,
+            replace: None,
+        });
+        self.keys("RET");
+    }
+
+    /// Fails with `what` and the agent's stderr, read until it exits, as that follows the stderr.
+    async fn fail(&mut self, what: String) -> ! {
+        while let Some(rx) = self.rx.as_mut()
+            && let Ok(Some(msg)) = timeout(Duration::from_secs(5), rx.recv()).await
+        {
+            if let Msg::AgentStderr { line, .. } = msg {
+                self.stderr.push(line);
+            }
+        }
+        panic!("{what}; the agent's stderr:\n{}", self.stderr.join("\n"));
+    }
+
+    /// Feeds the agent's messages to the core until one matches `done`, which it returns.
+    async fn pump(&mut self, done: fn(&Msg) -> bool) -> Msg {
+        loop {
+            let rx = self.rx.as_mut().expect("the agent was spawned");
+            let msg = match timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => self.fail("the agent's channel closed".into()).await,
+                Err(_) => self.fail("no agent message within 10 s".into()).await,
+            };
+            match &msg {
+                Msg::AgentStderr { line, .. } => self.stderr.push(line.clone()),
+                Msg::AgentUpdate { update, .. } => {
+                    self.updates += 1;
+                    if format!("{update:?}").contains("{cwd}") {
+                        (self.fail(format!("the replay left {{cwd}} in {update:?}"))).await
+                    }
+                }
+                Msg::AgentRequest { .. } => self.requests += 1,
+                Msg::AgentExited { code, signal, .. } => {
+                    (self.fail(format!("the agent exited with {code} {signal:?}"))).await
+                }
+                _ => {}
+            }
+            self.send(msg.clone());
+            if done(&msg) {
+                return msg;
+            }
+        }
+    }
+
+    /// Opens the session and runs each recorded prompt, checking its stop reason.
+    async fn run(&mut self, lines: &[(String, Value)]) {
+        self.keys("M-x agent-start RET r e p l a y RET");
+        let started = self.pump(|m| matches!(m, Msg::AgentStarted { .. })).await;
+        if let Msg::AgentStarted {
+            result: Err(err), ..
+        } = started
+        {
+            self.fail(format!("the session didn't open: {err}")).await;
+        }
+        let prompts =
+            (lines.iter()).filter(|(f, m)| f == "client" && m["method"] == "session/prompt");
+        for (_, prompt) in prompts {
+            let answer = (lines.iter()).find(|(f, m)| f == "agent" && m["id"] == prompt["id"]);
+            let want = answer.expect("the prompt is answered").1["result"]["stopReason"].clone();
+            self.prompt(
+                prompt["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .expect("a text prompt"),
+            );
+            let prompted = self.pump(|m| matches!(m, Msg::AgentPrompted { .. })).await;
+            let Msg::AgentPrompted { result, .. } = prompted else {
+                unreachable!()
+            };
+            match result.map(|reason| serde_json::to_value(reason).unwrap()) {
+                Ok(reason) if reason == want => {}
+                got => {
+                    self.fail(format!("the turn ended with {got:?}, recorded {want}"))
+                        .await
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn committed_transcripts_replay_through_the_core() {
+    let paths = committed();
+    assert_eq!(paths.len(), 2, "a Claude Code and a Codex transcript");
+    for path in paths {
+        let lines = lines(&std::fs::read_to_string(&path).unwrap());
+        let updates = (lines.iter())
+            .filter(|(f, m)| f == "agent" && m["method"] == "session/update")
+            .count();
+        let requests = (lines.iter())
+            .filter(|(f, m)| f == "agent" && m["method"].is_string() && !m["id"].is_null())
+            .count();
+        let mut replay = Replay::new(&path);
+        replay.run(&lines).await;
+        let name = path.display();
+        assert_eq!(replay.updates, updates, "{name}: typed updates");
+        assert!(requests > 0, "{name} has a permission request");
+        assert_eq!(replay.requests, requests, "{name}: agent requests");
+        // The replay only goes on once the client answers, so the turns ending prove it arrived.
+        assert_eq!(replay.replies, requests, "{name}: answered requests");
+        replay.agents.kill_all();
+    }
+}
+
+#[test]
+fn a_bad_transcript_exits_2_and_closed_stdin_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let garbage = dir.path().join("garbage.jsonl");
+    std::fs::write(&garbage, "not json\n").unwrap();
+    let missing = dir.path().join("missing.jsonl");
+    let run = |path: &Path| {
+        let output = std::process::Command::new(FAKE)
+            .env("AIDITOR_FAKE_AGENT_REPLAY", path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    for path in [&garbage, &missing] {
+        let (code, stderr) = run(path);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stderr.contains(&path.display().to_string()), "{stderr}");
+    }
+    let (code, stderr) = run(&transcripts().join("claude.jsonl"));
+    assert_eq!(code, Some(0), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "unexpected client message: ")]
+async fn an_unexpected_client_message_fails_the_replay() {
+    let path = transcripts().join("claude.jsonl");
+    let mut replay = Replay::new(&path);
+    replay.keys("M-x agent-start RET r e p l a y RET");
+    replay.pump(|m| matches!(m, Msg::AgentStarted { .. })).await;
+    // The core cancels before the replay reads on; the transcript expects the next prompt.
+    replay.prompt("hi");
+    replay.keys("C-c C-c");
+    loop {
+        replay.pump(|_| false).await;
+    }
 }
 
 /// Runs `prompts` with `command` and `env` in a scratch project holding `notes.md`, through the

@@ -1,8 +1,11 @@
 //! A scripted ACP agent for tests. It reports what the client sent on stderr and opens a session
 //! with two modes, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its `session` steps after
-//! `session/new` and the n-th list of `prompts` on the n-th `session/prompt`. The format is in
+//! `session/new` and the n-th list of `prompts` on the n-th `session/prompt`. With
+//! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead. Both are in
 //! docs/editor.md under Testing.
 
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +19,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
+use serde_json::Value;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
@@ -121,8 +125,89 @@ async fn run(
     Ok(StopReason::EndTurn)
 }
 
+fn exit(code: i32, message: String) -> ! {
+    eprintln!("{message}");
+    std::process::exit(code)
+}
+
+/// Replays the transcript at `path`: writes the agent messages recorded before the next client
+/// message, checks what the client sends against that one, and repeats.
+fn replay(path: &str) -> ! {
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|err| exit(2, format!("{path}: {err}")));
+    let records = text.lines().filter(|line| !line.is_empty()).map(|line| {
+        let mut record: Value =
+            serde_json::from_str(line).unwrap_or_else(|err| exit(2, format!("{path}: {err}")));
+        match record["from"].as_str() {
+            Some(from @ ("client" | "agent")) => (from == "client", record["message"].take()),
+            _ => exit(2, format!("{path}: not a transcript line: {line}")),
+        }
+    });
+    let records: Vec<_> = records.collect();
+    // The recorded client request ids, as JSON, to the live ones.
+    let mut ids = HashMap::<String, Value>::new();
+    let mut cwd: Option<String> = None;
+    let (mut stdin, mut stdout) = (std::io::stdin().lock().lines(), std::io::stdout().lock());
+    let mut records = records.into_iter();
+    loop {
+        let expected = loop {
+            match records.next() {
+                Some((true, message)) => break Some(message),
+                Some((false, mut message)) => {
+                    let live = (message.get("method").is_none())
+                        .then(|| ids.get(&message["id"].to_string()))
+                        .flatten();
+                    if let Some(live) = live {
+                        message["id"] = live.clone();
+                    }
+                    let mut line = message.to_string();
+                    if let Some(cwd) = &cwd {
+                        line = line.replace("{cwd}", cwd);
+                    }
+                    let written = writeln!(stdout, "{line}").and_then(|()| stdout.flush());
+                    written.unwrap_or_else(|err| exit(1, format!("writing to the client: {err}")));
+                }
+                None => break None,
+            }
+        };
+        let Some(Ok(line)) = stdin.next() else {
+            std::process::exit(0)
+        };
+        let live: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+        let matched = expected
+            .as_ref()
+            .filter(|recorded| match recorded.get("method") {
+                Some(method) => live.get("method") == Some(method),
+                None => live.get("method").is_none() && live.get("id") == recorded.get("id"),
+            });
+        let Some(recorded) = matched else {
+            let expected = expected.map_or("the end".into(), |e| e.to_string());
+            exit(
+                1,
+                format!("unexpected client message: {line}\nexpected: {expected}"),
+            );
+        };
+        if recorded.get("method").is_some()
+            && let (Some(from), Some(to)) = (recorded.get("id"), live.get("id"))
+        {
+            ids.insert(from.to_string(), to.clone());
+        }
+        if let Some(path) = live["params"]["cwd"]
+            .as_str()
+            .filter(|_| live["method"] == "session/new")
+        {
+            // Escaped as JSON, as `{cwd}` sits inside the line's strings.
+            let quoted = Value::from(path).to_string();
+            cwd = Some(quoted[1..quoted.len() - 1].to_owned());
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> agent_client_protocol::Result<()> {
+    if let Ok(path) = std::env::var("AIDITOR_FAKE_AGENT_REPLAY") {
+        replay(&path);
+    }
     let script = match load() {
         Ok(script) => Arc::new(script),
         Err(err) => {
