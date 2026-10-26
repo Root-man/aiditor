@@ -50,7 +50,7 @@ fn main() {
     assert_eq!(buffer.text().to_string(), fixture);
 
     let settings = Settings::default();
-    let frame = display::build(buffer, 50_000, 50, middle, None, &settings, 0..120);
+    let frame = display::build(buffer, 50_000, 50, middle, None, &settings, 0..120, None);
     assert_eq!(frame.lines.len(), 50);
     assert_eq!(
         frame.lines[0].spans[0].text,
@@ -67,6 +67,7 @@ fn main() {
                 None,
                 &settings,
                 0..120,
+                None,
             ));
         },
         &mut output,
