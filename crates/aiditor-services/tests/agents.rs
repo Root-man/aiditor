@@ -224,10 +224,10 @@ async fn session_updates_reach_the_core() {
     );
     let mut agents = Agents::default();
     let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[(key, &path)]);
-    started(&mut rx).await.1.unwrap();
+    // The session steps run once `session/new` is answered, so their update can come first.
     let update = loop {
         match next(&mut rx).await {
-            Some(Msg::AgentStderr { .. }) => {}
+            Some(Msg::AgentStderr { .. } | Msg::AgentStarted { result: Ok(_), .. }) => {}
             Some(Msg::AgentUpdate { id, update }) => break (id, update),
             msg => panic!("expected an update, got {msg:?}"),
         }

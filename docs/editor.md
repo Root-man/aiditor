@@ -381,7 +381,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 ## Testing
 
-Core tests use in-memory text and prepared protocol replies, collecting effects to control delayed or reordered completions. They do not implement filesystem writes, directory walks or grep. Filesystem and search contracts use production services with real temporary files; native watcher tests exercise both supported platforms. Later agent subsystems will add whole-app fake-agent scenarios.
+Core tests use in-memory text and prepared protocol replies, collecting effects to control delayed or reordered completions. They do not implement filesystem writes, directory walks or grep. Filesystem and search contracts use production services with real temporary files; native watcher tests exercise both supported platforms. Agent subsystems add whole-app fake-agent scenarios.
 
 | Layer | How it is tested |
 | --- | --- |
@@ -393,7 +393,7 @@ Core tests use in-memory text and prepared protocol replies, collecting effects 
 | Terminal | Byte streams fed into the emulator grid with snapshot assertions; PTY tests against small shell scripts |
 | Crash recovery | Kill the app mid-edit, relaunch, check the recovered buffers |
 | Frontend | GPUI input, display and dispatch tests; rendering checked by hand, no screenshot tests (see [docs/spikes/gpui.md](spikes/gpui.md)) |
-| Whole app | Launch with a test project and the fake agent, drive it with a key script, assert on files, buffers and workspaces; a manual smoke run against the real agents before each milestone gate |
+| Whole app | Launch with a test project and the fake agent, drive it with a key script, assert on files, buffers and workspaces; a manual smoke run against the real agents before each milestone gate. `aiditor-services/tests/scenario.rs` ([#288](https://github.com/Root-man/aiditor/issues/288)) runs the core on the real agent, file and watcher services: `agent-start` and a prompt, the fake's reply in the session buffer, its write reverting the open buffer, and `C-x t 0` leaving no agent process |
 
 ### Fake agent script
 
