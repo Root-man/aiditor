@@ -25,27 +25,48 @@ impl Ctx<'_> {
         self.goto_clamped((self.core.point() as i64).saturating_add(n))
     }
 
-    /// Moves `n` lines to the goal column, which a run of line motions keeps.
+    /// Where each visual row of the current window's `line` starts.
+    fn row_starts(&self, line: usize) -> Vec<usize> {
+        (self.core.windows.window).row_starts(self.core.current(), line)
+    }
+
+    /// Moves `n` visual rows, as Emacs's `line-move-visual`, to the goal column within the row,
+    /// which a run of line motions keeps; a buffer that truncates has one row to a line.
     pub(crate) fn next_line(&mut self, n: i64) -> Result<(), String> {
-        let core = &mut *self.core;
-        let (line, col) = core
-            .current()
-            .line_col(core.point())
+        let (mut line, col) = (self.core.current())
+            .line_col(self.core.point())
             .expect("point is in the buffer");
-        if !matches!(core.last_command, Some("next-line" | "previous-line")) {
+        let mut starts = self.row_starts(line);
+        let mut row = starts.partition_point(|&s| s <= col) - 1;
+        if !matches!(self.core.last_command, Some("next-line" | "previous-line")) {
             // shortcut: the goal is in chars, so tabs and wide chars shift it; use display columns once the display renders them.
-            core.goal_column = col;
+            self.core.goal_column = col - starts[row];
         }
-        let buffer = core.current();
-        let target = (line as i64).saturating_add(n);
-        let last = buffer.len_lines() as i64 - 1;
-        if !(0..=last).contains(&target) {
-            return self.goto_clamped(if target < 0 { -1 } else { i64::MAX });
+        let last = self.core.current().len_lines() - 1;
+        for _ in 0..n.unsigned_abs() {
+            if n > 0 && row + 1 < starts.len() {
+                row += 1;
+            } else if n > 0 && line < last {
+                (line, row) = (line + 1, 0);
+                starts = self.row_starts(line);
+            } else if n < 0 && row > 0 {
+                row -= 1;
+            } else if n < 0 && line > 0 {
+                line -= 1;
+                starts = self.row_starts(line);
+                row = starts.len() - 1;
+            } else {
+                return self.goto_clamped(if n < 0 { -1 } else { i64::MAX });
+            }
         }
-        let p = buffer
-            .char_idx(target as usize, core.goal_column)
-            .expect("target line is in the buffer");
-        self.goto(p)
+        let buffer = self.core.current();
+        let start = buffer.char_idx(line, 0).expect("line is in the buffer");
+        let end = buffer
+            .char_idx(line, usize::MAX)
+            .expect("line is in the buffer");
+        // A row's end is the next row's start, so only the last row reaches the line's end.
+        let row_end = starts.get(row + 1).map_or(end, |&s| start + s - 1);
+        self.goto((start + starts[row] + self.core.goal_column).min(row_end))
     }
 
     pub(crate) fn forward_word(&mut self, n: i64) -> Result<(), String> {
@@ -279,6 +300,60 @@ mod tests {
         assert_eq!(h.point(), 7, "C-b reset the goal to column 0");
         h.keys("M-< C-u 3 C-f C-u 2 C-n");
         assert_eq!(h.point(), 10, "a count keeps the goal");
+    }
+
+    #[test]
+    fn line_motion_steps_through_visual_rows() {
+        let mut h = Harness::new(&[("a.rs", "abcdefghij\nxy")]);
+        // 5 columns of 8 px cells: rows abcd, efgh, ij, xy.
+        h.open("a.rs").frame(40., 600.);
+        h.keys("C-f");
+        for p in [5, 9, 12] {
+            h.keys("C-n");
+            assert_eq!(h.point(), p);
+        }
+        for p in [9, 5, 1] {
+            h.keys("C-p");
+            assert_eq!(h.point(), p);
+        }
+        h.keys("M-< C-u 2 C-n");
+        assert_eq!(h.point(), 8, "a count moves rows");
+        h.keys("C-n");
+        assert_eq!(h.point(), 11, "column 0 of xy");
+        h.keys("C-p C-n C-n");
+        assert_eq!((h.point(), h.core.message()), (13, Some("End of buffer")));
+        h.keys("M-< C-u 5 C-f C-a");
+        assert_eq!(h.point(), 0, "C-a is logical");
+        h.keys("C-u 5 C-f C-e");
+        assert_eq!(h.point(), 10, "C-e is logical");
+
+        h.keys("M-x toggle-truncate-lines RET M-< C-f C-n");
+        assert_eq!(h.point(), 12, "a truncating buffer moves by lines");
+    }
+
+    #[test]
+    fn a_short_word_wrapped_row_clamps_to_its_last_char() {
+        // 9 columns, 8 chars to a row: rows "ab " and "cdefghij".
+        let mut h = on("ab cdefghij");
+        h.frame(72., 600.);
+        h.keys("C-u 8 C-f C-p");
+        assert_eq!(h.point(), 2, "the space ending the first row");
+        h.keys("C-n");
+        assert_eq!(h.point(), 8, "the goal is kept");
+    }
+
+    #[test]
+    fn row_motion_reports_the_ends_of_a_wrapped_line() {
+        // Rows abcd, efgh, ij.
+        let mut h = Harness::new(&[("a.rs", "abcdefghij")]);
+        h.open("a.rs").frame(40., 600.);
+        h.keys("C-u 8 C-f C-n");
+        assert_eq!((h.point(), h.core.message()), (10, Some("End of buffer")));
+        h.keys("M-< C-f C-p");
+        assert_eq!(
+            (h.point(), h.core.message()),
+            (0, Some("Beginning of buffer"))
+        );
     }
 
     #[test]
