@@ -126,7 +126,7 @@ impl Buffers {
             markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
             next_marker: 1,
             props: Vec::new(),
-            props_disjoint: true,
+            props_sorted: true,
             history: History::default(),
             major_mode: "fundamental-mode",
             minor_modes: Vec::new(),
@@ -280,14 +280,14 @@ pub struct Buffer {
     modified: bool,
     /// Counts text changes, like Emacs's `buffer-modified-tick`.
     tick: u64,
-    // shortcut: every edit walks all markers, fine for a few per buffer; index them if buffers get hundreds.
+    // shortcut: every edit walks all markers, two per property, so a long session transcript holds thousands; index them when typing in one lags.
     markers: BTreeMap<MarkerId, (usize, InsertionType)>,
     next_marker: u64,
     /// Text properties as (start, end) marker pairs, oldest first.
     props: Vec<(MarkerId, MarkerId, Prop)>,
-    /// Each property starts at or after the previous one's end, which edits keep, so
+    /// Starts and ends each ascend from one property to the next, which edits keep, so
     /// `properties_near` can bisect.
-    props_disjoint: bool,
+    props_sorted: bool,
     history: History,
     /// Names the major mode's keymap in `Core`.
     pub major_mode: &'static str,
@@ -390,7 +390,7 @@ impl Buffer {
         };
         *copy = text;
         self.commands.clear();
-        self.props_disjoint = true;
+        self.props_sorted = true;
         for (start, end, _) in std::mem::take(&mut self.props) {
             self.markers.remove(&start);
             self.markers.remove(&end);
@@ -642,8 +642,10 @@ impl Buffer {
         if range.start > range.end || range.end > self.len_chars() {
             return Err(Error::OutOfRange);
         }
-        if (self.props.last()).is_some_and(|(_, end, _)| self.marker(*end) > Some(range.start)) {
-            self.props_disjoint = false;
+        if let Some(&(start, end, _)) = self.props.last()
+            && (self.marker(start) > Some(range.start) || self.marker(end) > Some(range.end))
+        {
+            self.props_sorted = false;
         }
         let start = self.add_marker(range.start, InsertionType::Advance)?;
         let end = self.add_marker(range.end, InsertionType::Stay)?;
@@ -651,11 +653,25 @@ impl Buffer {
         Ok(())
     }
 
+    /// Removes every property whose range lies within `range`.
+    pub fn remove_properties(&mut self, range: Range<usize>) {
+        let markers = &mut self.markers;
+        self.props.retain(|(start, end, _)| {
+            let at = |id| markers.get(id).map(|&(pos, _)| pos);
+            let inside = at(start) >= Some(range.start) && at(end) <= Some(range.end);
+            if inside {
+                markers.remove(start);
+                markers.remove(end);
+            }
+            !inside
+        });
+    }
+
     /// The non-empty property ranges touching `range`, from at its start to at its end, oldest
     /// first.
     pub fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
         let touches = |r: &Range<usize>| r.end >= range.start && r.start <= range.end;
-        if !self.props_disjoint {
+        if !self.props_sorted {
             return self.properties().filter(|(r, _)| touches(r)).collect();
         }
         let at = |id| {
@@ -1271,9 +1287,33 @@ mod tests {
             [42..47, 52..57],
             "after edits, the emptied one gone"
         );
+        // Removing keeps the rest in order.
+        b.remove_properties(40..48);
+        assert_eq!(near(b, 40..52), [52..57]);
         // A long overlapping one makes the list unsorted by end; the full scan still finds it.
         b.add_property(0..90, face(1)).unwrap();
         assert_eq!(near(b, 68..70), [0..90]);
+    }
+
+    #[test]
+    fn nested_properties_with_ascending_ends_bisect() {
+        let (mut buffers, id) = with_text("abcdefghij");
+        let b = buffers.get_mut(id).unwrap();
+        let face = Prop::Face(Face::default());
+        for r in [1..3, 1..6, 4..6, 5..9] {
+            b.add_property(r, face.clone()).unwrap();
+        }
+        assert!(b.props_sorted);
+        let near = |b: &Buffer, r| -> Vec<_> {
+            b.properties_near(r).into_iter().map(|(r, _)| r).collect()
+        };
+        assert_eq!(near(b, 4..4), [1..6, 4..6]);
+        b.remove_properties(0..6);
+        assert_eq!(
+            near(b, 0..10),
+            [5..9],
+            "only the one past the range is left"
+        );
     }
 
     #[test]

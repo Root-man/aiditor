@@ -98,6 +98,7 @@ impl Core {
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
     pub fn frame(&mut self) -> display::FrameDisplay {
+        self.render_streams();
         let unwatched = self
             .projects
             .iter()
