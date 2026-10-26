@@ -390,13 +390,15 @@ pub fn build(
         Some(_) => (" [char]", String::new()),
         None => ("", position),
     };
+    let agent = buffer.agent_mode.as_ref().map(|m| format!(" [{m}]"));
     WindowDisplay {
         lines,
         cursor,
         // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
         mode_line: format!(
-            "{state} {}{dos}{disk}{mode}{position}",
+            "{state} {}{dos}{disk}{mode}{}{position}",
             buffer.name.replace('\n', "^J"),
+            agent.unwrap_or_default(),
         ),
         terminal: None,
     }

@@ -135,6 +135,7 @@ impl Buffers {
             commands: Vec::new(),
             syntax: None,
             prompt: None,
+            agent_mode: None,
         })
     }
 
@@ -302,6 +303,8 @@ pub struct Buffer {
     syntax: Option<Syntax>,
     /// A `Stay` marker at a session buffer's prompt area: the text before it is read-only.
     pub(crate) prompt: Option<MarkerId>,
+    /// A session buffer's agent's current mode, for the mode line.
+    pub(crate) agent_mode: Option<String>,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.
