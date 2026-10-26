@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::{PromptRequest, StopReason};
+use agent_client_protocol::schema::v1::{
+    PromptRequest, SessionConfigKind, SetSessionConfigOptionRequest, StopReason,
+};
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
 use aiditor_services::agents::Agents;
@@ -364,6 +366,36 @@ async fn a_prompt_streams_its_updates_before_its_answer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn setting_a_config_option_returns_the_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut agents, mut rx) = ready(dir.path(), "{}").await;
+    for (value, ok) in [("plan", true), ("nope", false)] {
+        let request = SetSessionConfigOptionRequest::new("fake-session", "mode", value);
+        assert!(
+            agents
+                .run(AgentOp::SetConfigOption { id: ID, request })
+                .is_none()
+        );
+        let result = loop {
+            match next(&mut rx).await {
+                Some(Msg::AgentConfigured { id, result }) => break (assert_eq!(id, ID), result).1,
+                Some(Msg::AgentUpdate { .. }) => {}
+                msg => panic!("expected configured, got {msg:?}"),
+            }
+        };
+        assert_eq!(result.is_ok(), ok, "{result:?}");
+        if let Ok(options) = result {
+            let mode = options.iter().find(|o| o.id.0.as_ref() == "mode").unwrap();
+            let SessionConfigKind::Select(select) = &mode.kind else {
+                panic!("a select: {mode:?}");
+            };
+            assert_eq!(select.current_value.0.as_ref(), "plan");
+        }
+    }
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cancel_ends_the_running_turn() {
     let dir = tempfile::tempdir().unwrap();
     let (mut agents, mut rx) = ready(dir.path(), r#"{"prompts": [[{"sleep": 10000}]]}"#).await;
@@ -525,5 +557,22 @@ async fn killing_the_workspace_stops_its_agent() {
     live.keys("C-x t 2 RET f i x RET");
     live.start().await;
     live.keys("C-x t 0");
+    live.gone().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_starts_in_its_default_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut live = Live::new(dir.path(), "{}");
+    let (key, path) = script(dir.path(), "{}");
+    let settings = format!(
+        "[agents.fake]\ncommand = {AGENT:?}\ndefault_mode = \"plan\"\nenv = {{ {key} = {path:?} }}"
+    );
+    live.send(Msg::SettingsLoaded(Ok(Some(settings))));
+    live.start().await;
+    (live.pump(Some(|m| matches!(m, Msg::AgentConfigured { .. })))).await;
+    let mode_line = live.core.frame().windows[0].display.mode_line.clone();
+    assert!(mode_line.contains(" [plan]"), "{mode_line}");
+    live.call("kill-buffer", &[&live.core.current().name.clone(), "yes"]);
     live.gone().await;
 }

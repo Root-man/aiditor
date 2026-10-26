@@ -105,6 +105,20 @@ impl Agents {
                 }
                 None
             }
+            AgentOp::SetConfigOption { id, request } => {
+                let (connection, tx) = self.connection(id)?;
+                let sent = connection.send_request(request).on_receiving_result(
+                    move |result| async move {
+                        let result = result.map(|r| r.config_options).map_err(|err| err.message);
+                        _ = tx.send(Msg::AgentConfigured { id, result }).await;
+                        Ok(())
+                    },
+                );
+                if let Err(err) = sent {
+                    tracing::warn!("setting the agent's config option: {err}");
+                }
+                None
+            }
             AgentOp::Cancel { id, session } => {
                 let sent = (self.connection(id)).map(|(connection, _)| {
                     connection.send_notification(CancelNotification::new(session))
