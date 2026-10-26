@@ -10,3 +10,7 @@
 ## 3. Docs
 
 - [x] 3.1 Record the plan and mode display in `docs/editor.md` under the session buffer
+
+## 4. Review
+
+- [x] 4.1 Set `CLAUDE_CODE_ENABLE_TASKS` and `CLAUDE_CODE_ENABLE_TODO_TOOLS` in the bundled `claude` agent's env; the bundled-agent settings test checks them
