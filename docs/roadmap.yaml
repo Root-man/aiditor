@@ -1074,12 +1074,12 @@ milestones:
           - key: m3-fake-record
             title: "Record Claude Code and Codex ACP transcripts"
             body: |
-              A small `aiditor-acp-record OUT -- COMMAND ARGS` binary that runs the agent, passes stdio through and appends every JSON-RPC line with its direction to OUT as JSON lines. Put it in front of `claude-agent-acp` or `codex-acp` with a registry entry. Record a short session with each agent from aiditor, so the client capabilities are ours: a reply with markdown, a tool call that reads, one that edits a file, a permission prompt and a mode change. Scrub them before committing: home directory and `cwd` become placeholders, and nothing secret is left (tokens, emails, private paths). Commit them under `crates/aiditor-services/tests/transcripts/` with how to re-record. Needs prompting from the session buffer epic (#97).
+              A small `aiditor-acp-record OUT -- COMMAND ARGS` binary that runs the agent, passes stdio through and appends every JSON-RPC line with its direction to OUT as JSON lines. Put it in front of `claude-agent-acp` or `codex-acp` with a registry entry. Record a short session with each agent from aiditor, so the client capabilities are ours: a reply with markdown, a tool call that reads, one that edits a file, a permission prompt and a mode change. Scrub them before committing: home directory and `cwd` become placeholders, and nothing secret is left (tokens, emails, private paths). Commit them under `crates/aiditor-services/tests/transcripts/` with how to re-record. Needs prompting from #292.
             acceptance:
               - "The recorder passes traffic through unchanged and writes both directions"
               - "A scrubbed Claude Code and a scrubbed Codex transcript are committed"
               - "How to record and scrub is written next to them"
-            blocked_by: [m3-acp-sessions]
+            blocked_by: [m3-acp-sessions, m3-session-prompt]
           - key: m3-fake-replay
             title: "Replay recorded transcripts against the client"
             body: |
@@ -1091,16 +1091,75 @@ milestones:
           - key: m3-fake-scenario
             title: "Whole-app scenario with the fake agent"
             body: |
-              One end-to-end test of the core with the real services, as `tests/file_sync.rs` does for files: a temporary project whose registry points at the fake agent, a key script that runs `agent-start` and sends a prompt, and a fake script that streams a reply and writes a file the project has open. It asserts that the reply reaches the session, the open buffer reverts to the new contents, and killing the workspace leaves no agent process. Needs prompting from the session buffer epic (#97).
+              One end-to-end test of the core with the real services, as `tests/file_sync.rs` does for files: a temporary project whose registry points at the fake agent, a key script that runs `agent-start` and sends a prompt, and a fake script that streams a reply and writes a file the project has open. It asserts that the reply reaches the session, the open buffer reverts to the new contents, and killing the workspace leaves no agent process. Needs prompting from #292.
             acceptance:
               - "The scenario passes under `cargo test` on macOS and Linux"
-            blocked_by: [m3-fake-script]
+            blocked_by: [m3-fake-script, m3-session-prompt]
+      - key: m3-soft-wrap
+        title: "Soft wrap"
+        labels: [text, frontend]
+        design: "#core-data-model"
+        body: |
+          Soft wrap as decided in #45: visual lines in the display builder, for vertical motion and for scrolling. File buffers wrap by default, Markdown and text at word boundaries (`visual-line-mode`), code at the window edge with a continuation marker; `toggle-truncate-lines` switches a buffer back to truncation with horizontal scroll. Pulled forward from M5 for the session buffer.
+        tasks:
+          - key: m3-wrap-display
+            title: "Wrap long lines in the display"
+            body: |
+              The display builder splits a long line into visual lines at the window's width: Markdown, text and session buffers at word boundaries, other buffers at the window edge with a continuation marker. Scrolling and point's visibility count visual lines. Wrapping is on by default; `toggle-truncate-lines` switches a buffer back to truncation with horizontal scroll. Only the lines on screen are wrapped, so a long file costs no more than now.
+            acceptance:
+              - "Long lines wrap at word boundaries in Markdown and session buffers, at the edge with a marker in code"
+              - "Scrolling keeps point visible on wrapped lines"
+              - "`toggle-truncate-lines` switches between wrapping and truncation"
+          - key: m3-wrap-motion
+            title: "Move by visual lines in wrapped buffers"
+            body: |
+              `C-n` and `C-p` move by visual lines and keep the goal column within the visual line, as Emacs's `line-move-visual`; `C-a`, `C-e` and `C-k` keep acting on logical lines, as in Emacs without `visual-line-mode`'s rebinds.
+            acceptance:
+              - "`C-n` and `C-p` step through a wrapped line one visual line at a time"
+            blocked_by: [m3-wrap-display]
       - key: m3-session-buffer
         title: "Session buffer"
         labels: [acp, frontend]
         design: "#acp-integration-and-session-management"
         body: |
-          A rope buffer the core renders the transcript into: markdown with hidden markup, folded tool calls, read-only text above a comint-style prompt, as decided in M0 ("Decide: display model for the session buffer"). Needs soft wrap: pull the soft-wrap epic forward if it is still in M5. Break down when M3 starts.
+          A rope buffer the core renders the transcript into: markdown with hidden markup, folded tool calls, read-only text above a comint-style prompt, as decided in M0 ("Decide: display model for the session buffer"). Soft wrap is pulled forward into M3.
+        tasks:
+          - key: m3-session-prompt
+            title: "Session buffer with a prompt"
+            body: |
+              `agent-start` opens and shows a `*<agent>*<<workspace>>` session buffer, which becomes the session's handle in place of the stderr log buffer: killing it (asked first while the agent is live) or its workspace stops the agent. As in comint, everything before the prompt marker is read-only and output is inserted above it. `RET` in the prompt area sends the input as a `session/prompt` and echoes it above the marker; `C-j` and `S-RET` insert a newline. `RET` while a turn runs echoes that the agent is busy. `C-c C-c` sends `session/cancel`. Agent message chunks are appended as plain text as they stream; a turn that ends other than `end_turn`, or an error reply, gets a line saying so. Other updates stay kept and unrendered until the tasks below. Tests drive the scripted fake agent.
+            acceptance:
+              - "A prompt sent to the fake agent shows its streamed reply above the prompt, and the turn ends"
+              - "Text above the prompt marker is read-only; the prompt area edits like any buffer"
+              - "`C-c C-c` ends a running turn as cancelled"
+              - "Killing the session buffer or its workspace leaves no agent process"
+              - "Keys and behaviour recorded in docs/editor.md"
+            blocked_by: [m3-acp-sessions, m3-fake-script]
+          - key: m3-session-markdown
+            title: "Render agent messages as markdown"
+            body: |
+              Render each agent message, user prompt and thought into the rope as markdown text with properties, as the display model decided: faces for headings, emphasis, inline code and links; the markup itself `invisible`; a line background on code blocks; thoughts in a dim face. The markup stays in the text, so swiper matches it and kill or copy yield markdown. Only the message being streamed is re-rendered, at most once per frame.
+            acceptance:
+              - "Headings, emphasis, inline code, links and code blocks render with their markup hidden"
+              - "Swiper finds hidden markup; `M-w` over a message yields its markdown"
+              - "Streaming a long reply re-renders only that message, at most once per frame"
+            blocked_by: [m3-session-prompt, m3-wrap-display]
+          - key: m3-session-tools
+            title: "Show tool calls folded in the session buffer"
+            body: |
+              Each `tool_call` gets a header line (title, kind, status) with a rule beside it and its content (input, output, text) folded under it as `invisible` text. `tool_call_update` updates the header and content in place. `TAB` on a header toggles its fold, as in magit.
+            acceptance:
+              - "A tool call shows folded with its status, and updates in place as it runs and finishes"
+              - "`TAB` on its header shows and hides its content"
+            blocked_by: [m3-session-markdown]
+          - key: m3-session-plan
+            title: "Show the agent's plan and mode in the session buffer"
+            body: |
+              A `plan` update renders the plan's entries with their status and priority, replacing the previous plan in place. The session buffer's mode line shows the current mode, following `current_mode_update`; cycling modes belongs to the modes epic.
+            acceptance:
+              - "A new plan replaces the old one in place"
+              - "The mode line shows the current mode and follows mode changes"
+            blocked_by: [m3-session-prompt]
       - key: m3-modes
         title: "Session modes and permission prompts"
         labels: [acp]
@@ -1228,12 +1287,6 @@ milestones:
               Indent width and style per language and project, `.editorconfig` support, themes and fonts beyond M0's single defaults. Per-project values come from the project file overriding the global files, VS Code style (see "Project overrides for settings and keymaps"); this settles how per-language values and `.editorconfig` fit into those layers. Record the answer in `docs/editor.md`.
             acceptance:
               - "Decision recorded in docs/editor.md"
-      - key: m5-soft-wrap
-        title: "Soft wrap"
-        labels: [text, frontend]
-        design: "#core-data-model"
-        body: |
-          Soft wrap as decided in #45: visual lines in the display builder, for vertical motion and for scrolling. File buffers wrap by default, Markdown and text at word boundaries (`visual-line-mode`), code at the window edge with a continuation marker; `toggle-truncate-lines` switches a buffer back to truncation with horizontal scroll. Break down when M5 starts.
       - key: m5-files
         title: "File handling beyond UTF-8"
         labels: [files]
