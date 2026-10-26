@@ -33,7 +33,7 @@ A window's point and mark SHALL be positions in its buffer that follow edits: te
 - **THEN** the mark is at 2
 
 ### Requirement: Scrolling keeps point visible
-Given how many lines fit in the window, the window's first line SHALL move only as far as needed for point's line to be visible: down when point is below the last visible line, up when it is above the first.
+Given how many rows fit in the window, the window's first row SHALL move only as far as needed for point's row to be visible: down when point is below the last visible row, up when it is above the first. Rows are visual rows: a wrapped buffer line counts one per row it wraps into, a line that is not wrapped counts one.
 
 #### Scenario: Point moves below the window
 - **WHEN** the window fits 3 lines, shows from line 0, and point moves to line 5
@@ -46,6 +46,14 @@ Given how many lines fit in the window, the window's first line SHALL move only 
 #### Scenario: Point stays on screen
 - **WHEN** point moves within the visible lines
 - **THEN** the first line does not change
+
+#### Scenario: Point at the end of a wrapped line
+- **WHEN** a window 3 rows high and 5 columns wide shows a buffer whose line 0 wraps into 4 rows, and point moves to the end of line 0
+- **THEN** the window shows from line 0's second row, and its last row holds the cursor
+
+#### Scenario: Point below wrapped lines
+- **WHEN** lines 0 and 1 each wrap into 2 rows in a window 3 rows high, and point moves to line 2
+- **THEN** the window shows from line 1's first row
 
 ### Requirement: Splitting a window
 `split-window-below` (`C-x 2`) SHALL split the selected window into two, one above the other, and `split-window-right` (`C-x 3`) into two side by side, each taking half of the old window's space, rounded to whole lines or cells. The new window SHALL be below or right of the old one, show the same buffer with the same point and first line, and have no mark. The old window SHALL stay selected.
