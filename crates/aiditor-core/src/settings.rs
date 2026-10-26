@@ -173,7 +173,17 @@ mod tests {
     fn bundled_claude_agent_and_user_overrides_or_additions() {
         let claude = &Settings::default().agents["claude"];
         assert_eq!(claude.command, "claude-agent-acp");
-        assert!(claude.args.is_empty() && claude.env.is_empty());
+        assert!(claude.args.is_empty());
+        let env: Vec<_> = (claude.env.iter())
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        assert_eq!(
+            env,
+            [
+                "CLAUDE_CODE_ENABLE_TASKS=1",
+                "CLAUDE_CODE_ENABLE_TODO_TOOLS=1"
+            ]
+        );
         assert_eq!(claude.default_mode.as_deref(), Some("auto"));
         let s = Settings::parse(Some(
             "[agents.claude]\ncommand = \"/opt/claude\"\n[agents.codex]\ncommand = \"codex-acp\"\nargs = [\"-v\"]",

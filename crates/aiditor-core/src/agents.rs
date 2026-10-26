@@ -2,8 +2,8 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    ContentBlock, NewSessionResponse, PromptRequest, SessionNotification, SessionUpdate,
-    StopReason, ToolCall, ToolCallContent, ToolCallId, ToolCallUpdate,
+    ContentBlock, NewSessionResponse, Plan, PlanEntry, PromptRequest, SessionNotification,
+    SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallId, ToolCallUpdate,
 };
 use serde_json::Value;
 
@@ -45,6 +45,9 @@ pub(crate) struct Session {
     stream: Option<Stream>,
     /// The tool calls shown, by id.
     tools: HashMap<ToolCallId, Tool>,
+    /// The plan's block: where it starts and its length in chars, the blank line after it not
+    /// counted.
+    plan: Option<(MarkerId, usize)>,
 }
 
 /// A tool call's block: a header line, then its content when it has any.
@@ -143,12 +146,7 @@ impl Core {
         let tool = match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
                 let start = buffer.marker(tool.start).expect("live while shown");
-                let old = buffer.text().slice(start..start + tool.len).to_string();
-                buffer.remove_properties(start..start + tool.len);
-                // Line by line, so point on an unchanged line stays.
-                for (r, new) in buffer::diff(&old, &text).into_iter().rev() {
-                    buffer.replace_output(start + r.start..start + r.end, &new);
-                }
+                rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
                 tool
             }
@@ -169,6 +167,38 @@ impl Core {
             }
         };
         render_tool(buffer, tool, &self.settings.theme);
+    }
+
+    /// Puts `plan` above session `id`'s prompt line as its plan block, or rewrites that block in
+    /// place.
+    fn show_plan(&mut self, id: AgentId, plan: &Plan) {
+        if self.agents.get(&id).is_some_and(|s| s.plan.is_none()) {
+            self.end_stream(id);
+        }
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let text = plan_text(plan);
+        let len = text.chars().count();
+        let start = match &mut session.plan {
+            Some((marker, old)) => {
+                let start = buffer.marker(*marker).expect("live while shown");
+                rewrite(buffer, start..start + *old, &text);
+                *old = len;
+                start
+            }
+            None => {
+                let end = buffer.prompt_start() - PROMPT.len();
+                buffer.insert_output(end, &format!("{text}\n\n"));
+                let marker = buffer.add_marker(end, InsertionType::Stay);
+                session.plan = Some((marker.expect("in the text"), len));
+                end
+            }
+        };
+        render_plan(buffer, start, plan, &self.settings.theme);
     }
 
     /// Renders session `id`'s streamed block if chunks arrived since it was last rendered.
@@ -306,6 +336,7 @@ impl Ctx<'_> {
             turn: false,
             stream: None,
             tools: HashMap::new(),
+            plan: None,
         };
         core.agents.insert(id, session);
         core.echo(format!("Starting {name}..."));
@@ -361,6 +392,9 @@ impl Ctx<'_> {
                     true => "none".into(),
                     false => modes.join(", "),
                 };
+                if let Some(b) = core.buffers.get_mut(session.buffer) {
+                    b.agent_mode = (response.modes.as_ref()).map(|m| m.current_mode_id.to_string());
+                }
                 session.session = Some(response);
                 core.echo(format!("{agent} session ready (modes: {modes})"));
             }
@@ -381,8 +415,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// Keeps the update, and puts a text message or thought chunk or a tool call above the
-    /// prompt line.
+    /// Keeps the update, puts a text message or thought chunk, a tool call or the plan above the
+    /// prompt line, and follows mode changes.
     pub(crate) fn agent_update(&mut self, id: AgentId, update: SessionNotification) {
         let core = &mut *self.core;
         let Some(session) = core.agents.get_mut(&id).filter(|s| !s.ended) else {
@@ -402,7 +436,19 @@ impl Ctx<'_> {
             SessionUpdate::ToolCallUpdate(update) => Some(Err(update.clone())),
             _ => None,
         };
+        let plan = match &update.update {
+            SessionUpdate::Plan(plan) => Some(plan.clone()),
+            _ => None,
+        };
+        if let SessionUpdate::CurrentModeUpdate(mode) = &update.update
+            && let Some(b) = core.buffers.get_mut(session.buffer)
+        {
+            b.agent_mode = Some(mode.current_mode_id.to_string());
+        }
         session.updates.push(update);
+        if let Some(plan) = plan {
+            core.show_plan(id, &plan);
+        }
         if let Some((text, thought)) = text {
             core.output(id, &text, Some(thought));
         }
@@ -542,24 +588,82 @@ fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool, theme: &Theme
     }
 }
 
+/// Replaces `range` of `buffer`'s output with `text`, removing its properties, line by line so
+/// point on an unchanged line stays.
+fn rewrite(buffer: &mut Buffer, range: Range<usize>, text: &str) {
+    let old = buffer.text().slice(range.clone()).to_string();
+    buffer.remove_properties(range.clone());
+    for (r, new) in buffer::diff(&old, text).into_iter().rev() {
+        buffer.replace_output(range.start + r.start..range.start + r.end, &new);
+    }
+}
+
+/// The ACP name of an enum value, as `in_progress`.
+fn acp_name(value: impl serde::Serialize) -> String {
+    match serde_json::to_value(value) {
+        Ok(Value::String(name)) => name,
+        _ => "?".into(),
+    }
+}
+
+/// `text`'s first line, followed by ` …` when it has more.
+fn first_line(text: &str) -> String {
+    let mut line = text.lines().next().unwrap_or_default().to_string();
+    if text.trim_end().contains('\n') {
+        line.push_str(" …");
+    }
+    line
+}
+
 /// A tool call's header line, `<title> (<kind>, <status>)` with the title's first line, and the
 /// title part's length in chars.
 fn tool_header(call: &ToolCall) -> (String, usize) {
-    // The ACP names, as `in_progress`.
-    let name = |v: Result<Value, _>| match v {
-        Ok(Value::String(name)) => name,
-        _ => "?".into(),
-    };
-    let mut title = call.title.lines().next().unwrap_or_default().to_string();
-    if call.title.trim_end().contains('\n') {
-        title.push_str(" …");
-    }
+    let title = first_line(&call.title);
+    let suffix = format!(" ({}, {})", acp_name(call.kind), acp_name(call.status));
+    (format!("{title}{suffix}"), title.chars().count())
+}
+
+/// A plan entry's line, `<content> (<status>, <priority>)` with the content's first line, and
+/// the content part's length in chars.
+fn plan_line(entry: &PlanEntry) -> (String, usize) {
+    let content = first_line(&entry.content);
     let suffix = format!(
         " ({}, {})",
-        name(serde_json::to_value(call.kind)),
-        name(serde_json::to_value(call.status))
+        acp_name(&entry.status),
+        acp_name(&entry.priority)
     );
-    (format!("{title}{suffix}"), title.chars().count())
+    (format!("{content}{suffix}"), content.chars().count())
+}
+
+/// The plan block's text: `Plan`, then a line per entry.
+fn plan_text(plan: &Plan) -> String {
+    let lines = plan.entries.iter().map(|e| plan_line(e).0);
+    std::iter::once("Plan".to_string())
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Renders the plan block at `start`, whose properties were removed: a rule beside each line and
+/// each entry's suffix dim.
+fn render_plan(buffer: &mut Buffer, start: usize, plan: &Plan, theme: &Theme) {
+    let rule = Prop::Line(Decoration::Rule(theme.dim));
+    let dim = Prop::Face(Face {
+        fg: Some(theme.dim),
+        ..Face::default()
+    });
+    let mut props = vec![(0..1, rule.clone())];
+    let mut line = "Plan\n".len();
+    for entry in &plan.entries {
+        let (text, content) = plan_line(entry);
+        let len = text.chars().count();
+        props.push((line..line + 1, rule.clone()));
+        props.push((line + content..line + len, dim.clone()));
+        line += len + 1;
+    }
+    for (r, prop) in props {
+        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
+    }
 }
 
 /// Everything a tool call carries, uncut, as markdown: its raw input, its content items, and its
@@ -661,8 +765,8 @@ fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
-        ContentChunk, SessionMode, SessionModeState, SessionUpdate, ToolCallStatus,
-        ToolCallUpdateFields, ToolKind,
+        ContentChunk, CurrentModeUpdate, PlanEntryPriority, PlanEntryStatus, SessionMode,
+        SessionModeState, SessionUpdate, ToolCallStatus, ToolCallUpdateFields, ToolKind,
     };
 
     use super::*;
@@ -1352,6 +1456,76 @@ mod tests {
             tool_content(&call),
             "**hi**\n\na.rs\n```diff\n--- a.rs\n+++ a.rs\n@@ -1 +1 @@\n-a\n+b\n```"
         );
+    }
+
+    fn plan(h: &mut Harness, entries: &[(&str, PlanEntryStatus, PlanEntryPriority)]) {
+        let entries = (entries.iter())
+            .map(|(content, status, priority)| {
+                PlanEntry::new(*content, priority.clone(), status.clone())
+            })
+            .collect();
+        update(h, 0, SessionUpdate::Plan(Plan::new(entries)));
+    }
+
+    #[test]
+    fn a_new_plan_replaces_the_old_one_in_place() {
+        use PlanEntryPriority::*;
+        use PlanEntryStatus::*;
+        let mut h = session();
+        chunk(&mut h, "Planning.");
+        plan(
+            &mut h,
+            &[
+                ("Read the code", InProgress, High),
+                ("Write tests", Pending, Medium),
+            ],
+        );
+        let first = "Plan\nRead the code (in_progress, high)\nWrite tests (pending, medium)";
+        assert_eq!(h.core.text(), format!("Planning.\n\n{first}\n\n> "));
+        let rule = Prop::Line(Decoration::Rule(h.core.settings().theme.dim));
+        let rules = |h: &Harness| {
+            (props(h).into_iter())
+                .filter(|(_, p)| *p == rule)
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rules(&h), ["P", "R", "W"]);
+        assert!(props(&h).iter().any(|(t, _)| t == " (pending, medium)"));
+        // Point on the plan's first entry stays there while a later entry changes.
+        h.keys("M-< C-n C-n C-n");
+        let point = h.core.point();
+        chunk(&mut h, "Done.");
+        plan(
+            &mut h,
+            &[
+                ("Read the code", InProgress, High),
+                ("Write tests", Completed, Medium),
+                ("Ship\nit", Pending, Low),
+            ],
+        );
+        assert_eq!(h.core.point(), point);
+        let second = "Plan\nRead the code (in_progress, high)\nWrite tests (completed, medium)\nShip … (pending, low)";
+        assert_eq!(
+            h.core.text(),
+            format!("Planning.\n\n{second}\n\nDone.\n\n> ")
+        );
+        assert_eq!(rules(&h), ["P", "R", "W", "S"]);
+        plan(&mut h, &[]);
+        assert_eq!(h.core.text(), "Planning.\n\nPlan\n\nDone.\n\n> ");
+        assert_eq!(rules(&h), ["P"]);
+    }
+
+    #[test]
+    fn the_mode_line_shows_the_current_mode() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        assert!(!h.display(5).mode_line.contains('['));
+        ready(&mut h, 0);
+        assert!(h.display(5).mode_line.contains(" [auto]"));
+        let mode = CurrentModeUpdate::new("plan");
+        update(&mut h, 0, SessionUpdate::CurrentModeUpdate(mode));
+        let line = h.display(5).mode_line;
+        assert!(line.contains(" [plan]") && !line.contains("auto"), "{line}");
     }
 
     #[test]

@@ -13,6 +13,8 @@ max_watched_files = 10000
 [agents.claude]
 command = "claude-agent-acp"  # found on PATH; set a full path, or npx and args, to run it otherwise
 default_mode = "auto"
+# The Claude Agent SDK leaves its to-do and task tools off; they are what sends ACP plans.
+env = { CLAUDE_CODE_ENABLE_TASKS = "1", CLAUDE_CODE_ENABLE_TODO_TOOLS = "1" }
 
 [theme]
 background = 0x1e1e1e
