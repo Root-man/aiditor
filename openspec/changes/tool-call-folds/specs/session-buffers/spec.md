@@ -41,11 +41,15 @@ A `tool_call_update` SHALL merge its fields into the call with that id and rewri
 - **THEN** the transcript is unchanged
 
 ### Requirement: TAB toggles a tool call
-`TAB` in a session buffer (`agent-toggle-tool-call`) with point on a tool call's header line SHALL show its content if folded and hide it otherwise. Shown content SHALL be rendered as markdown, as messages are, with the rule beside each of its lines. With point anywhere else it SHALL echo `No tool call here`.
+`TAB` in a session buffer (`agent-toggle-tool-call`) with point on a tool call's header line SHALL show its content if folded and hide it otherwise. With point anywhere in an unfolded call's content it SHALL hide the content and move point to the start of the header. Shown content SHALL be rendered as markdown, as messages are, with the rule beside each of its lines. With point anywhere else it SHALL echo `No tool call here`.
 
 #### Scenario: Unfolding and folding
 - **WHEN** point is on a folded call's header and `TAB` is typed, then `TAB` again
 - **THEN** the content shows under the header with the rule beside it and its fences hidden, then hides again behind ` …`
+
+#### Scenario: Folding from inside the content
+- **WHEN** a call is unfolded, point is on a line of its content and `TAB` is typed
+- **THEN** the content hides behind ` …` and point is at the start of the header
 
 #### Scenario: Not on a header
 - **WHEN** `TAB` is typed in the prompt area

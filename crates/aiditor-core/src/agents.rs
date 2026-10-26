@@ -458,7 +458,7 @@ impl Ctx<'_> {
     }
 
     /// `agent-toggle-tool-call`: shows or hides the content of the tool call whose header point
-    /// is on.
+    /// is on, or hides that of the open call point is in, moving point to its header.
     pub(crate) fn agent_toggle_tool_call(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
         let point = core.point();
@@ -469,13 +469,19 @@ impl Ctx<'_> {
             .get_mut(buffer)
             .expect("current buffer is live");
         let tool = (session.into_iter().flat_map(|s| s.tools.values_mut()))
-            .find(|t| (b.marker(t.start)).is_some_and(|s| (s..=s + t.header).contains(&point)))
+            .find(|t| {
+                let end = if t.open { t.len } else { t.header };
+                (b.marker(t.start)).is_some_and(|s| (s..=s + end).contains(&point))
+            })
             .ok_or("No tool call here")?;
         // Without content there is nothing to show, so it stays folded for when content comes.
         tool.open = !tool.open && tool.len > tool.header;
         let start = b.marker(tool.start).expect("live while shown");
         b.remove_properties(start..start + tool.len);
         render_tool(b, tool, &core.settings.theme);
+        if point > start + tool.header {
+            return self.goto(start);
+        }
         Ok(())
     }
 
@@ -1281,8 +1287,10 @@ mod tests {
         let output = ToolCallUpdateFields::new().raw_output(serde_json::json!("a.rs"));
         tool_update(&mut h, "t", output);
         assert_eq!(shown(&mut h, 12)[8..12], ["Output:", "", "a.rs", ""]);
-        h.keys("TAB");
+        // TAB inside the open content folds it, point going to the header.
+        h.keys("C-n C-n C-n TAB");
         assert_eq!(shown(&mut h, 5)[..3], ["ls (execute, pending) …", "", "> "]);
+        assert_eq!(h.core.point(), 0);
     }
 
     #[test]
