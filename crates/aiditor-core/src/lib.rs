@@ -615,14 +615,7 @@ impl Ctx<'_> {
             } => self.end_terminal(id, Some(err)),
             Msg::TerminalSpawned { .. } => {}
             Msg::TerminalExited { id, .. } => self.end_terminal(id, None),
-            // shortcut: every agent request is refused; the modes epic answers permissions.
-            Msg::AgentRequest { id, request, .. } => {
-                (self.effects).push(Effect::Agent(AgentOp::Reply {
-                    id,
-                    request,
-                    result: Err(Error::method_not_found()),
-                }))
-            }
+            Msg::AgentRequest { id, request, body } => self.agent_request(id, request, body),
             Msg::AgentStarted { id, result } => self.agent_started(id, result),
             Msg::AgentStderr { id, line } => self.agent_stderr(id, line),
             Msg::AgentUpdate { id, update } => self.agent_update(id, *update),

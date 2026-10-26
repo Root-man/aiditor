@@ -676,6 +676,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_cycle_mode(),
         },
         Command {
+            name: "agent-allow-once",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_allow_once(),
+        },
+        Command {
+            name: "agent-reject-once",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_reject_once(),
+        },
+        Command {
             name: "vterm",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.vterm(),
