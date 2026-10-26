@@ -1,8 +1,8 @@
 //! A scripted ACP agent for tests. It reports what the client sent on stderr and opens a session
-//! with two modes, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its `session` steps after
-//! `session/new` and the n-th list of `prompts` on the n-th `session/prompt`. With
-//! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead. Both are in
-//! docs/editor.md under Testing.
+//! with a two-value mode option, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its
+//! `session` steps after `session/new` and the n-th list of `prompts` on the n-th
+//! `session/prompt`. With `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
+//! Both are in docs/editor.md under Testing.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, CurrentModeUpdate, InitializeRequest, InitializeResponse,
+    CancelNotification, ConfigOptionUpdate, InitializeRequest, InitializeResponse,
     NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest, PromptResponse,
-    RequestPermissionRequest, SessionMode, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionModeRequest, SetSessionModeResponse, StopReason, ToolCallUpdate,
+    RequestPermissionRequest, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, ToolCallUpdate,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
@@ -25,6 +26,15 @@ use tokio_util::sync::CancellationToken;
 
 const SESSION: &str = "fake-session";
 const MODES: [&str; 2] = ["auto", "plan"];
+
+/// The session's config options: the `mode` select set to `current`.
+fn options(current: &str) -> Vec<SessionConfigOption> {
+    let values = MODES
+        .map(|id| SessionConfigSelectOption::new(id, id))
+        .to_vec();
+    let mode = SessionConfigOption::select("mode", "Mode", current.to_owned(), values);
+    vec![mode.category(SessionConfigOptionCategory::Mode)]
+}
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,10 +250,8 @@ async fn main() -> agent_client_protocol::Result<()> {
             async move |request: NewSessionRequest, responder, client: ConnectionTo<Client>| {
                 eprintln!("cwd={}", request.cwd.display());
                 eprintln!("A={}", std::env::var("A").unwrap_or_default());
-                let modes = MODES.map(|id| SessionMode::new(id, id)).to_vec();
-                responder.respond(
-                    NewSessionResponse::new(SESSION).modes(SessionModeState::new(MODES[0], modes)),
-                )?;
+                let options = options(MODES[0]);
+                responder.respond(NewSessionResponse::new(SESSION).config_options(options))?;
                 // shortcut: a cancel after the first prompt can't stop `session` steps still
                 // running; give them their own token if a test needs that.
                 let cancel = {
@@ -277,14 +285,19 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |request: SetSessionModeRequest, responder, client: ConnectionTo<Client>| {
-                if !MODES.contains(&&*request.mode_id.0) {
+            async |request: SetSessionConfigOptionRequest,
+                   responder,
+                   client: ConnectionTo<Client>| {
+                let value = request.value.as_value_id().map(|v| &*v.0);
+                let Some(value) =
+                    value.filter(|v| MODES.contains(v) && &*request.config_id.0 == "mode")
+                else {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::invalid_params());
-                }
-                responder.respond(SetSessionModeResponse::new())?;
+                };
+                responder.respond(SetSessionConfigOptionResponse::new(options(value)))?;
                 let update =
-                    SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(request.mode_id));
+                    SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options(value)));
                 client.send_notification(SessionNotification::new(SESSION, update))
             },
             agent_client_protocol::on_receive_request!(),

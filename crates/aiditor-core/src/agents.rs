@@ -2,8 +2,11 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    ContentBlock, NewSessionResponse, Plan, PlanEntry, PromptRequest, SessionNotification,
-    SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallId, ToolCallUpdate,
+    ContentBlock, NewSessionResponse, Plan, PlanEntry, PromptRequest, SessionConfigId,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent, ToolCallId,
+    ToolCallUpdate,
 };
 use serde_json::Value;
 
@@ -48,6 +51,37 @@ pub(crate) struct Session {
     /// The plan's block: where it starts and its length in chars, the blank line after it not
     /// counted.
     plan: Option<(MarkerId, usize)>,
+}
+
+/// The session's mode: the first config option of category `mode`, when it is a select.
+fn mode_option(
+    options: &[SessionConfigOption],
+) -> Option<(&SessionConfigId, &SessionConfigSelect)> {
+    let option =
+        (options.iter()).find(|o| o.category == Some(SessionConfigOptionCategory::Mode))?;
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some((&option.id, select)),
+        _ => None,
+    }
+}
+
+/// The mode option's current value, for the mode line.
+fn mode(options: &[SessionConfigOption]) -> Option<String> {
+    mode_option(options).map(|(_, select)| select.current_value.to_string())
+}
+
+/// A select's values, its groups flattened.
+fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().map(|o| &o.value).collect()
+        }
+        SessionConfigSelectOptions::Grouped(groups) => (groups.iter())
+            .flat_map(|g| &g.options)
+            .map(|o| &o.value)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// A tool call's block: a header line, then its content when it has any.
@@ -384,19 +418,43 @@ impl Ctx<'_> {
         let agent = session.agent.clone();
         match result {
             Ok(response) => {
-                let modes: Vec<_> = (response.modes.iter())
-                    .flat_map(|m| &m.available_modes)
-                    .map(|m| m.id.to_string())
-                    .collect();
-                let modes = match modes.is_empty() {
+                let options = response.config_options.as_deref().unwrap_or_default();
+                let option = mode_option(options);
+                let values = option.map(|(_, select)| values(select)).unwrap_or_default();
+                let modes = match values.is_empty() {
                     true => "none".into(),
-                    false => modes.join(", "),
+                    false => (values.iter().map(|v| v.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 };
                 if let Some(b) = core.buffers.get_mut(session.buffer) {
-                    b.agent_mode = (response.modes.as_ref()).map(|m| m.current_mode_id.to_string());
+                    b.agent_mode = mode(options);
+                }
+                let default =
+                    (core.settings.agents.get(&agent)).and_then(|a| a.default_mode.clone());
+                let (mut set, mut note) = (None, None);
+                match (default, option) {
+                    (Some(default), Some((config, select)))
+                        if values.iter().any(|v| *v.0 == *default) =>
+                    {
+                        if *select.current_value.0 != *default {
+                            let request = SetSessionConfigOptionRequest::new(
+                                response.session_id.clone(),
+                                config.clone(),
+                                default.as_str(),
+                            );
+                            set = Some(AgentOp::SetConfigOption { id, request });
+                        }
+                    }
+                    (Some(default), _) => note = Some(format!("{agent} has no mode {default}")),
+                    (None, _) => {}
                 }
                 session.session = Some(response);
                 core.echo(format!("{agent} session ready (modes: {modes})"));
+                if let Some(note) = note {
+                    core.log(&note);
+                }
+                self.effects.extend(set.map(Effect::Agent));
             }
             Err(err) => {
                 session.ended = true;
@@ -440,10 +498,10 @@ impl Ctx<'_> {
             SessionUpdate::Plan(plan) => Some(plan.clone()),
             _ => None,
         };
-        if let SessionUpdate::CurrentModeUpdate(mode) = &update.update
+        if let SessionUpdate::ConfigOptionUpdate(options) = &update.update
             && let Some(b) = core.buffers.get_mut(session.buffer)
         {
-            b.agent_mode = Some(mode.current_mode_id.to_string());
+            b.agent_mode = mode(&options.config_options);
         }
         session.updates.push(update);
         if let Some(plan) = plan {
@@ -557,6 +615,35 @@ impl Ctx<'_> {
             Err(err) => format!("Error: {err}"),
         };
         core.output(id, &line, None);
+    }
+
+    /// Shows the mode the agent's answer to `session/set_config_option` reports, or notes why it
+    /// refused.
+    pub(crate) fn agent_configured(
+        &mut self,
+        id: AgentId,
+        result: Result<Vec<SessionConfigOption>, String>,
+    ) {
+        let core = &mut *self.core;
+        let Some(session) = core.agents.get(&id).filter(|s| !s.ended) else {
+            return;
+        };
+        match result {
+            Ok(options) => {
+                if let Some(b) = core.buffers.get_mut(session.buffer) {
+                    b.agent_mode = mode(&options);
+                }
+            }
+            Err(err) => {
+                // shortcut: only `default_mode` is ever set; name the value sent once a key sets
+                // modes.
+                let agent = session.agent.clone();
+                let default =
+                    (core.settings.agents.get(&agent)).and_then(|a| a.default_mode.clone());
+                let value = default.unwrap_or_default();
+                core.log(&format!("{agent} could not set mode {value}: {err}"));
+            }
+        }
     }
 
     /// Ends the session after its agent exited, noting a crash, and releases the agent's handle.
@@ -765,8 +852,8 @@ fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
-        ContentChunk, CurrentModeUpdate, PlanEntryPriority, PlanEntryStatus, SessionMode,
-        SessionModeState, SessionUpdate, ToolCallStatus, ToolCallUpdateFields, ToolKind,
+        ConfigOptionUpdate, ContentChunk, PlanEntryPriority, PlanEntryStatus,
+        SessionConfigSelectOption, SessionUpdate, ToolCallStatus, ToolCallUpdateFields, ToolKind,
     };
 
     use super::*;
@@ -819,6 +906,11 @@ mod tests {
                     };
                     format!("prompt {} {} {:?}", id.0, request.session_id, text.text)
                 }
+                AgentOp::SetConfigOption { id, request } => {
+                    let value = request.value.as_value_id().unwrap();
+                    let (session, config) = (request.session_id, request.config_id);
+                    format!("set {} {session} {config}={value}", id.0)
+                }
                 AgentOp::Cancel { id, session } => format!("cancel {} {session}", id.0),
                 AgentOp::Kill { id } => format!("kill {}", id.0),
             })
@@ -845,12 +937,16 @@ mod tests {
         h.core.buffers.get(id).unwrap().text().to_string()
     }
 
+    /// Config options whose `mode` select is `current`, with values `auto` and `plan`.
+    fn options(current: &str) -> Vec<SessionConfigOption> {
+        let values = ["auto", "plan"].map(|v| SessionConfigSelectOption::new(v, v));
+        let mode = SessionConfigOption::select("mode", "Mode", current.to_owned(), values.to_vec());
+        let model = SessionConfigOption::select("model", "Model", "m", values[..1].to_vec());
+        vec![model, mode.category(SessionConfigOptionCategory::Mode)]
+    }
+
     fn ready(h: &mut Harness, id: u64) {
-        let modes = vec![
-            SessionMode::new("auto", "Auto"),
-            SessionMode::new("plan", "Plan"),
-        ];
-        let response = NewSessionResponse::new("s").modes(SessionModeState::new("auto", modes));
+        let response = NewSessionResponse::new("s").config_options(options("auto"));
         h.send(Msg::AgentStarted {
             id: AgentId(id),
             result: Ok(response),
@@ -1522,10 +1618,104 @@ mod tests {
         assert!(!h.display(5).mode_line.contains('['));
         ready(&mut h, 0);
         assert!(h.display(5).mode_line.contains(" [auto]"));
-        let mode = CurrentModeUpdate::new("plan");
-        update(&mut h, 0, SessionUpdate::CurrentModeUpdate(mode));
+        let options = ConfigOptionUpdate::new(options("plan"));
+        update(&mut h, 0, SessionUpdate::ConfigOptionUpdate(options));
         let line = h.display(5).mode_line;
         assert!(line.contains(" [plan]") && !line.contains("auto"), "{line}");
+    }
+
+    #[test]
+    fn a_session_starts_in_the_default_mode() {
+        let mut h = work();
+        h.core
+            .settings
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .default_mode = Some("plan".into());
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        ready(&mut h, 0);
+        assert_eq!(ops(&mut h), ["set 0 s mode=plan"]);
+        assert!(h.display(5).mode_line.contains(" [auto]"));
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(options("plan")),
+        });
+        assert!(h.display(5).mode_line.contains(" [plan]"));
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Err("no".into()),
+        });
+        assert!(messages(&h).contains("claude could not set mode plan: no\n"));
+        assert!(h.display(5).mode_line.contains(" [plan]"));
+    }
+
+    #[test]
+    fn options_without_a_mode_select_are_no_mode() {
+        let mut h = work();
+        h.core
+            .settings
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .default_mode = Some("plan".into());
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        // A mode-category boolean is not a mode.
+        let flag = SessionConfigOption::boolean("fast", "Fast", true)
+            .category(SessionConfigOptionCategory::Mode);
+        let mut options = options("auto");
+        options.pop();
+        options.push(flag);
+        let response = NewSessionResponse::new("s").config_options(options.clone());
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(response),
+        });
+        assert!(ops(&mut h).is_empty());
+        let note = "claude session ready (modes: none)\nclaude has no mode plan\n";
+        assert!(messages(&h).contains(note));
+        assert!(!h.display(5).mode_line.contains('['));
+        // An answer or update without a mode option clears the mode.
+        ready(&mut h, 0);
+        assert!(h.display(5).mode_line.contains(" [auto]"));
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(options),
+        });
+        assert!(!h.display(5).mode_line.contains('['));
+    }
+
+    #[test]
+    fn a_current_or_unknown_default_mode_sends_nothing() {
+        let mut h = work();
+        h.core
+            .settings
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .default_mode = Some("auto".into());
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        ready(&mut h, 0);
+        assert!(ops(&mut h).is_empty());
+        h.core
+            .settings
+            .agents
+            .get_mut("claude")
+            .unwrap()
+            .default_mode = Some("nope".into());
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        ready(&mut h, 1);
+        assert!(ops(&mut h).is_empty());
+        assert!(
+            messages(&h)
+                .contains("claude session ready (modes: auto, plan)\nclaude has no mode nope\n")
+        );
+        assert!(h.display(5).mode_line.contains(" [auto]"));
+        assert_eq!(messages(&h).matches("has no mode").count(), 1);
     }
 
     #[test]

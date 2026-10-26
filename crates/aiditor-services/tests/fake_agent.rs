@@ -1,5 +1,5 @@
 //! The fake agent driven directly as an ACP client, for what the agent service can't send yet:
-//! prompts, modes and cancel.
+//! prompts, config options and cancel.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -8,8 +8,8 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     CancelNotification, InitializeRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, SetSessionModeRequest,
-    StopReason,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use tempfile::TempDir;
@@ -167,17 +167,26 @@ async fn prompts_past_the_script_end_the_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn setting_the_mode_reports_it() {
+    /// The `mode` option's current value.
+    fn mode(options: &[SessionConfigOption]) -> Option<&str> {
+        let option = options.iter().find(|o| o.id.0.as_ref() == "mode")?;
+        match &option.kind {
+            SessionConfigKind::Select(select) => Some(&select.current_value.0),
+            _ => None,
+        }
+    }
     let mut fake = fake("").await;
-    let set = (fake.agent).send_request(SetSessionModeRequest::new(SESSION, "plan"));
-    set.block_task().await.unwrap();
+    let set = SetSessionConfigOptionRequest::new(SESSION, "mode", "plan");
+    let answer = fake.agent.send_request(set).block_task().await.unwrap();
+    assert_eq!(mode(&answer.config_options), Some("plan"));
     let update = fake.event().await;
     assert!(
-        matches!(&update, Event::Update(SessionUpdate::CurrentModeUpdate(mode))
-            if mode.current_mode_id.0.as_ref() == "plan"),
+        matches!(&update, Event::Update(SessionUpdate::ConfigOptionUpdate(update))
+            if mode(&update.config_options) == Some("plan")),
         "{update:?}"
     );
-    let set = (fake.agent).send_request(SetSessionModeRequest::new(SESSION, "nope"));
-    set.block_task().await.unwrap_err();
+    let set = SetSessionConfigOptionRequest::new(SESSION, "mode", "nope");
+    fake.agent.send_request(set).block_task().await.unwrap_err();
 }
 
 #[tokio::test(flavor = "multi_thread")]

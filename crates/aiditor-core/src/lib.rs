@@ -54,8 +54,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, ClientResponse, Error, NewSessionResponse, PromptRequest, RequestId, SessionId,
-    SessionNotification, StopReason,
+    AgentRequest, ClientResponse, Error, NewSessionResponse, PromptRequest, RequestId,
+    SessionConfigOption, SessionId, SessionNotification, SetSessionConfigOptionRequest, StopReason,
 };
 use ropey::Rope;
 
@@ -196,6 +196,12 @@ pub enum Msg {
     AgentPrompted {
         id: AgentId,
         result: Result<StopReason, String>,
+    },
+    /// The agent's answer to `AgentOp::SetConfigOption`: every config option with its current
+    /// value, or the error's message.
+    AgentConfigured {
+        id: AgentId,
+        result: Result<Vec<SessionConfigOption>, String>,
     },
     /// The agent's exit status, after its stderr.
     AgentExited {
@@ -460,6 +466,12 @@ pub enum AgentOp {
     /// Send `session/prompt`, answered with `Msg::AgentPrompted`; ignored for an unknown agent
     /// or one whose session isn't open.
     Prompt { id: AgentId, request: PromptRequest },
+    /// Send `session/set_config_option`, answered with `Msg::AgentConfigured`; ignored as
+    /// `Prompt` is.
+    SetConfigOption {
+        id: AgentId,
+        request: SetSessionConfigOptionRequest,
+    },
     /// Send `session/cancel` for `session`; ignored as `Prompt` is.
     Cancel { id: AgentId, session: SessionId },
     /// SIGTERM the agent's process group, SIGKILL after 100 ms; ignored for an unknown agent.
@@ -615,6 +627,7 @@ impl Ctx<'_> {
             Msg::AgentStderr { id, line } => self.agent_stderr(id, line),
             Msg::AgentUpdate { id, update } => self.agent_update(id, *update),
             Msg::AgentPrompted { id, result } => self.agent_prompted(id, result),
+            Msg::AgentConfigured { id, result } => self.agent_configured(id, result),
             Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
             Msg::Key(key) => {
                 self.key(key);
