@@ -119,6 +119,7 @@ impl Buffers {
             conflict: None,
             conflict_asked: false,
             read_only: false,
+            truncate_lines: false,
             unkillable: false,
             modified: false,
             tick: 0,
@@ -272,6 +273,8 @@ pub struct Buffer {
     /// Focusing it already asked about `conflict`; a save still asks.
     pub conflict_asked: bool,
     pub read_only: bool,
+    /// Long lines are cut at the window edge instead of wrapping, as Emacs's `truncate-lines`.
+    pub truncate_lines: bool,
     /// `kill-buffer` refuses it; killing its workspace still kills it.
     pub unkillable: bool,
     modified: bool,
@@ -356,6 +359,17 @@ pub enum Prop {
 }
 
 impl Buffer {
+    /// The chars a visual row holds in a window `cols` wide and whether rows break at words, or
+    /// `None` when long lines are cut instead; the last column is left for the `\` marker.
+    pub(crate) fn wrap(&self, cols: usize) -> Option<(usize, bool)> {
+        let prose = (self.file.as_deref().and_then(Path::extension))
+            .is_some_and(|e| ["md", "markdown", "txt"].iter().any(|p| e == *p));
+        let word = prose || self.major_mode == crate::agents::MODE;
+        // The minibuffer is one line, so it always truncates.
+        let truncate = self.truncate_lines || self.major_mode == "minibuffer-mode";
+        (!truncate && cols >= 2).then(|| (cols - 1, word))
+    }
+
     pub fn text(&self) -> &Rope {
         match &self.content {
             Content::Text(rope) => rope,
@@ -896,6 +910,38 @@ mod tests {
         let mut buffers = Buffers::default();
         let id = buffers.create_for_file(Path::new("/t/a.txt"), text);
         (buffers, id)
+    }
+
+    #[test]
+    fn prose_and_sessions_wrap_at_words_and_the_rest_at_the_edge() {
+        let mut buffers = Buffers::default();
+        let mut wrap = |path: Option<&str>, mode| {
+            let id = buffers.create("b");
+            let b = buffers.get_mut(id).unwrap();
+            (b.file, b.major_mode) = (path.map(PathBuf::from), mode);
+            b.wrap(5)
+        };
+        for path in ["/t/a.md", "/t/a.markdown", "/t/a.txt"] {
+            assert_eq!(
+                wrap(Some(path), "fundamental-mode"),
+                Some((4, true)),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            wrap(None, crate::agents::MODE),
+            Some((4, true)),
+            "a session"
+        );
+        assert_eq!(wrap(Some("/t/a.rs"), "fundamental-mode"), Some((4, false)));
+        assert_eq!(wrap(None, "fundamental-mode"), Some((4, false)), "no file");
+        let (mut buffers, id) = with_text("");
+        let b = buffers.get_mut(id).unwrap();
+        assert_eq!(b.wrap(1), None, "too narrow");
+        b.truncate_lines = true;
+        assert_eq!(b.wrap(5), None, "truncating");
+        (b.truncate_lines, b.major_mode) = (false, "minibuffer-mode");
+        assert_eq!(b.wrap(5), None, "the minibuffer");
     }
 
     #[test]

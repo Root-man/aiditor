@@ -193,6 +193,21 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.scroll_command(args.prefix, -1),
         },
         Command {
+            name: "toggle-truncate-lines",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                let buffer = ctx.core.current_mut();
+                buffer.truncate_lines = !buffer.truncate_lines;
+                let state = if buffer.truncate_lines {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                ctx.core.echo(format!("Truncate long lines {state}"));
+                Ok(())
+            },
+        },
+        Command {
             name: "recenter-top-bottom",
             spec: ArgSpec::default(),
             handler: |ctx, args| {

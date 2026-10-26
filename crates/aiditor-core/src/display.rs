@@ -128,9 +128,45 @@ pub struct Span {
     pub fold: bool,
 }
 
+/// How a window wraps long lines: `width` chars to a row, breaking at words or at the width, and
+/// shown from row `skip` of its first line.
+#[derive(Clone, Copy, Debug)]
+pub struct Wrap {
+    pub width: usize,
+    pub word: bool,
+    pub skip: usize,
+}
+
+/// Where each visual row of a line of `len` chars starts, `width` chars to a row. At words a row
+/// breaks after the last whitespace that fits, one more fitting in the column left for the
+/// marker, and at the width when none does.
+pub fn row_starts(
+    len: usize,
+    width: usize,
+    word: bool,
+    space: impl Fn(usize) -> bool,
+) -> Vec<usize> {
+    let mut starts = vec![0];
+    let mut start = 0;
+    loop {
+        let rest = len - start;
+        if rest <= width || (word && rest == width + 1 && space(len - 1)) {
+            return starts;
+        }
+        let at_word = word.then(|| {
+            (start + 1..=start + width + 1)
+                .rev()
+                .find(|&i| space(i - 1))
+        });
+        start = at_word.flatten().unwrap_or(start + width);
+        starts.push(start);
+    }
+}
+
 /// Builds `rows` display lines from buffer line `top`, plus the cursor and mode line. Point's line
-/// holds its `shown` columns, every other line the first `shown.len()`.
-// shortcut: long lines are cut at the window edge; soft wrap (#112) breaks them here instead.
+/// holds its `shown` columns, every other line the first `shown.len()`; with `wrap`, each line is
+/// then split into rows.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     buffer: &Buffer,
     top: usize,
@@ -139,6 +175,7 @@ pub fn build(
     mark: Option<usize>,
     settings: &Settings,
     shown: Range<usize>,
+    wrap: Option<Wrap>,
 ) -> WindowDisplay {
     let text = buffer.text();
     let (top_line, end_line) = (
@@ -314,6 +351,13 @@ pub fn build(
             }),
         }
     }
+    if let Some(wrap) = wrap {
+        let marker = Face {
+            fg: settings.theme.syntax.get("comment").copied(),
+            ..Face::default()
+        };
+        lines = wrap_lines(lines, &mut cursor, rows, wrap, marker);
+    }
     let (l, c) = buffer.line_col(point).unwrap_or_default();
     let state = match (buffer.read_only, buffer.modified()) {
         (true, _) => "%%",
@@ -345,6 +389,71 @@ pub fn build(
     }
 }
 
+/// Splits each of `lines` into its rows, ending each row but the last with a `\` in `marker`
+/// when not breaking at words, and keeps `rows` of them from row `wrap.skip`, the cursor moving
+/// along.
+fn wrap_lines(
+    lines: Vec<Line>,
+    cursor: &mut Option<(usize, usize)>,
+    rows: usize,
+    wrap: Wrap,
+    marker: Face,
+) -> Vec<Line> {
+    let mut out = Vec::new();
+    let mut moved = None;
+    for (i, line) in lines.into_iter().enumerate() {
+        let chars: Vec<char> = line.spans.iter().flat_map(|s| s.text.chars()).collect();
+        let starts = row_starts(chars.len(), wrap.width, wrap.word, |i| {
+            chars[i].is_whitespace()
+        });
+        let row_of = |col: usize| starts.partition_point(|&s| s <= col) - 1;
+        if let Some((_, col)) = cursor.filter(|&(l, _)| l == i) {
+            moved = Some((out.len() + row_of(col), col - starts[row_of(col)]));
+        }
+        let mut split: Vec<Vec<Span>> = starts.iter().map(|_| Vec::new()).collect();
+        let mut col = 0;
+        for span in line.spans {
+            let mut row = row_of(col);
+            let mut text = String::new();
+            for c in span.text.chars() {
+                if starts.get(row + 1) == Some(&col) {
+                    split[row].push(Span {
+                        text: std::mem::take(&mut text),
+                        ..span
+                    });
+                    row += 1;
+                }
+                text.push(c);
+                col += 1;
+            }
+            if !text.is_empty() {
+                split[row].push(Span { text, ..span });
+            }
+        }
+        let last = split.len() - 1;
+        for (row, mut spans) in split.into_iter().enumerate() {
+            if !wrap.word && row < last {
+                spans.push(Span {
+                    text: "\\".into(),
+                    face: marker,
+                    fold: false,
+                });
+            }
+            out.push(Line {
+                number: line.number,
+                height: line.height,
+                spans,
+                decorations: line.decorations.clone(),
+            });
+        }
+    }
+    let skip = wrap.skip.min(out.len());
+    *cursor = moved.and_then(|(r, c)| (skip..skip + rows).contains(&r).then(|| (r - skip, c)));
+    out.drain(..skip);
+    out.truncate(rows);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use crate::buffer::{Decoration, Face, Prop};
@@ -371,6 +480,28 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
             .collect()
+    }
+
+    #[test]
+    fn rows_break_after_whitespace_and_one_may_take_the_last_column() {
+        let starts = |text: &str, word| {
+            let chars: Vec<char> = text.chars().collect();
+            super::row_starts(chars.len(), 8, word, |i| chars[i].is_whitespace())
+        };
+        assert_eq!(
+            starts("abcdefgh ij", true),
+            [0, 9],
+            "a space in the last column"
+        );
+        assert_eq!(
+            starts("abcdefgh ", true),
+            [0],
+            "a line ending in it is one row"
+        );
+        assert_eq!(starts("ab cdefghij", true), [0, 3]);
+        assert_eq!(starts("abcdefghij", true), [0, 8], "no whitespace");
+        assert_eq!(starts("abcdefgh ij", false), [0, 8], "at the edge");
+        assert_eq!(starts("", false), [0]);
     }
 
     #[test]
@@ -591,6 +722,7 @@ mod tests {
             None,
             h.core.settings(),
             shown,
+            None,
         );
         let texts = (d.lines.iter())
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
@@ -633,6 +765,7 @@ mod tests {
             None,
             h.core.settings(),
             495..505,
+            None,
         );
         let spans: Vec<_> = (d.lines[0].spans.iter())
             .map(|s| (s.text.as_str(), s.face.fg))

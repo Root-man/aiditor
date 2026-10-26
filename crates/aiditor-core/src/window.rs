@@ -1,7 +1,7 @@
 //! Windows: viewports onto buffers, holding point and mark as markers and the first line shown.
 
 use crate::buffer::{Buffer, BufferId, Buffers, Error, InsertionType, MarkerId};
-use crate::display::Rect;
+use crate::display::{self, Rect};
 
 /// How many marks the ring keeps, Emacs's `mark-ring-max`.
 const MARK_RING_MAX: usize = 16;
@@ -14,10 +14,14 @@ pub struct Window {
     active: bool,
     /// Earlier marks, most recent first.
     ring: Vec<MarkerId>,
-    /// The first line shown; moves only to keep point's line visible.
+    /// The first line shown; moves only to keep point's row visible.
     top: usize,
+    /// The first row shown of `top` when it wraps.
+    top_row: usize,
     /// The lines shown at the last redisplay, 1 before the first.
     rows: usize,
+    /// The columns shown at the last redisplay, which long lines wrap at.
+    cols: usize,
     /// The first column shown of point's line; moves only to keep point visible.
     left: usize,
 }
@@ -35,7 +39,9 @@ impl Window {
             active: false,
             ring: Vec::new(),
             top: 0,
+            top_row: 0,
             rows: 1,
+            cols: 0,
             left: 0,
         }
     }
@@ -48,7 +54,9 @@ impl Window {
     pub fn split(&self, buffers: &mut Buffers) -> Self {
         let w = Window {
             top: self.top,
+            top_row: self.top_row,
             rows: self.rows,
+            cols: self.cols,
             left: self.left,
             ..Window::new(buffers, self.buffer)
         };
@@ -75,9 +83,10 @@ impl Window {
     /// of ours.
     pub fn show(&mut self, buffers: &mut Buffers, buffer: BufferId) {
         self.release(buffers);
-        let rows = self.rows;
+        let (rows, cols) = (self.rows, self.cols);
         *self = Window {
             rows,
+            cols,
             ..Window::new(buffers, buffer)
         };
     }
@@ -156,13 +165,47 @@ impl Window {
         self.active = active;
     }
 
-    /// Moves the first line just far enough that point's line is among the `rows` shown, and returns it.
+    /// Moves the first row just far enough that point's row is among the `rows` shown, and
+    /// returns the first line.
+    // shortcut: rows are counted in buffer chars, so a fold on a wrapped line makes it count more rows than it shows; count display chars when folds get common.
     pub fn scroll(&mut self, buffers: &Buffers, rows: usize) -> usize {
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
-        let (line, _) = buffer.line_col(self.point(buffers)).unwrap_or_default();
+        let (line, col) = buffer.line_col(self.point(buffers)).unwrap_or_default();
         self.rows = rows.max(1);
-        self.top = self.top.clamp(line.saturating_sub(self.rows - 1), line);
+        let starts = |l: usize| match buffer.wrap(self.cols) {
+            Some((width, word)) => {
+                let text = buffer.text().line(l);
+                let end = buffer.char_idx(l, usize::MAX).expect("l is a line");
+                let len = end - buffer.text().line_to_char(l);
+                display::row_starts(len, width, word, |i| text.char(i).is_whitespace())
+            }
+            None => vec![0],
+        };
+        let row = starts(line).partition_point(|&s| s <= col) - 1;
+        // The lowest first row: `rows - 1` rows above point's.
+        let (mut low, mut low_row) = (line, row);
+        for _ in 1..self.rows {
+            match (low_row, low) {
+                (0, 0) => break,
+                (0, _) => (low, low_row) = (low - 1, starts(low - 1).len() - 1),
+                _ => low_row -= 1,
+            }
+        }
+        if self.top_row > 0 && self.top < buffer.len_lines() {
+            self.top_row = self.top_row.min(starts(self.top).len() - 1);
+        }
+        (self.top, self.top_row) = (self.top, self.top_row).clamp((low, low_row), (line, row));
         self.top
+    }
+
+    /// The first row shown of the first line at the last `scroll`.
+    pub fn top_row(&self) -> usize {
+        self.top_row
+    }
+
+    /// Sets the columns long lines wrap at, as shown at this redisplay.
+    pub(crate) fn set_cols(&mut self, cols: usize) {
+        self.cols = cols;
     }
 
     /// Moves point to `char_idx`, centering its line when it is not among the rows shown.
@@ -171,14 +214,14 @@ impl Window {
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
         let (line, _) = buffer.line_col(char_idx)?;
         if !(self.top..self.top + self.rows).contains(&line) {
-            self.top = line.saturating_sub(self.rows / 2);
+            (self.top, self.top_row) = (line.saturating_sub(self.rows / 2), 0);
         }
         Ok(())
     }
 
     /// Shows from `line` on; the next `scroll` moves it if point's line is not shown.
     pub fn set_top(&mut self, line: usize) {
-        self.top = line;
+        (self.top, self.top_row) = (line, 0);
     }
 
     pub fn rows(&self) -> usize {
@@ -411,6 +454,40 @@ mod tests {
             assert_eq!(w.scroll(&buffers, 3), top, "point on line {line}");
         }
         assert_eq!(w.scroll(&buffers, 0), 1);
+    }
+
+    #[test]
+    fn scrolling_counts_the_rows_of_wrapped_lines() {
+        // 5 columns, so 4 chars to a row.
+        let (mut buffers, mut w) = window_on(&"a".repeat(16));
+        w.set_cols(5);
+        w.set_point(&mut buffers, 16).unwrap();
+        assert_eq!(
+            (w.scroll(&buffers, 3), w.top_row()),
+            (0, 1),
+            "end of a 4-row line"
+        );
+        w.set_point(&mut buffers, 5).unwrap();
+        assert_eq!(
+            (w.scroll(&buffers, 3), w.top_row()),
+            (0, 1),
+            "row 1 is shown"
+        );
+        w.set_point(&mut buffers, 0).unwrap();
+        assert_eq!(
+            (w.scroll(&buffers, 3), w.top_row()),
+            (0, 0),
+            "back to row 0"
+        );
+
+        let (mut buffers, mut w) = window_on("aaaaaaaa\nbbbbbbbb\nc");
+        w.set_cols(5);
+        w.set_point(&mut buffers, 18).unwrap();
+        assert_eq!(
+            (w.scroll(&buffers, 3), w.top_row()),
+            (1, 0),
+            "below two 2-row lines"
+        );
     }
 
     #[test]

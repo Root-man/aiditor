@@ -192,6 +192,7 @@ pub(crate) fn window_display(
     let rows = ((height / settings.line_height()) as usize)
         .saturating_sub(1)
         .max(1);
+    window.set_cols(cols);
     // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
     let top = window.scroll(buffers, rows);
     let id = window.buffer();
@@ -205,15 +206,28 @@ pub(crate) fn window_display(
     let mark = window.mark(buffers).filter(|_| window.active());
     // shortcut: point's column is its char column in the buffer line, so a fold before point on its line shifts the scroll; use the display column when folds get common.
     // shortcut: a tab or wide char counts as one column, so the cursor can sit past the edge on such lines; measure widths when the display does.
-    let col = buffer.line_col(point).map_or(0, |(_, c)| c);
+    let wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
+        width,
+        word,
+        skip: window.top_row(),
+    });
+    // A wrapped line never scrolls sideways.
+    let col = match wrap {
+        Some(_) => 0,
+        None => buffer.line_col(point).map_or(0, |(_, c)| c),
+    };
     let left = window.hscroll(col, cols);
     // One more than fits, for the partly visible last column; no width cuts nothing.
     let width = match cols {
         0 => usize::MAX,
         _ => cols.saturating_add(1),
     };
-    let shown = left..left.saturating_add(width);
-    let mut display = display::build(buffer, top, rows, point, mark, settings, shown);
+    // Wrapped, a line is laid out only through the rows the window can show.
+    let shown = match wrap {
+        Some(w) => 0..(w.skip + rows + 1).saturating_mul(cols),
+        None => left..left.saturating_add(width),
+    };
+    let mut display = display::build(buffer, top, rows, point, mark, settings, shown, wrap);
     if let Some(terminal) = buffer.terminal().filter(|_| !buffer.copy_mode()) {
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }
@@ -423,7 +437,7 @@ mod tests {
     fn point_s_line_scrolls_sideways_to_keep_point_visible() {
         let long: String = (0..100).map(|i| char::from(b'a' + i % 26)).collect();
         let mut h = on(&format!("{long}\n{long}\n{long}"));
-        h.keys("C-n");
+        h.keys("M-x toggle-truncate-lines RET C-n");
         // 40 columns of 8 px cells.
         let (width, height) = (320., 600.);
         h.keys("C-e");
@@ -445,6 +459,7 @@ mod tests {
         let mut h = on(&format!("{long}\nnext"));
         let id = h.core.windows.window.buffer();
         let buffer = h.core.buffers.get_mut(id).unwrap();
+        buffer.truncate_lines = true;
         let rule = crate::buffer::Prop::Line(crate::buffer::Decoration::Rule(0x888888));
         buffer.add_property(9_990..9_995, rule).unwrap();
         // Before any resize the frame has no size: one row and no width.
@@ -475,6 +490,113 @@ mod tests {
         let lines = &frame.windows[0].display.lines;
         assert_eq!(shown(&frame).0, [&long[..21]]);
         assert_eq!((lines[0].number, lines.len()), (0, 1));
+    }
+
+    #[test]
+    fn long_lines_wrap_at_the_edge_in_code_and_at_words_in_prose() {
+        let mut h = Harness::new(&[
+            ("a.rs", "abcdefghij\nabcd"),
+            ("a.md", "one two three"),
+            ("b.md", "abcdefghij"),
+        ]);
+        // 5 columns of 8 px cells, 4 chars to a row.
+        h.open("a.rs");
+        let frame = h.frame(40., 600.);
+        assert_eq!(
+            shown(&frame).0,
+            ["abcd\\", "efgh\\", "ij", "abcd"],
+            "a line that fits has no marker"
+        );
+        let lines = &frame.windows[0].display.lines;
+        let numbers: Vec<_> = lines.iter().map(|l| l.number).collect();
+        assert_eq!(numbers, [0, 0, 0, 1]);
+        let comment = h.core.settings().theme.syntax.get("comment").copied();
+        let marker = lines[0].spans.last().unwrap();
+        assert_eq!((marker.text.as_str(), marker.face.fg), ("\\", comment));
+        h.keys("C-f C-f C-f C-f C-f");
+        assert_eq!(
+            shown(&h.frame(40., 600.)).1,
+            Some((1, 1)),
+            "the cursor on row 1"
+        );
+        h.keys("C-f C-f C-f");
+        assert_eq!(
+            shown(&h.frame(40., 600.)).1,
+            Some((2, 0)),
+            "point at a break"
+        );
+        // 9 columns, 8 chars to a row.
+        h.open("a.md");
+        assert_eq!(shown(&h.frame(72., 600.)).0, ["one two ", "three"]);
+        h.open("b.md");
+        assert_eq!(
+            shown(&h.frame(40., 600.)).0,
+            ["abcd", "efgh", "ij"],
+            "a long word"
+        );
+    }
+
+    #[test]
+    fn a_long_wrapped_line_is_laid_out_only_through_the_shown_rows() {
+        let long: String = (0..10_000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let mut h = Harness::new(&[("a.rs", &long)]);
+        h.open("a.rs").keys("M->");
+        let height = 3. * h.core.settings().line_height();
+        // 21 columns, 20 chars to a row; 500 rows, the last one holding point.
+        let (lines, cursor) = shown(&h.frame(168., height));
+        let rows = [format!("{}\\", &long[9_960..9_980]), long[9_980..].into()];
+        assert_eq!((lines, cursor), (rows.to_vec(), Some((1, 20))));
+        assert_eq!(h.core.windows.window.top_row(), 498);
+    }
+
+    #[test]
+    fn a_fold_on_a_wrapped_line_is_split_with_it() {
+        let mut h = Harness::new(&[("a.rs", "abcdefghij")]);
+        h.open("a.rs");
+        let id = h.core.windows.window.buffer();
+        let fold = crate::buffer::Prop::Invisible("…".into());
+        (h.core.buffers.get_mut(id).unwrap().add_property(1..3, fold)).unwrap();
+        let frame = h.frame(40., 600.);
+        assert_eq!(shown(&frame).0, ["a…de\\", "fghi\\", "j"]);
+        assert!(frame.windows[0].display.lines[0].spans[1].fold);
+    }
+
+    #[test]
+    fn toggle_truncate_lines_switches_between_wrapping_and_truncation() {
+        let mut h = on("abcdefghij");
+        h.keys("M-x toggle-truncate-lines RET");
+        let frame = h.frame(40., 600.);
+        assert_eq!(
+            frame.message.as_deref(),
+            Some("Truncate long lines enabled")
+        );
+        assert_eq!(shown(&frame).0, ["abcdef"], "cut at the edge");
+        h.keys("M-x toggle-truncate-lines RET");
+        let frame = h.frame(40., 600.);
+        assert_eq!(
+            frame.message.as_deref(),
+            Some("Truncate long lines disabled")
+        );
+        assert_eq!(
+            shown(&frame).0,
+            ["abcd", "efgh", "ij"],
+            "a text file wraps at words"
+        );
+    }
+
+    #[test]
+    fn a_window_inside_a_wrapped_line_shows_from_its_row() {
+        // 4 rows of 4 chars, as a text file, in a window of 2 rows and the mode line.
+        let mut h = on(&"abcd".repeat(4));
+        let height = 3. * h.core.settings().line_height();
+        h.keys("M->");
+        let frame = h.frame(40., height);
+        assert_eq!(
+            shown(&frame),
+            (vec!["abcd".into(), "abcd".into()], Some((1, 4)))
+        );
     }
 
     #[test]
