@@ -178,7 +178,10 @@ impl Window {
         for _ in 1..self.rows {
             match (low_row, low) {
                 (0, 0) => break,
-                (0, _) => (low, low_row) = (low - 1, starts(low - 1).len() - 1),
+                (0, _) => {
+                    low = buffer.unfolded_line(low - 1, false);
+                    low_row = starts(low).len() - 1;
+                }
                 _ => low_row -= 1,
             }
         }

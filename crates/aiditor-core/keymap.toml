@@ -129,6 +129,7 @@
 "RET" = "agent-send-input"
 "S-RET" = "newline"
 "C-c C-c" = "agent-cancel"
+"TAB" = "agent-toggle-tool-call"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"

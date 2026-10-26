@@ -661,6 +661,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_send_input(),
         },
         Command {
+            name: "agent-toggle-tool-call",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_toggle_tool_call(),
+        },
+        Command {
             name: "agent-cancel",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.agent_cancel(),

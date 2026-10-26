@@ -47,12 +47,15 @@ impl Ctx<'_> {
             if n > 0 && row + 1 < starts.len() {
                 row += 1;
             } else if n > 0 && line < last {
-                (line, row) = (line + 1, 0);
+                (line, row) = (self.core.current().unfolded_line(line + 1, true), 0);
+                if line > last {
+                    return self.goto_clamped(i64::MAX);
+                }
                 starts = self.row_starts(line);
             } else if n < 0 && row > 0 {
                 row -= 1;
             } else if n < 0 && line > 0 {
-                line -= 1;
+                line = self.core.current().unfolded_line(line - 1, false);
                 starts = self.row_starts(line);
                 row = starts.len() - 1;
             } else {

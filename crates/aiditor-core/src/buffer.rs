@@ -283,7 +283,7 @@ pub struct Buffer {
     // shortcut: every edit walks all markers, two per property, so a long session transcript holds thousands; index them when typing in one lags.
     markers: BTreeMap<MarkerId, (usize, InsertionType)>,
     next_marker: u64,
-    /// Text properties as (start, end) marker pairs, oldest first.
+    /// Text properties as (start, end) marker pairs, in order while sorted, else oldest first.
     props: Vec<(MarkerId, MarkerId, Prop)>,
     /// Starts and ends each ascend from one property to the next, which edits keep, so
     /// `properties_near` can bisect.
@@ -445,12 +445,23 @@ impl Buffer {
     /// Inserts `text` at `at`, before the prompt boundary, past read-only and without undo,
     /// moving the undo history's positions from `at` on along with the text.
     pub(crate) fn insert_output(&mut self, at: usize, text: &str) {
+        self.replace_output(at..at, text);
+    }
+
+    /// Replaces `range` with `text` as `insert_output` inserts, the undo history's positions
+    /// from the range's end on moving by the change in length.
+    pub(crate) fn replace_output(&mut self, range: Range<usize>, text: &str) {
         let (read_only, prompt) = (std::mem::take(&mut self.read_only), self.prompt.take());
-        self.raw_insert(at, text)
+        (self.raw_delete(range.clone()))
+            .and_then(|()| self.raw_insert(range.start, text))
             .expect("output goes inside the text");
         (self.read_only, self.prompt) = (read_only, prompt);
-        let n = text.chars().count();
-        let shift = |pos: &mut usize| *pos += n * usize::from(*pos >= at);
+        let (at, n) = (range.end, text.chars().count());
+        let shift = |pos: &mut usize| {
+            if *pos >= at {
+                *pos = *pos - range.len() + n;
+            }
+        };
         let h = &mut self.history;
         h.before.as_mut().map(shift);
         for group in h.undo.iter_mut().chain(&mut h.redo) {
@@ -642,14 +653,24 @@ impl Buffer {
         if range.start > range.end || range.end > self.len_chars() {
             return Err(Error::OutOfRange);
         }
-        if let Some(&(start, end, _)) = self.props.last()
-            && (self.marker(start) > Some(range.start) || self.marker(end) > Some(range.end))
-        {
-            self.props_sorted = false;
+        let at = |id| {
+            self.marker(id)
+                .expect("a property's markers live as long as it")
+        };
+        let mut i = self.props.len();
+        if self.props_sorted {
+            // Its sorted place, which keeps the order if the ends around it still ascend.
+            i = (self.props)
+                .partition_point(|&(s, e, _)| (at(s), at(e)) <= (range.start, range.end));
+            let before = i.checked_sub(1).map(|j| at(self.props[j].1));
+            let after = self.props.get(i).map(|p| at(p.1));
+            if before > Some(range.end) || after.is_some_and(|e| e < range.end) {
+                (self.props_sorted, i) = (false, self.props.len());
+            }
         }
         let start = self.add_marker(range.start, InsertionType::Advance)?;
         let end = self.add_marker(range.end, InsertionType::Stay)?;
-        self.props.push((start, end, prop));
+        self.props.insert(i, (start, end, prop));
         Ok(())
     }
 
@@ -667,8 +688,8 @@ impl Buffer {
         });
     }
 
-    /// The non-empty property ranges touching `range`, from at its start to at its end, oldest
-    /// first.
+    /// The non-empty property ranges touching `range`, from at its start to at its end, in
+    /// stored order.
     pub fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
         let touches = |r: &Range<usize>| r.end >= range.start && r.start <= range.end;
         if !self.props_sorted {
@@ -686,12 +707,28 @@ impl Buffer {
             .collect()
     }
 
+    /// `line`, or when it starts inside invisible text, the line after that fold (`down`) or the
+    /// fold's first line, as Emacs's `line-move-ignore-invisible`.
+    pub(crate) fn unfolded_line(&self, line: usize, down: bool) -> usize {
+        if !self.has_folds() {
+            return line;
+        }
+        let (text, pos) = (self.text(), self.text().line_to_char(line));
+        let fold = (self.properties_near(pos..pos).into_iter())
+            .find(|(r, p)| matches!(p, Prop::Invisible(_)) && r.start < pos && pos < r.end);
+        match fold {
+            Some((r, _)) if down => text.char_to_line(r.end) + 1,
+            Some((r, _)) => text.char_to_line(r.start),
+            None => line,
+        }
+    }
+
     /// Whether any property hides text.
     pub(crate) fn has_folds(&self) -> bool {
         (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_)))
     }
 
-    /// The non-empty property ranges, oldest first.
+    /// The non-empty property ranges, in stored order.
     pub fn properties(&self) -> impl Iterator<Item = (Range<usize>, &Prop)> {
         self.props.iter().filter_map(|(s, e, prop)| {
             let range = self.marker(*s)?..self.marker(*e)?;
@@ -1088,6 +1125,10 @@ mod tests {
         assert_eq!(b.text(), "hi\n\n> ab");
         assert_eq!(b.redo(), Some(7));
         assert_eq!(b.text(), "hi\n\n> a");
+        // Replacing output with longer text moves the history with the prompt area.
+        b.replace_output(0..2, "hello");
+        assert_eq!(b.undo(), Some(11));
+        assert_eq!(b.text(), "hello\n\n> ab");
     }
 
     #[test]
@@ -1308,6 +1349,11 @@ mod tests {
             b.properties_near(r).into_iter().map(|(r, _)| r).collect()
         };
         assert_eq!(near(b, 4..4), [1..6, 4..6]);
+        // One added in the middle goes to its place and keeps the order.
+        b.add_property(3..6, face.clone()).unwrap();
+        assert!(b.props_sorted);
+        assert_eq!(near(b, 3..3), [1..3, 1..6, 3..6]);
+        b.remove_properties(3..6);
         b.remove_properties(0..6);
         assert_eq!(
             near(b, 0..10),

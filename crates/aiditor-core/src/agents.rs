@@ -2,12 +2,15 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    ContentBlock, NewSessionResponse, PromptRequest, SessionNotification, SessionUpdate, StopReason,
+    ContentBlock, NewSessionResponse, PromptRequest, SessionNotification, SessionUpdate,
+    StopReason, ToolCall, ToolCallContent, ToolCallId, ToolCallUpdate,
 };
+use serde_json::Value;
 
+use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::buffer::{Buffer, BufferId, InsertionType, MarkerId};
+use crate::buffer::{self, Buffer, BufferId, Decoration, Face, InsertionType, MarkerId, Prop};
 use crate::command::Args;
 use crate::markdown;
 use crate::project::ProjectId;
@@ -34,11 +37,27 @@ pub(crate) struct Session {
     /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
     /// `session/update`s in order, for the session buffer.
+    // shortcut: tool calls' raw input and output are kept here and merged in `tools`, so twice; drop rendered updates when sessions get long.
     pub(crate) updates: Vec<SessionNotification>,
     /// A `session/prompt` waits for its answer.
     turn: bool,
     /// The last block above the prompt line, while an agent message or thought streams into it.
     stream: Option<Stream>,
+    /// The tool calls shown, by id.
+    tools: HashMap<ToolCallId, Tool>,
+}
+
+/// A tool call's block: a header line, then its content when it has any.
+struct Tool {
+    /// The call, with every update merged in.
+    call: ToolCall,
+    /// Where the block starts.
+    start: MarkerId,
+    /// The header's and the whole block's lengths in chars, the blank line after it not counted.
+    header: usize,
+    len: usize,
+    /// Whether its content shows.
+    open: bool,
 }
 
 /// A block being streamed.
@@ -80,6 +99,76 @@ impl Core {
             thought,
             dirty: true,
         });
+    }
+
+    /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
+    fn tool_update(&mut self, id: AgentId, update: ToolCallUpdate) {
+        let known = (self.agents.get(&id))
+            .and_then(|s| s.tools.get(&update.tool_call_id))
+            .map(|t| t.call.clone());
+        let call = match known {
+            Some(mut call) => {
+                call.update(update.fields);
+                call
+            }
+            None => match ToolCall::try_from(update) {
+                Ok(call) => call,
+                Err(_) => return,
+            },
+        };
+        self.show_tool(id, call);
+    }
+
+    /// Puts `call` above session `id`'s prompt line as a new block, or rewrites its block in
+    /// place, keeping whether it is folded.
+    fn show_tool(&mut self, id: AgentId, call: ToolCall) {
+        let header = tool_header(&call).0;
+        let content = tool_content(&call);
+        let text = match content.is_empty() {
+            true => header.clone(),
+            false => format!("{header}\n{content}"),
+        };
+        let (header, len) = (header.chars().count(), text.chars().count());
+        let known =
+            (self.agents.get(&id)).is_some_and(|s| s.tools.contains_key(&call.tool_call_id));
+        if !known {
+            self.end_stream(id);
+        }
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let tool = match session.tools.get_mut(&call.tool_call_id) {
+            Some(tool) => {
+                let start = buffer.marker(tool.start).expect("live while shown");
+                let old = buffer.text().slice(start..start + tool.len).to_string();
+                buffer.remove_properties(start..start + tool.len);
+                // Line by line, so point on an unchanged line stays.
+                for (r, new) in buffer::diff(&old, &text).into_iter().rev() {
+                    buffer.replace_output(start + r.start..start + r.end, &new);
+                }
+                (tool.call, tool.header, tool.len) = (call, header, len);
+                tool
+            }
+            None => {
+                let end = buffer.prompt_start() - PROMPT.len();
+                buffer.insert_output(end, &format!("{text}\n\n"));
+                let tool = Tool {
+                    start: (buffer.add_marker(end, InsertionType::Stay)).expect("in the text"),
+                    call,
+                    header,
+                    len,
+                    open: false,
+                };
+                session
+                    .tools
+                    .entry(tool.call.tool_call_id.clone())
+                    .or_insert(tool)
+            }
+        };
+        render_tool(buffer, tool, &self.settings.theme);
     }
 
     /// Renders session `id`'s streamed block if chunks arrived since it was last rendered.
@@ -216,6 +305,7 @@ impl Ctx<'_> {
             updates: Vec::new(),
             turn: false,
             stream: None,
+            tools: HashMap::new(),
         };
         core.agents.insert(id, session);
         core.echo(format!("Starting {name}..."));
@@ -291,7 +381,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// Keeps the update, and puts a text message or thought chunk above the prompt line.
+    /// Keeps the update, and puts a text message or thought chunk or a tool call above the
+    /// prompt line.
     pub(crate) fn agent_update(&mut self, id: AgentId, update: SessionNotification) {
         let core = &mut *self.core;
         let Some(session) = core.agents.get_mut(&id).filter(|s| !s.ended) else {
@@ -306,9 +397,20 @@ impl Ctx<'_> {
             ContentBlock::Text(text) => Some((text.text.clone(), thought)),
             _ => None,
         });
+        let tool = match &update.update {
+            SessionUpdate::ToolCall(call) => Some(Ok(call.clone())),
+            SessionUpdate::ToolCallUpdate(update) => Some(Err(update.clone())),
+            _ => None,
+        };
         session.updates.push(update);
         if let Some((text, thought)) = text {
             core.output(id, &text, Some(thought));
+        }
+        match tool {
+            // A `tool_call` replaces the call with its id.
+            Some(Ok(call)) => core.show_tool(id, call),
+            Some(Err(update)) => core.tool_update(id, update),
+            None => {}
         }
     }
 
@@ -353,6 +455,34 @@ impl Ctx<'_> {
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
         self.goto(end)
+    }
+
+    /// `agent-toggle-tool-call`: shows or hides the content of the tool call whose header point
+    /// is on, or hides that of the open call point is in, moving point to its header.
+    pub(crate) fn agent_toggle_tool_call(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let point = core.point();
+        let buffer = core.windows.window.buffer();
+        let session = (core.agents.values_mut()).find(|s| s.buffer == buffer);
+        let b = core
+            .buffers
+            .get_mut(buffer)
+            .expect("current buffer is live");
+        let tool = (session.into_iter().flat_map(|s| s.tools.values_mut()))
+            .find(|t| {
+                let end = if t.open { t.len } else { t.header };
+                (b.marker(t.start)).is_some_and(|s| (s..=s + end).contains(&point))
+            })
+            .ok_or("No tool call here")?;
+        // Without content there is nothing to show, so it stays folded for when content comes.
+        tool.open = !tool.open && tool.len > tool.header;
+        let start = b.marker(tool.start).expect("live while shown");
+        b.remove_properties(start..start + tool.len);
+        render_tool(b, tool, &core.settings.theme);
+        if point > start + tool.header {
+            return self.goto(start);
+        }
+        Ok(())
     }
 
     /// `agent-cancel`: sends `session/cancel` while a turn runs.
@@ -412,15 +542,132 @@ fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool, theme: &Theme
     }
 }
 
+/// A tool call's header line, `<title> (<kind>, <status>)` with the title's first line, and the
+/// title part's length in chars.
+fn tool_header(call: &ToolCall) -> (String, usize) {
+    // The ACP names, as `in_progress`.
+    let name = |v: Result<Value, _>| match v {
+        Ok(Value::String(name)) => name,
+        _ => "?".into(),
+    };
+    let mut title = call.title.lines().next().unwrap_or_default().to_string();
+    if call.title.trim_end().contains('\n') {
+        title.push_str(" …");
+    }
+    let suffix = format!(
+        " ({}, {})",
+        name(serde_json::to_value(call.kind)),
+        name(serde_json::to_value(call.status))
+    );
+    (format!("{title}{suffix}"), title.chars().count())
+}
+
+/// Everything a tool call carries, uncut, as markdown: its raw input, its content items, and its
+/// raw output when no item carries the result.
+fn tool_content(call: &ToolCall) -> String {
+    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
+    let mut parts = Vec::new();
+    if let Some(input) = &call.raw_input {
+        parts.push(format!("Input:\n{}", fenced("json", &pretty(input))));
+    }
+    for item in &call.content {
+        parts.push(match item {
+            ToolCallContent::Content(c) => match &c.content {
+                ContentBlock::Text(text) => text.text.clone(),
+                ContentBlock::ResourceLink(link) => link.uri.clone(),
+                other => match serde_json::to_value(other) {
+                    Ok(v) => format!("[{}]", v["type"].as_str().unwrap_or("?")),
+                    Err(_) => "[?]".into(),
+                },
+            },
+            ToolCallContent::Diff(d) => {
+                let old = d.old_text.as_deref().unwrap_or_default();
+                let path = d.path.display().to_string();
+                let diff = similar::TextDiff::from_lines(old, &d.new_text);
+                let diff = diff.unified_diff().header(&path, &path).to_string();
+                format!("{path}\n{}", fenced("diff", &diff))
+            }
+            ToolCallContent::Terminal(t) => format!("Terminal {}", t.terminal_id),
+            _ => "[?]".into(),
+        });
+    }
+    if let (true, Some(output)) = (call.content.is_empty(), &call.raw_output) {
+        let text = match output {
+            Value::String(text) => text.clone(),
+            // Claude's adapter passes a tool result's text blocks through.
+            Value::Array(items)
+                if !items.is_empty() && items.iter().all(|i| i["text"].is_string()) =>
+            {
+                let texts: Vec<_> = items.iter().filter_map(|i| i["text"].as_str()).collect();
+                texts.join("\n")
+            }
+            other => pretty(other),
+        };
+        parts.push(format!("Output:\n{}", fenced("", &text)));
+    }
+    parts.join("\n\n").trim_end_matches('\n').to_string()
+}
+
+/// `text` in a fenced code block whose fence is longer than any run of backticks in it.
+fn fenced(lang: &str, text: &str) -> String {
+    let run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(run.max(2) + 1);
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    format!("{fence}{lang}\n{text}\n{fence}")
+}
+
+/// Renders a tool call's block, whose properties were removed: its header with a rule beside it,
+/// then its content as markdown with a rule beside each line, or folded behind ` …`. No property
+/// contains another's end, so starts and ends ascend.
+fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
+    let start = buffer.marker(tool.start).expect("live while shown");
+    let (header, title) = tool_header(&tool.call);
+    let rule = Prop::Line(Decoration::Rule(theme.dim));
+    let dim = Face {
+        fg: Some(theme.dim),
+        ..Face::default()
+    };
+    // A rule on one char touches only its line and sorts before the faces on it.
+    let mut props = vec![(0..1, rule.clone())];
+    let title: String = header.chars().take(title).collect();
+    props.extend(markdown::render(&title, false, theme));
+    props.push((title.chars().count()..tool.header, Prop::Face(dim)));
+    let body = tool.header + 1..tool.len;
+    if tool.open && !body.is_empty() {
+        let content = buffer
+            .text()
+            .slice(start + body.start..start + body.end)
+            .to_string();
+        let shifted = |(r, p): (Range<usize>, Prop)| (body.start + r.start..body.start + r.end, p);
+        props.extend(
+            markdown::render(&content, false, theme)
+                .into_iter()
+                .map(shifted),
+        );
+        let mut line = body.start;
+        for l in content.split('\n') {
+            props.push((line..line + 1, rule.clone()));
+            line += l.chars().count() + 1;
+        }
+    } else if !body.is_empty() {
+        props.push((tool.header..tool.len, Prop::Invisible(" …".into())));
+    }
+    props.sort_by_key(|(r, _)| (r.start, r.end));
+    for (r, prop) in props {
+        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
-        ContentChunk, SessionMode, SessionModeState, SessionUpdate,
+        ContentChunk, SessionMode, SessionModeState, SessionUpdate, ToolCallStatus,
+        ToolCallUpdateFields, ToolKind,
     };
 
     use super::*;
     use crate::Msg;
-    use crate::buffer::{Decoration, Face, Prop};
+    use crate::buffer::Prop;
     use crate::harness::{Harness, listed, name};
     use crate::settings::Agent;
 
@@ -907,6 +1154,203 @@ mod tests {
         assert_eq!(
             h.clipboard.as_deref(),
             Some("Some **bold** [docs](https://x.dev).")
+        );
+    }
+
+    fn tool(h: &mut Harness, call: ToolCall) {
+        update(h, 0, SessionUpdate::ToolCall(call));
+    }
+
+    fn tool_update(h: &mut Harness, id: &'static str, fields: ToolCallUpdateFields) {
+        update(
+            h,
+            0,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id, fields)),
+        );
+    }
+
+    /// The text of each display line of a frame `rows` lines high.
+    fn shown(h: &mut Harness, rows: usize) -> Vec<String> {
+        let height = (rows + 1) as f32 * h.core.settings().line_height();
+        let frame = h.frame(800., height);
+        (frame.windows[0].display.lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    }
+
+    /// An `execute` call `t` titled `` `ls` `` with the input `{"command":"ls"}`.
+    fn ls() -> ToolCall {
+        ToolCall::new("t", "`ls`")
+            .kind(ToolKind::Execute)
+            .raw_input(serde_json::json!({"command": "ls"}))
+    }
+
+    const LS_INPUT: &str = "Input:\n```json\n{\n  \"command\": \"ls\"\n}\n```";
+
+    #[test]
+    fn a_tool_call_starts_folded_and_updates_in_place() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, "Let me look.");
+        tool(&mut h, ls());
+        assert_eq!(
+            h.core.text(),
+            format!("> a\n\nLet me look.\n\n`ls` (execute, pending)\n{LS_INPUT}\n\n> ")
+        );
+        assert_eq!(
+            shown(&mut h, 10)[..5],
+            ["> a", "", "Let me look.", "", "ls (execute, pending) …"]
+        );
+        // A message after the call, then updates: the call's block changes where it is.
+        chunk(&mut h, "Done.");
+        let status = |s| ToolCallUpdateFields::new().status(s);
+        tool_update(&mut h, "t", status(ToolCallStatus::InProgress));
+        tool_update(
+            &mut h,
+            "t",
+            status(ToolCallStatus::Completed).raw_output(serde_json::json!("a.rs\nb.rs\n")),
+        );
+        assert_eq!(
+            h.core.text(),
+            format!(
+                "> a\n\nLet me look.\n\n`ls` (execute, completed)\n{LS_INPUT}\n\n\
+                 Output:\n```\na.rs\nb.rs\n```\n\nDone.\n\n> "
+            )
+        );
+        assert_eq!(
+            shown(&mut h, 10)[4..7],
+            ["ls (execute, completed) …", "", "Done."]
+        );
+        // Props stay in order, so the display can bisect them.
+        let props: Vec<_> = h.core.current().properties().map(|(r, _)| r).collect();
+        assert!(
+            props
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
+        );
+        // The header carries the rule, the suffix is dim.
+        let frame = h.frame(800., 600.);
+        let header = &frame.windows[0].display.lines[4];
+        let dim = h.core.settings().theme.dim;
+        assert_eq!(header.decorations, [Decoration::Rule(dim)]);
+        let suffix = header
+            .spans
+            .iter()
+            .find(|s| s.text.contains("execute"))
+            .unwrap();
+        assert_eq!(suffix.face.fg, Some(dim));
+    }
+
+    #[test]
+    fn a_tool_call_without_content_is_its_header() {
+        let mut h = session();
+        tool(&mut h, ToolCall::new("t", "Think"));
+        assert_eq!(h.core.text(), "Think (other, pending)\n\n> ");
+        assert_eq!(shown(&mut h, 5)[0], "Think (other, pending)");
+        // An update for an unknown call without a title shows nothing.
+        let fields = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
+        tool_update(&mut h, "u", fields.clone());
+        assert_eq!(h.core.text(), "Think (other, pending)\n\n> ");
+        // With a title it starts a block.
+        tool_update(&mut h, "u", fields.title("Grep".to_string()));
+        assert!(h.core.text().ends_with("Grep (other, failed)\n\n> "));
+    }
+
+    #[test]
+    fn tab_on_a_header_shows_and_hides_its_content() {
+        let mut h = session();
+        tool(&mut h, ls());
+        h.keys("TAB");
+        assert_eq!(h.core.message(), Some("No tool call here"));
+        h.keys("M-< C-e TAB");
+        let open = [
+            "ls (execute, pending)",
+            "Input:",
+            "",
+            "{",
+            "  \"command\": \"ls\"",
+            "}",
+            "",
+            "",
+            "> ",
+        ];
+        assert_eq!(shown(&mut h, 10)[..9], open);
+        let frame = h.frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        let rule = Decoration::Rule(h.core.settings().theme.dim);
+        assert!(
+            (0..7).all(|i| lines[i].decorations.contains(&rule)),
+            "{lines:?}"
+        );
+        assert!(!lines[7].decorations.contains(&rule));
+        // An update keeps it open.
+        let output = ToolCallUpdateFields::new().raw_output(serde_json::json!("a.rs"));
+        tool_update(&mut h, "t", output);
+        assert_eq!(shown(&mut h, 12)[8..12], ["Output:", "", "a.rs", ""]);
+        // TAB inside the open content folds it, point going to the header.
+        h.keys("C-n C-n C-n TAB");
+        assert_eq!(shown(&mut h, 5)[..3], ["ls (execute, pending) …", "", "> "]);
+        assert_eq!(h.core.point(), 0);
+    }
+
+    #[test]
+    fn line_motion_and_scrolling_pass_a_folded_call() {
+        let mut h = session();
+        let output: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        tool(&mut h, ls().raw_output(serde_json::json!(output)));
+        // The window keeps the header in view above the prompt line.
+        assert_eq!(shown(&mut h, 5)[..3], ["ls (execute, pending) …", "", "> "]);
+        h.keys("M-< C-n");
+        assert_eq!(h.core.current().line_col(h.core.point()), Ok((61, 0)));
+        h.keys("C-p");
+        assert_eq!(h.core.point(), 0);
+        h.keys("TAB C-n");
+        assert_eq!(h.core.current().line_col(h.core.point()), Ok((1, 0)));
+        // Open, all of the output shows.
+        let lines = shown(&mut h, 70);
+        assert!((0..50).all(|i| lines.contains(&format!("line {i}"))));
+    }
+
+    #[test]
+    fn a_repeated_tool_call_replaces_it_and_point_stays_on_its_header() {
+        let mut h = session();
+        tool(&mut h, ls());
+        h.keys("M-< C-e TAB");
+        tool(&mut h, ls().status(ToolCallStatus::Completed));
+        assert_eq!(h.core.text().matches("`ls`").count(), 1);
+        assert_eq!(shown(&mut h, 3)[..2], ["ls (execute, completed)", "Input:"]);
+        assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
+        // TAB on a call without content leaves it folded.
+        tool(&mut h, ToolCall::new("e", "Empty"));
+        h.keys("M-> C-p C-p TAB");
+        let content = ToolCallUpdateFields::new().raw_output(serde_json::json!("x"));
+        tool_update(&mut h, "e", content);
+        assert!(shown(&mut h, 20).contains(&"Empty (other, pending) …".to_string()));
+    }
+
+    #[test]
+    fn tool_content_is_uncut_in_long_enough_fences() {
+        let mut call = ToolCall::new("t", "Run\nmore");
+        assert_eq!(tool_header(&call), ("Run … (other, pending)".into(), 5));
+        // A list of text blocks shows as their text; other output as JSON.
+        call.raw_output = Some(serde_json::json!([{"type": "text", "text": "x ``` y"}]));
+        assert_eq!(tool_content(&call), "Output:\n````\nx ``` y\n````");
+        call.raw_output = Some(serde_json::json!({"code": 0}));
+        assert_eq!(
+            tool_content(&call),
+            "Output:\n```\n{\n  \"code\": 0\n}\n```"
+        );
+        // Content items replace the raw output.
+        call.content = vec![
+            "**hi**".into(),
+            ToolCallContent::Diff(
+                agent_client_protocol_schema::v1::Diff::new("a.rs", "b\n")
+                    .old_text("a\n".to_string()),
+            ),
+        ];
+        assert_eq!(
+            tool_content(&call),
+            "**hi**\n\na.rs\n```diff\n--- a.rs\n+++ a.rs\n@@ -1 +1 @@\n-a\n+b\n```"
         );
     }
 
