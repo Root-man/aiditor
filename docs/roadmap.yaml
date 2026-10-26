@@ -1166,6 +1166,43 @@ milestones:
         design: "#acp-integration-and-session-management"
         body: |
           Default mode per agent from config, a key to cycle modes, permission requests answered inline in the session buffer. Break down when M3 starts.
+        tasks:
+          - key: m3-modes-config
+            title: "Session mode from config options, started in default_mode"
+            body: |
+              Take the session's mode from ACP session config options instead of session modes: the mode is the first option in `session/new`'s `configOptions` with category `mode`, and an agent without one has no mode (both adapters send one; Codex's plan mode and model picking exist only as config options, so they become one more `configId` later). The mode line and the `session ready (modes: ...)` message read that option and follow `config_option_update` instead of `current_mode_update`. After `session/new`, if the agent's `default_mode` is one of the option's values and not the current one, the core sends `session/set_config_option` through a new `AgentOp`; an unknown value is noted in `*Messages*` and the session stays as it is. The fake agent advertises a `mode` option (`auto`, `plan`), answers `session/set_config_option` and sends `config_option_update`. Record config options over modes, and why, in docs/editor.md.
+            acceptance:
+              - "A session whose agent has `default_mode` set starts in that mode, shown in the mode line"
+              - "An unknown `default_mode` is noted in `*Messages*` and leaves the mode alone"
+              - "The mode line follows `config_option_update`"
+              - "Config options over modes, and why, recorded in docs/editor.md"
+            blocked_by: [m3-session-plan]
+          - key: m3-modes-cycle
+            title: "Cycle the session's mode with S-TAB"
+            body: |
+              `agent-cycle-mode`, bound to `S-TAB` in `agent-session-mode` (Claude Code's shift-tab), sets the mode option to the next of all its values, wrapping around, with `session/set_config_option`. It echoes `<agent> has no modes` for an agent without a mode option, and the usual not ready or ended message before `session/new` is answered or after an exit.
+            acceptance:
+              - "`S-TAB` moves the fake agent's session through every mode and back, and the mode line follows"
+              - "Keys and behaviour recorded in docs/editor.md"
+            blocked_by: [m3-modes-config]
+          - key: m3-permission-prompt
+            title: "Answer permission requests inline in the session buffer"
+            body: |
+              Replace the refusal of `session/request_permission` with a prompt: a block above the prompt line with the tool call's title and a numbered line per option (its name and `dim` kind). `C-c C-y` answers the oldest pending request with its first `allow_once` option and `C-c C-n` with its first `reject_once` option, from anywhere in the buffer; `RET` on an option line picks that option. Answered, the block becomes one line saying what was chosen and for which tool. Several requests can be pending at once. Other agent requests are still refused. The transcript replay test asserts that each recorded permission request gets an answer.
+            acceptance:
+              - "A permission request from the fake agent shows inline, and `C-c C-y`, `C-c C-n` and `RET` on an option send the matching outcome"
+              - "Two pending requests are answered oldest first"
+              - "The replay test asserts the recorded permission requests are answered"
+              - "Keys and behaviour recorded in docs/editor.md"
+            blocked_by: [m3-session-prompt]
+          - key: m3-permission-settle
+            title: "Settle pending permission requests on cancel and exit"
+            body: |
+              ACP requires the client to answer pending permission requests with `Cancelled` after `session/cancel`. `C-c C-c` does so for every pending request of the session and marks their blocks cancelled; a request arriving after the session ended, or while its buffer is being killed, is answered `Cancelled` and not shown; an agent exit drops its pending requests.
+            acceptance:
+              - "`C-c C-c` during a pending permission request answers it `Cancelled` and ends the turn"
+              - "No permission request is left unanswered while its agent lives"
+            blocked_by: [m3-permission-prompt]
       - key: m3-agent-terminals
         title: "Agent terminals as terminal buffers"
         labels: [acp, terminal]
