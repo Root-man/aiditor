@@ -35,8 +35,10 @@ pub(crate) struct Session {
     project: ProjectId,
     /// The spawn, held while the project's environment is being captured.
     held: Option<AgentOp>,
-    /// The `session/new` answer, once the agent is ready.
+    /// The `session/new` answer, once the agent is ready, its config options the latest reported.
     pub(crate) session: Option<NewSessionResponse>,
+    /// The mode value last sent with `session/set_config_option`, for a refusal's note.
+    mode_sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
     /// `session/update`s in order, for the session buffer.
@@ -365,6 +367,7 @@ impl Ctx<'_> {
             project,
             held: Some(spawn),
             session: None,
+            mode_sent: None,
             ended: false,
             updates: Vec::new(),
             turn: false,
@@ -444,6 +447,7 @@ impl Ctx<'_> {
                                 default.as_str(),
                             );
                             set = Some(AgentOp::SetConfigOption { id, request });
+                            session.mode_sent = Some(default.clone());
                         }
                     }
                     (Some(default), _) => note = Some(format!("{agent} has no mode {default}")),
@@ -498,10 +502,13 @@ impl Ctx<'_> {
             SessionUpdate::Plan(plan) => Some(plan.clone()),
             _ => None,
         };
-        if let SessionUpdate::ConfigOptionUpdate(options) = &update.update
-            && let Some(b) = core.buffers.get_mut(session.buffer)
-        {
-            b.agent_mode = mode(&options.config_options);
+        if let SessionUpdate::ConfigOptionUpdate(options) = &update.update {
+            if let Some(b) = core.buffers.get_mut(session.buffer) {
+                b.agent_mode = mode(&options.config_options);
+            }
+            if let Some(ready) = &mut session.session {
+                ready.config_options = Some(options.config_options.clone());
+            }
         }
         session.updates.push(update);
         if let Some(plan) = plan {
@@ -598,6 +605,35 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// `agent-cycle-mode`: sets the session's mode option to its next value, wrapping around.
+    pub(crate) fn agent_cycle_mode(&mut self) -> Result<(), String> {
+        let (id, session) = self.core.current_session()?;
+        let agent = &session.agent;
+        let ready = match (&session.session, session.ended) {
+            (_, true) => Err(format!("{agent} session has ended")),
+            (None, _) => Err(format!("{agent} is not ready")),
+            (Some(ready), _) => Ok(ready),
+        }?;
+        let options = ready.config_options.as_deref().unwrap_or_default();
+        let no_modes = || format!("{agent} has no modes");
+        let (config, select) = mode_option(options).ok_or_else(no_modes)?;
+        let values = values(select);
+        // shortcut: cycles from the reported mode, so presses before the answer send the same
+        // value and a refusal names the last one sent; track values in flight if a slow agent
+        // shows it.
+        let at = values.iter().position(|v| **v == select.current_value);
+        let next =
+            (values.get(at.map_or(0, |i| i + 1) % values.len().max(1))).ok_or_else(no_modes)?;
+        let request = SetSessionConfigOptionRequest::new(
+            ready.session_id.clone(),
+            config.clone(),
+            (*next).clone(),
+        );
+        session.mode_sent = Some(next.to_string());
+        (self.effects).push(Effect::Agent(AgentOp::SetConfigOption { id, request }));
+        Ok(())
+    }
+
     /// Ends the turn, with a line saying why unless it ended normally.
     pub(crate) fn agent_prompted(&mut self, id: AgentId, result: Result<StopReason, String>) {
         let core = &mut *self.core;
@@ -625,7 +661,7 @@ impl Ctx<'_> {
         result: Result<Vec<SessionConfigOption>, String>,
     ) {
         let core = &mut *self.core;
-        let Some(session) = core.agents.get(&id).filter(|s| !s.ended) else {
+        let Some(session) = core.agents.get_mut(&id).filter(|s| !s.ended) else {
             return;
         };
         match result {
@@ -633,15 +669,14 @@ impl Ctx<'_> {
                 if let Some(b) = core.buffers.get_mut(session.buffer) {
                     b.agent_mode = mode(&options);
                 }
+                if let Some(ready) = &mut session.session {
+                    ready.config_options = Some(options);
+                }
             }
             Err(err) => {
-                // shortcut: only `default_mode` is ever set; name the value sent once a key sets
-                // modes.
-                let agent = session.agent.clone();
-                let default =
-                    (core.settings.agents.get(&agent)).and_then(|a| a.default_mode.clone());
-                let value = default.unwrap_or_default();
-                core.log(&format!("{agent} could not set mode {value}: {err}"));
+                let (agent, value) = (&session.agent, session.mode_sent.as_deref());
+                let note = format!("{agent} could not set mode {}: {err}", value.unwrap_or(""));
+                core.log(&note);
             }
         }
     }
@@ -1716,6 +1751,57 @@ mod tests {
         );
         assert!(h.display(5).mode_line.contains(" [auto]"));
         assert_eq!(messages(&h).matches("has no mode").count(), 1);
+    }
+
+    #[test]
+    fn s_tab_cycles_through_every_mode_and_back() {
+        let mut h = session();
+        let configured = |h: &mut Harness, result| {
+            h.send(Msg::AgentConfigured {
+                id: AgentId(0),
+                result,
+            });
+        };
+        // Mid-turn too.
+        h.keys("a RET");
+        ops(&mut h);
+        h.keys("S-TAB");
+        assert_eq!(ops(&mut h), ["set 0 s mode=plan"]);
+        configured(&mut h, Ok(options("plan")));
+        assert!(h.display(5).mode_line.contains(" [plan]"));
+        h.keys("S-TAB");
+        assert_eq!(ops(&mut h), ["set 0 s mode=auto"]);
+        configured(&mut h, Ok(options("auto")));
+        assert!(h.display(5).mode_line.contains(" [auto]"));
+        // The agent's own change is where the next cycle starts.
+        let plan = ConfigOptionUpdate::new(options("plan"));
+        update(&mut h, 0, SessionUpdate::ConfigOptionUpdate(plan));
+        h.keys("S-TAB");
+        assert_eq!(ops(&mut h), ["set 0 s mode=auto"]);
+        configured(&mut h, Err("no".into()));
+        assert!(messages(&h).contains("claude could not set mode auto: no\n"));
+        assert!(h.display(5).mode_line.contains(" [plan]"));
+    }
+
+    #[test]
+    fn s_tab_needs_a_ready_session_with_modes() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        h.keys("S-TAB");
+        assert_eq!(h.core.message(), Some("claude is not ready"));
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("s")),
+        });
+        h.keys("S-TAB");
+        assert_eq!(h.core.message(), Some("claude has no modes"));
+        assert!(ops(&mut h).is_empty());
+        exited(&mut h, 0, 1);
+        ops(&mut h);
+        h.keys("S-TAB");
+        assert_eq!(h.core.message(), Some("claude session has ended"));
+        assert!(ops(&mut h).is_empty());
     }
 
     #[test]

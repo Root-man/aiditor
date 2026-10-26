@@ -130,6 +130,7 @@
 "S-RET" = "newline"
 "C-c C-c" = "agent-cancel"
 "TAB" = "agent-toggle-tool-call"
+"S-TAB" = "agent-cycle-mode"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"

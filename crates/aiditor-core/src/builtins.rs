@@ -671,6 +671,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_cancel(),
         },
         Command {
+            name: "agent-cycle-mode",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_cycle_mode(),
+        },
+        Command {
             name: "vterm",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.vterm(),
