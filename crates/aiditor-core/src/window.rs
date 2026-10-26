@@ -167,20 +167,11 @@ impl Window {
 
     /// Moves the first row just far enough that point's row is among the `rows` shown, and
     /// returns the first line.
-    // shortcut: rows are counted in buffer chars, so a fold on a wrapped line makes it count more rows than it shows; count display chars when folds get common.
     pub fn scroll(&mut self, buffers: &Buffers, rows: usize) -> usize {
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
         let (line, col) = buffer.line_col(self.point(buffers)).unwrap_or_default();
         self.rows = rows.max(1);
-        let starts = |l: usize| match buffer.wrap(self.cols) {
-            Some((width, word)) => {
-                let text = buffer.text().line(l);
-                let end = buffer.char_idx(l, usize::MAX).expect("l is a line");
-                let len = end - buffer.text().line_to_char(l);
-                display::row_starts(len, width, word, |i| text.char(i).is_whitespace())
-            }
-            None => vec![0],
-        };
+        let starts = |l: usize| self.row_starts(buffer, l);
         let row = starts(line).partition_point(|&s| s <= col) - 1;
         // The lowest first row: `rows - 1` rows above point's.
         let (mut low, mut low_row) = (line, row);
@@ -196,6 +187,21 @@ impl Window {
         }
         (self.top, self.top_row) = (self.top, self.top_row).clamp((low, low_row), (line, row));
         self.top
+    }
+
+    /// Where each visual row of `buffer`'s `line` starts at the last redisplay's width, `[0]`
+    /// when it truncates.
+    // shortcut: rows are counted in buffer chars, so a fold on a wrapped line makes it count more rows than it shows; count display chars when folds get common.
+    pub(crate) fn row_starts(&self, buffer: &Buffer, line: usize) -> Vec<usize> {
+        let Some((width, word)) = buffer.wrap(self.cols) else {
+            return vec![0];
+        };
+        let text = buffer.text().line(line);
+        let end = buffer
+            .char_idx(line, usize::MAX)
+            .expect("line is in the buffer");
+        let len = end - buffer.text().line_to_char(line);
+        display::row_starts(len, width, word, |i| text.char(i).is_whitespace())
     }
 
     /// The first row shown of the first line at the last `scroll`.
