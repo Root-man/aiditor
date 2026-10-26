@@ -21,22 +21,26 @@ Starts ACP agent sessions from the editor in the current workspace, with the pro
 - **THEN** the echo area shows `"<name>" is not a registered agent` and no spawn is requested
 
 ### Requirement: The spawn waits for the environment capture
-When the project's environment is being captured as the session starts, the spawn SHALL wait and SHALL be requested once that capture answers, with the captured variables, or with none when it failed. A session whose log buffer is killed while it waits SHALL never be spawned.
+When the project's environment is being captured as the session starts, the spawn SHALL wait and SHALL be requested once that capture answers, with the captured variables, or with none when it failed. A session whose session buffer is killed while it waits SHALL never be spawned.
 
 #### Scenario: Waiting for the capture
 - **WHEN** the editor was launched from the Dock, the project's capture is running and `claude` is started
 - **THEN** no spawn is requested until the capture answers with `PATH=/opt/bin`, and then the spawn carries `PATH=/opt/bin`
 
 #### Scenario: Killed while waiting
-- **WHEN** a session waits for the capture and its log buffer is killed before the capture answers
+- **WHEN** a session waits for the capture and its session buffer is killed before the capture answers
 - **THEN** no spawn is requested when the capture answers
 
 ### Requirement: The stderr log buffer
-Each session SHALL get a new read-only buffer named `*<agent> stderr*<<workspace>>`, made unique, owned by the current workspace and not shown. Each stderr line of the agent SHALL be appended to it as a line. The buffer SHALL stay after the agent exits.
+Each session SHALL get a new read-only buffer named `*<agent> stderr*<<workspace>>`, made unique, owned by the current workspace and not shown. Each stderr line of the agent SHALL be appended to it as a line while it exists. The buffer SHALL stay after the agent exits, and killing it SHALL neither ask nor stop the agent.
 
 #### Scenario: Stderr is logged
 - **WHEN** a started agent writes `hello` then `world` to stderr
 - **THEN** its log buffer's text is `hello\nworld\n` and the buffer is read-only
+
+#### Scenario: Killing the log buffer
+- **WHEN** a live session's log buffer is killed
+- **THEN** it is killed without a question and no kill is sent to the agent
 
 ### Requirement: Session notes in Messages
 When the agent's session opens, `*Messages*` and the echo area, replacing `Starting <agent>...`, SHALL get `<agent> session ready (modes: <ids>)`, the advertised mode ids joined by `, `, or `none` when it advertises no modes. When the agent fails to start, `*Messages*` and the echo area SHALL get `<agent> session failed to start: <reason>`. When the agent exits after its session opened and was not stopped by the editor, `*Messages*` SHALL get `<agent> session exited with code <code>`, or `<agent> session killed by <signal>`.
@@ -60,20 +64,20 @@ An agent's exit or failed start SHALL end only its own session: other sessions, 
 - **WHEN** two sessions are ready and the first agent exits
 - **THEN** the second session is still live and no kill is sent to its agent
 
-### Requirement: Killing the log buffer stops the agent
-Killing a live session's log buffer SHALL first ask `Buffer <name> has a running process; kill it? `, completing over `no` then `yes`, as for a live terminal; on `yes` the buffer SHALL be killed and the agent stopped, with no crash note. Killing a workspace SHALL stop the agents of the log buffers it kills.
-
-#### Scenario: Killing a workspace stops its agent
-- **WHEN** a workspace with a live session is killed
-- **THEN** a kill is sent to that session's agent and `*Messages*` gets no crash note when it exits
-
-#### Scenario: Killing the log buffer asks
-- **WHEN** `C-x k` names a live session's log buffer
-- **THEN** the minibuffer asks `Buffer <name> has a running process; kill it? `
-
 ### Requirement: Session updates are kept
 Each `session/update` notification from a session's agent SHALL be kept in that session, in order, and SHALL NOT change any buffer's text. Updates for an unknown or ended session SHALL be dropped.
 
 #### Scenario: An update is kept
 - **WHEN** a ready agent sends an agent message chunk update
 - **THEN** the session holds that update and no buffer's text changed
+
+### Requirement: Killing the session buffer stops the agent
+Killing a live session's session buffer SHALL first ask `Buffer <name> has a running process; kill it? `, completing over `no` then `yes`, as for a live terminal; on `yes` the buffer SHALL be killed and the agent stopped, with no crash note. An ended session's buffer SHALL be killed without asking. Killing a workspace SHALL stop the agents of the session buffers it kills.
+
+#### Scenario: Killing the session buffer asks
+- **WHEN** `C-x k` names a live session's buffer and `yes` is answered
+- **THEN** the minibuffer first asked `Buffer <name> has a running process; kill it? `, and then a kill is sent to the agent
+
+#### Scenario: Killing a workspace stops its agent
+- **WHEN** a workspace with a live session is killed
+- **THEN** a kill is sent to that session's agent and `*Messages*` gets no crash note when it exits

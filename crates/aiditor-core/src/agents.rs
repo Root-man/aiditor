@@ -1,30 +1,69 @@
-//! Agent sessions: each one an ACP agent process started in a workspace, with a read-only buffer
-//! for its stderr.
+//! Agent sessions: each one an ACP agent process started in a workspace, with a session buffer,
+//! comint-style, and a read-only buffer for its stderr.
 
-use agent_client_protocol_schema::v1::{NewSessionResponse, SessionNotification};
+use agent_client_protocol_schema::v1::{
+    ContentBlock, NewSessionResponse, PromptRequest, SessionNotification, SessionUpdate, StopReason,
+};
 
-use crate::buffer::BufferId;
+use crate::buffer::{BufferId, InsertionType};
 use crate::command::Args;
 use crate::project::ProjectId;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects};
 
+/// The prompt line's text, just before the prompt area.
+const PROMPT: &str = "> ";
+/// The session buffer's major mode.
+pub(crate) const MODE: &str = "agent-session-mode";
+
 pub(crate) struct Session {
     /// The registry name it was started as.
     agent: String,
-    /// Its stderr log, and its handle until the session buffer exists: killing it stops the agent.
+    /// The session buffer, the session's handle: killing it stops the agent.
     pub(crate) buffer: BufferId,
+    /// Its stderr log.
+    log: BufferId,
     project: ProjectId,
     /// The spawn, held while the project's environment is being captured.
     held: Option<AgentOp>,
     /// The `session/new` answer, once the agent is ready.
     pub(crate) session: Option<NewSessionResponse>,
-    /// Whether the agent failed to start or exited; its log buffer stays until killed.
+    /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
     /// `session/update`s in order, for the session buffer.
     pub(crate) updates: Vec<SessionNotification>,
+    /// A `session/prompt` waits for its answer.
+    turn: bool,
+    /// The last block above the prompt line is the agent message still streaming.
+    streaming: bool,
 }
 
 impl Core {
+    /// Puts `text` above session `id`'s prompt line: as a new block followed by a blank line, or,
+    /// for a `chunk` while one streams, at the end of the streamed block.
+    fn output(&mut self, id: AgentId, text: &str, chunk: bool) {
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let end = buffer.prompt_start() - PROMPT.len();
+        match chunk && session.streaming {
+            true => buffer.insert_output(end - "\n\n".len(), text),
+            false => buffer.insert_output(end, &format!("{text}\n\n")),
+        }
+        session.streaming = chunk;
+    }
+
+    /// The session whose buffer the selected window shows.
+    fn current_session(&mut self) -> Result<(AgentId, &mut Session), String> {
+        let buffer = self.windows.window.buffer();
+        (self.agents.iter_mut())
+            .find(|(_, s)| s.buffer == buffer)
+            .map(|(&id, s)| (id, s))
+            .ok_or_else(|| "Not in an agent session buffer".into())
+    }
+
     /// The agent names `agent-start` completes over, in registry order.
     pub(crate) fn agent_names(&self) -> Vec<String> {
         self.settings.agents.keys().cloned().collect()
@@ -45,12 +84,12 @@ impl Core {
         self.agents.values().any(|s| !s.ended)
     }
 
-    /// Whether buffer `id` is the log of a session that hasn't ended.
+    /// Whether buffer `id` is the session buffer of a session that hasn't ended.
     pub(crate) fn live_agent(&self, id: BufferId) -> bool {
         self.agents.values().any(|s| s.buffer == id && !s.ended)
     }
 
-    /// Stops the agents of sessions whose log buffer was killed and forgets them.
+    /// Stops the agents of sessions whose session buffer was killed and forgets them.
     pub(crate) fn sync_agents(&mut self, effects: &mut Effects) {
         let buffers = &self.buffers;
         self.agents.retain(|&id, session| {
@@ -64,8 +103,8 @@ impl Core {
 }
 
 impl Ctx<'_> {
-    /// `agent-start`: starts the named agent in the current workspace's project, with a new log
-    /// buffer for its stderr.
+    /// `agent-start`: starts the named agent in the current workspace's project, showing a new
+    /// session buffer, with a new log buffer for its stderr.
     pub(crate) fn agent_start(&mut self, args: Args) -> Result<(), String> {
         let core = &mut *self.core;
         let name = &args.strings[0];
@@ -73,9 +112,10 @@ impl Ctx<'_> {
             .ok_or_else(|| format!("{name:?} is not a registered agent"))?
             .clone();
         let workspace = core.current_workspace();
-        let (project, log) = (
+        let (project, log, title) = (
             workspace.project,
             format!("*{name} stderr*<{}>", workspace.name),
+            format!("*{name}*<{}>", workspace.name),
         );
         let loaded = &core.projects[core.project_at(project)?].project;
         // Under the captured environment, which `release_agents` puts first.
@@ -83,11 +123,16 @@ impl Ctx<'_> {
         let cwd = loaded.primary.path.clone();
         let id = AgentId(core.next_agent);
         core.next_agent += 1;
-        let buffer = core.buffers.create(&log);
-        core.buffers
-            .get_mut(buffer)
-            .expect("just created")
-            .read_only = true;
+        let log = core.buffers.create(&log);
+        core.buffers.get_mut(log).expect("just created").read_only = true;
+        let buffer = core.buffers.create(&title);
+        let b = core.buffers.get_mut(buffer).expect("just created");
+        b.append(PROMPT);
+        let start = PROMPT.len();
+        b.prompt = Some((b.add_marker(start, InsertionType::Stay)).expect("after the prompt"));
+        b.set_marker(b.point, start).expect("after the prompt");
+        b.major_mode = MODE;
+        core.switch_to(buffer);
         let spawn = AgentOp::Spawn {
             id,
             command: agent.command,
@@ -98,11 +143,14 @@ impl Ctx<'_> {
         let session = Session {
             agent: name.clone(),
             buffer,
+            log,
             project,
             held: Some(spawn),
             session: None,
             ended: false,
             updates: Vec::new(),
+            turn: false,
+            streaming: false,
         };
         core.agents.insert(id, session);
         core.echo(format!("Starting {name}..."));
@@ -172,16 +220,92 @@ impl Ctx<'_> {
 
     pub(crate) fn agent_stderr(&mut self, id: AgentId, line: String) {
         let core = &mut *self.core;
-        let buffer = (core.agents.get(&id)).and_then(|s| core.buffers.get_mut(s.buffer));
+        let buffer = (core.agents.get(&id)).and_then(|s| core.buffers.get_mut(s.log));
         if let Some(buffer) = buffer {
             buffer.append(&format!("{line}\n"));
         }
     }
 
+    /// Keeps the update, and puts a text message chunk above the prompt line.
     pub(crate) fn agent_update(&mut self, id: AgentId, update: SessionNotification) {
-        if let Some(session) = self.core.agents.get_mut(&id).filter(|s| !s.ended) {
-            session.updates.push(update);
+        let core = &mut *self.core;
+        let Some(session) = core.agents.get_mut(&id).filter(|s| !s.ended) else {
+            return;
+        };
+        let text = match &update.update {
+            SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        session.updates.push(update);
+        if let Some(text) = text {
+            core.output(id, &text, true);
         }
+    }
+
+    /// `agent-send-input`: sends the prompt area's text as a `session/prompt`, leaving it above
+    /// a new prompt line.
+    pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let buffer = core.windows.window.buffer();
+        let (id, session) = core.current_session()?;
+        let agent = &session.agent;
+        let ready = match (&session.session, session.ended, session.turn) {
+            (_, true, _) => Err(format!("{agent} session has ended")),
+            (None, ..) => Err(format!("{agent} is not ready")),
+            (_, _, true) => Err(format!("{agent} is busy")),
+            (Some(ready), ..) => Ok(ready.session_id.clone()),
+        };
+        let session_id = ready?;
+        let b = core
+            .buffers
+            .get_mut(buffer)
+            .expect("current buffer is live");
+        let input = b.text().slice(b.prompt_start()..).to_string();
+        if input.trim().is_empty() {
+            return Ok(());
+        }
+        b.append(&format!("\n\n{PROMPT}"));
+        let end = b.len_chars();
+        b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
+        // The old prompt area's edits would replay into read-only text.
+        b.clear_undo();
+        let session = core.agents.get_mut(&id).expect("found above");
+        (session.turn, session.streaming) = (true, false);
+        let request = PromptRequest::new(session_id, vec![input.into()]);
+        self.effects
+            .push(Effect::Agent(AgentOp::Prompt { id, request }));
+        self.goto(end)
+    }
+
+    /// `agent-cancel`: sends `session/cancel` while a turn runs.
+    pub(crate) fn agent_cancel(&mut self) -> Result<(), String> {
+        let (id, session) = self.core.current_session()?;
+        let ready = session.session.as_ref().filter(|_| session.turn);
+        let session = ready.ok_or("No turn is running")?.session_id.clone();
+        (self.effects).push(Effect::Agent(AgentOp::Cancel { id, session }));
+        Ok(())
+    }
+
+    /// Ends the turn, with a line saying why unless it ended normally.
+    pub(crate) fn agent_prompted(&mut self, id: AgentId, result: Result<StopReason, String>) {
+        let core = &mut *self.core;
+        let Some(session) = core.agents.get_mut(&id).filter(|s| s.turn) else {
+            return;
+        };
+        session.turn = false;
+        let line = match result {
+            Ok(StopReason::EndTurn) => return,
+            Ok(StopReason::MaxTokens) => "Turn ended: max_tokens".into(),
+            Ok(StopReason::MaxTurnRequests) => "Turn ended: max_turn_requests".into(),
+            Ok(StopReason::Refusal) => "Turn ended: refusal".into(),
+            Ok(StopReason::Cancelled) => "Turn ended: cancelled".into(),
+            Ok(reason) => format!("Turn ended: {reason:?}"),
+            Err(err) => format!("Error: {err}"),
+        };
+        core.output(id, &line, false);
     }
 
     /// Ends the session after its agent exited, noting a crash, and releases the agent's handle.
@@ -190,6 +314,7 @@ impl Ctx<'_> {
         let Some(session) = core.agents.get_mut(&id) else {
             return;
         };
+        session.turn = false;
         if !std::mem::replace(&mut session.ended, true) {
             let agent = &session.agent;
             let line = match signal {
@@ -251,6 +376,13 @@ mod tests {
                     )
                 }
                 AgentOp::Reply { id, .. } => format!("reply {}", id.0),
+                AgentOp::Prompt { id, request } => {
+                    let [ContentBlock::Text(text)] = &request.prompt[..] else {
+                        panic!("one text block: {request:?}");
+                    };
+                    format!("prompt {} {} {:?}", id.0, request.session_id, text.text)
+                }
+                AgentOp::Cancel { id, session } => format!("cancel {} {session}", id.0),
                 AgentOp::Kill { id } => format!("kill {}", id.0),
             })
             .collect()
@@ -313,8 +445,11 @@ mod tests {
             [format!("spawn 0 codex-acp {} ", app.display())]
         );
         assert_eq!(h.core.message(), Some("Starting codex..."));
-        // Not shown: the window stays on the file.
-        assert_ne!(name(&h), "*codex stderr*<work>");
+        // The session buffer is shown, the log isn't.
+        assert_eq!(name(&h), "*codex*<work>");
+        assert_eq!((h.core.text(), h.core.point()), ("> ".into(), 2));
+        let session = h.core.current();
+        assert!(!session.read_only && session.workspace == Some(h.core.workspace()));
         let log = h.core.buffers.find("*codex stderr*<work>").unwrap();
         let log = h.core.buffers.get(log).unwrap();
         assert!(log.read_only && log.workspace == Some(h.core.workspace()));
@@ -412,8 +547,8 @@ mod tests {
         let mut h = work();
         h.core.capture_environments();
         h.keys("M-x agent-start RET claude RET");
-        let log = h.core.buffers.find("*claude stderr*<work>").unwrap();
-        h.core.kill_buffer(log);
+        let session = h.core.buffers.find("*claude*<work>").unwrap();
+        h.core.kill_buffer(session);
         h.send(Msg::Tick);
         let request = capture(&mut h);
         h.send(Msg::EnvironmentCaptured {
@@ -488,9 +623,9 @@ mod tests {
         // Only the crashed agent's handle is released.
         assert_eq!(ops(&mut h), ["kill 0"]);
         assert!(h.core.live_agents());
-        let second = h.core.buffers.find("*claude stderr*<work><2>").unwrap();
+        let second = h.core.buffers.find("*claude*<work><2>").unwrap();
         assert!(h.core.live_agent(second));
-        let first = h.core.buffers.find("*claude stderr*<work>").unwrap();
+        let first = h.core.buffers.find("*claude*<work>").unwrap();
         assert!(!h.core.live_agent(first) && h.core.buffers.get(first).is_some());
         h.send(Msg::AgentExited {
             id: AgentId(1),
@@ -500,25 +635,155 @@ mod tests {
         assert!(messages(&h).contains("claude session killed by Killed: 9\n"));
     }
 
-    #[test]
-    fn updates_are_kept_without_changing_buffers() {
+    fn update(h: &mut Harness, id: u64, update: SessionUpdate) {
+        h.send(Msg::AgentUpdate {
+            id: AgentId(id),
+            update: Box::new(SessionNotification::new("s", update)),
+        });
+    }
+
+    fn chunk(h: &mut Harness, text: &str) {
+        update(
+            h,
+            0,
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(text.into())),
+        );
+    }
+
+    fn prompted(h: &mut Harness, result: Result<StopReason, &str>) {
+        h.send(Msg::AgentPrompted {
+            id: AgentId(0),
+            result: result.map_err(String::from),
+        });
+    }
+
+    /// A ready `claude` session in `*claude*<work>`, shown.
+    fn session() -> Harness {
         let mut h = work();
         h.keys("M-x agent-start RET claude RET");
         ready(&mut h, 0);
+        ops(&mut h);
+        h
+    }
+
+    #[test]
+    fn message_chunks_stream_above_the_prompt_and_updates_are_kept() {
+        let mut h = session();
         let before = log_text(&h, "*claude stderr*<work>");
-        let chunk = SessionUpdate::AgentMessageChunk(ContentChunk::new("hi".into()));
-        let update = SessionNotification::new("s", chunk);
-        h.send(Msg::AgentUpdate {
-            id: AgentId(0),
-            update: Box::new(update.clone()),
-        });
+        chunk(&mut h, "Hi");
+        let thought = SessionUpdate::AgentThoughtChunk(ContentChunk::new("hmm".into()));
+        update(&mut h, 0, thought);
+        chunk(&mut h, " there");
         // Unknown agents' updates are dropped.
-        h.send(Msg::AgentUpdate {
-            id: AgentId(9),
-            update: Box::new(update.clone()),
-        });
-        assert_eq!(h.core.agents[&AgentId(0)].updates, [update]);
+        update(
+            &mut h,
+            9,
+            SessionUpdate::AgentMessageChunk(ContentChunk::new("x".into())),
+        );
+        assert_eq!(h.core.text(), "Hi there\n\n> ");
+        assert_eq!(h.core.point(), h.core.text().chars().count());
+        assert_eq!(h.core.agents[&AgentId(0)].updates.len(), 3);
         assert_eq!(log_text(&h, "*claude stderr*<work>"), before);
+    }
+
+    #[test]
+    fn a_prompt_is_sent_and_its_reply_streams_above_the_prompt() {
+        let mut h = session();
+        h.keys("h e l l o RET");
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "hello""#]);
+        assert_eq!(h.core.text(), "> hello\n\n> ");
+        assert_eq!(h.core.point(), 11);
+        chunk(&mut h, "Hi");
+        chunk(&mut h, " there");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert_eq!(h.core.text(), "> hello\n\nHi there\n\n> ");
+        // The turn ended, so the next prompt goes out.
+        h.keys("a g a i n RET");
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "again""#]);
+        chunk(&mut h, "Again");
+        assert_eq!(
+            h.core.text(),
+            "> hello\n\nHi there\n\n> again\n\nAgain\n\n> "
+        );
+    }
+
+    #[test]
+    fn ret_sends_only_a_ready_idle_session_with_input() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        h.keys("x RET");
+        assert_eq!(h.core.message(), Some("claude is not ready"));
+        ready(&mut h, 0);
+        h.keys("RET");
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "x""#]);
+        h.keys("y RET");
+        assert_eq!(h.core.message(), Some("claude is busy"));
+        assert!(ops(&mut h).is_empty());
+        assert_eq!(h.core.text(), "> x\n\n> y");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.keys("DEL SPC C-j RET");
+        assert!(ops(&mut h).is_empty());
+        exited(&mut h, 0, 1);
+        h.keys("RET");
+        assert_eq!(h.core.message(), Some("claude session has ended"));
+    }
+
+    #[test]
+    fn c_j_and_s_ret_insert_newlines() {
+        let mut h = session();
+        h.keys("a C-j b S-RET c");
+        assert_eq!(h.core.text(), "> a\nb\nc");
+        assert!(ops(&mut h).is_empty());
+    }
+
+    #[test]
+    fn a_turn_that_ends_otherwise_says_so() {
+        let mut h = session();
+        h.keys("a RET");
+        prompted(&mut h, Ok(StopReason::Refusal));
+        assert_eq!(h.core.text(), "> a\n\nTurn ended: refusal\n\n> ");
+        h.keys("b RET");
+        chunk(&mut h, "B");
+        prompted(&mut h, Err("Internal error"));
+        assert!(
+            h.core
+                .text()
+                .ends_with("> b\n\nB\n\nError: Internal error\n\n> ")
+        );
+        // A late answer, with no turn running, adds nothing.
+        prompted(&mut h, Ok(StopReason::MaxTokens));
+        assert!(h.core.text().ends_with("Error: Internal error\n\n> "));
+    }
+
+    #[test]
+    fn c_c_c_c_cancels_a_running_turn() {
+        let mut h = session();
+        h.keys("C-c C-c");
+        assert_eq!(h.core.message(), Some("No turn is running"));
+        h.keys("a RET C-c C-c");
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "a""#, "cancel 0 s"]);
+        prompted(&mut h, Ok(StopReason::Cancelled));
+        assert_eq!(h.core.text(), "> a\n\nTurn ended: cancelled\n\n> ");
+    }
+
+    #[test]
+    fn the_transcript_is_read_only_and_the_prompt_area_edits() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, "Hi");
+        let transcript = h.core.text();
+        h.keys("M-< z");
+        assert_eq!(h.core.message(), Some("Text is read-only"));
+        h.keys("M-> DEL");
+        assert_eq!(h.core.message(), Some("Text is read-only"));
+        assert_eq!(h.core.text(), transcript);
+        h.keys("d r a f t DEL");
+        chunk(&mut h, " there");
+        assert_eq!(h.core.text(), "> a\n\nHi there\n\n> draf");
+        assert_eq!(h.core.point(), h.core.text().chars().count());
+        h.keys("C-/");
+        assert_eq!(h.core.text(), "> a\n\nHi there\n\n> draft");
     }
 
     #[test]
@@ -544,24 +809,37 @@ mod tests {
     }
 
     #[test]
-    fn killing_the_log_buffer_asks_first() {
+    fn killing_the_session_buffer_asks_first_and_the_log_does_not() {
         let mut h = work();
         h.keys("M-x agent-start RET claude RET");
         ops(&mut h);
-        h.call(
-            "kill-buffer",
-            Args {
-                strings: vec!["*claude stderr*<work>".into()],
-                ..Args::default()
-            },
-        );
+        fn kill(h: &mut Harness, name: &str) {
+            let strings = vec![name.into()];
+            h.call(
+                "kill-buffer",
+                Args {
+                    strings,
+                    ..Args::default()
+                },
+            );
+        }
+        kill(&mut h, "*claude stderr*<work>");
+        assert!(h.core.minibuffer().is_none());
+        assert!(h.core.buffers.find("*claude stderr*<work>").is_none());
+        assert!(ops(&mut h).is_empty());
+        // Stderr without a log goes nowhere.
+        h.send(Msg::AgentStderr {
+            id: AgentId(0),
+            line: "lost".into(),
+        });
+        kill(&mut h, "*claude*<work>");
         assert_eq!(
             h.core.minibuffer().unwrap().prompt,
-            "Buffer *claude stderr*<work> has a running process; kill it? "
+            "Buffer *claude*<work> has a running process; kill it? "
         );
         assert_eq!(listed(&mut h).0, ["no", "yes"]);
         h.keys("yes RET");
-        assert!(h.core.buffers.find("*claude stderr*<work>").is_none());
+        assert!(h.core.buffers.find("*claude*<work>").is_none());
         assert_eq!(ops(&mut h), ["kill 0"]);
     }
 

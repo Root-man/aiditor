@@ -123,6 +123,13 @@
 "C-c C-n" = "vterm-next-prompt"
 "C-c C-r" = "vterm-mark-output"
 
+# Agent session buffers: the read-only transcript above a prompt area. C-j inserts a newline as
+# everywhere.
+[agent-session-mode]
+"RET" = "agent-send-input"
+"S-RET" = "newline"
+"C-c C-c" = "agent-cancel"
+
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
 "C-g" = "abort-minibuffers"

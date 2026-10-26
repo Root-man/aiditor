@@ -40,6 +40,8 @@ pub enum Error {
     NoSuchBuffer(BufferId),
     OutOfRange,
     ReadOnly,
+    /// The edit touches text before the prompt boundary.
+    TextReadOnly,
 }
 
 impl fmt::Display for Error {
@@ -48,6 +50,7 @@ impl fmt::Display for Error {
             Error::NoSuchBuffer(id) => write!(f, "no buffer {}", id.0),
             Error::OutOfRange => f.write_str("position out of range"),
             Error::ReadOnly => f.write_str("Buffer is read-only"),
+            Error::TextReadOnly => f.write_str("Text is read-only"),
         }
     }
 }
@@ -130,6 +133,7 @@ impl Buffers {
             point: MarkerId(0),
             commands: Vec::new(),
             syntax: None,
+            prompt: None,
         })
     }
 
@@ -293,6 +297,8 @@ pub struct Buffer {
     pub(crate) commands: Vec<ShellCommand>,
     /// The parse of a file in a language aiditor highlights.
     syntax: Option<Syntax>,
+    /// A `Stay` marker at a session buffer's prompt area: the text before it is read-only.
+    pub(crate) prompt: Option<MarkerId>,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.
@@ -422,6 +428,38 @@ impl Buffer {
         (self.read_only, self.tick) = (read_only, tick);
     }
 
+    /// Inserts `text` at `at`, before the prompt boundary, past read-only and without undo,
+    /// moving the undo history's positions from `at` on along with the text.
+    pub(crate) fn insert_output(&mut self, at: usize, text: &str) {
+        let (read_only, prompt) = (std::mem::take(&mut self.read_only), self.prompt.take());
+        self.raw_insert(at, text)
+            .expect("output goes inside the text");
+        (self.read_only, self.prompt) = (read_only, prompt);
+        let n = text.chars().count();
+        let shift = |pos: &mut usize| *pos += n * usize::from(*pos >= at);
+        let h = &mut self.history;
+        h.before.as_mut().map(shift);
+        for group in h.undo.iter_mut().chain(&mut h.redo) {
+            shift(&mut group.before);
+            shift(&mut group.after);
+            for change in &mut group.changes {
+                match change {
+                    Change::Insert(pos, _) | Change::Delete(pos, _) => shift(pos),
+                }
+            }
+        }
+    }
+
+    /// Forgets every undo and redo group.
+    pub(crate) fn clear_undo(&mut self) {
+        self.history = History::default();
+    }
+
+    /// Where the prompt boundary is, 0 without one.
+    pub(crate) fn prompt_start(&self) -> usize {
+        self.prompt.and_then(|m| self.marker(m)).unwrap_or(0)
+    }
+
     /// Ends the open undo group with point at `point`; the next edit starts a group with point there.
     pub fn undo_boundary(&mut self, point: usize) {
         let h = &mut self.history;
@@ -497,6 +535,9 @@ impl Buffer {
         if self.read_only && !text.is_empty() {
             return Err(Error::ReadOnly);
         }
+        if char_idx < self.prompt_start() && !text.is_empty() {
+            return Err(Error::TextReadOnly);
+        }
         let start = (self.syntax.is_some() && char_idx <= self.len_chars())
             .then(|| syntax::position(self.text(), char_idx));
         match &mut self.content {
@@ -526,6 +567,9 @@ impl Buffer {
         let changed = !range.is_empty();
         if self.read_only && changed {
             return Err(Error::ReadOnly);
+        }
+        if range.start < self.prompt_start() && changed {
+            return Err(Error::TextReadOnly);
         }
         let ends =
             (self.syntax.is_some() && range.start <= range.end && range.end <= self.len_chars())
@@ -960,6 +1004,28 @@ mod tests {
         assert_eq!(b.insert(0, "y"), Err(Error::ReadOnly));
         assert_eq!(b.delete(0..1), Err(Error::ReadOnly));
         assert_eq!(b.text(), "x");
+    }
+
+    #[test]
+    fn text_before_the_prompt_is_read_only_and_output_keeps_undo() {
+        let (mut buffers, id) = with_text("> ");
+        let b = buffers.get_mut(id).unwrap();
+        b.prompt = Some(b.add_marker(2, InsertionType::Stay).unwrap());
+        assert_eq!(b.insert(1, "x"), Err(Error::TextReadOnly));
+        assert_eq!(b.delete(1..3), Err(Error::TextReadOnly));
+        b.insert(2, "ab").unwrap();
+        assert_eq!(b.prompt_start(), 2);
+        b.undo_boundary(4);
+        b.delete(3..4).unwrap();
+        b.insert_output(0, "hi\n\n");
+        assert_eq!(
+            (b.text().to_string(), b.prompt_start()),
+            ("hi\n\n> a".into(), 6)
+        );
+        assert_eq!(b.undo(), Some(8));
+        assert_eq!(b.text(), "hi\n\n> ab");
+        assert_eq!(b.redo(), Some(7));
+        assert_eq!(b.text(), "hi\n\n> a");
     }
 
     #[test]
