@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentRequest, ClientCapabilities, Implementation, InitializeRequest, NewSessionRequest,
-    RequestId, SessionNotification,
+    AgentRequest, CancelNotification, ClientCapabilities, Implementation, InitializeRequest,
+    NewSessionRequest, RequestId, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Request};
@@ -33,11 +33,16 @@ pub struct Agents {
     handles: HashMap<AgentId, Handle>,
 }
 
+/// The connection to the agent and its sender, while its session is open; dropped with the
+/// connection so the receiver closes after the exit.
+type Connection = Arc<Mutex<Option<(ConnectionTo<Agent>, Sender<Msg>)>>>;
+
 struct Handle {
     /// The agent leads its own process group, so this is the group's id too.
     pid: libc::pid_t,
     exited: Arc<AtomicBool>,
     pending: Pending,
+    connection: Connection,
 }
 
 /// How long a terminated agent has to exit before SIGKILL.
@@ -85,6 +90,30 @@ impl Agents {
                 }
                 None
             }
+            AgentOp::Prompt { id, request } => {
+                let (connection, tx) = self.connection(id)?;
+                // The answer is handled before the next message, so it follows the turn's updates.
+                let sent = connection.send_request(request).on_receiving_result(
+                    move |result| async move {
+                        let result = result.map(|r| r.stop_reason).map_err(|err| err.message);
+                        _ = tx.send(Msg::AgentPrompted { id, result }).await;
+                        Ok(())
+                    },
+                );
+                if let Err(err) = sent {
+                    tracing::warn!("prompting the agent: {err}");
+                }
+                None
+            }
+            AgentOp::Cancel { id, session } => {
+                let sent = (self.connection(id)).map(|(connection, _)| {
+                    connection.send_notification(CancelNotification::new(session))
+                });
+                if let Some(Err(err)) = sent {
+                    tracing::warn!("cancelling the agent's turn: {err}");
+                }
+                None
+            }
             AgentOp::Kill { id } => {
                 if let Some(group) = self.handles.remove(&id).and_then(Handle::terminate) {
                     thread::spawn(move || {
@@ -95,6 +124,11 @@ impl Agents {
                 None
             }
         }
+    }
+
+    /// The connection of agent `id` and its sender, once its session is open.
+    fn connection(&self, id: AgentId) -> Option<(ConnectionTo<Agent>, Sender<Msg>)> {
+        self.handles.get(&id)?.connection.lock().unwrap().clone()
     }
 
     /// Kill every agent, blocking for one shared grace, so no agent outlives the app.
@@ -155,15 +189,18 @@ impl Agents {
         let (stdin, stdout, stderr) = (stdin.unwrap(), stdout.unwrap(), stderr.unwrap());
         let exited = Arc::new(AtomicBool::new(false));
         let pending = Pending::default();
+        let open = Connection::default();
         self.handles.insert(
             id,
             Handle {
                 pid,
                 exited: exited.clone(),
                 pending: pending.clone(),
+                connection: open.clone(),
             },
         );
-        let connection = tokio::spawn(connect(id, cwd, stdin, stdout, pending, tx.clone()));
+        let streams = (stdin, stdout);
+        let connection = tokio::spawn(connect(id, cwd, streams, pending, open, tx.clone()));
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -191,9 +228,9 @@ impl Agents {
 async fn connect(
     id: AgentId,
     cwd: PathBuf,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
+    (stdin, stdout): (ChildStdin, ChildStdout),
     pending: Pending,
+    open: Connection,
     tx: Sender<Msg>,
 ) {
     let (requests, updates) = (tx.clone(), tx.clone());
@@ -233,6 +270,8 @@ async fn connect(
                 .block_task()
                 .await?;
             started = true;
+            // Before the core hears of it, so its first prompt finds the connection.
+            *open.lock().unwrap() = Some((agent.clone(), tx.clone()));
             _ = (tx.send(Msg::AgentStarted {
                 id,
                 result: Ok(session),
@@ -242,6 +281,7 @@ async fn connect(
             Ok(())
         })
         .await;
+    open.lock().unwrap().take();
     if let Err(err) = result {
         let err = err.to_string();
         if started {

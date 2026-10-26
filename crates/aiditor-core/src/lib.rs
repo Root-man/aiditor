@@ -53,7 +53,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, ClientResponse, Error, NewSessionResponse, RequestId, SessionNotification,
+    AgentRequest, ClientResponse, Error, NewSessionResponse, PromptRequest, RequestId, SessionId,
+    SessionNotification, StopReason,
 };
 use ropey::Rope;
 
@@ -188,6 +189,12 @@ pub enum Msg {
     AgentUpdate {
         id: AgentId,
         update: Box<SessionNotification>,
+    },
+    /// The agent's answer to `AgentOp::Prompt`, after the turn's updates: its stop reason, or
+    /// the error's message.
+    AgentPrompted {
+        id: AgentId,
+        result: Result<StopReason, String>,
     },
     /// The agent's exit status, after its stderr.
     AgentExited {
@@ -449,6 +456,11 @@ pub enum AgentOp {
         request: RequestId,
         result: Result<ClientResponse, Error>,
     },
+    /// Send `session/prompt`, answered with `Msg::AgentPrompted`; ignored for an unknown agent
+    /// or one whose session isn't open.
+    Prompt { id: AgentId, request: PromptRequest },
+    /// Send `session/cancel` for `session`; ignored as `Prompt` is.
+    Cancel { id: AgentId, session: SessionId },
     /// SIGTERM the agent's process group, SIGKILL after 100 ms; ignored for an unknown agent.
     /// The exit message still follows.
     Kill { id: AgentId },
@@ -601,6 +613,7 @@ impl Ctx<'_> {
             Msg::AgentStarted { id, result } => self.agent_started(id, result),
             Msg::AgentStderr { id, line } => self.agent_stderr(id, line),
             Msg::AgentUpdate { id, update } => self.agent_update(id, *update),
+            Msg::AgentPrompted { id, result } => self.agent_prompted(id, result),
             Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
             Msg::Key(key) => {
                 self.key(key);
@@ -883,7 +896,7 @@ pub struct Core {
     /// killed.
     terminals: BTreeMap<TerminalId, BufferId>,
     next_terminal: u64,
-    /// Each agent session, until its log buffer is killed.
+    /// Each agent session, until its session buffer is killed.
     agents: BTreeMap<AgentId, agents::Session>,
     next_agent: u64,
     /// Whether projects' environments are captured: the app was not launched from a shell.

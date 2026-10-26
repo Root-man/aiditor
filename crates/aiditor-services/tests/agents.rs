@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema::v1::{PromptRequest, StopReason};
+use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
 use aiditor_services::agents::Agents;
 use tokio::sync::mpsc::Receiver;
@@ -309,4 +311,219 @@ async fn quitting_kills_every_agent() {
         );
         assert!(gone(pid).await);
     }
+}
+
+/// Starts the fake agent on `script`, ready for prompts.
+async fn ready(dir: &Path, script_text: &str) -> (Agents, Receiver<Msg>) {
+    let (key, path) = script(dir, script_text);
+    let mut agents = Agents::default();
+    let mut rx = spawn(&mut agents, AGENT, dir, &[(key, &path)]);
+    started(&mut rx).await.1.unwrap();
+    (agents, rx)
+}
+
+fn prompt(text: &str) -> AgentOp {
+    let request = PromptRequest::new("fake-session", vec![text.into()]);
+    AgentOp::Prompt { id: ID, request }
+}
+
+/// The messages up to the prompt's answer, and its result.
+async fn turn(rx: &mut Receiver<Msg>) -> (Vec<Msg>, Result<StopReason, String>) {
+    let mut msgs = Vec::new();
+    loop {
+        match next(rx).await.expect("the agent is running") {
+            Msg::AgentPrompted { id, result } => {
+                assert_eq!(id, ID);
+                return (msgs, result);
+            }
+            msg => msgs.push(msg),
+        }
+    }
+}
+
+/// A fake agent script step sending a text message chunk.
+fn chunk(text: &str) -> String {
+    format!(
+        r#"{{"update": {{"sessionUpdate": "agent_message_chunk",
+            "content": {{"type": "text", "text": "{text}"}}}}}}"#
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prompt_streams_its_updates_before_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (chunk("a"), chunk("b"));
+    let script = format!(r#"{{"prompts": [[{a}, {b}, {{"stop": "refusal"}}]]}}"#);
+    let (mut agents, mut rx) = ready(dir.path(), &script).await;
+    assert!(agents.run(prompt("hello")).is_none());
+    let (msgs, result) = turn(&mut rx).await;
+    assert_eq!(result, Ok(StopReason::Refusal));
+    let updates = (msgs.iter()).filter(|m| matches!(m, Msg::AgentUpdate { .. }));
+    assert_eq!(updates.count(), 2, "{msgs:?}");
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_ends_the_running_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut agents, mut rx) = ready(dir.path(), r#"{"prompts": [[{"sleep": 10000}]]}"#).await;
+    agents.run(prompt("hello"));
+    let session = "fake-session".into();
+    agents.run(AgentOp::Cancel { id: ID, session });
+    assert_eq!(turn(&mut rx).await.1, Ok(StopReason::Cancelled));
+    // Unknown agents are ignored.
+    let session = "fake-session".into();
+    agents.run(AgentOp::Cancel {
+        id: AgentId(9),
+        session,
+    });
+    let AgentOp::Prompt { request, .. } = prompt("x") else {
+        unreachable!()
+    };
+    let unknown = AgentOp::Prompt {
+        id: AgentId(9),
+        request,
+    };
+    assert!(agents.run(unknown).is_none());
+    agents.kill_all();
+}
+
+/// A core running the real agent service on the fake agent, driven by keys.
+struct Live {
+    core: Core,
+    agents: Agents,
+    rx: Option<Receiver<Msg>>,
+    pid: Option<libc::pid_t>,
+}
+
+impl Live {
+    fn new(dir: &Path, script_text: &str) -> Self {
+        let (key, path) = script(dir, script_text);
+        let mut live = Live {
+            core: Core::default(),
+            agents: Agents::default(),
+            rx: None,
+            pid: None,
+        };
+        let settings = format!("[agents.fake]\ncommand = {AGENT:?}\nenv = {{ {key} = {path:?} }}");
+        live.send(Msg::SettingsLoaded(Ok(Some(settings))));
+        live
+    }
+
+    fn run(&mut self, effects: aiditor_core::Effects) {
+        for effect in effects {
+            if let Effect::Agent(op) = effect
+                && let Some(rx) = self.agents.run(op)
+            {
+                self.rx = Some(rx);
+            }
+        }
+    }
+
+    fn send(&mut self, msg: Msg) {
+        let effects = self.core.handle(Instant::now(), msg);
+        self.run(effects);
+    }
+
+    fn keys(&mut self, script: &str) {
+        for key in parse_keys(script).unwrap() {
+            self.send(match key.code {
+                KeyCode::Char(c) if key == Key::plain(key.code) => Msg::Insert {
+                    text: c.into(),
+                    replace: None,
+                },
+                _ => Msg::Key(key),
+            });
+        }
+    }
+
+    /// Runs the command `name` with `strings`, as `M-x` would after its prompts.
+    fn call(&mut self, name: &str, strings: &[&str]) {
+        let mut ctx = aiditor_core::Ctx {
+            core: &mut self.core,
+            now: Instant::now(),
+            effects: Vec::new(),
+        };
+        let strings = strings.iter().map(|s| (*s).into()).collect();
+        ctx.call(
+            name,
+            aiditor_core::command::Args {
+                strings,
+                ..Default::default()
+            },
+        );
+        let effects = ctx.effects;
+        self.run(effects);
+        // The core reconciles killed buffers' sessions as it handles a message.
+        self.send(Msg::Tick);
+    }
+
+    /// Feeds the agent's messages to the core until one matches `done`, which is fed too, or,
+    /// with `None`, until the agent's channel closes.
+    async fn pump(&mut self, done: Option<fn(&Msg) -> bool>) {
+        loop {
+            let rx = self.rx.as_mut().expect("an agent was spawned");
+            let Some(msg) = next(rx).await else {
+                assert!(done.is_none(), "the agent's channel closed");
+                return;
+            };
+            if let Msg::AgentStderr { line, .. } = &msg
+                && let Some(pid) = line.strip_prefix("pid=")
+            {
+                self.pid = Some(pid.parse().unwrap());
+            }
+            let matched = done.is_some_and(|done| done(&msg));
+            self.send(msg);
+            if matched {
+                return;
+            }
+        }
+    }
+
+    async fn start(&mut self) {
+        self.keys("M-x agent-start RET f a k e RET");
+        (self.pump(Some(|m| matches!(m, Msg::AgentStarted { .. })))).await;
+        assert!(self.core.current().name.starts_with("*fake*<"));
+    }
+
+    async fn turn(&mut self) {
+        (self.pump(Some(|m| matches!(m, Msg::AgentPrompted { .. })))).await;
+    }
+
+    /// Waits for the agent to exit and checks its process is gone.
+    async fn gone(&mut self) {
+        self.pump(None).await;
+        assert!(gone(self.pid.expect("the agent reported its pid")).await);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_buffer_runs_turns_and_its_kill_stops_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hi, there) = (chunk("Hi"), chunk(" there"));
+    let script = format!(r#"{{"prompts": [[{hi}, {there}], [{{"sleep": 10000}}]]}}"#);
+    let mut live = Live::new(dir.path(), &script);
+    live.start().await;
+    live.keys("h e l l o RET");
+    live.turn().await;
+    assert_eq!(live.core.text(), "> hello\n\nHi there\n\n> ");
+    live.keys("w a i t RET C-c C-c");
+    live.turn().await;
+    assert_eq!(
+        live.core.text(),
+        "> hello\n\nHi there\n\n> wait\n\nTurn ended: cancelled\n\n> "
+    );
+    let name = live.core.current().name.clone();
+    live.call("kill-buffer", &[&name, "yes"]);
+    live.gone().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn killing_the_workspace_stops_its_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut live = Live::new(dir.path(), "{}");
+    live.keys("C-x t 2 RET f i x RET");
+    live.start().await;
+    live.keys("C-x t 0");
+    live.gone().await;
 }

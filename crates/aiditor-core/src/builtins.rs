@@ -641,6 +641,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.agent_start(args),
         },
         Command {
+            name: "agent-send-input",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_send_input(),
+        },
+        Command {
+            name: "agent-cancel",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_cancel(),
+        },
+        Command {
             name: "vterm",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.vterm(),
