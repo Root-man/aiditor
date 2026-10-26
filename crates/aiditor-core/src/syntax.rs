@@ -117,7 +117,7 @@ fn parse(parser: &mut Parser, text: &Rope, old: Option<&Tree>) -> Tree {
 }
 
 /// `name`'s colour in `palette`, or that of its longest dotted prefix there.
-fn color(palette: &BTreeMap<String, u32>, mut name: &str) -> Option<u32> {
+pub(crate) fn color(palette: &BTreeMap<String, u32>, mut name: &str) -> Option<u32> {
     loop {
         if let Some(&color) = palette.get(name) {
             return Some(color);

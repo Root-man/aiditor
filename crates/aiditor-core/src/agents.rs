@@ -5,9 +5,13 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, NewSessionResponse, PromptRequest, SessionNotification, SessionUpdate, StopReason,
 };
 
-use crate::buffer::{BufferId, InsertionType};
+use std::ops::Range;
+
+use crate::buffer::{Buffer, BufferId, InsertionType, MarkerId};
 use crate::command::Args;
+use crate::markdown;
 use crate::project::ProjectId;
+use crate::settings::Theme;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects};
 
 /// The prompt line's text, just before the prompt area.
@@ -33,14 +37,24 @@ pub(crate) struct Session {
     pub(crate) updates: Vec<SessionNotification>,
     /// A `session/prompt` waits for its answer.
     turn: bool,
-    /// The last block above the prompt line is the agent message still streaming.
-    streaming: bool,
+    /// The last block above the prompt line, while an agent message or thought streams into it.
+    stream: Option<Stream>,
+}
+
+/// A block being streamed.
+struct Stream {
+    /// Where the block starts.
+    start: MarkerId,
+    thought: bool,
+    /// Chunks arrived since it was last rendered.
+    dirty: bool,
 }
 
 impl Core {
     /// Puts `text` above session `id`'s prompt line: as a new block followed by a blank line, or,
-    /// for a `chunk` while one streams, at the end of the streamed block.
-    fn output(&mut self, id: AgentId, text: &str, chunk: bool) {
+    /// for a chunk of the kind streaming (`Some(thought)`), at the end of the streamed block. A
+    /// chunk's block is rendered as markdown by the next frame.
+    fn output(&mut self, id: AgentId, text: &str, chunk: Option<bool>) {
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -48,11 +62,62 @@ impl Core {
             return;
         };
         let end = buffer.prompt_start() - PROMPT.len();
-        match chunk && session.streaming {
-            true => buffer.insert_output(end - "\n\n".len(), text),
-            false => buffer.insert_output(end, &format!("{text}\n\n")),
+        if let Some(stream) = &mut session.stream
+            && Some(stream.thought) == chunk
+        {
+            buffer.insert_output(end - "\n\n".len(), text);
+            stream.dirty = true;
+            return;
         }
-        session.streaming = chunk;
+        self.end_stream(id);
+        let session = self.agents.get_mut(&id).expect("found above");
+        let buffer = self.buffers.get_mut(session.buffer).expect("found above");
+        buffer.insert_output(end, &format!("{text}\n\n"));
+        session.stream = chunk.map(|thought| Stream {
+            start: buffer
+                .add_marker(end, InsertionType::Stay)
+                .expect("in the text"),
+            thought,
+            dirty: true,
+        });
+    }
+
+    /// Renders session `id`'s streamed block if chunks arrived since it was last rendered.
+    fn render_stream(&mut self, id: AgentId) {
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let (Some(stream), Some(buffer)) =
+            (&mut session.stream, self.buffers.get_mut(session.buffer))
+        else {
+            return;
+        };
+        if std::mem::take(&mut stream.dirty) {
+            let start = buffer.marker(stream.start).expect("live while streaming");
+            let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
+            render(buffer, start..end, stream.thought, &self.settings.theme);
+        }
+    }
+
+    /// Renders and ends session `id`'s stream, if any.
+    fn end_stream(&mut self, id: AgentId) {
+        self.render_stream(id);
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        if let (Some(stream), Some(buffer)) =
+            (session.stream.take(), self.buffers.get_mut(session.buffer))
+        {
+            buffer.remove_marker(stream.start);
+        }
+    }
+
+    /// Renders each streamed block that changed, at most once per frame.
+    pub(crate) fn render_streams(&mut self) {
+        let ids: Vec<_> = self.agents.keys().copied().collect();
+        for id in ids {
+            self.render_stream(id);
+        }
     }
 
     /// The session whose buffer the selected window shows.
@@ -150,7 +215,7 @@ impl Ctx<'_> {
             ended: false,
             updates: Vec::new(),
             turn: false,
-            streaming: false,
+            stream: None,
         };
         core.agents.insert(id, session);
         core.echo(format!("Starting {name}..."));
@@ -226,22 +291,24 @@ impl Ctx<'_> {
         }
     }
 
-    /// Keeps the update, and puts a text message chunk above the prompt line.
+    /// Keeps the update, and puts a text message or thought chunk above the prompt line.
     pub(crate) fn agent_update(&mut self, id: AgentId, update: SessionNotification) {
         let core = &mut *self.core;
         let Some(session) = core.agents.get_mut(&id).filter(|s| !s.ended) else {
             return;
         };
         let text = match &update.update {
-            SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
-                ContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            },
+            SessionUpdate::AgentMessageChunk(chunk) => Some((chunk, false)),
+            SessionUpdate::AgentThoughtChunk(chunk) => Some((chunk, true)),
             _ => None,
-        };
+        }
+        .and_then(|(chunk, thought)| match &chunk.content {
+            ContentBlock::Text(text) => Some((text.text.clone(), thought)),
+            _ => None,
+        });
         session.updates.push(update);
-        if let Some(text) = text {
-            core.output(id, &text, true);
+        if let Some((text, thought)) = text {
+            core.output(id, &text, Some(thought));
         }
     }
 
@@ -263,17 +330,25 @@ impl Ctx<'_> {
             .buffers
             .get_mut(buffer)
             .expect("current buffer is live");
-        let input = b.text().slice(b.prompt_start()..).to_string();
+        let start = b.prompt_start();
+        let input = b.text().slice(start..).to_string();
         if input.trim().is_empty() {
             return Ok(());
         }
+        core.end_stream(id);
+        let b = core
+            .buffers
+            .get_mut(buffer)
+            .expect("current buffer is live");
         b.append(&format!("\n\n{PROMPT}"));
+        let theme = &core.settings.theme;
+        render(b, start..start + input.chars().count(), false, theme);
         let end = b.len_chars();
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
         let session = core.agents.get_mut(&id).expect("found above");
-        (session.turn, session.streaming) = (true, false);
+        session.turn = true;
         let request = PromptRequest::new(session_id, vec![input.into()]);
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
@@ -305,7 +380,7 @@ impl Ctx<'_> {
             Ok(reason) => format!("Turn ended: {reason:?}"),
             Err(err) => format!("Error: {err}"),
         };
-        core.output(id, &line, false);
+        core.output(id, &line, None);
     }
 
     /// Ends the session after its agent exited, noting a crash, and releases the agent's handle.
@@ -327,6 +402,16 @@ impl Ctx<'_> {
     }
 }
 
+/// Renders `range` of `buffer` as markdown, replacing its properties.
+fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool, theme: &Theme) {
+    buffer.remove_properties(range.clone());
+    let text = buffer.text().slice(range.clone()).to_string();
+    for (r, prop) in markdown::render(&text, thought, theme) {
+        (buffer.add_property(range.start + r.start..range.start + r.end, prop))
+            .expect("inside the rendered range");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
@@ -335,6 +420,7 @@ mod tests {
 
     use super::*;
     use crate::Msg;
+    use crate::buffer::{Decoration, Face, Prop};
     use crate::harness::{Harness, listed, name};
     use crate::settings::Agent;
 
@@ -680,7 +766,8 @@ mod tests {
             9,
             SessionUpdate::AgentMessageChunk(ContentChunk::new("x".into())),
         );
-        assert_eq!(h.core.text(), "Hi there\n\n> ");
+        // The thought is a block of its own, between two message blocks.
+        assert_eq!(h.core.text(), "Hi\n\nhmm\n\n there\n\n> ");
         assert_eq!(h.core.point(), h.core.text().chars().count());
         assert_eq!(h.core.agents[&AgentId(0)].updates.len(), 3);
         assert_eq!(log_text(&h, "*claude stderr*<work>"), before);
@@ -704,6 +791,122 @@ mod tests {
         assert_eq!(
             h.core.text(),
             "> hello\n\nHi there\n\n> again\n\nAgain\n\n> "
+        );
+    }
+
+    /// Each property of the current buffer, with the text it covers.
+    fn props(h: &Harness) -> Vec<(String, Prop)> {
+        let b = h.core.current();
+        (b.properties())
+            .map(|(r, p)| (b.text().slice(r).to_string(), p.clone()))
+            .collect()
+    }
+
+    fn thought(h: &mut Harness, text: &str) {
+        update(
+            h,
+            0,
+            SessionUpdate::AgentThoughtChunk(ContentChunk::new(text.into())),
+        );
+    }
+
+    #[test]
+    fn a_streamed_block_renders_when_the_frame_is_built() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, "**a");
+        chunk(&mut h, "b**");
+        assert_eq!(h.core.text(), "> a\n\n**ab**\n\n> ");
+        assert!(props(&h).is_empty(), "nothing rendered before the frame");
+        h.core.frame();
+        let bold = Face {
+            bold: true,
+            ..Face::default()
+        };
+        let hidden = Prop::Invisible(String::new());
+        let first = vec![
+            ("**".into(), hidden.clone()),
+            ("ab".into(), Prop::Face(bold)),
+            ("**".into(), hidden.clone()),
+        ];
+        assert_eq!(props(&h), first);
+        // The next reply renders on its own; the first keeps its properties.
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.keys("b RET");
+        chunk(&mut h, "*c*");
+        assert_eq!(props(&h), first);
+        h.core.frame();
+        let italic = Face {
+            italic: true,
+            ..Face::default()
+        };
+        let all = [
+            first.clone(),
+            vec![
+                ("*".into(), hidden.clone()),
+                ("c".into(), Prop::Face(italic)),
+                ("*".into(), hidden.clone()),
+            ],
+        ]
+        .concat();
+        assert_eq!(props(&h), all);
+        h.core.frame();
+        assert_eq!(props(&h), all, "a frame without chunks changes nothing");
+    }
+
+    #[test]
+    fn a_finished_block_renders_before_the_next_starts() {
+        let mut h = session();
+        chunk(&mut h, "`x`");
+        thought(&mut h, "hmm");
+        // The message rendered when the thought began; the thought waits for the frame.
+        assert_eq!(props(&h).len(), 3);
+        h.core.frame();
+        let dim = Face {
+            fg: Some(h.core.settings().theme.dim),
+            ..Face::default()
+        };
+        assert_eq!(props(&h).last(), Some(&("hmm".into(), Prop::Face(dim))));
+    }
+
+    #[test]
+    fn the_echoed_prompt_renders_as_markdown() {
+        let mut h = session();
+        h.keys("* * h i * * RET");
+        assert_eq!(h.core.text(), "> **hi**\n\n> ");
+        let bold = Face {
+            bold: true,
+            ..Face::default()
+        };
+        assert!(props(&h).contains(&("hi".into(), Prop::Face(bold))));
+    }
+
+    #[test]
+    fn rendered_replies_show_without_markup_and_keep_it_in_the_text() {
+        let mut h = session();
+        chunk(
+            &mut h,
+            "# Title\n\nSome **bold** [docs](https://x.dev).\n\n```rust\nfn main() {}\n```",
+        );
+        let frame = h.frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        let shown: Vec<String> = (lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            shown[..7],
+            ["Title", "", "Some bold docs.", "", "", "fn main() {}", ""]
+        );
+        let code = Decoration::Background(h.core.settings().theme.code_block);
+        assert!((4..7).all(|i| lines[i].decorations == [code]));
+        assert!(lines[3].decorations.is_empty());
+        // Swiper matches the hidden markup, and copying yields it.
+        h.keys("C-s * * b");
+        assert_eq!(listed(&mut h).0, ["3 Some **bold** [docs](https://x.dev)."]);
+        h.keys("C-g M-< C-n C-n C-SPC C-e M-w");
+        assert_eq!(
+            h.clipboard.as_deref(),
+            Some("Some **bold** [docs](https://x.dev).")
         );
     }
 

@@ -22,6 +22,9 @@ region = 0x264f78
 # The selected window's mode line, and the other windows'.
 mode_line = 0x3c3c3c
 mode_line_inactive = 0x282828
+# Agent thoughts' text, and code's background in agent messages.
+dim = 0x808080
+code_block = 0x2a2a2a
 # The 16 ANSI colours terminals use: black, red, green, yellow, blue, magenta, cyan, white, then their bright forms.
 ansi = [
   0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5,

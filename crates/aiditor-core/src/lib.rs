@@ -27,6 +27,7 @@ pub mod key;
 pub mod keymap;
 mod kill_ring;
 mod mark;
+mod markdown;
 mod minibuffer;
 mod motion;
 mod prefix;

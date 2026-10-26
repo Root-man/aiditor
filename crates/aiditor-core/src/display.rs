@@ -182,14 +182,27 @@ pub fn build(
         top.min(text.len_lines() - 1),
         (top + rows + 1).min(text.len_lines()),
     );
-    let (first, last) = (text.line_to_char(top_line), text.line_to_char(end_line));
+    let (first, mut last) = (text.line_to_char(top_line), text.line_to_char(end_line));
     let folds = buffer.has_folds();
-    // Without folds no line past the window's is reached, so only the properties near it count,
-    // which keeps a coloured scrollback in terminal copy mode cheap to draw.
-    let props = match folds {
-        true => buffer.properties().collect(),
-        false => buffer.properties_near(first..last),
-    };
+    // Only the properties near the window count, which keeps a coloured scrollback in terminal
+    // copy mode and a long session transcript cheap to draw. Folds join lines, so the window
+    // reaches one more line for each newline they hide in it.
+    let mut props = buffer.properties_near(first..last);
+    let mut widen = folds;
+    while widen {
+        let hidden: usize = (props.iter())
+            .filter(|(_, p)| matches!(p, Prop::Invisible(_)))
+            .map(|(r, _)| {
+                text.char_to_line(r.end.min(last)) - text.char_to_line(r.start.max(first))
+            })
+            .sum();
+        let end = text.line_to_char((end_line + hidden).min(text.len_lines()));
+        widen = end > last;
+        if widen {
+            last = end;
+            props = buffer.properties_near(first..last);
+        }
+    }
     // shortcut: point's line is the display line starting on point's buffer line, so one joined by a fold from an earlier line is not scrolled; compare display lines when folds get common.
     let point_line = buffer.line_col(point).ok().map(|(l, _)| l);
     // Without folds a column is a char, so only each line's drawn chars are highlighted.
@@ -547,6 +560,19 @@ mod tests {
         prop(&mut h, 3..7, Prop::Invisible("…".into()));
         prop(&mut h, 6..7, Prop::Line(Decoration::Rule(0x888888)));
         insta::assert_debug_snapshot!(h.display(5));
+    }
+
+    #[test]
+    fn folds_reach_lines_past_the_window_and_their_properties() {
+        let mut h = Harness::new(&[]);
+        h.keys("a RET b RET c RET d RET e RET f M-<");
+        // `a…` hides `b` to `d`; the window's 2 rows then reach `e` and its face, then `f`.
+        prop(&mut h, 1..7, Prop::Invisible("…".into()));
+        prop(&mut h, 8..9, Prop::Face(RED));
+        prop(&mut h, 9..10, Prop::Invisible(String::new()));
+        let display = h.display(2);
+        assert_eq!(texts(&mut h, 2), ["a…", "ef"]);
+        assert_eq!(display.lines[1].spans[0].face, RED);
     }
 
     #[test]
