@@ -2,13 +2,16 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use agent_client_protocol_schema::v1::{
+    ContentChunk, NewSessionResponse, SessionNotification, SessionUpdate,
+};
 use aiditor_core::buffer::{self, Buffers};
 use aiditor_core::command::{Args, Prefix};
 use aiditor_core::display;
 use aiditor_core::project::{Loaded, Project};
 use aiditor_core::settings::Settings;
 use aiditor_core::terminal::Terminal;
-use aiditor_core::{Core, Ctx, Effect, FileOp, Msg};
+use aiditor_core::{AgentOp, Core, Ctx, Effect, FileOp, Msg};
 
 use super::support::{measure, prepared};
 
@@ -193,6 +196,7 @@ fn syntax(output: &mut String) {
     assert!(shown.len() <= 121);
     let text = format!("const DATA: &str = \"{}\";\n", "x".repeat(1_000_000));
     let mut core = open("/long.rs", &text);
+    command(&mut core, "toggle-truncate-lines");
     command(&mut core, "move-end-of-line");
     let frame = core.frame();
     let shown: String = (frame.windows[0].display.lines[0].spans.iter())
@@ -206,6 +210,90 @@ fn syntax(output: &mut String) {
         "syntax-display/rs/1mb-single-line-at-end",
         || {
             black_box(core.frame());
+        },
+        output,
+    );
+    let mut core = open("/long.rs", &text);
+    command(&mut core, "move-end-of-line");
+    let frame = core.frame();
+    let window = &frame.windows[0].display;
+    let row = window.cursor.expect("point shown").0;
+    let shown: String = (window.lines[row].spans.iter())
+        .map(|s| s.text.as_str())
+        .collect();
+    assert!(
+        shown.ends_with("xx\";") && colored(&frame),
+        "the wrapped line's last row, highlighted"
+    );
+    measure(
+        "syntax-display/rs/1mb-single-line-wrapped-at-end",
+        || {
+            black_box(core.frame());
+        },
+        output,
+    );
+}
+
+fn sessions(output: &mut String) {
+    let group = "# Heading été\n\nSome **bold** and *italic* text with `code` and a [link](https://x.dev).\n\n```rust\nfn item() -> usize { 1 }\n```\n- a *list* item with `x`\n\nA closing **line**.\n";
+    let text = group.repeat(5_000 / group.matches('\n').count());
+    assert_eq!(text.matches('\n').count(), 5_000);
+    prepared(
+        "session-render/5000-line-styled-message",
+        || {
+            let mut core = Core::default();
+            let project =
+                Project::parse("name = 'bench'\nwatch = false\n[primary]\npath = '/bench/a'\n")
+                    .unwrap();
+            core.handle(
+                Instant::now(),
+                Msg::ProjectsLoaded {
+                    dir: None,
+                    projects: vec![Ok(Loaded {
+                        project,
+                        file: None,
+                    })],
+                },
+            );
+            let project = core.project_id("bench").unwrap();
+            core.new_workspace("bench", project);
+            let effects = call(
+                &mut core,
+                "agent-start",
+                Args {
+                    strings: vec!["claude".into()],
+                    ..Args::default()
+                },
+            );
+            let id = (effects.into_iter())
+                .find_map(|e| match e {
+                    Effect::Agent(AgentOp::Spawn { id, .. }) => Some(id),
+                    _ => None,
+                })
+                .expect("agent-start spawns");
+            let session = NewSessionResponse::new("s");
+            core.handle(
+                Instant::now(),
+                Msg::AgentStarted {
+                    id,
+                    result: Ok(session),
+                },
+            );
+            let chunk = ContentChunk::new(text.clone().into());
+            let update = SessionNotification::new("s", SessionUpdate::AgentMessageChunk(chunk));
+            core.handle(
+                Instant::now(),
+                Msg::AgentUpdate {
+                    id,
+                    update: Box::new(update),
+                },
+            );
+            core
+        },
+        |core| {
+            let frame = core.frame();
+            assert!(core.text().contains("# Heading été"), "the message arrived");
+            black_box(frame);
         },
         output,
     );
@@ -559,4 +647,5 @@ pub fn run(output: &mut String) {
     reverts(output);
     terminals(output);
     splits(output);
+    sessions(output);
 }

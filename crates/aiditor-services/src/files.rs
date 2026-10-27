@@ -66,9 +66,9 @@ pub fn run(op: FileOp) -> Msg {
                 result: unified_diff(&path, &name, &text, file),
             }
         }
-        FileOp::ListDir(dir) => {
+        FileOp::ListDir { dir, request } => {
             let result = list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
-            Msg::Listed { dir, result }
+            Msg::Listed { request, result }
         }
         FileOp::Open { intent, path } => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
@@ -620,7 +620,10 @@ mod tests {
             panic!("not previewed");
         };
         assert_eq!(result.unwrap().unwrap().to_string(), "");
-        let Msg::Listed { result, .. } = run(FileOp::ListDir(file.clone())) else {
+        let Msg::Listed { result, .. } = run(FileOp::ListDir {
+            dir: file.clone(),
+            request: 1,
+        }) else {
             panic!("not listed");
         };
         assert!(

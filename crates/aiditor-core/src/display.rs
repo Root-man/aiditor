@@ -129,12 +129,12 @@ pub struct Span {
 }
 
 /// How a window wraps long lines: `width` chars to a row, breaking at words or at the width, and
-/// shown from row `skip` of its first line.
+/// shown from char column `from` of its first line, where its first row starts.
 #[derive(Clone, Copy, Debug)]
 pub struct Wrap {
     pub width: usize,
     pub word: bool,
-    pub skip: usize,
+    pub from: usize,
 }
 
 /// Where each visual row of a line of `len` chars starts, `width` chars to a row. At words a row
@@ -182,7 +182,12 @@ pub fn build(
         top.min(text.len_lines() - 1),
         (top + rows + 1).min(text.len_lines()),
     );
-    let (first, mut last) = (text.line_to_char(top_line), text.line_to_char(end_line));
+    // Rows break greedily, so laying out from the first row's start breaks as the whole line would.
+    let from = wrap.map_or(0, |w| w.from);
+    let (first, mut last) = (
+        text.line_to_char(top_line) + from,
+        text.line_to_char(end_line),
+    );
     let folds = buffer.has_folds();
     // Only the properties near the window count, which keeps a coloured scrollback in terminal
     // copy mode and a long session transcript cheap to draw. Folds join lines, so the window
@@ -212,7 +217,7 @@ pub fn build(
         drawn.push(first..last);
     } else if buffer.highlighted() {
         for l in top_line..end_line {
-            let start = text.line_to_char(l);
+            let start = text.line_to_char(l) + if l == top_line { from } else { 0 };
             let Ok(end) = buffer.char_idx(l, usize::MAX) else {
                 continue;
             };
@@ -241,7 +246,7 @@ pub fn build(
     };
     let mut lines = Vec::new();
     let mut cursor = None;
-    let mut pos = text.line_to_char(top.min(text.len_lines() - 1));
+    let mut pos = first;
     let mut line = new_line(text.char_to_line(pos));
     let mut start = pos;
     // Ends `line` at `end`, giving it every decoration whose range touches start..end.
@@ -405,8 +410,7 @@ pub fn build(
 }
 
 /// Splits each of `lines` into its rows, ending each row but the last with a `\` in `marker`
-/// when not breaking at words, and keeps `rows` of them from row `wrap.skip`, the cursor moving
-/// along.
+/// when not breaking at words, and keeps the first `rows` of them, the cursor moving along.
 fn wrap_lines(
     lines: Vec<Line>,
     cursor: &mut Option<(usize, usize)>,
@@ -462,9 +466,7 @@ fn wrap_lines(
             });
         }
     }
-    let skip = wrap.skip.min(out.len());
-    *cursor = moved.and_then(|(r, c)| (skip..skip + rows).contains(&r).then(|| (r - skip, c)));
-    out.drain(..skip);
+    *cursor = moved.filter(|&(r, _)| r < rows);
     out.truncate(rows);
     out
 }

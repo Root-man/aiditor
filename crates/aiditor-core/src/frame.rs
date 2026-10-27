@@ -210,7 +210,7 @@ pub(crate) fn window_display(
     let wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
         width,
         word,
-        skip: window.top_row(),
+        from: window.row_starts(buffer, top)[window.top_row()],
     });
     // A wrapped line never scrolls sideways.
     let col = match wrap {
@@ -223,9 +223,9 @@ pub(crate) fn window_display(
         0 => usize::MAX,
         _ => cols.saturating_add(1),
     };
-    // Wrapped, a line is laid out only through the rows the window can show.
+    // Wrapped, a line is laid out only from the window's first row through the rows it can show.
     let shown = match wrap {
-        Some(w) => 0..(w.skip + rows + 1).saturating_mul(cols),
+        Some(_) => 0..(rows + 1).saturating_mul(cols),
         None => left..left.saturating_add(width),
     };
     let mut display = display::build(buffer, top, rows, point, mark, settings, shown, wrap);
@@ -550,6 +550,24 @@ mod tests {
         let rows = [format!("{}\\", &long[9_960..9_980]), long[9_980..].into()];
         assert_eq!((lines, cursor), (rows.to_vec(), Some((1, 20))));
         assert_eq!(h.core.windows.window.top_row(), 498);
+    }
+
+    #[test]
+    fn a_window_deep_inside_a_word_wrapped_line_breaks_as_the_whole_line() {
+        let long = "word ".repeat(1_000);
+        let mut h = Harness::new(&[("a.md", &long)]);
+        h.open("a.md").keys("M->");
+        let height = 4. * h.core.settings().line_height();
+        // 21 columns, 20 chars to a row, 3 rows.
+        let (lines, cursor) = shown(&h.frame(168., height));
+        let starts = crate::display::row_starts(long.len(), 20, true, |i| &long[i..=i] == " ");
+        let ends = starts[1..].iter().copied().chain([long.len()]);
+        let rows: Vec<String> = (starts.iter().zip(ends))
+            .map(|(&s, e)| long[s..e].into())
+            .collect();
+        let last = rows[rows.len() - 3..].to_vec();
+        let cursor_col = last[2].len();
+        assert_eq!((lines, cursor), (last, Some((2, cursor_col))));
     }
 
     #[test]

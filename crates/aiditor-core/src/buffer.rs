@@ -726,6 +726,17 @@ impl Buffer {
         }
     }
 
+    /// Rewrites every colour the properties hold, faces' and line decorations', through `f`.
+    pub(crate) fn map_colors(&mut self, f: impl Fn(u32) -> u32) {
+        for (.., prop) in &mut self.props {
+            match prop {
+                Prop::Face(face) => (face.fg, face.bg) = (face.fg.map(&f), face.bg.map(&f)),
+                Prop::Line(Decoration::Background(c) | Decoration::Rule(c)) => *c = f(*c),
+                Prop::Invisible(_) => {}
+            }
+        }
+    }
+
     /// Whether any property hides text.
     pub(crate) fn has_folds(&self) -> bool {
         (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_)))
@@ -1362,6 +1373,33 @@ mod tests {
             near(b, 0..10),
             [5..9],
             "only the one past the range is left"
+        );
+    }
+
+    #[test]
+    fn map_colors_rewrites_faces_and_decorations() {
+        let (mut buffers, id) = with_text("abcdef");
+        let b = buffers.get_mut(id).unwrap();
+        let face = |fg, bg| {
+            Prop::Face(Face {
+                fg,
+                bg,
+                ..Face::default()
+            })
+        };
+        b.add_property(0..2, face(Some(1), Some(2))).unwrap();
+        b.add_property(2..4, Prop::Line(Decoration::Rule(1)))
+            .unwrap();
+        b.add_property(4..6, Prop::Invisible("…".into())).unwrap();
+        b.map_colors(|c| c * 10);
+        let props: Vec<_> = b.properties().map(|(_, p)| p.clone()).collect();
+        assert_eq!(
+            props,
+            [
+                face(Some(10), Some(20)),
+                Prop::Line(Decoration::Rule(10)),
+                Prop::Invisible("…".into())
+            ]
         );
     }
 

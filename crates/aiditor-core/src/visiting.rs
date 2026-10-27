@@ -1511,10 +1511,56 @@ mod tests {
         assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/nope/")));
         assert_eq!(listed(&mut h).0, Vec::<String>::new());
         h.send(Msg::Listed {
-            dir: h.path("d"),
+            request: 1,
             result: Ok(vec!["stale".into()]),
         });
         assert_eq!(listed(&mut h).0, Vec::<String>::new());
+    }
+
+    /// The ids of the listings the core asked for since the last call, with collected effects.
+    fn listing_requests(h: &mut Harness) -> Vec<u64> {
+        (h.effects.drain(..))
+            .filter_map(|e| match e {
+                crate::Effect::File(crate::FileOp::ListDir { request, .. }) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn deliver(h: &mut Harness, request: u64, names: &[&str]) {
+        let result = Ok(names.iter().map(|n| (*n).into()).collect());
+        h.send(Msg::Listed { request, result });
+    }
+
+    #[test]
+    fn a_reopened_prompt_ignores_the_old_listing() {
+        let mut h = in_dir();
+        h.collect_effects = true;
+        h.keys("C-x C-f");
+        let first = listing_requests(&mut h);
+        h.keys("C-g C-x C-f");
+        let second = listing_requests(&mut h);
+        h.collect_effects = false;
+        deliver(&mut h, first[0], &["old.txt"]);
+        assert_eq!(listed(&mut h).0, Vec::<String>::new());
+        deliver(&mut h, second[0], &["new.txt"]);
+        assert_eq!(listed(&mut h).0, ["new.txt"]);
+    }
+
+    #[test]
+    fn a_listing_from_before_the_text_came_back_is_ignored() {
+        let mut h = in_dir();
+        h.collect_effects = true;
+        h.keys("C-x C-f");
+        let first = listing_requests(&mut h);
+        h.keys("s u b / DEL");
+        let later = listing_requests(&mut h);
+        assert_eq!(later.len(), 2, "sub/, then the directory again");
+        h.collect_effects = false;
+        deliver(&mut h, later[1], &["new.txt"]);
+        deliver(&mut h, first[0], &["old.txt"]);
+        deliver(&mut h, later[0], &["c.txt"]);
+        assert_eq!(listed(&mut h).0, ["new.txt"]);
     }
 
     #[test]

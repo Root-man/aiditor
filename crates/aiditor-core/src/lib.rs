@@ -110,10 +110,10 @@ pub enum Msg {
         buffer: BufferId,
         result: Result<String, String>,
     },
-    /// The file service's answer to `FileOp::ListDir`: the directory's entries, or why it
-    /// couldn't be listed.
+    /// The file service's answer to `FileOp::ListDir` `request`: the directory's entries, or
+    /// why it couldn't be listed.
     Listed {
-        dir: PathBuf,
+        request: u64,
         result: Result<Vec<String>, String>,
     },
     /// The file service's answer to `FileOp::Open`: the file's bytes and hash, `None` when there
@@ -377,8 +377,8 @@ pub enum FileOp {
         path: PathBuf,
         text: Rope,
     },
-    /// List the directory and send `Msg::Listed`.
-    ListDir(PathBuf),
+    /// List `dir` and send `Msg::Listed` with `request`.
+    ListDir { dir: PathBuf, request: u64 },
     /// Read the file and send `Msg::Opened`.
     Open { intent: VisitIntent, path: PathBuf },
     /// Read the file and send `Msg::Previewed`.
@@ -662,7 +662,7 @@ impl Ctx<'_> {
                 result,
             } => self.core.on_reverted(buffer, tick, result),
             Msg::Diffed { buffer, result } => self.on_diffed(buffer, result),
-            Msg::Listed { dir, result } => self.on_listed(dir, result),
+            Msg::Listed { request, result } => self.on_listed(request, result),
             Msg::Opened {
                 intent,
                 path,
@@ -676,7 +676,10 @@ impl Ctx<'_> {
             }
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
-                    Ok(settings) => self.core.settings = settings,
+                    Ok(settings) => {
+                        self.core.retheme_sessions(&settings.theme);
+                        self.core.settings = settings;
+                    }
                     Err(err) => self.core.report(format!("settings: {err}")),
                 }
             }
