@@ -9,6 +9,16 @@ use tokio::time::timeout;
 
 const ID: TerminalId = TerminalId(7);
 
+async fn native_lock() -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    // macOS can leak EREDRIVEOPEN from concurrent PTY allocation and teardown.
+    static PTYS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    if cfg!(target_os = "macos") {
+        Some(PTYS.lock().await)
+    } else {
+        None
+    }
+}
+
 fn spawn(
     terminals: &mut Terminals,
     cwd: &Path,
@@ -104,6 +114,7 @@ async fn output_until_exit(rx: &mut Receiver<Msg>, code: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn streams_output_before_real_exit_status() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(dir.path(), "printf a; printf b; exit 3");
     started(&mut rx).await;
@@ -113,6 +124,7 @@ async fn streams_output_before_real_exit_status() {
 
 #[tokio::test]
 async fn spawn_failures_close_the_stream() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("file");
     std::fs::write(&file, "not a directory").unwrap();
@@ -137,6 +149,7 @@ async fn spawn_failures_close_the_stream() {
 
 #[tokio::test]
 async fn large_output_arrives_whole_in_bounded_batches() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let bytes: Vec<u8> = (0..1_000_000).map(|i| b'a' + (i % 26) as u8).collect();
     std::fs::write(dir.path().join("data"), &bytes).unwrap();
@@ -148,6 +161,7 @@ async fn large_output_arrives_whole_in_bounded_batches() {
 
 #[tokio::test]
 async fn exit_does_not_wait_for_a_background_job_holding_the_pty() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(dir.path(), "sleep 5 & exit 0");
     started(&mut rx).await;
@@ -158,6 +172,7 @@ async fn exit_does_not_wait_for_a_background_job_holding_the_pty() {
 
 #[tokio::test]
 async fn terminal_environment_and_utf8_flag_reach_the_child() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = start(
         dir.path(),
@@ -185,6 +200,7 @@ async fn terminal_environment_and_utf8_flag_reach_the_child() {
 
 #[tokio::test]
 async fn default_bash_reads_the_login_profile() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".bash_profile"), "echo \"$0\"; exit\n").unwrap();
     let mut rx = start(
@@ -210,6 +226,7 @@ async fn default_bash_reads_the_login_profile() {
     ignore = "on Linux zsh also prints a screen clear after the profile"
 )]
 async fn default_zsh_reads_the_login_profile() {
+    let _native = native_lock().await;
     let Some(zsh) = ["/bin/zsh", "/usr/bin/zsh"]
         .into_iter()
         .find(|path| Path::new(path).is_file())
@@ -266,6 +283,7 @@ async fn integrated_zsh(
 
 #[tokio::test]
 async fn zsh_integration_sends_marks_and_keeps_the_users_files() {
+    let _native = native_lock().await;
     let Some(zsh) = zsh() else { return };
     let integration = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
@@ -317,6 +335,7 @@ async fn zsh_integration_sends_marks_and_keeps_the_users_files() {
 
 #[tokio::test]
 async fn zsh_integration_leaves_an_unset_zdotdir_unset() {
+    let _native = native_lock().await;
     let Some(zsh) = zsh() else { return };
     if std::env::var_os("ZDOTDIR").is_some() {
         eprintln!("ZDOTDIR is set in the test's environment; skipping");
@@ -343,6 +362,7 @@ async fn zsh_integration_leaves_an_unset_zdotdir_unset() {
 
 #[tokio::test]
 async fn bash_starts_without_zsh_integration() {
+    let _native = native_lock().await;
     let integration = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -364,6 +384,7 @@ async fn bash_starts_without_zsh_integration() {
 
 #[tokio::test]
 async fn backpressure_stalls_only_its_terminal_and_draining_resumes_it() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(dir.path(), "head -c 8000000 /dev/zero; touch done");
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -390,6 +411,7 @@ async fn backpressure_stalls_only_its_terminal_and_draining_resumes_it() {
 
 #[tokio::test]
 async fn buffered_output_precedes_exit_after_a_slow_receiver_resumes() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(
         dir.path(),
@@ -420,6 +442,7 @@ async fn buffered_output_precedes_exit_after_a_slow_receiver_resumes() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn exit_is_reported_while_a_background_job_keeps_writing() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(
         dir.path(),
@@ -448,6 +471,7 @@ async fn exit_is_reported_while_a_background_job_keeps_writing() {
 
 #[tokio::test]
 async fn large_final_output_precedes_exit_with_a_slow_receiver() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(dir.path(), "head -c 1000000 /dev/zero");
     started(&mut rx).await;
@@ -481,6 +505,7 @@ async fn large_final_output_precedes_exit_with_a_slow_receiver() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn exit_is_reported_during_a_background_output_flood() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = script(
         dir.path(),
@@ -529,6 +554,7 @@ async fn exit_is_reported_during_a_background_output_flood() {
 
 #[tokio::test]
 async fn input_echoes_and_reaches_the_program() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let mut rx = spawn(&mut terminals, dir.path(), Some(vec!["cat".into()]), vec![]);
@@ -541,6 +567,7 @@ async fn input_echoes_and_reaches_the_program() {
 
 #[tokio::test]
 async fn resize_reaches_the_program() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let mut rx = spawn(&mut terminals, dir.path(), sh("read x; stty size"), vec![]);
@@ -557,6 +584,7 @@ async fn resize_reaches_the_program() {
 
 #[tokio::test]
 async fn ctrl_c_interrupts_the_foreground_job() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let command = Some(vec!["sleep".into(), "30".into()]);
@@ -580,6 +608,7 @@ async fn ctrl_c_interrupts_the_foreground_job() {
 
 #[tokio::test]
 async fn backspace_erases_a_whole_multibyte_char() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let script = sh("read -r line; printf '<%s>' \"$line\"");
@@ -591,6 +620,7 @@ async fn backspace_erases_a_whole_multibyte_char() {
 
 #[tokio::test]
 async fn a_large_write_to_a_program_that_does_not_read_returns_at_once() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let script = sh("stty raw -echo; echo ready; sleep 5");
@@ -651,6 +681,7 @@ fn kill(terminals: &mut Terminals, id: TerminalId) {
 
 #[tokio::test]
 async fn kill_ends_the_shell_and_its_foreground_job() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let bash = ["bash", "--norc", "--noprofile", "-i"];
@@ -671,6 +702,7 @@ async fn kill_ends_the_shell_and_its_foreground_job() {
 
 #[tokio::test]
 async fn kill_ends_a_shell_that_ignores_hangup_and_term() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let script = sh("trap '' HUP TERM; echo \"pid $$ \"; while :; do sleep 1; done");
@@ -690,6 +722,7 @@ async fn kill_ends_a_shell_that_ignores_hangup_and_term() {
 
 #[tokio::test]
 async fn kill_ends_a_foreground_job_that_outlives_its_shell() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let bash = ["bash", "--norc", "--noprofile", "-i"];
@@ -740,6 +773,7 @@ async fn none_running(args: &str) {
 
 #[tokio::test]
 async fn kill_right_after_spawn_ends_the_shell() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let command = Some(vec!["sleep".into(), "1000.1".into()]);
@@ -751,6 +785,7 @@ async fn kill_right_after_spawn_ends_the_shell() {
 
 #[tokio::test]
 async fn kill_all_right_after_spawn_ends_the_shell() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let command = Some(vec!["sleep".into(), "1000.2".into()]);
@@ -761,6 +796,7 @@ async fn kill_all_right_after_spawn_ends_the_shell() {
 
 #[tokio::test]
 async fn kill_all_leaves_no_shells() {
+    let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut terminals = Terminals::default();
     let mut pids = Vec::new();

@@ -455,6 +455,7 @@ mod tests {
 
     #[gpui::test]
     fn every_bundled_binding_reaches_the_core(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         // `C-x C-s` hands the save to Tokio's blocking pool.
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
@@ -479,6 +480,7 @@ mod tests {
 
     #[gpui::test]
     fn typing_goes_through_the_text_input(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("aB");
         cx.simulate_keystrokes("ctrl-u 3 x ctrl-x u");
@@ -490,6 +492,7 @@ mod tests {
 
     #[gpui::test]
     fn the_window_title_follows_the_current_workspace(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         let shown = cx.window_title().unwrap();
         assert!(shown.starts_with("t.txt | "), "{shown}");
@@ -518,6 +521,7 @@ mod tests {
 
     #[gpui::test]
     fn closing_the_window_offers_to_save(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
         let path = editor.read_with(cx, |e, _| e.core.current().file.clone().unwrap());
@@ -528,6 +532,7 @@ mod tests {
 
     #[gpui::test]
     fn startup_indexes_before_watching_and_applies_ignores(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
@@ -572,6 +577,7 @@ mod tests {
 
     #[gpui::test]
     fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let dir = tempfile::tempdir().unwrap();
@@ -626,6 +632,7 @@ mod tests {
 
     #[gpui::test]
     fn integrated_finders_visits_saves_and_directory_recovery(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .max_blocking_threads(1)
             .enable_all()
@@ -742,7 +749,9 @@ mod tests {
                 && core.point() == 0
         });
 
-        for _ in 0..50 {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(Instant::now() < deadline, "native watcher never ready");
             std::fs::write(root.join("sub/c"), "ready\n").unwrap();
             std::thread::sleep(Duration::from_millis(100));
             cx.run_until_parked();
@@ -795,6 +804,7 @@ mod tests {
 
     #[gpui::test]
     fn recovery_files_are_written_and_removed_on_quit(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
             recovery_dir: Some(dir.path().to_owned()),
@@ -830,6 +840,7 @@ mod tests {
 
     #[gpui::test]
     fn a_prompt_reads_typed_text(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             e.core.register(Command {
@@ -857,6 +868,7 @@ mod tests {
 
     #[gpui::test]
     fn the_echo_line_is_one_string_with_point_in_it(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("abc");
@@ -874,6 +886,7 @@ mod tests {
 
     #[gpui::test]
     fn m_x_runs_a_command_by_name(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "abc");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("forward-char");
@@ -887,6 +900,7 @@ mod tests {
 
     #[gpui::test]
     fn a_completing_prompt_filters_and_picks(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             e.core.register(Command {
@@ -932,6 +946,7 @@ mod tests {
 
     #[gpui::test]
     fn input_methods_compose_and_replace(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "😀");
         cx.simulate_keystrokes("ctrl-e");
         let state = |cx: &mut VisualTestContext| {
@@ -966,6 +981,7 @@ mod tests {
 
     #[gpui::test]
     fn copy_and_paste_go_through_the_clipboard(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "ab");
         let (copy, paste) = if cfg!(target_os = "macos") {
             ("cmd-c", "cmd-v")
@@ -995,6 +1011,7 @@ mod tests {
 
     #[gpui::test]
     fn a_full_channel_lets_other_ui_work_run(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         let (tx, rx) = mpsc::channel(1000);
         for _ in 0..1000 {
@@ -1022,6 +1039,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_cells_sit_on_the_grid(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let (id, _) = e.core.create_terminal("term", 3, 20);
@@ -1050,6 +1068,7 @@ mod tests {
 
     #[gpui::test]
     fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "hello world");
         let cursor = |cx: &mut VisualTestContext| {
             let (bounds, rows) = painted(&editor, cx, 0);
