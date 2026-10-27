@@ -53,6 +53,17 @@ async fn started(rx: &mut Receiver<Msg>) -> (Vec<String>, Result<String, String>
     }
 }
 
+/// Reads stderr into `lines` until it holds `wanted`; stderr has its own pipe and task, so a
+/// line the agent wrote before answering can still arrive after the started message.
+async fn stderr_until(rx: &mut Receiver<Msg>, lines: &mut Vec<String>, wanted: &str) {
+    while !lines.iter().any(|l| l == wanted) {
+        match next(rx).await {
+            Some(Msg::AgentStderr { line, .. }) => lines.push(line),
+            msg => panic!("expected stderr {wanted:?} in {lines:?}, got {msg:?}"),
+        }
+    }
+}
+
 fn pid(lines: &[String]) -> libc::pid_t {
     let line = lines.iter().find_map(|l| l.strip_prefix("pid="));
     line.expect("the agent reports its pid").parse().unwrap()
@@ -84,7 +95,7 @@ async fn a_session_opens_in_cwd_without_fs_or_terminal() {
     let dir = tempfile::tempdir().unwrap();
     let mut agents = Agents::default();
     let mut rx = spawn(&mut agents, AGENT, dir.path(), &[]);
-    let (lines, result) = started(&mut rx).await;
+    let (mut lines, result) = started(&mut rx).await;
     let session = result.unwrap();
     assert!(session.contains("fake-session"), "{session}");
     assert!(
@@ -92,9 +103,9 @@ async fn a_session_opens_in_cwd_without_fs_or_terminal() {
         "{session}"
     );
     let cwd = format!("cwd={}", dir.path().display());
-    assert!(lines.contains(&cwd), "{lines:?}");
+    stderr_until(&mut rx, &mut lines, &cwd).await;
     let caps = "fs.readTextFile=false fs.writeTextFile=false terminal=false";
-    assert!(lines.iter().any(|l| l == caps), "{lines:?}");
+    stderr_until(&mut rx, &mut lines, caps).await;
     agents.kill_all();
 }
 
@@ -103,9 +114,9 @@ async fn later_variables_win() {
     let dir = tempfile::tempdir().unwrap();
     let mut agents = Agents::default();
     let mut rx = spawn(&mut agents, AGENT, dir.path(), &[("A", "1"), ("A", "2")]);
-    let (lines, result) = started(&mut rx).await;
+    let (mut lines, result) = started(&mut rx).await;
     result.unwrap();
-    assert!(lines.iter().any(|l| l == "A=2"), "{lines:?}");
+    stderr_until(&mut rx, &mut lines, "A=2").await;
     agents.kill_all();
 }
 
