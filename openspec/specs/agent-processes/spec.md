@@ -36,11 +36,15 @@ Each line the agent writes to stderr SHALL reach the core as one message tagged 
 - **THEN** the core gets both lines in order, then an exit message with code 3
 
 ### Requirement: Agent requests wait for the core's reply
-Each request the agent sends to the client SHALL reach the core as a message with the agent id, the request id and the request. The request SHALL stay pending until the core replies to that agent and request id with a response or an error, which SHALL then be sent to the agent. A reply for an unknown agent or request id SHALL be ignored. Until permissions and terminals are handled, the core SHALL reply to every agent request with a "method not found" error.
+Each request the agent sends to the client SHALL reach the core as a message with the agent id, the request id and the request. The request SHALL stay pending until the core replies to that agent and request id with a response or an error, which SHALL then be sent to the agent. A reply for an unknown agent or request id SHALL be ignored. The core SHALL answer `session/request_permission` for a ready session from its session buffer, and SHALL reply to every other agent request, and to a permission request for an agent without a ready session, with a "method not found" error.
 
 #### Scenario: A request is rejected
-- **WHEN** the test agent sends `session/request_permission` after its session opened and the core gets it
+- **WHEN** the test agent sends `session/request_permission` to a core that has no session for it
 - **THEN** the core replies with a "method not found" error, and the agent receives that error
+
+#### Scenario: A permission request is answered
+- **WHEN** a session started with `agent-start` gets a permission request from the fake agent and `C-c C-y`, `C-c C-n` or `RET` on an option line answers it
+- **THEN** the agent receives the `selected` outcome with that option's id
 
 ### Requirement: Killing an agent
 Killing an agent SHALL send SIGTERM to the agent's process group, which it leads, and SIGKILL to it 100 ms later, so wrappers such as `npx` and the processes they start do not outlive it. Killing SHALL return to the caller at once and drop the agent's pending requests. The core SHALL still get the exit message. A kill of an unknown agent SHALL be ignored.
