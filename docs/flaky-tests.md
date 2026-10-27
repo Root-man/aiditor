@@ -6,5 +6,5 @@ A flake is confirmed when the test passes alone and on reruns, fails without a c
 
 No currently tracked flakes. The entries investigated on 2026-10-27 were addressed
 by watcher shutdown, macOS native-test serialization, and bounded readiness
-probes. See the [investigation and implementation follow-up](flaky-tests-investigation.md)
-for evidence and the remaining OS limits.
+probes. Native notification delays and PTY allocation by unrelated processes
+remain OS constraints.
