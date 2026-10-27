@@ -570,19 +570,30 @@ impl Ctx<'_> {
         }
     }
 
-    /// Shows a permission request from a ready session; refuses it otherwise, and every other
-    /// request.
+    /// Shows a permission request from a ready session and cancels one from an ended or killed
+    /// session; refuses it before the session is ready, and every other request.
     pub(crate) fn agent_request(&mut self, id: AgentId, request: RequestId, body: Request) {
         let core = &mut *self.core;
-        let ready = (core.agents.get(&id)).is_some_and(|s| !s.ended && s.session.is_some());
-        match *body.0 {
-            AgentRequest::RequestPermissionRequest(ask) if ready => core.show_ask(id, request, ask),
-            _ => self.effects.push(Effect::Agent(AgentOp::Reply {
-                id,
-                request,
-                result: Err(Error::method_not_found()),
-            })),
-        }
+        let session = core.agents.get(&id);
+        let ready = session.is_some_and(|s| !s.ended && s.session.is_some());
+        // An unknown id is a session forgotten when its buffer was killed.
+        let gone = session.is_none_or(|s| s.ended);
+        let result = match *body.0 {
+            AgentRequest::RequestPermissionRequest(ask) if ready => {
+                return core.show_ask(id, request, ask);
+            }
+            AgentRequest::RequestPermissionRequest(_) if gone => {
+                Ok(ClientResponse::RequestPermissionResponse(
+                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+                ))
+            }
+            _ => Err(Error::method_not_found()),
+        };
+        (self.effects).push(Effect::Agent(AgentOp::Reply {
+            id,
+            request,
+            result,
+        }));
     }
 
     /// Answers session `id`'s pending request `at` with its option `option`, or `cancelled`,
@@ -2134,6 +2145,9 @@ mod tests {
         h.keys("yes RET");
         assert!(h.core.buffers.find("*claude*<work>").is_none());
         assert_eq!(ops(&mut h), ["kill 0"]);
+        // A request the agent sent before it died is cancelled.
+        ask(&mut h, 1, "c", Some("C"));
+        assert_eq!(ops(&mut h), ["reply 0 1 cancelled"]);
     }
 
     #[test]
@@ -2316,7 +2330,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_answers_pending_requests_and_an_exit_drops_them() {
+    fn cancelling_answers_pending_requests_and_ends_the_turn_and_an_exit_drops_them() {
         let mut h = session();
         h.keys("a RET");
         ops(&mut h);
@@ -2329,16 +2343,26 @@ mod tests {
         );
         let cancelled = "Cancelled permission for A\n\nCancelled permission for B";
         assert_eq!(h.core.text(), format!("> a\n\n{cancelled}\n\n> "));
+        prompted(&mut h, Ok(StopReason::Cancelled));
+        let ended = format!("> a\n\n{cancelled}\n\nTurn ended: cancelled\n\n> ");
+        assert_eq!(h.core.text(), ended);
+        h.keys("b RET");
+        ops(&mut h);
         ask(&mut h, 3, "c", Some("C"));
         exited(&mut h, 0, 1);
         assert_eq!(ops(&mut h), ["kill 0"]);
         assert!(h.core.text().ends_with("Cancelled permission for C\n\n> "));
         h.keys("C-c C-y");
         assert_eq!(h.core.message(), Some("No permission request is pending"));
+        // A request after the exit is cancelled and not shown.
+        let text = h.core.text();
+        ask(&mut h, 4, "d", Some("D"));
+        assert_eq!(ops(&mut h), ["reply 0 4 cancelled"]);
+        assert_eq!(h.core.text(), text);
     }
 
     #[test]
-    fn other_requests_and_unready_sessions_are_refused() {
+    fn other_requests_and_unready_sessions_are_refused_and_ended_ones_cancelled() {
         use agent_client_protocol_schema::v1::CreateTerminalRequest;
         let mut h = work();
         h.keys("M-x agent-start RET claude RET");
@@ -2357,7 +2381,7 @@ mod tests {
         exited(&mut h, 0, 0);
         ops(&mut h);
         ask(&mut h, 3, "c", Some("Late"));
-        assert_eq!(ops(&mut h), ["reply 0 3 Method not found"]);
+        assert_eq!(ops(&mut h), ["reply 0 3 cancelled"]);
         assert_eq!(h.core.text(), "> ");
     }
 }
