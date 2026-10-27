@@ -180,7 +180,9 @@ stress run, production fix, or claim of permanent flake elimination is included.
   redirecting the suite's output to a regular log file made the child's size
   limit apply to that log too. Child failures now include status and output.
 
-The first full macOS workspace run and Clippy with warnings denied passed after
-these changes. Repeated native-suite runs and PR CI validate the final change.
+The full macOS workspace run and Clippy with warnings denied passed after
+these changes. Twenty repeated terminal-suite runs and three file-sync runs
+passed with a 16-thread test harness. [Draft PR #313](https://github.com/Root-man/aiditor/pull/313)
+checks the changes on Linux and macOS.
 These controls address the reproduced failures; native delivery under arbitrary
 external load and PTY allocation by unrelated processes remain OS constraints.
