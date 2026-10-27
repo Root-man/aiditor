@@ -392,7 +392,11 @@ async fn backpressure_stalls_only_its_terminal_and_draining_resumes_it() {
     let (tx, mut shared) = channel();
     let cwd = dir.path().to_path_buf();
     tokio::task::spawn_blocking(move || {
-        tx.blocking_send(files::run(FileOp::ListDir(cwd))).unwrap()
+        tx.blocking_send(files::run(FileOp::ListDir {
+            dir: cwd,
+            request: 1,
+        }))
+        .unwrap()
     });
     assert!(matches!(
         timeout(Duration::from_secs(1), shared.recv())

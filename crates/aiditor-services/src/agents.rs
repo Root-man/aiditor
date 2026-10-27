@@ -52,14 +52,27 @@ impl Handle {
     /// SIGTERM to the agent's group unless it has exited; returns the group for the SIGKILL.
     fn terminate(self) -> Option<libc::pid_t> {
         self.pending.lock().unwrap().clear();
-        // shortcut: the group can empty between this check and the SIGKILL, and its id be reused
-        // within the grace, as with terminals; track every member if that ever shows up.
-        if self.exited.load(Ordering::SeqCst) {
-            return None;
-        }
-        unsafe { libc::killpg(self.pid, libc::SIGTERM) };
-        Some(self.pid)
+        terminate(self.pid, &self.exited)
     }
+}
+
+/// SIGTERM to group `pid` unless the agent has exited; returns the group for the SIGKILL.
+fn terminate(pid: libc::pid_t, exited: &AtomicBool) -> Option<libc::pid_t> {
+    // shortcut: the group can empty between this check and the SIGKILL, and its id be reused
+    // within the grace, as with terminals; track every member if that ever shows up.
+    if exited.load(Ordering::SeqCst) {
+        return None;
+    }
+    unsafe { libc::killpg(pid, libc::SIGTERM) };
+    Some(pid)
+}
+
+/// SIGKILL to `group` after the grace, without blocking.
+fn kill_after_grace(group: libc::pid_t) {
+    thread::spawn(move || {
+        thread::sleep(GRACE);
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    });
 }
 
 impl Agents {
@@ -130,10 +143,7 @@ impl Agents {
             }
             AgentOp::Kill { id } => {
                 if let Some(group) = self.handles.remove(&id).and_then(Handle::terminate) {
-                    thread::spawn(move || {
-                        thread::sleep(GRACE);
-                        unsafe { libc::killpg(group, libc::SIGKILL) };
-                    });
+                    kill_after_grace(group);
                 }
                 None
             }
@@ -214,7 +224,16 @@ impl Agents {
             },
         );
         let streams = (stdin, stdout);
-        let connection = tokio::spawn(connect(id, cwd, streams, pending, open, tx.clone()));
+        let process = (pid, exited.clone());
+        let connection = tokio::spawn(connect(
+            id,
+            cwd,
+            streams,
+            process,
+            pending,
+            open,
+            tx.clone(),
+        ));
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -238,11 +257,12 @@ impl Agents {
 }
 
 /// Initializes the agent and opens a session in `cwd`, then forwards the agent's requests until
-/// it closes its stdout.
+/// it closes its stdout, and then terminates it, so a session that stops speaking still exits.
 async fn connect(
     id: AgentId,
     cwd: PathBuf,
     (stdin, stdout): (ChildStdin, ChildStdout),
+    (pid, exited): (libc::pid_t, Arc<AtomicBool>),
     pending: Pending,
     open: Connection,
     tx: Sender<Msg>,
@@ -296,6 +316,9 @@ async fn connect(
         })
         .await;
     open.lock().unwrap().take();
+    if started && let Some(group) = terminate(pid, &exited) {
+        kill_after_grace(group);
+    }
     if let Err(err) = result {
         let err = err.to_string();
         if started {

@@ -122,6 +122,9 @@ pub(crate) fn render(text: &str, thought: bool, theme: &Theme) -> Vec<(Range<usi
             hidden.extend((children(node).filter(|c| c.kind() == markup)).map(|c| c.byte_range()));
         });
     }
+    // The old per-piece `covers` test never matched an empty range.
+    faces.retain(|(r, _)| !r.is_empty());
+    hidden.retain(|r| !r.is_empty());
     let mut cuts: Vec<usize> = (faces.iter().map(|(r, _)| r))
         .chain(&hidden)
         .chain(&code)
@@ -129,30 +132,45 @@ pub(crate) fn render(text: &str, thought: bool, theme: &Theme) -> Vec<(Range<usi
         .collect();
     cuts.sort_unstable();
     cuts.dedup();
+    // Every range boundary is a cut, so the ranges covering a piece are those open at its start.
+    let at = |pos: usize| cuts.binary_search(&pos).expect("every boundary is a cut");
+    let (mut opened, mut closed) = (vec![Vec::new(); cuts.len()], vec![Vec::new(); cuts.len()]);
+    for (i, (r, _)) in faces.iter().enumerate() {
+        opened[at(r.start)].push(i);
+        closed[at(r.end)].push(i);
+    }
+    let mut hiding = vec![0isize; cuts.len()];
+    for r in &hidden {
+        hiding[at(r.start)] += 1;
+        hiding[at(r.end)] -= 1;
+    }
+    let mut line_starts = vec![false; cuts.len()];
+    for r in &code {
+        line_starts[at(r.start)] = true;
+    }
+    // Keyed by push index: inner faces come later, so folding in key order lets them win.
+    let mut open = std::collections::BTreeMap::new();
+    let mut hidden_open = 0;
     let mut props: Vec<(Range<usize>, Prop)> = Vec::new();
-    for piece in cuts.windows(2).map(|w| w[0]..w[1]) {
-        let covers = |r: &Range<usize>| r.start <= piece.start && piece.end <= r.end;
-        let prop = match hidden.iter().any(covers) {
+    for (k, piece) in cuts.windows(2).map(|w| w[0]..w[1]).enumerate() {
+        for i in &closed[k] {
+            open.remove(i);
+        }
+        open.extend(opened[k].iter().map(|&i| (i, faces[i].1)));
+        hidden_open += hiding[k];
+        let prop = match hidden_open > 0 {
             true => Prop::Invisible(String::new()),
-            // Inner faces come later, so they win.
-            false => Prop::Face((faces.iter().filter(|(r, _)| covers(r))).fold(
-                Face::default(),
-                |acc, (_, f)| Face {
-                    fg: f.fg.or(acc.fg),
-                    bg: f.bg.or(acc.bg),
-                    bold: acc.bold || f.bold,
-                    italic: acc.italic || f.italic,
-                    underline: acc.underline || f.underline,
-                },
-            )),
+            false => Prop::Face(open.values().fold(Face::default(), |acc, f| Face {
+                fg: f.fg.or(acc.fg),
+                bg: f.bg.or(acc.bg),
+                bold: acc.bold || f.bold,
+                italic: acc.italic || f.italic,
+                underline: acc.underline || f.underline,
+            })),
         };
         match props.last_mut() {
             // Not joined across a code line's start, so a face never ends inside a later line's decoration.
-            Some((last, p))
-                if last.end == piece.start
-                    && *p == prop
-                    && !code.iter().any(|r| r.start == piece.start) =>
-            {
+            Some((last, p)) if last.end == piece.start && *p == prop && !line_starts[k] => {
                 last.end = piece.end
             }
             _ if prop != Prop::Face(Face::default()) => props.push((piece, prop)),
@@ -288,6 +306,31 @@ mod tests {
             [
                 ("I ".into(), face(dim, false, false, false)),
                 ("think".into(), face(dim, false, true, false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn inner_faces_win_and_code_lines_stay_apart() {
+        let theme = Settings::default().theme;
+        let (dim, title) = (Some(theme.dim), color(&theme.syntax, "text.title"));
+        let uri = color(&theme.syntax, "text.uri");
+        let text = "# T **s [k](https://x.dev) e**\n\n```\nx\ny\n```\n";
+        let (_, faces) = shown(text, true);
+        let title = face(title, true, false, false);
+        assert_eq!(
+            faces,
+            [
+                ("T ".into(), title),
+                ("s ".into(), title),
+                ("k".into(), face(uri, true, false, true)),
+                (" e".into(), title),
+                ("\n".into(), title),
+                ("\n".into(), face(dim, false, false, false)),
+                ("\n".into(), face(dim, false, false, false)),
+                ("x\n".into(), face(dim, false, false, false)),
+                ("y\n".into(), face(dim, false, false, false)),
+                ("\n".into(), face(dim, false, false, false)),
             ]
         );
     }

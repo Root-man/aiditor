@@ -364,6 +364,36 @@ impl Core {
             live
         });
     }
+
+    /// Changes each colour session buffers took from the current theme's `dim`, `code_block`,
+    /// `text.title`, `text.literal` and `text.uri` to `theme`'s, keeping colours the current theme
+    /// lacks.
+    pub(crate) fn retheme_sessions(&mut self, theme: &Theme) {
+        let old = &self.settings.theme;
+        let syntax = ["text.title", "text.literal", "text.uri"].map(|name| {
+            let color = |t: &Theme| crate::syntax::color(&t.syntax, name);
+            (color(old), color(theme))
+        });
+        let pairs: Vec<(u32, u32)> = [(old.dim, theme.dim), (old.code_block, theme.code_block)]
+            .map(|(o, n)| (Some(o), Some(n)))
+            .into_iter()
+            .chain(syntax)
+            .filter_map(|pair| match pair {
+                (Some(o), Some(n)) if o != n => Some((o, n)),
+                _ => None,
+            })
+            .collect();
+        if pairs.is_empty() {
+            return;
+        }
+        // shortcut: two names sharing an old colour but given different new ones both take the first's; store theme names in faces if themes ever collide.
+        let map = |c| pairs.iter().find(|&&(o, _)| o == c).map_or(c, |&(_, n)| n);
+        for session in self.agents.values() {
+            if let Some(b) = self.buffers.get_mut(session.buffer) {
+                b.map_colors(map);
+            }
+        }
+    }
 }
 
 impl Ctx<'_> {
@@ -1497,6 +1527,60 @@ mod tests {
             0,
             SessionUpdate::AgentThoughtChunk(ContentChunk::new(text.into())),
         );
+    }
+
+    /// The settings with `dim` and `code_block` changed, reloaded.
+    fn retheme(h: &mut Harness) -> (u32, u32) {
+        let settings = "[theme]\ndim = 0x010203\ncode_block = 0x040506";
+        h.send(Msg::SettingsLoaded(Ok(Some(settings.into()))));
+        (0x010203, 0x040506)
+    }
+
+    #[test]
+    fn a_theme_reload_rethemes_completed_replies() {
+        let mut h = session();
+        h.keys("a RET");
+        thought(&mut h, "hmm");
+        chunk(&mut h, "see `x`");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.core.frame();
+        let (dim, code) = retheme(&mut h);
+        let all = props(&h);
+        let face = |text: &str| match all.iter().find(|(t, _)| t == text) {
+            Some((_, Prop::Face(f))) => *f,
+            other => panic!("{text}: {other:?} in {all:?}"),
+        };
+        assert_eq!(face("hmm").fg, Some(dim));
+        assert_eq!(face("x").bg, Some(code));
+    }
+
+    #[test]
+    fn a_theme_reload_rethemes_a_tool_calls_rule() {
+        let mut h = session();
+        tool(&mut h, ls());
+        let (dim, _) = retheme(&mut h);
+        let rules: Vec<_> = (props(&h).into_iter())
+            .filter_map(|(_, p)| match p {
+                Prop::Line(Decoration::Rule(c)) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !rules.is_empty() && rules.iter().all(|&c| c == dim),
+            "{rules:?}"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_theme_leaves_sessions_alone() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, "see `x` *y*");
+        h.core.frame();
+        tool(&mut h, ls());
+        let before = props(&h);
+        h.send(Msg::SettingsLoaded(Ok(None)));
+        assert_eq!(props(&h), before);
     }
 
     #[test]

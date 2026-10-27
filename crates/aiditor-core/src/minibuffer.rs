@@ -68,8 +68,8 @@ struct Completion {
     rows: usize,
     /// For file names, the text through its last `/`: the directory listed or awaited.
     dir: Option<String>,
-    /// Whether `dir`'s listing arrived, so a second answer is dropped.
-    listed: bool,
+    /// The listing request for `dir` not yet answered; any other answer is dropped.
+    awaiting: Option<u64>,
     /// The directory a relative `dir` is listed from, as `find-file` visits from it.
     base: PathBuf,
     /// The command's own matches, in place of the matcher's.
@@ -101,6 +101,8 @@ impl Filtered {
 pub(crate) struct Prompts {
     sessions: u64,
     preview_revision: u64,
+    /// The last listing request's id; never reset, so a closed prompt's never matches.
+    listings: u64,
     active_preview: Option<PreviewRequest>,
     pending_preview: Option<PreviewRequest>,
     /// The prompt being answered, while the minibuffer is open.
@@ -206,15 +208,15 @@ impl Completion {
 
 impl Ctx<'_> {
     /// Adds `dir`'s listing to the completion that awaits it, or shows why it failed.
-    pub(crate) fn on_listed(&mut self, dir: PathBuf, result: Result<Vec<String>, String>) {
+    pub(crate) fn on_listed(&mut self, request: u64, result: Result<Vec<String>, String>) {
         let core = &mut *self.core;
         let awaited = (core.prompts.minibuffer.as_mut())
             .and_then(|mb| mb.completion.as_mut())
-            .filter(|c| !c.listed && c.dir.as_ref().map(|d| c.base.join(d)) == Some(dir.clone()));
+            .filter(|c| c.awaiting == Some(request));
         let Some(completion) = awaited else {
             return;
         };
-        completion.listed = true;
+        completion.awaiting = None;
         let directories = core.prompts.directories(&core.commands);
         match result {
             Ok(names) => {
@@ -314,7 +316,7 @@ impl Ctx<'_> {
                 rows: 0,
                 // Nothing listed yet; `poll_completion` asks for the start directory.
                 dir: files.then(String::new),
-                listed: false,
+                awaiting: None,
                 base,
                 filtered,
             };
@@ -534,11 +536,15 @@ impl Core {
             pattern = tail;
             if head != dir {
                 *dir = head.to_string();
-                completion.listed = false;
+                completion.awaiting = None;
                 fresh = true;
                 matcher.restart(true);
                 if !head.is_empty() {
-                    effects.push(Effect::File(FileOp::ListDir(completion.base.join(head))));
+                    self.prompts.listings += 1;
+                    let request = self.prompts.listings;
+                    completion.awaiting = Some(request);
+                    let dir = completion.base.join(head);
+                    effects.push(Effect::File(FileOp::ListDir { dir, request }));
                 }
             }
         }

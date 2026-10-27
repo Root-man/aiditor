@@ -27,8 +27,9 @@ enum Event {
     Asked(RequestPermissionRequest),
 }
 
-/// A fake with an open session in its temporary directory; `fake("")` runs with no script;
-/// permissions get the first option, and one without options is never answered.
+/// A fake with an open session in its temporary directory, writing its stderr to `stderr` there;
+/// `fake("")` runs with no script; permissions get the first option, and one without options is
+/// never answered.
 struct Fake {
     agent: ConnectionTo<Agent>,
     events: mpsc::Receiver<Event>,
@@ -47,7 +48,7 @@ async fn fake(script: &str) -> Fake {
         .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(dir.path().join("stderr")).unwrap())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -238,4 +239,26 @@ fn a_bad_script_exits_with_2() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("script.json"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_stdout_keeps_the_process_alive() {
+    let mut fake = fake(
+        r#"{"session": [{"sleep": 100}, "closeStdout", {"sleep": 200}, {"stderr": "still here"}]}"#,
+    )
+    .await;
+    let closed = timeout(Duration::from_secs(10), fake.events.recv()).await;
+    assert!(closed.expect("the connection closes within 10 s").is_none());
+    let stderr = fake.dir.path().join("stderr");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&stderr)
+        .unwrap()
+        .contains("still here")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no stderr after the close"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

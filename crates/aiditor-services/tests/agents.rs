@@ -591,3 +591,47 @@ async fn s_tab_cycles_the_mode() {
     live.call("kill-buffer", &[&live.core.current().name.clone(), "yes"]);
     live.gone().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_stops_speaking_is_terminated() {
+    let dir = tempfile::tempdir().unwrap();
+    let script_text = r#"{"session": [{"sleep": 100}, "closeStdout", {"sleep": 10000}]}"#;
+    let (mut agents, mut rx) = ready(dir.path(), script_text).await;
+    let start = Instant::now();
+    let msgs = rest(&mut rx).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "well before the sleep ends"
+    );
+    assert!(
+        matches!(
+            msgs.last(),
+            Some(Msg::AgentExited {
+                signal: Some(_),
+                ..
+            })
+        ),
+        "{msgs:?}"
+    );
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_whose_agent_stops_speaking_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let partial = chunk("partial");
+    let script = format!(
+        r#"{{"prompts": [[{partial}, {{"sleep": 100}}, "closeStdout", {{"sleep": 10000}}]]}}"#
+    );
+    let mut live = Live::new(dir.path(), &script);
+    live.start().await;
+    live.keys("h i RET");
+    let start = Instant::now();
+    live.gone().await;
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "well before the sleep ends"
+    );
+    live.keys("x RET");
+    assert_eq!(live.core.message(), Some("fake session has ended"));
+}

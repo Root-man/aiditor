@@ -230,9 +230,9 @@ impl Harness {
                                 result,
                             })
                         }
-                        FileOp::ListDir(dir) => {
+                        FileOp::ListDir { dir, request } => {
                             self.listings.get(dir).cloned().map(|result| Msg::Listed {
-                                dir: dir.clone(),
+                                request: *request,
                                 result,
                             })
                         }

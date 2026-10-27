@@ -27,6 +27,11 @@ use tokio_util::sync::CancellationToken;
 const SESSION: &str = "fake-session";
 const MODES: [&str; 2] = ["auto", "plan"];
 
+/// The steps after a `closeStdout`, with what they run with; they outlive the connection, so
+/// `main` runs them once it ends.
+type Rest = (Vec<Step>, PathBuf, ConnectionTo<Client>, CancellationToken);
+static REST: Mutex<Option<Rest>> = Mutex::new(None);
+
 /// The session's config options: the `mode` select set to `current`.
 fn options(current: &str) -> Vec<SessionConfigOption> {
     let values = MODES
@@ -45,7 +50,7 @@ struct Script {
     prompts: Vec<Vec<Step>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 enum Step {
     Update(SessionUpdate),
@@ -56,9 +61,10 @@ enum Step {
     Exit(i32),
     Stop(StopReason),
     IgnoreSigterm,
+    CloseStdout,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Permission {
     tool_call: ToolCallUpdate,
@@ -88,7 +94,7 @@ async fn run(
     client: &ConnectionTo<Client>,
     cancel: &CancellationToken,
 ) -> agent_client_protocol::Result<StopReason> {
-    for step in steps {
+    for (i, step) in steps.iter().enumerate() {
         if cancel.is_cancelled() {
             return Ok(StopReason::Cancelled);
         }
@@ -130,6 +136,16 @@ async fn run(
             Step::Exit(code) => std::process::exit(*code),
             Step::Stop(reason) => return Ok(*reason),
             Step::IgnoreSigterm => _ = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) },
+            // /dev/null over fd 1 closes the pipe and keeps the fd from being reused by a file.
+            Step::CloseStdout => {
+                let null = std::fs::OpenOptions::new().write(true).open("/dev/null");
+                let null = null.expect("/dev/null opens");
+                unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&null), libc::STDOUT_FILENO) };
+                // The client then closes stdin, ending the connection and its tasks.
+                let rest = (steps[i + 1..].to_vec(), cwd.to_owned());
+                *REST.lock().unwrap() = Some((rest.0, rest.1, client.clone(), cancel.clone()));
+                return Ok(StopReason::EndTurn);
+            }
         }
     }
     Ok(StopReason::EndTurn)
@@ -232,7 +248,7 @@ async fn main() -> agent_client_protocol::Result<()> {
         tokio::io::stdout().compat_write(),
         tokio::io::stdin().compat(),
     );
-    Agent
+    let result = Agent
         .builder()
         .on_receive_request(
             async |request: InitializeRequest, responder, _| {
@@ -310,5 +326,10 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_to(transport)
-        .await
+        .await;
+    let rest = REST.lock().unwrap().take();
+    if let Some((steps, cwd, client, cancel)) = rest {
+        _ = run(&steps, &cwd, &client, &cancel).await;
+    }
+    result
 }
