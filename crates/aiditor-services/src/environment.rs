@@ -261,14 +261,20 @@ FISH=1 sh -c "${4#*; }""#;
         std::fs::create_dir(&bin).unwrap();
         shell(&bin, "direnv", body);
         let path = format!("/nowhere:{}", bin.display());
-        let mut vars = vec![
-            ("PATH".into(), path),
-            ("A".into(), "1".into()),
-            ("OLD".into(), "x".into()),
-        ];
-        let timeout = Duration::from_secs(1);
-        let result = direnv(&mut vars, tmp.path(), timeout).await;
-        (result, vars, tmp.path().canonicalize().unwrap())
+        loop {
+            let mut vars = vec![
+                ("PATH".into(), path.clone()),
+                ("A".into(), "1".into()),
+                ("OLD".into(), "x".into()),
+            ];
+            let timeout = Duration::from_secs(1);
+            let result = direnv(&mut vars, tmp.path(), timeout).await;
+            // A child another test forks while `shell` writes the script holds it open for
+            // writing until it execs, so running it can fail with ETXTBSY on Linux.
+            if !result.as_ref().is_err_and(|e| e.contains("Text file busy")) {
+                return (result, vars, tmp.path().canonicalize().unwrap());
+            }
+        }
     }
 
     #[tokio::test]
