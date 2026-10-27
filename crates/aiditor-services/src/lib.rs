@@ -10,6 +10,10 @@ pub mod recovery;
 pub mod terminal;
 pub mod watcher;
 
+#[cfg(test)]
+#[path = "../tests/support/native.rs"]
+mod native;
+
 use aiditor_core::Msg;
 use tokio::sync::mpsc;
 

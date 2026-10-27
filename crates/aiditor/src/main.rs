@@ -19,6 +19,10 @@ mod element;
 mod emoji;
 mod input;
 
+#[cfg(test)]
+#[path = "../../aiditor-services/tests/support/native.rs"]
+mod native;
+
 const FONT: &str = if cfg!(target_os = "macos") {
     "Menlo"
 } else {

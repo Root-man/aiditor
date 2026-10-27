@@ -10,6 +10,9 @@ use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{Core, Effect, FileOp, Msg};
 use aiditor_services::{files, projects, watcher::Watcher};
 
+#[path = "support/native.rs"]
+mod native;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Editor {
@@ -111,7 +114,7 @@ impl Editor {
     fn ready(&mut self, name: &str) {
         let path = self.root.join(name);
         let bytes = fs::read(&path).unwrap();
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             assert!(
                 Instant::now() < deadline,
@@ -175,6 +178,7 @@ impl Editor {
 
 #[test]
 fn atomic_external_saves_revert_every_clean_copy_and_leave_other_buffers_alone() {
+    let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "old\nkeep\n"), ("other.txt", "other\n")], "");
     assert_eq!(
         editor.core.watch_set().roots,
@@ -229,6 +233,7 @@ fn atomic_external_saves_revert_every_clean_copy_and_leave_other_buffers_alone()
 
 #[test]
 fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
+    let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "original\n")], "");
     let dirty = editor.core.workspace();
     let base = editor.core.current().disk;
@@ -275,6 +280,7 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
 
 #[test]
 fn an_own_save_updates_the_other_workspace_and_preserves_its_own_undo() {
+    let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "original\n")], "");
     let observer = editor.core.workspace();
     let saving = editor
@@ -306,6 +312,7 @@ fn an_own_save_updates_the_other_workspace_and_preserves_its_own_undo() {
 
 #[test]
 fn visited_files_still_follow_the_disk_without_project_root_watches() {
+    let _native = native::lock();
     for settings in ["watch = false", "max_watched_files = 0"] {
         let mut editor = Editor::new(&[("a.txt", "original\n")], settings);
         assert_eq!(editor.core.watch_set().roots, vec![]);
@@ -329,6 +336,7 @@ fn visited_files_still_follow_the_disk_without_project_root_watches() {
 
 #[test]
 fn accepted_recovery_covers_lost_directories_ignore_changes_and_replacements() {
+    let _native = native::lock();
     let mut editor = Editor::new(
         &[
             ("a", "a"),
@@ -382,6 +390,7 @@ fn accepted_recovery_covers_lost_directories_ignore_changes_and_replacements() {
 
 #[test]
 fn recovery_crossing_the_limit_keeps_visited_file_synchronization() {
+    let _native = native::lock();
     let mut editor = Editor::new(&[("a", "original")], "max_watched_files = 2");
     fs::create_dir_all(editor.root.join("new/deep")).unwrap();
     fs::write(editor.root.join("new/deep/b"), "b").unwrap();
@@ -400,6 +409,7 @@ fn recovery_crossing_the_limit_keeps_visited_file_synchronization() {
 
 #[test]
 fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() {
+    let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "base\n")], "");
     let first = editor.core.workspace();
     editor.hold_operations = true;
@@ -477,6 +487,7 @@ fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() 
 
 #[test]
 fn held_reverts_keep_new_edits_and_apply_only_to_their_original_buffer() {
+    let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "base\n"), ("other.txt", "other\n")], "");
     let first = editor.core.workspace();
     let second = editor

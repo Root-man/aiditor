@@ -21,9 +21,10 @@ const MAX: Duration = Duration::from_secs(1);
 enum In {
     Set(WatchSet),
     Event(notify::Result<notify::Event>),
+    Stop,
 }
 
-/// The watcher service's thread, told what to watch with `set`; it lives as long as the app.
+/// The watcher service's thread, told what to watch with `set`; dropping it requests shutdown.
 pub struct Watcher(Sender<In>);
 
 impl Watcher {
@@ -37,7 +38,8 @@ impl Watcher {
                 notify::recommended_watcher(move |e| _ = events.send(In::Event(e)))
                     .map(|w| Box::new(w) as Box<dyn Backend>)
             };
-            run(State::with_factory(Box::new(factory)), rx, send);
+            // Release the reporter only after the native backend has stopped.
+            run(State::with_factory(Box::new(factory)), rx, &send);
         });
         Watcher(tx)
     }
@@ -45,6 +47,13 @@ impl Watcher {
     /// Watches `set` from now on, instead of the set before.
     pub fn set(&self, set: WatchSet) {
         _ = self.0.send(In::Set(set));
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        // The backend holds a sender too; dropping ours cannot disconnect the worker.
+        _ = self.0.send(In::Stop);
     }
 }
 
@@ -83,6 +92,7 @@ fn run(mut state: State, rx: Receiver<In>, send: impl Fn(Msg)) {
             },
         };
         let event = match msg {
+            In::Stop => return,
             In::Set(set) => {
                 state.set(set);
                 continue;
@@ -181,13 +191,6 @@ struct State {
 }
 
 impl State {
-    #[cfg(test)]
-    fn new(watcher: RecommendedWatcher) -> Self {
-        let mut state = Self::with_factory(Box::new(|| unreachable!("test watcher supplied")));
-        state.watcher = Some(Box::new(watcher));
-        state
-    }
-
     fn with_factory(factory: Factory) -> Self {
         State {
             factory,
@@ -599,10 +602,16 @@ mod tests {
         let watcher = Watcher::spawn(move |msg| _ = tx.send(msg));
         watcher.set(set);
         let probe = probe.join(".probe");
+        let deadline = Instant::now() + Duration::from_secs(30);
         for i in 0.. {
-            assert!(i < 50, "the watcher never reported");
+            assert!(
+                Instant::now() < deadline,
+                "the watcher never reported {probe:?}"
+            );
             fs::write(&probe, i.to_string()).unwrap();
-            if rx.recv_timeout(Duration::from_millis(200)).is_ok() {
+            if matches!(rx.recv_timeout(Duration::from_millis(200)),
+                Ok(Msg::FilesChanged { paths, .. }) if paths.iter().any(|(p, _)| p == &probe))
+            {
                 break;
             }
         }
@@ -678,6 +687,29 @@ mod tests {
             State::with_factory(Box::new(move || Ok(Box::new(cloned.clone())))),
             backend,
         )
+    }
+
+    #[test]
+    fn dropping_the_watcher_releases_its_backend_and_reporter() {
+        let _native = crate::native::lock();
+        let dir = tree(&[("a", "")]);
+        for registered in [false, true] {
+            let (watcher, reports) = if registered {
+                start(set(&[dir.path()], &[]), dir.path())
+            } else {
+                let (tx, rx) = mpsc::channel();
+                (Watcher::spawn(move |msg| _ = tx.send(msg)), rx)
+            };
+            drop(watcher);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match reports.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    Ok(_) => {}
+                    Err(err) => panic!("watcher did not shut down: {err}"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -830,6 +862,7 @@ mod tests {
 
     #[test]
     fn one_write_makes_one_report() {
+        let _native = crate::native::lock();
         let dir = tree(&[("a.txt", "a")]);
         let a = dir.path().join("a.txt");
         let (_w, rx) = start(set(&[dir.path()], &[]), dir.path());
@@ -840,6 +873,7 @@ mod tests {
 
     #[test]
     fn a_steady_stream_of_changes_is_still_reported() {
+        let _native = crate::native::lock();
         let dir = tree(&[("a.txt", "")]);
         let a = dir.path().join("a.txt");
         let (_w, rx) = start(set(&[dir.path()], &[]), dir.path());
@@ -856,6 +890,7 @@ mod tests {
 
     #[test]
     fn creates_deletes_and_an_atomic_save_are_reported() {
+        let _native = crate::native::lock();
         let dir = tree(&[("a.txt", "a")]);
         let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
         let (_w, rx) = start(set(&[dir.path()], &[&a]), dir.path());
@@ -876,6 +911,7 @@ mod tests {
 
     #[test]
     fn a_file_outside_the_roots_is_watched_through_its_directory() {
+        let _native = crate::native::lock();
         let (root, out) = (tree(&[("x", "")]), tree(&[("o.txt", "")]));
         let o = out.path().join("o.txt");
         let (w, rx) = start(set(&[root.path()], &[&o]), out.path());
@@ -890,7 +926,7 @@ mod tests {
 
     /// A state with no events delivered, for checking what it watches.
     fn state() -> State {
-        State::new(notify::recommended_watcher(|_| {}).unwrap())
+        fake_state().0
     }
 
     #[test]
@@ -921,6 +957,7 @@ mod tests {
 
     #[test]
     fn ignored_directories_get_no_watch_and_no_reports() {
+        let _native = crate::native::lock();
         let dir = tree(&[
             (".gitignore", "node_modules/\n"),
             ("node_modules/pkg/x.js", ""),
@@ -1081,6 +1118,7 @@ mod tests {
 
     #[test]
     fn a_new_directory_is_scanned_and_watched() {
+        let _native = crate::native::lock();
         let (root, out) = (tree(&[("x", "")]), tree(&[("new/f", "made before")]));
         let (_w, rx) = start(set(&[root.path()], &[]), root.path());
         let new = root.path().join("new");

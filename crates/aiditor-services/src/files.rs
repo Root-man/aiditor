@@ -400,7 +400,7 @@ mod tests {
     fn a_failed_create_can_be_retried() {
         const CHILD: &str = "AIDITOR_TEST_FILE_SIZE_LIMIT";
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new("sh")
+            let output = std::process::Command::new("sh")
                 .args(["-c", "trap '' XFSZ; ulimit -f 1; exec \"$@\"", "file-limit"])
                 .arg(std::env::current_exe().unwrap())
                 .args([
@@ -409,9 +409,16 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
-                .status()
+                // The file-size limit must not apply to redirected test logs.
+                .output()
                 .unwrap();
-            assert!(status.success());
+            assert!(
+                output.status.success(),
+                "{}\nstdout: {}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             return;
         }
         let dir = tempfile::tempdir().unwrap();

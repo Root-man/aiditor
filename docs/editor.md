@@ -385,6 +385,8 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 Core tests use in-memory text and prepared protocol replies, collecting effects to control delayed or reordered completions. They do not implement filesystem writes, directory walks or grep. Filesystem and search contracts use production services with real temporary files; native watcher tests exercise both supported platforms. Agent subsystems add whole-app fake-agent scenarios.
 
+On macOS, tests that own native watchers or PTYs serialize within their test binary to avoid FSEvents startup contention and PTY allocation races. State-only watcher tests use a fake backend; native readiness probes have a separate 30-second startup budget. Linux tests remain parallel. Avoid overlapping native-suite processes when investigating timing failures.
+
 | Layer | How it is tested |
 | --- | --- |
 | Text model: rope, undo, markers | Unit tests plus property tests (`proptest`) on random edit sequences and undo/redo round trips |
