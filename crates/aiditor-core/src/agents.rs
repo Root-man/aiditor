@@ -2,11 +2,13 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    ContentBlock, NewSessionResponse, Plan, PlanEntry, PromptRequest, SessionConfigId,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent, ToolCallId,
-    ToolCallUpdate,
+    AgentRequest, ClientResponse, ContentBlock, Error, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, Plan, PlanEntry, PromptRequest, RequestId, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelect, SessionConfigSelectOptions, SessionConfigValueId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent,
+    ToolCallId, ToolCallUpdate,
 };
 use serde_json::Value;
 
@@ -18,7 +20,7 @@ use crate::command::Args;
 use crate::markdown;
 use crate::project::ProjectId;
 use crate::settings::Theme;
-use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects};
+use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Request};
 
 /// The prompt line's text, just before the prompt area.
 const PROMPT: &str = "> ";
@@ -53,6 +55,8 @@ pub(crate) struct Session {
     /// The plan's block: where it starts and its length in chars, the blank line after it not
     /// counted.
     plan: Option<(MarkerId, usize)>,
+    /// Permission requests waiting for an answer, oldest first.
+    asks: Vec<Ask>,
 }
 
 /// The session's mode: the first config option of category `mode`, when it is a select.
@@ -97,6 +101,17 @@ struct Tool {
     len: usize,
     /// Whether its content shows.
     open: bool,
+}
+
+/// A permission request's block, waiting for its answer.
+struct Ask {
+    request: RequestId,
+    /// The tool call's title, for the block and its answer line.
+    title: String,
+    options: Vec<PermissionOption>,
+    /// Where the block starts and its length in chars, the blank line after it not counted.
+    start: MarkerId,
+    len: usize,
 }
 
 /// A block being streamed.
@@ -217,7 +232,8 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        let text = plan_text(plan);
+        let rows = plan_rows(plan);
+        let text = rows_text(&rows);
         let len = text.chars().count();
         let start = match &mut session.plan {
             Some((marker, old)) => {
@@ -234,7 +250,35 @@ impl Core {
                 end
             }
         };
-        render_plan(buffer, start, plan, &self.settings.theme);
+        render_rows(buffer, start, &rows, &self.settings.theme);
+    }
+
+    /// Puts permission request `ask` above session `id`'s prompt line as a block of its own,
+    /// pending until answered.
+    fn show_ask(&mut self, id: AgentId, request: RequestId, ask: RequestPermissionRequest) {
+        self.end_stream(id);
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let call = &ask.tool_call;
+        let shown = session.tools.get(&call.tool_call_id).map(|t| &t.call.title);
+        let title = (call.fields.title.as_ref().or(shown))
+            .map_or_else(|| call.tool_call_id.to_string(), |t| first_line(t));
+        let rows = ask_rows(&title, &ask.options);
+        let text = rows_text(&rows);
+        let end = buffer.prompt_start() - PROMPT.len();
+        buffer.insert_output(end, &format!("{text}\n\n"));
+        render_rows(buffer, end, &rows, &self.settings.theme);
+        session.asks.push(Ask {
+            request,
+            title,
+            options: ask.options,
+            start: (buffer.add_marker(end, InsertionType::Stay)).expect("in the text"),
+            len: text.chars().count(),
+        });
     }
 
     /// Renders session `id`'s streamed block if chunks arrived since it was last rendered.
@@ -374,6 +418,7 @@ impl Ctx<'_> {
             stream: None,
             tools: HashMap::new(),
             plan: None,
+            asks: Vec::new(),
         };
         core.agents.insert(id, session);
         core.echo(format!("Starting {name}..."));
@@ -525,9 +570,104 @@ impl Ctx<'_> {
         }
     }
 
-    /// `agent-send-input`: sends the prompt area's text as a `session/prompt`, leaving it above
-    /// a new prompt line.
+    /// Shows a permission request from a ready session; refuses it otherwise, and every other
+    /// request.
+    pub(crate) fn agent_request(&mut self, id: AgentId, request: RequestId, body: Request) {
+        let core = &mut *self.core;
+        let ready = (core.agents.get(&id)).is_some_and(|s| !s.ended && s.session.is_some());
+        match *body.0 {
+            AgentRequest::RequestPermissionRequest(ask) if ready => core.show_ask(id, request, ask),
+            _ => self.effects.push(Effect::Agent(AgentOp::Reply {
+                id,
+                request,
+                result: Err(Error::method_not_found()),
+            })),
+        }
+    }
+
+    /// Answers session `id`'s pending request `at` with its option `option`, or `cancelled`,
+    /// leaving its answer line in place of its block.
+    fn answer_ask(&mut self, id: AgentId, at: usize, option: Option<usize>) {
+        let core = &mut *self.core;
+        let session = core
+            .agents
+            .get_mut(&id)
+            .expect("a pending request's session");
+        let ask = session.asks.remove(at);
+        let (outcome, line) = match option.map(|i| &ask.options[i]) {
+            Some(o) => (
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                    o.option_id.clone(),
+                )),
+                format!(
+                    "Chose {} ({}) for {}",
+                    first_line(&o.name),
+                    acp_name(o.kind),
+                    ask.title
+                ),
+            ),
+            None => (RequestPermissionOutcome::Cancelled, cancelled(&ask)),
+        };
+        if let Some(b) = core.buffers.get_mut(session.buffer) {
+            settle(b, &ask, &line);
+        }
+        let response = RequestPermissionResponse::new(outcome);
+        self.effects.push(Effect::Agent(AgentOp::Reply {
+            id,
+            request: ask.request,
+            result: Ok(ClientResponse::RequestPermissionResponse(response)),
+        }));
+    }
+
+    /// Answers the current session's oldest pending request with its first option of `kind`.
+    fn answer_oldest(&mut self, kind: PermissionOptionKind) -> Result<(), String> {
+        let (id, session) = self.core.current_session()?;
+        let ask = session
+            .asks
+            .first()
+            .ok_or("No permission request is pending")?;
+        let option = (ask.options.iter().position(|o| o.kind == kind))
+            .ok_or_else(|| format!("No {} option for {}", acp_name(kind), ask.title))?;
+        self.answer_ask(id, 0, Some(option));
+        Ok(())
+    }
+
+    /// `agent-allow-once`: answers the oldest pending permission request with its first
+    /// `allow_once` option.
+    pub(crate) fn agent_allow_once(&mut self) -> Result<(), String> {
+        self.answer_oldest(PermissionOptionKind::AllowOnce)
+    }
+
+    /// `agent-reject-once`: answers the oldest pending permission request with its first
+    /// `reject_once` option.
+    pub(crate) fn agent_reject_once(&mut self) -> Result<(), String> {
+        self.answer_oldest(PermissionOptionKind::RejectOnce)
+    }
+
+    /// The session, pending request and option whose option line point is on.
+    fn option_at_point(&self) -> Option<(AgentId, usize, usize)> {
+        let core = &*self.core;
+        let (point, buffer) = (core.point(), core.windows.window.buffer());
+        let b = core.buffers.get(buffer)?;
+        let (&id, session) = core.agents.iter().find(|(_, s)| s.buffer == buffer)?;
+        session.asks.iter().enumerate().find_map(|(at, ask)| {
+            let start = b.marker(ask.start)?;
+            if !(start..=start + ask.len).contains(&point) {
+                return None;
+            }
+            let line = b.text().slice(start..point).chars().filter(|&c| c == '\n');
+            line.count().checked_sub(1).map(|option| (id, at, option))
+        })
+    }
+
+    /// `agent-send-input`: on a pending permission request's option line, answers it with that
+    /// option; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
+    /// new prompt line.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
+        if let Some((id, at, option)) = self.option_at_point() {
+            self.answer_ask(id, at, Some(option));
+            return Ok(());
+        }
         let core = &mut *self.core;
         let buffer = core.windows.window.buffer();
         let (id, session) = core.current_session()?;
@@ -596,12 +736,17 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// `agent-cancel`: sends `session/cancel` while a turn runs.
+    /// `agent-cancel`: sends `session/cancel` while a turn runs, then answers the pending
+    /// permission requests `cancelled`, as ACP requires.
     pub(crate) fn agent_cancel(&mut self) -> Result<(), String> {
         let (id, session) = self.core.current_session()?;
         let ready = session.session.as_ref().filter(|_| session.turn);
+        let asks = session.asks.len();
         let session = ready.ok_or("No turn is running")?.session_id.clone();
         (self.effects).push(Effect::Agent(AgentOp::Cancel { id, session }));
+        for _ in 0..asks {
+            self.answer_ask(id, 0, None);
+        }
         Ok(())
     }
 
@@ -688,6 +833,12 @@ impl Ctx<'_> {
             return;
         };
         session.turn = false;
+        // The agent is gone with its requests, so only the blocks change.
+        if let Some(b) = core.buffers.get_mut(session.buffer) {
+            for ask in std::mem::take(&mut session.asks) {
+                settle(b, &ask, &cancelled(&ask));
+            }
+        }
         if !std::mem::replace(&mut session.ended, true) {
             let agent = &session.agent;
             let line = match signal {
@@ -757,35 +908,66 @@ fn plan_line(entry: &PlanEntry) -> (String, usize) {
     (format!("{content}{suffix}"), content.chars().count())
 }
 
-/// The plan block's text: `Plan`, then a line per entry.
-fn plan_text(plan: &Plan) -> String {
-    let lines = plan.entries.iter().map(|e| plan_line(e).0);
-    std::iter::once("Plan".to_string())
-        .chain(lines)
-        .collect::<Vec<_>>()
-        .join("\n")
+/// The plan block's rows: `Plan`, then a line per entry.
+fn plan_rows(plan: &Plan) -> Vec<(String, usize)> {
+    let rows = plan.entries.iter().map(plan_line);
+    std::iter::once(("Plan".to_string(), 4))
+        .chain(rows)
+        .collect()
 }
 
-/// Renders the plan block at `start`, whose properties were removed: a rule beside each line and
-/// each entry's suffix dim.
-fn render_plan(buffer: &mut Buffer, start: usize, plan: &Plan, theme: &Theme) {
+/// A permission request's rows: `Permission: <title>`, then a numbered line per option,
+/// `<n>. <name> (<kind>)`.
+fn ask_rows(title: &str, options: &[PermissionOption]) -> Vec<(String, usize)> {
+    let header = format!("Permission: {title}");
+    let rows = options.iter().enumerate().map(|(i, o)| {
+        let name = format!("{}. {}", i + 1, first_line(&o.name));
+        let len = name.chars().count();
+        (format!("{name} ({})", acp_name(o.kind)), len)
+    });
+    let len = header.chars().count();
+    std::iter::once((header, len)).chain(rows).collect()
+}
+
+/// A block's text from its rows, a line each.
+fn rows_text(rows: &[(String, usize)]) -> String {
+    let lines: Vec<_> = rows.iter().map(|(text, _)| text.as_str()).collect();
+    lines.join("\n")
+}
+
+/// Renders the block of `rows` at `start`, whose properties were removed: a rule beside each
+/// line and each row's text past its length before the suffix dim.
+fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, usize)], theme: &Theme) {
     let rule = Prop::Line(Decoration::Rule(theme.dim));
     let dim = Prop::Face(Face {
         fg: Some(theme.dim),
         ..Face::default()
     });
-    let mut props = vec![(0..1, rule.clone())];
-    let mut line = "Plan\n".len();
-    for entry in &plan.entries {
-        let (text, content) = plan_line(entry);
+    let mut props = Vec::new();
+    let mut line = 0;
+    for (text, content) in rows {
         let len = text.chars().count();
         props.push((line..line + 1, rule.clone()));
-        props.push((line + content..line + len, dim.clone()));
+        if *content < len {
+            props.push((line + content..line + len, dim.clone()));
+        }
         line += len + 1;
     }
     for (r, prop) in props {
         (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
     }
+}
+
+/// The line a permission request's block becomes when cancelled or dropped.
+fn cancelled(ask: &Ask) -> String {
+    format!("Cancelled permission for {}", ask.title)
+}
+
+/// Replaces `ask`'s block with `line`, which stays plain.
+fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
+    let start = buffer.marker(ask.start).expect("live while pending");
+    rewrite(buffer, start..start + ask.len, line);
+    buffer.remove_marker(ask.start);
 }
 
 /// Everything a tool call carries, uncut, as markdown: its raw input, its content items, and its
@@ -934,7 +1116,21 @@ mod tests {
                         env.join(",")
                     )
                 }
-                AgentOp::Reply { id, .. } => format!("reply {}", id.0),
+                AgentOp::Reply {
+                    id,
+                    request,
+                    result,
+                } => {
+                    let answer = match result {
+                        Ok(ClientResponse::RequestPermissionResponse(r)) => match r.outcome {
+                            RequestPermissionOutcome::Selected(s) => s.option_id.to_string(),
+                            _ => "cancelled".into(),
+                        },
+                        Ok(other) => format!("{other:?}"),
+                        Err(err) => err.message,
+                    };
+                    format!("reply {} {request} {answer}", id.0)
+                }
                 AgentOp::Prompt { id, request } => {
                     let [ContentBlock::Text(text)] = &request.prompt[..] else {
                         panic!("one text block: {request:?}");
@@ -1961,5 +2157,207 @@ mod tests {
         exited(&mut h, 0, 1);
         h.keys("C-x C-c");
         assert!(h.quit);
+    }
+
+    /// Sends session 0 permission request `request` for tool call `call` (titled `title`), with
+    /// options `allow` (`allow_once`), `always` (`allow_always`) and `reject` (`reject_once`).
+    fn ask(h: &mut Harness, request: i64, call: &str, title: Option<&str>) {
+        use PermissionOptionKind::*;
+        let fields = ToolCallUpdateFields::new().title(title.map(String::from));
+        let options = [
+            ("allow", "Yes", AllowOnce),
+            ("always", "Always", AllowAlways),
+        ]
+        .into_iter()
+        .chain([("reject", "No", RejectOnce)])
+        .map(|(id, name, kind)| PermissionOption::new(id, name, kind))
+        .collect();
+        let ask = RequestPermissionRequest::new(
+            "s",
+            ToolCallUpdate::new(call.to_string(), fields),
+            options,
+        );
+        h.send(Msg::AgentRequest {
+            id: AgentId(0),
+            request: RequestId::Number(request),
+            body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
+        });
+    }
+
+    /// The block `ask` shows for a request titled `title`.
+    fn asked(title: &str) -> String {
+        format!(
+            "Permission: {title}\n1. Yes (allow_once)\n2. Always (allow_always)\n3. No (reject_once)"
+        )
+    }
+
+    #[test]
+    fn a_permission_request_shows_inline_and_waits() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, "Editing.");
+        ops(&mut h);
+        ask(&mut h, 4, "c", Some("Edit a.txt"));
+        assert!(ops(&mut h).is_empty(), "nothing answered yet");
+        let block = asked("Edit a.txt");
+        assert_eq!(h.core.text(), format!("> a\n\nEditing.\n\n{block}\n\n> "));
+        let theme = &h.core.settings().theme;
+        let rule = Prop::Line(Decoration::Rule(theme.dim));
+        let dim = Prop::Face(Face {
+            fg: Some(theme.dim),
+            ..Face::default()
+        });
+        let props: Vec<_> = (props(&h).into_iter())
+            .filter(|(_, p)| *p == rule || *p == dim)
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(
+            props,
+            [
+                "P",
+                "1",
+                " (allow_once)",
+                "2",
+                " (allow_always)",
+                "3",
+                " (reject_once)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_title_comes_from_the_request_the_shown_call_or_the_id() {
+        let mut h = session();
+        let call = ToolCall::new("c", "Read\nmore");
+        update(&mut h, 0, SessionUpdate::ToolCall(call));
+        ask(&mut h, 1, "c", None);
+        ask(&mut h, 2, "d", None);
+        let text = h.core.text();
+        assert!(text.contains("Permission: Read …\n"), "{text}");
+        assert!(text.contains("Permission: d\n"), "{text}");
+    }
+
+    #[test]
+    fn the_keys_answer_the_oldest_request_first() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        ask(&mut h, 1, "a", Some("A"));
+        ask(&mut h, 2, "b", Some("B"));
+        ask(&mut h, 3, "c", Some("C"));
+        h.keys("C-c C-y");
+        assert_eq!(ops(&mut h), ["reply 0 1 allow"]);
+        h.keys("C-c C-n");
+        assert_eq!(ops(&mut h), ["reply 0 2 reject"]);
+        let c = asked("C");
+        assert_eq!(
+            h.core.text(),
+            format!(
+                "> a\n\nChose Yes (allow_once) for A\n\nChose No (reject_once) for B\n\n{c}\n\n> "
+            )
+        );
+        h.keys("C-c C-y");
+        assert_eq!(ops(&mut h), ["reply 0 3 allow"]);
+        h.keys("C-c C-y");
+        assert_eq!(h.core.message(), Some("No permission request is pending"));
+        assert!(ops(&mut h).is_empty());
+    }
+
+    #[test]
+    fn ret_on_an_option_line_picks_it() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        ask(&mut h, 1, "a", Some("A"));
+        ask(&mut h, 2, "b", Some("B"));
+        // The newer request's second option, then the older one's header, which sends nothing.
+        h.keys("C-p C-p C-p RET");
+        assert_eq!(ops(&mut h), ["reply 0 2 always"]);
+        assert!(
+            h.core
+                .text()
+                .contains("Chose Always (allow_always) for B\n")
+        );
+        h.keys("M-< C-n C-n RET");
+        assert_eq!(h.core.message(), Some("claude is busy"));
+        h.keys("C-n C-n C-n RET");
+        assert_eq!(ops(&mut h), ["reply 0 1 reject"]);
+        assert_eq!(
+            h.core.text(),
+            "> a\n\nChose No (reject_once) for A\n\nChose Always (allow_always) for B\n\n> "
+        );
+    }
+
+    #[test]
+    fn a_missing_option_kind_answers_nothing() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        let options = vec![PermissionOption::new(
+            "always",
+            "Always",
+            PermissionOptionKind::AllowAlways,
+        )];
+        let ask = RequestPermissionRequest::new(
+            "s",
+            ToolCallUpdate::new("c", ToolCallUpdateFields::new().title("Run".to_string())),
+            options,
+        );
+        h.send(Msg::AgentRequest {
+            id: AgentId(0),
+            request: RequestId::Number(1),
+            body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
+        });
+        h.keys("C-c C-y");
+        assert_eq!(h.core.message(), Some("No allow_once option for Run"));
+        h.keys("C-c C-n");
+        assert_eq!(h.core.message(), Some("No reject_once option for Run"));
+        assert!(ops(&mut h).is_empty());
+    }
+
+    #[test]
+    fn cancelling_answers_pending_requests_and_an_exit_drops_them() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        ask(&mut h, 1, "a", Some("A"));
+        ask(&mut h, 2, "b", Some("B"));
+        h.keys("C-c C-c");
+        assert_eq!(
+            ops(&mut h),
+            ["cancel 0 s", "reply 0 1 cancelled", "reply 0 2 cancelled"]
+        );
+        let cancelled = "Cancelled permission for A\n\nCancelled permission for B";
+        assert_eq!(h.core.text(), format!("> a\n\n{cancelled}\n\n> "));
+        ask(&mut h, 3, "c", Some("C"));
+        exited(&mut h, 0, 1);
+        assert_eq!(ops(&mut h), ["kill 0"]);
+        assert!(h.core.text().ends_with("Cancelled permission for C\n\n> "));
+        h.keys("C-c C-y");
+        assert_eq!(h.core.message(), Some("No permission request is pending"));
+    }
+
+    #[test]
+    fn other_requests_and_unready_sessions_are_refused() {
+        use agent_client_protocol_schema::v1::CreateTerminalRequest;
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        ask(&mut h, 1, "c", Some("Early"));
+        assert_eq!(ops(&mut h), ["reply 0 1 Method not found"]);
+        ready(&mut h, 0);
+        ops(&mut h);
+        let terminal = CreateTerminalRequest::new("s", "ls");
+        h.send(Msg::AgentRequest {
+            id: AgentId(0),
+            request: RequestId::Number(2),
+            body: Request(Box::new(AgentRequest::CreateTerminalRequest(terminal))),
+        });
+        assert_eq!(ops(&mut h), ["reply 0 2 Method not found"]);
+        exited(&mut h, 0, 0);
+        ops(&mut h);
+        ask(&mut h, 3, "c", Some("Late"));
+        assert_eq!(ops(&mut h), ["reply 0 3 Method not found"]);
+        assert_eq!(h.core.text(), "> ");
     }
 }

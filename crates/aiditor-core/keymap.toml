@@ -131,6 +131,8 @@
 "C-c C-c" = "agent-cancel"
 "TAB" = "agent-toggle-tool-call"
 "S-TAB" = "agent-cycle-mode"
+"C-c C-y" = "agent-allow-once"
+"C-c C-n" = "agent-reject-once"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"

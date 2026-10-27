@@ -19,6 +19,7 @@ struct App {
     agents: Agents,
     agent: Option<Receiver<Msg>>,
     pid: Option<libc::pid_t>,
+    stderr: Vec<String>,
     started: bool,
     prompted: bool,
     exited: bool,
@@ -49,6 +50,7 @@ impl App {
             agents: Agents::default(),
             agent: None,
             pid: None,
+            stderr: Vec::new(),
             started: false,
             prompted: false,
             exited: false,
@@ -110,7 +112,7 @@ impl App {
     }
 
     /// The next message from the watcher or the agent within `wait`, recording the agent's
-    /// pid, start, answer and exit.
+    /// pid, stderr, start, answer and exit.
     async fn next(&mut self, wait: Duration) -> Option<Msg> {
         let msg = tokio::time::timeout(wait, async {
             loop {
@@ -136,6 +138,7 @@ impl App {
                 if let Some(pid) = line.strip_prefix("pid=") {
                     self.pid = Some(pid.parse().unwrap());
                 }
+                self.stderr.push(line.clone());
             }
             Msg::AgentStarted { .. } => self.started = true,
             Msg::AgentPrompted { .. } => self.prompted = true,
@@ -223,4 +226,50 @@ async fn an_agent_reply_and_write_reach_the_editor_and_its_workspace_kill_stops_
         assert!(Instant::now() < deadline, "agent {pid} is still running");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn permission_requests_are_answered_from_the_session_buffer() {
+    let ask = r#"{"permission": {"toolCall": {"toolCallId": "call-1", "title": "Write a.txt"},
+        "options": [{"optionId": "allow", "name": "Yes", "kind": "allow_once"},
+                    {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                    {"optionId": "reject", "name": "No", "kind": "reject_once"}]}}"#;
+    let mut app = App::new(&format!(r#"{{"prompts": [[{ask}, {ask}, {ask}]]}}"#));
+    app.keys("M-x agent-start RET fake RET");
+    app.until("the session", |app| app.started).await;
+    app.keys("go RET");
+    let pending = |app: &App| app.core.text().contains("Permission: Write a.txt");
+    let answered = |n: usize| {
+        move |app: &App| {
+            (app.stderr.iter())
+                .filter(|l| l.starts_with("permission "))
+                .count()
+                == n
+        }
+    };
+    // From the prompt line, three lines up is the second option.
+    for (n, keys, outcome) in [
+        (1, "C-c C-y", "allow"),
+        (2, "C-c C-n", "reject"),
+        (3, "C-p C-p C-p RET", "always"),
+    ] {
+        app.until("a permission request", pending).await;
+        app.keys(keys);
+        app.until("the answer", answered(n)).await;
+        let line = app
+            .stderr
+            .iter()
+            .rfind(|l| l.starts_with("permission "))
+            .unwrap();
+        let want =
+            format!(r#"permission answered: {{"outcome":"selected","optionId":"{outcome}"}}"#);
+        assert_eq!(line, &want);
+    }
+    app.until("the turn", |app| app.prompted).await;
+    assert_eq!(
+        app.core.text(),
+        "> go\n\nChose Yes (allow_once) for Write a.txt\n\n\
+         Chose No (reject_once) for Write a.txt\n\n\
+         Chose Always (allow_always) for Write a.txt\n\n> "
+    );
 }

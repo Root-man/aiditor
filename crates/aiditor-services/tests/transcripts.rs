@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::{Error, PromptRequest};
+use agent_client_protocol::schema::v1::{AgentRequest, Error, PromptRequest};
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
 use aiditor_services::agents::Agents;
@@ -331,6 +331,11 @@ impl Replay {
                 _ => {}
             }
             self.send(msg.clone());
+            if let Msg::AgentRequest { body, .. } = &msg
+                && matches!(*body.0, AgentRequest::RequestPermissionRequest(_))
+            {
+                self.keys("C-c C-y");
+            }
             if done(&msg) {
                 return msg;
             }
@@ -392,6 +397,11 @@ async fn committed_transcripts_replay_through_the_core() {
         assert_eq!(replay.requests, requests, "{name}: agent requests");
         // The replay only goes on once the client answers, so the turns ending prove it arrived.
         assert_eq!(replay.replies, requests, "{name}: answered requests");
+        let asks = (lines.iter())
+            .filter(|(f, m)| f == "agent" && m["method"] == "session/request_permission")
+            .count();
+        let text = replay.core.text();
+        assert_eq!(text.matches("\nChose ").count(), asks, "{name}: {text}");
         replay.agents.kill_all();
     }
 }
