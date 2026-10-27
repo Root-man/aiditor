@@ -187,7 +187,7 @@ async fn stderr_then_exit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_core_rejects_agent_requests() {
+async fn the_core_cancels_permission_requests_without_a_session() {
     let dir = tempfile::tempdir().unwrap();
     let ask = r#"{"toolCall": {"toolCallId": "call-1"},
         "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}"#;
@@ -203,7 +203,7 @@ async fn the_core_rejects_agent_requests() {
         if let Msg::AgentStderr { line, .. } = &msg
             && line.starts_with("permission ")
         {
-            assert_eq!(line, "permission error: Method not found");
+            assert_eq!(line, r#"permission answered: {"outcome":"cancelled"}"#);
             break;
         }
         for effect in core.handle(Instant::now(), msg) {

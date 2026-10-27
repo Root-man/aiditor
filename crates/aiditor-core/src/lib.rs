@@ -1450,10 +1450,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_requests_are_refused_as_unknown_methods() {
+    fn permission_requests_without_a_session_are_cancelled() {
         use agent_client_protocol_schema::v1::{
-            AgentRequest, Error, RequestId, RequestPermissionRequest, ToolCallUpdate,
-            ToolCallUpdateFields,
+            AgentRequest, ClientResponse, RequestId, RequestPermissionOutcome,
+            RequestPermissionRequest, ToolCallUpdate, ToolCallUpdateFields,
         };
 
         use crate::{AgentId, AgentOp, Request};
@@ -1480,6 +1480,9 @@ mod tests {
             panic!("expected one reply");
         };
         assert_eq!((*id, request), (AgentId(1), &RequestId::Number(4)));
-        assert_eq!(result.as_ref().unwrap_err(), &Error::method_not_found());
+        let Ok(ClientResponse::RequestPermissionResponse(response)) = result else {
+            panic!("expected a permission answer: {result:?}");
+        };
+        assert_eq!(response.outcome, RequestPermissionOutcome::Cancelled);
     }
 }
