@@ -151,7 +151,7 @@ The frame display's title SHALL be the current buffer's name, followed by ` *` w
 - **THEN** the title names `main` and `aiditor` again
 
 ### Requirement: Long lines wrap into visual rows
-Unless its buffer truncates lines, a window at least 2 columns wide SHALL show each buffer line as visual rows of at most its width less one char, each a display line carrying the buffer line's number and decorations. A session buffer and a buffer visiting a `.md`, `.markdown` or `.txt` file SHALL break a row after the last whitespace that fits, a whitespace char also fitting in the last column, and at the width when no whitespace fits. Every other buffer SHALL break at the width and end each row but a line's last with a `\` continuation marker in the last column, in the theme's `comment` colour. The window's first row MAY be a row inside its first buffer line. The cursor SHALL be on the row holding point, at point's column from the row's start; point at a break SHALL be at the start of the next row. Only the chars from a line's start through the rows the window can show SHALL be laid out.
+Unless its buffer truncates lines, a window at least 2 columns wide SHALL show each buffer line as visual rows of at most its width less one char, each a display line carrying the buffer line's number and decorations. A session buffer and a buffer visiting a `.md`, `.markdown` or `.txt` file SHALL break a row after the last whitespace that fits, a whitespace char also fitting in the last column, and at the width when no whitespace fits. Every other buffer SHALL break at the width and end each row but a line's last with a `\` continuation marker in the last column, in the theme's `comment` colour. The window's first row MAY be a row inside its first buffer line. The cursor SHALL be on the row holding point, at point's column from the row's start; point at a break SHALL be at the start of the next row. Only the chars of the rows the window can show SHALL be laid out: the rows of the first buffer line above the window's first row SHALL NOT be.
 
 #### Scenario: Code wraps at the edge
 - **WHEN** `a.rs` holds a 10-char line `abcdefghij` in a window 5 columns wide
@@ -172,6 +172,10 @@ Unless its buffer truncates lines, a window at least 2 columns wide SHALL show e
 #### Scenario: A short line
 - **WHEN** a line fits in the window less one column
 - **THEN** it is one display line without a marker
+
+#### Scenario: The window starts deep inside a line
+- **WHEN** `a.md` holds 1,000 copies of `word ` on one line, a window 21 columns wide shows 3 rows and point is at the line's end
+- **THEN** the display lines are the line's last rows as wrapping the whole line at words would break them, the cursor is on the last row after its final char, and laying out the display reads none of the line's chars before the first row shown
 
 ### Requirement: toggle-truncate-lines switches a buffer between wrapping and truncation
 `toggle-truncate-lines` SHALL switch the current buffer between wrapping and truncating long lines and echo `Truncate long lines enabled` or `Truncate long lines disabled`. Buffers SHALL wrap until toggled. The minibuffer SHALL always truncate.

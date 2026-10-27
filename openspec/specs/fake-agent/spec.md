@@ -25,7 +25,8 @@ A step SHALL be one of:
 - `{"stderr": <line>}`: write the line to stderr;
 - `{"exit": <code>}`: exit the process at once with the code;
 - `{"stop": <StopReason>}`: end the turn with that stop reason, skipping the turn's remaining steps;
-- `"ignoreSigterm"`: ignore SIGTERM from then on.
+- `"ignoreSigterm"`: ignore SIGTERM from then on;
+- `"closeStdout"`: close the process's stdout, so the client hears nothing more, and keep running the remaining steps.
 
 Steps SHALL run in order, each after the previous one finished. A turn that runs out of steps, or a prompt past the end of `prompts`, SHALL end with `end_turn`. A `stop` in the `session` steps ends them.
 
@@ -36,6 +37,10 @@ Steps SHALL run in order, each after the previous one finished. A turn that runs
 #### Scenario: Prompts past the script
 - **WHEN** the client sends more prompts than the script has
 - **THEN** each extra prompt is answered with `end_turn`
+
+#### Scenario: Closing stdout keeps the process alive
+- **WHEN** the fake's session steps are `"closeStdout"`, `{"sleep": 200}` and `{"stderr": "still here"}`
+- **THEN** the client's connection closes, and `still here` is written to stderr afterwards
 
 ### Requirement: Modes and cancel
 The fake SHALL answer `session/set_config_option` for its `mode` option and a value it advertised with its config options, the mode set to that value, and then send a `config_option_update` with the same options; for any other option or value it SHALL answer with an invalid-params error. On `session/cancel` it SHALL stop the running turn at once, including a step that is sleeping or waiting for a permission answer, and answer that prompt with `cancelled`.
