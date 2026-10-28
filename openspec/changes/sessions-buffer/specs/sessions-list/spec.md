@@ -62,7 +62,7 @@ Each answer to the latest request of an agent SHALL rebuild the buffer's text. W
 - **THEN** the buffer still shows `Listing claude...`, and the second request's answer shows its sessions
 
 ### Requirement: Moving, switching and quitting
-`n`, `C-n` and `<down>` SHALL move point to the start of the next session row and `p`, `C-p` and `<up>` to the previous one, staying on the last or first row at the ends; with no rows they SHALL fail with `No sessions listed`. `RET` on an `[open]` row SHALL show that session's buffer in the selected window, switching first to the workspace that owns it if it's another. `RET` on a row not open SHALL fail with `Loading sessions isn't supported yet`, and elsewhere with `Select a session row`. `q` SHALL kill the sessions buffer.
+`n`, `C-n` and `<down>` SHALL move point to the start of the next session row and `p`, `C-p` and `<up>` to the previous one, staying on the last or first row at the ends; with no rows they SHALL fail with `No sessions listed`. Whenever point lands on the first row, by a move or a rebuild, the windows showing it SHALL show the buffer from its first line, so the header is never out of reach. `RET` on an `[open]` row SHALL show that session's buffer in the selected window, switching first to the workspace that owns it if it's another. `RET` on a row not open SHALL fail with `Loading sessions isn't supported yet`, and elsewhere with `Select a session row`. `q` SHALL kill the sessions buffer.
 
 #### Scenario: RET on an open session
 - **WHEN** point is on an `[open]` row and `RET` is pressed
@@ -71,6 +71,10 @@ Each answer to the latest request of an agent SHALL rebuild the buffer's text. W
 #### Scenario: RET on a session not open
 - **WHEN** point is on a row without `[open]` and `RET` is pressed
 - **THEN** the echo area shows `Loading sessions isn't supported yet` and the sessions buffer stays shown
+
+#### Scenario: The header shows again at the first row
+- **WHEN** a 5-line window is scrolled down a long list, and then `p` is pressed until point is on the first row, or `g` is pressed and the answers put point on the first row
+- **THEN** the window's first line is the header
 
 #### Scenario: Moving and quitting
 - **WHEN** the list has three rows, point is on the first, and `n`, `n`, `n`, `p` are pressed, then `q`

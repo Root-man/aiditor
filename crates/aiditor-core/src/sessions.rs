@@ -135,6 +135,7 @@ impl Core {
                 .find(|r| Some(r.0) == target)
                 .map(|r| (r.1, r.2.clone())),
         };
+        let rows_first = rows.first().map(|row| row.0);
         let list = self.session_lists.get_mut(&id).expect("checked above");
         (list.rows, list.at) = (rows, at);
         let buffer = self.buffers.get_mut(id).expect("checked above");
@@ -150,10 +151,14 @@ impl Core {
                 .flat_map(|w| w.windows.iter_mut())
                 .flat_map(|w| w.windows_mut()),
         );
+        let first = target.is_some() && target == rows_first;
         for window in windows.filter(|w| w.buffer() == id) {
             window
                 .set_point(&mut self.buffers, point)
                 .expect("in the text");
+            if first {
+                window.set_top(0);
+            }
         }
     }
 }
@@ -257,7 +262,12 @@ impl Ctx<'_> {
             true => rows.iter().find(|r| r.0 > line).unwrap_or(last),
             false => rows.iter().rev().find(|r| r.0 < line).unwrap_or(first),
         };
-        self.goto(self.core.current().char_idx(target.0, 0)?)
+        let (line, first) = (target.0, target.0 == first.0);
+        // The header above the first row is otherwise out of reach once scrolled past.
+        if first {
+            self.core.windows.window.set_top(0);
+        }
+        self.goto(self.core.current().char_idx(line, 0)?)
     }
 
     /// `agent-sessions-visit`: shows the session on point's row when it is open.
@@ -551,6 +561,46 @@ mod tests {
         assert_eq!(h.core.message(), Some("Select a session row"));
         h.keys("q");
         assert!(h.core.buffers.find("*Sessions*<work>").is_none());
+    }
+
+    #[test]
+    fn the_first_row_shows_the_header_above_it() {
+        let mut h = work();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let many = (0..20)
+            .map(|n| info(&format!("c{n}"), None, None))
+            .collect();
+        answer(&mut h, requests[0].0, Ok(many));
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        for _ in 0..20 {
+            h.keys("n");
+            h.display(5);
+        }
+        h.keys("g");
+        h.display(5);
+        let requests = lists(&mut h);
+        let many = (0..20)
+            .map(|n| info(&format!("c{n}"), None, None))
+            .collect();
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        answer(&mut h, requests[0].0, Ok(many));
+        h.display(5);
+        for _ in 0..20 {
+            h.keys("p");
+            h.display(5);
+        }
+        assert_eq!(line(&h), "claude                    c0");
+        assert_eq!(h.display(5).lines[0].number, 0);
+        for _ in 0..20 {
+            h.keys("n");
+            h.display(5);
+        }
+        h.keys("g");
+        h.display(5);
+        answer(&mut h, 6, Ok(vec![info("c0", None, None)]));
+        answer(&mut h, 5, Ok(vec![info("c0", None, None)]));
+        assert_eq!(h.display(5).lines[0].number, 0);
     }
 
     #[test]
