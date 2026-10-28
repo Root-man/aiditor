@@ -1,12 +1,12 @@
 //! The fake agent driven directly as an ACP client, for what the agent service can't send yet:
-//! prompts, config options and cancel.
+//! prompts, config options, cancel and `session/list` cursors.
 
 use std::process::Stdio;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, InitializeRequest, NewSessionRequest, PromptRequest,
+    CancelNotification, InitializeRequest, ListSessionsRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason,
@@ -261,4 +261,23 @@ async fn closing_stdout_keeps_the_process_alive() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_page_by_cursor() {
+    let fake = fake(
+        r#"{"sessions": [[{"sessionId": "a", "cwd": "/"}], [{"sessionId": "b", "cwd": "/"}]]}"#,
+    )
+    .await;
+    let list = |cursor: Option<&str>| {
+        let request = ListSessionsRequest::new().cursor(cursor.map(str::to_owned));
+        fake.agent.send_request(request).block_task()
+    };
+    let first = list(None).await.unwrap();
+    assert_eq!(first.sessions[0].session_id.to_string(), "a");
+    assert_eq!(first.next_cursor.as_deref(), Some("1"));
+    let second = list(Some("1")).await.unwrap();
+    assert_eq!(second.sessions[0].session_id.to_string(), "b");
+    assert_eq!(second.next_cursor, None);
+    list(Some("9")).await.unwrap_err();
 }

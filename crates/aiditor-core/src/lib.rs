@@ -55,7 +55,8 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::{
     AgentRequest, ClientResponse, Error, NewSessionResponse, PromptRequest, RequestId,
-    SessionConfigOption, SessionId, SessionNotification, SetSessionConfigOptionRequest, StopReason,
+    SessionConfigOption, SessionId, SessionInfo, SessionNotification,
+    SetSessionConfigOptionRequest, StopReason,
 };
 use ropey::Rope;
 
@@ -208,6 +209,12 @@ pub enum Msg {
         id: AgentId,
         code: u32,
         signal: Option<String>,
+    },
+    /// The agent service's answer to `AgentOp::List`: every page's sessions in order, or why
+    /// the agent couldn't list them.
+    AgentListed {
+        request: u64,
+        result: Result<Vec<SessionInfo>, String>,
     },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
@@ -477,6 +484,16 @@ pub enum AgentOp {
     /// SIGTERM the agent's process group, SIGKILL after 100 ms; ignored for an unknown agent.
     /// The exit message still follows.
     Kill { id: AgentId },
+    /// Start `command` as `Spawn` does in a throwaway process, then `initialize` and
+    /// `session/list` in `cwd` through every page, then terminate it; answered with
+    /// `Msg::AgentListed` carrying `request`.
+    List {
+        request: u64,
+        command: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+    },
 }
 
 /// Work for the grep service.
@@ -622,6 +639,8 @@ impl Ctx<'_> {
             Msg::AgentPrompted { id, result } => self.agent_prompted(id, result),
             Msg::AgentConfigured { id, result } => self.agent_configured(id, result),
             Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
+            // shortcut: nothing asks yet; the sessions buffer (#323) handles the answer.
+            Msg::AgentListed { .. } => {}
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.

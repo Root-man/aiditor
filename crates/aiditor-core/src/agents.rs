@@ -1411,6 +1411,7 @@ mod tests {
                 }
                 AgentOp::Cancel { id, session } => format!("cancel {} {session}", id.0),
                 AgentOp::Kill { id } => format!("kill {}", id.0),
+                AgentOp::List { request, .. } => format!("list {request}"),
             })
             .collect()
     }

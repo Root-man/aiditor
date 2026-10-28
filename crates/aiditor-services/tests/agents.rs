@@ -684,3 +684,129 @@ async fn command_output_streams_into_its_tool_call() {
         "> go\n\nmake (execute, failed, exit 1)\nOutput:\n```\none\ntwo\n```\n\n> "
     );
 }
+
+/// Lists the sessions of `command` with `args` in `cwd`; returns the answer.
+async fn list(
+    command: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> Result<Vec<String>, String> {
+    let mut agents = Agents::default();
+    let mut rx = (agents.run(AgentOp::List {
+        request: 7,
+        command: command.into(),
+        args: args.iter().map(|&a| a.into()).collect(),
+        cwd: cwd.into(),
+        env: (env.iter()).map(|&(k, v)| (k.into(), v.into())).collect(),
+    }))
+    .expect("a list returns a receiver");
+    let msgs = rest(&mut rx).await;
+    let [Msg::AgentListed { request, result }] = &msgs[..] else {
+        panic!("one listed message: {msgs:?}");
+    };
+    assert_eq!(*request, 7);
+    let ids = |sessions: &Vec<_>| {
+        (sessions.iter())
+            .map(|s: &agent_client_protocol::schema::v1::SessionInfo| s.session_id.to_string())
+            .collect()
+    };
+    result.as_ref().map(ids).map_err(Clone::clone)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_answers_every_page_in_cwd_and_its_process_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = |id: &str, cwd: &str| format!(r#"{{"sessionId": "{id}", "cwd": "{cwd}"}}"#);
+    let (key, path) = script(
+        dir.path(),
+        &format!(
+            r#"{{"sessions": [[{}, {}], [{}]]}}"#,
+            session("a", &cwd),
+            session("elsewhere", "/"),
+            session("b", &cwd),
+        ),
+    );
+    // The shell leaves its pid, which `exec` hands to the fake, since list stderr is discarded.
+    let pid_file = dir.path().join("pid");
+    let shell = r#"echo $$ > "$0"; exec "$1""#;
+    let pid_path = pid_file.display().to_string();
+    let listed = list(
+        "sh",
+        &["-c", shell, &pid_path, AGENT],
+        dir.path(),
+        &[(key, &path)],
+    )
+    .await;
+    assert_eq!(listed.unwrap(), ["a", "b"]);
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    assert!(gone(pid.trim().parse().unwrap()).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_without_the_capability_fails() {
+    let listed = list(AGENT, &[], Path::new("/"), &[]).await;
+    assert!(listed.unwrap_err().contains("can't list sessions"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_of_a_missing_program_fails() {
+    let listed = list("/nonexistent/agent", &[], Path::new("/"), &[]).await;
+    assert!(listed.unwrap_err().contains("/nonexistent/agent"));
+    let listed = list(AGENT, &[], Path::new("/nonexistent/dir"), &[]).await;
+    assert!(listed.unwrap_err().contains("not a directory"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_of_an_agent_exiting_before_answering_fails() {
+    list("/usr/bin/true", &[], Path::new("/"), &[])
+        .await
+        .unwrap_err();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_stops_after_50_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = r#"[{"sessionId": "s", "cwd": "/"}]"#;
+    let pages = vec![page; 51].join(", ");
+    let (key, path) = script(dir.path(), &format!(r#"{{"sessions": [{pages}]}}"#));
+    let listed = list(AGENT, &[], Path::new("/"), &[(key, &path)]).await;
+    assert_eq!(listed.unwrap().len(), 50);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quitting_kills_a_running_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let pid_path = pid_file.display().to_string();
+    let mut agents = Agents::default();
+    // `sleep` never answers `initialize`.
+    let mut rx = (agents.run(AgentOp::List {
+        request: 1,
+        command: "sh".into(),
+        args: ["-c", r#"echo $$ > "$0"; exec sleep 30"#, &pid_path]
+            .map(Into::into)
+            .to_vec(),
+        cwd: "/".into(),
+        env: Vec::new(),
+    }))
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = pid.trim().parse()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the shell writes its pid");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    agents.kill_all();
+    assert!(gone(pid).await);
+    let msgs = rest(&mut rx).await;
+    assert!(
+        matches!(&msgs[..], [Msg::AgentListed { result: Err(_), .. }]),
+        "{msgs:?}"
+    );
+}
