@@ -35,6 +35,7 @@ fn spawn(
         args,
         cwd: cwd.into(),
         env: (env.iter()).map(|&(k, v)| (k.into(), v.into())).collect(),
+        session: None,
     }))
     .expect("spawn returns a receiver")
 }

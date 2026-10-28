@@ -87,7 +87,7 @@ Killing a live session's session buffer SHALL first ask `Buffer <name> has a run
 - **THEN** a kill is sent to that session's agent and `*Messages*` gets no crash note when it exits
 
 ### Requirement: A session starts in the agent's default mode
-When the session opens and the agent's registry entry has a `default_mode`, the core SHALL send `session/set_config_option` setting the mode option to it if it is one of the option's values and not its current value, and SHALL then show the mode the answer reports. If `default_mode` is not one of the values, or the agent has no mode option, `*Messages*` SHALL get `<agent> has no mode <default_mode>` and nothing is sent. If the agent answers with an error, `*Messages*` SHALL get `<agent> could not set mode <default_mode>: <reason>`. In both cases the mode stays as the agent reported it.
+When a new session opens (`session/new` answers) and the agent's registry entry has a `default_mode`, the core SHALL send `session/set_config_option` setting the mode option to it if it is one of the option's values and not its current value, and SHALL then show the mode the answer reports. If `default_mode` is not one of the values, or the agent has no mode option, `*Messages*` SHALL get `<agent> has no mode <default_mode>` and nothing is sent. If the agent answers with an error, `*Messages*` SHALL get `<agent> could not set mode <default_mode>: <reason>`. In both cases the mode stays as the agent reported it. A loaded session SHALL keep the mode its `session/load` answer reports, with nothing sent and no note.
 
 #### Scenario: Starting in the default mode
 - **WHEN** an agent with `default_mode = "plan"` opens a session whose mode option is `auto` with values `auto` and `plan`
@@ -104,3 +104,7 @@ When the session opens and the agent's registry entry has a `default_mode`, the 
 #### Scenario: The agent refuses the mode
 - **WHEN** the agent answers the `session/set_config_option` with an error
 - **THEN** `*Messages*` has `claude could not set mode plan: ` followed by the reason and the mode line keeps its mode
+
+#### Scenario: A loaded session keeps its mode
+- **WHEN** an agent with `default_mode = "plan"` loads a session whose mode option is `auto`
+- **THEN** nothing is sent and the mode line shows `[auto]`

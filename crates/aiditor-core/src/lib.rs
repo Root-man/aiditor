@@ -457,13 +457,15 @@ pub struct AgentId(pub u64);
 /// Work for the agent service.
 pub enum AgentOp {
     /// Start `command` in `cwd` with `env` on top of the editor's environment, later pairs
-    /// winning, then `initialize` and `session/new` in `cwd`; answered with `Msg::AgentStarted`.
+    /// winning, then `initialize` and `session/new` in `cwd`, or `session/load` of `session`;
+    /// answered with `Msg::AgentStarted`.
     Spawn {
         id: AgentId,
         command: String,
         args: Vec<String>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
+        session: Option<SessionId>,
     },
     /// Answer the agent's pending `request`; ignored for an unknown agent or request.
     Reply {
