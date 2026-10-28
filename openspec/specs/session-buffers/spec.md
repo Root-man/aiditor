@@ -292,6 +292,8 @@ A `tool_call`, or a call started from an update, SHALL open a terminal for the c
 
 The call's own terminal SHALL show as `Output:` and its output in a fenced code block, with ANSI escape sequences and carriage returns removed, in the place of `rawOutput` in the content, and its `terminal` content item SHALL NOT show as `Terminal <id>`. A terminal without output yet SHALL show nothing. The exit, when recorded, SHALL follow the status in the header, `dim` like it. An update that changes only a terminal's output or exit SHALL re-render that call when the next frame is built, once however many such updates came, and an update with fields SHALL rewrite the call at once.
 
+The SGR escapes removed from the terminal output and from text content items SHALL become faces on the chars they precede, shown when the call is open: foreground (`30`–`37`, `90`–`97`, `38;5;<n>` for n below 16) and background (`40`–`47`, `100`–`107`, `48;5;<n>`) in the theme's ANSI colours, bold (`1`), underline (`4`), and their resets (`0`, `39`, `49`, `22`, `24`). Other colours SHALL show in the default colour, and other attributes and escapes SHALL be ignored. The buffer's text SHALL hold no escapes, so copying the output yields plain text.
+
 #### Scenario: Streamed chunks
 - **WHEN** a call with a terminal content item `t` and `_meta.terminal_info` for `t` is shown, then updates carry `_meta.terminal_output_delta` `{terminal_id: "t", data: "a"}` and `_meta.terminal_output` `{terminal_id: "t", data: "b\n"}`, and the frame is built
 - **THEN** the call's content reads `Output:` and a fenced block holding `ab`, with no `Terminal t` line
@@ -314,7 +316,19 @@ The call's own terminal SHALL show as `Output:` and its output in a fenced code 
 
 #### Scenario: ANSI escapes
 - **WHEN** a chunk is `\u001b[31mred\u001b[0m\r\n`
-- **THEN** the output shows `red`
+- **THEN** the output shows `red`, in the theme's ANSI colour 1 when the call is open
+
+#### Scenario: Bold, underline and reset
+- **WHEN** the output is `\u001b[1;4;92mok\u001b[22mx\u001b[0my`
+- **THEN** `ok` is bold, underlined and in ANSI colour 10, `x` underlined in colour 10 but not bold, and `y` has no face
+
+#### Scenario: Colours beyond the palette
+- **WHEN** the output is `\u001b[38;5;196ma\u001b[38;2;1;2;3mb\u001b[38;5;4mc`
+- **THEN** `a` and `b` have no face and `c` is in ANSI colour 4
+
+#### Scenario: Codex's coloured text content
+- **WHEN** a call's text content item is `\u001b[34mfile\u001b[0m`
+- **THEN** it reads `file`, in ANSI colour 4 when the call is open
 
 #### Scenario: An unannounced terminal
 - **WHEN** an update carries output for a terminal id no shown call opened
