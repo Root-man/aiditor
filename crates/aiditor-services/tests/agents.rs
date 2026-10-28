@@ -104,7 +104,7 @@ async fn a_session_opens_in_cwd_without_fs_or_terminal() {
     );
     let cwd = format!("cwd={}", dir.path().display());
     stderr_until(&mut rx, &mut lines, &cwd).await;
-    let caps = "fs.readTextFile=false fs.writeTextFile=false terminal=false";
+    let caps = "fs.readTextFile=false fs.writeTextFile=false terminal=false terminal_output=true";
     stderr_until(&mut rx, &mut lines, caps).await;
     agents.kill_all();
 }
@@ -645,4 +645,42 @@ async fn a_turn_whose_agent_stops_speaking_ends() {
     );
     live.keys("x RET");
     assert_eq!(live.core.message(), Some("fake session has ended"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_output_streams_into_its_tool_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let update = |fields: &str| {
+        format!(
+            r#"{{"update": {{"sessionUpdate": "tool_call_update", "toolCallId": "t", {fields}}}}}"#
+        )
+    };
+    let out = |key: &str, data: &str| {
+        update(&format!(
+            r#""_meta": {{"{key}": {{"terminal_id": "t", "data": "{data}"}}}}"#
+        ))
+    };
+    let call = r#"{"update": {"sessionUpdate": "tool_call", "toolCallId": "t", "title": "make",
+        "kind": "execute", "status": "in_progress",
+        "content": [{"type": "terminal", "terminalId": "t"}],
+        "_meta": {"terminal_info": {"terminal_id": "t"}}}}"#;
+    let steps = [
+        call.to_string(),
+        out("terminal_output_delta", "one\\n"),
+        out("terminal_output", "\\u001b[1mtwo\\u001b[0m\\n"),
+        update(
+            r#""status": "failed",
+            "_meta": {"terminal_exit": {"terminal_id": "t", "exit_code": 1, "signal": null}}"#,
+        ),
+    ];
+    let script = format!(r#"{{"prompts": [[{}]]}}"#, steps.join(", "));
+    let mut live = Live::new(dir.path(), &script);
+    live.start().await;
+    live.keys("g o RET");
+    live.turn().await;
+    live.core.frame();
+    assert_eq!(
+        live.core.text(),
+        "> go\n\nmake (execute, failed, exit 1)\nOutput:\n```\none\ntwo\n```\n\n> "
+    );
 }
