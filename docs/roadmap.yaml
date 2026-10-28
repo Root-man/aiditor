@@ -1246,13 +1246,39 @@ milestones:
         labels: [acp]
         design: "#acp-integration-and-session-management"
         body: |
-          The project's past sessions come from the agents themselves: `session/list` to each registry agent with each project root as `cwd`, merged newest first. No index of our own; sessions started in the Claude Code CLI or the Codex app appear too. Break down when M4 starts.
+          The project's past sessions come from the agents themselves: `session/list` to each registry agent with the project's primary root as `cwd`, shown in a sessions buffer, most recently updated first. No index of our own; sessions started in the Claude Code CLI or the Codex app appear too.
+        tasks:
+          - key: m4-list-service
+            title: "List an agent's sessions in a throwaway process"
+            body: |
+              A new `AgentOp::List` spawns the agent like `Spawn` (command, args, env, `cwd` the primary root), sends `initialize`, and, when the agent advertises `sessionCapabilities.list`, sends `session/list` with that `cwd`, following `nextCursor` up to a limit (a `shortcut:`). It then kills the process and answers `Msg::AgentListed` with the agent's sessions or an error (spawn failure, no list capability, an error answer, an exit). Each request carries an id so the core can drop answers to a superseded request. The fake agent answers `session/list` from a fixture.
+            acceptance:
+              - "A list request answers with every page of the fake agent's sessions, and its process exits"
+              - "An agent without `sessionCapabilities.list`, or one that fails to start, answers with an error"
+              - "Checked against the real claude-agent-acp and codex-acp on macOS"
+          - key: m4-list-buffer
+            title: "List the project's past sessions in a buffer"
+            body: |
+              `agent-sessions` (M-x) asks every registry agent for its sessions in the current workspace's project, after the project's environment is captured, and shows `*Sessions*<workspace>`: read-only, owned by the workspace, in `agent-sessions-mode`. Each row shows the agent, the last update in the local time zone, and the title. Rows are sorted by `updatedAt`, most recent first, across all agents; a missing or unparseable time sorts last and shows blank. Add a time crate (`jiff`) to parse `updatedAt` as RFC 3339, whatever offset or fraction an adapter sends, and show it in local time. While an agent hasn't answered, its line reads `Listing <agent>...`; an agent's error takes the place of its rows. Each answer rebuilds the list, keeping point on the same session. Sessions open in the editor are marked `[open]`. `g` asks every agent again and drops answers to the previous request, `n`/`p` move between rows and `q` quits. `RET` on an `[open]` row switches to its session buffer; loading the others is #103.
+            acceptance:
+              - "Sessions from two agents show in one list, most recently updated first"
+              - "Times in `Z` and in other offsets, with and without fractions, show in the local time zone; a test passes a fixed zone"
+              - "`g` rebuilds the list and a late answer to the previous request is dropped"
+              - "`RET` on an `[open]` row switches to its session buffer"
+            blocked_by: [m4-list-service]
+          - key: m4-list-state
+            title: "Show the state of open sessions in the session list"
+            body: |
+              Replace the `[open]` mark with the live session's state, known to the core without ACP: `[starting]` before `session/new` answers, `[working]` while a turn runs, `[waiting]` while a permission request is pending, `[idle]` between turns and `[ended]` once its process exited. The buffer updates the label when the state changes. Sessions running outside the editor show no state; ACP's `session/list` doesn't report one.
+            acceptance:
+              - "Each state shows its label, and the label follows the session's changes without `g`"
+            blocked_by: [m4-list-buffer]
       - key: m4-resume
         title: "Resume sessions with session/load"
         labels: [acp]
         design: "#acp-integration-and-session-management"
         body: |
-          A resume command listing the project's past sessions; `session/load` replays history into a new session buffer in the current workspace. Break down when M4 starts.
+          `RET` on a session in the sessions buffer that isn't open in the editor continues it in the current workspace: `session/load` replays history into a new session buffer. Break down when M4 starts.
         tasks:
           - key: m4-spike-external-sessions
             title: "Spike: list sessions started outside the editor"
