@@ -295,9 +295,11 @@ async fn connect(
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(transport, async |agent: ConnectionTo<Agent>| {
-            // The default capabilities offer neither fs nor terminals: agents use the disk.
+            // The default capabilities offer neither fs nor terminals: agents use the disk. The
+            // `_meta` extension asks for command output in tool calls (#100).
+            let meta = serde_json::json!({"terminal_output": true});
             let initialize = InitializeRequest::new(ProtocolVersion::V1)
-                .client_capabilities(ClientCapabilities::new())
+                .client_capabilities(ClientCapabilities::new().meta(meta.as_object().cloned()))
                 .client_info(Implementation::new("aiditor", env!("CARGO_PKG_VERSION")));
             agent.send_request(initialize).block_task().await?;
             let session = (agent.send_request(NewSessionRequest::new(cwd)))

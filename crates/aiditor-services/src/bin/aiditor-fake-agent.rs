@@ -255,8 +255,12 @@ async fn main() -> agent_client_protocol::Result<()> {
                 let caps = &request.client_capabilities;
                 eprintln!("pid={}", std::process::id());
                 eprintln!(
-                    "fs.readTextFile={} fs.writeTextFile={} terminal={}",
-                    caps.fs.read_text_file, caps.fs.write_text_file, caps.terminal
+                    "fs.readTextFile={} fs.writeTextFile={} terminal={} terminal_output={}",
+                    caps.fs.read_text_file,
+                    caps.fs.write_text_file,
+                    caps.terminal,
+                    (caps.meta.as_ref()).and_then(|m| m.get("terminal_output"))
+                        == Some(&true.into())
                 );
                 responder.respond(InitializeResponse::new(ProtocolVersion::V1))
             },

@@ -8,9 +8,10 @@ use agent_client_protocol_schema::v1::{
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelect, SessionConfigSelectOptions, SessionConfigValueId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallUpdate,
+    ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
-use serde_json::Value;
+use alacritty_terminal::vte::{Parser, Perform};
+use serde_json::{Map, Value};
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -101,6 +102,38 @@ struct Tool {
     len: usize,
     /// Whether its content shows.
     open: bool,
+    /// The terminal it announced, whose output it shows.
+    term: Option<Term>,
+    /// Its terminal changed since the block was last rendered.
+    dirty: bool,
+}
+
+/// A command's terminal, from the `_meta` extension (#100).
+struct Term {
+    id: String,
+    /// Every chunk, raw.
+    output: String,
+    /// `exit <code>` or `signal <name>` once it failed.
+    exit: Option<String>,
+}
+
+/// The terminal a call announces: its `_meta.terminal_info`, else its first terminal item.
+fn terminal_id(call: &ToolCall) -> Option<String> {
+    let info = (call.meta.as_ref()).and_then(|m| m.get("terminal_info")?["terminal_id"].as_str());
+    let item = call.content.iter().find_map(|item| match item {
+        ToolCallContent::Terminal(t) => Some(&*t.terminal_id.0),
+        _ => None,
+    });
+    info.or(item).map(Into::into)
+}
+
+/// The shown call whose terminal `value`'s `terminal_id` names.
+fn terminal_tool<'a>(
+    tools: &'a mut HashMap<ToolCallId, Tool>,
+    value: &Value,
+) -> Option<&'a mut Tool> {
+    let id = value["terminal_id"].as_str()?;
+    (tools.values_mut()).find(|t| t.term.as_ref().is_some_and(|t| t.id == id))
 }
 
 /// A permission request's block, waiting for its answer.
@@ -176,13 +209,6 @@ impl Core {
     /// Puts `call` above session `id`'s prompt line as a new block, or rewrites its block in
     /// place, keeping whether it is folded.
     fn show_tool(&mut self, id: AgentId, call: ToolCall) {
-        let header = tool_header(&call).0;
-        let content = tool_content(&call);
-        let text = match content.is_empty() {
-            true => header.clone(),
-            false => format!("{header}\n{content}"),
-        };
-        let (header, len) = (header.chars().count(), text.chars().count());
         let known =
             (self.agents.get(&id)).is_some_and(|s| s.tools.contains_key(&call.tool_call_id));
         if !known {
@@ -194,11 +220,28 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
+        let term = (session.tools.get_mut(&call.tool_call_id))
+            .and_then(|t| t.term.take())
+            .or_else(|| {
+                terminal_id(&call).map(|id| Term {
+                    id,
+                    output: String::new(),
+                    exit: None,
+                })
+            });
+        let header = tool_header(&call, term.as_ref()).0;
+        let content = tool_content(&call, term.as_ref());
+        let text = match content.is_empty() {
+            true => header.clone(),
+            false => format!("{header}\n{content}"),
+        };
+        let (header, len) = (header.chars().count(), text.chars().count());
         let tool = match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
                 let start = buffer.marker(tool.start).expect("live while shown");
                 rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
+                (tool.term, tool.dirty) = (term, false);
                 tool
             }
             None => {
@@ -210,6 +253,8 @@ impl Core {
                     header,
                     len,
                     open: false,
+                    term,
+                    dirty: false,
                 };
                 session
                     .tools
@@ -218,6 +263,37 @@ impl Core {
             }
         };
         render_tool(buffer, tool, &self.settings.theme);
+    }
+
+    /// Appends the command output in `meta` to the terminals it names and records their exit,
+    /// for their calls to show with the next frame; drops what names no shown call's terminal.
+    fn terminal_meta(&mut self, id: AgentId, meta: Option<&Map<String, Value>>) {
+        let (Some(session), Some(meta)) = (self.agents.get_mut(&id), meta) else {
+            return;
+        };
+        for key in ["terminal_output", "terminal_output_delta"] {
+            let Some(value) = meta.get(key) else {
+                continue;
+            };
+            if let (Some(tool), Some(data)) = (
+                terminal_tool(&mut session.tools, value),
+                value["data"].as_str(),
+            ) {
+                (tool.term.as_mut().expect("found by it").output).push_str(data);
+                tool.dirty = true;
+            }
+        }
+        if let Some(value) = meta.get("terminal_exit")
+            && let Some(tool) = terminal_tool(&mut session.tools, value)
+        {
+            tool.term.as_mut().expect("found by it").exit =
+                match (value["signal"].as_str(), value["exit_code"].as_i64()) {
+                    (Some(signal), _) => Some(format!("signal {signal}")),
+                    (None, Some(code)) if code != 0 => Some(format!("exit {code}")),
+                    _ => None,
+                };
+            tool.dirty = true;
+        }
     }
 
     /// Puts `plan` above session `id`'s prompt line as its plan block, or rewrites that block in
@@ -311,11 +387,18 @@ impl Core {
         }
     }
 
-    /// Renders each streamed block that changed, at most once per frame.
+    /// Renders each streamed block and each call whose terminal changed, at most once per frame.
     pub(crate) fn render_streams(&mut self) {
         let ids: Vec<_> = self.agents.keys().copied().collect();
         for id in ids {
             self.render_stream(id);
+            let dirty: Vec<_> = (self.agents[&id].tools.values())
+                .filter(|t| t.dirty)
+                .map(|t| t.call.clone())
+                .collect();
+            for call in dirty {
+                self.show_tool(id, call);
+            }
         }
     }
 
@@ -573,6 +656,11 @@ impl Ctx<'_> {
             SessionUpdate::ToolCallUpdate(update) => Some(Err(update.clone())),
             _ => None,
         };
+        let meta = match &update.update {
+            SessionUpdate::ToolCall(call) => call.meta.clone(),
+            SessionUpdate::ToolCallUpdate(update) => update.meta.clone(),
+            _ => None,
+        };
         let plan = match &update.update {
             SessionUpdate::Plan(plan) => Some(plan.clone()),
             _ => None,
@@ -595,9 +683,13 @@ impl Ctx<'_> {
         match tool {
             // A `tool_call` replaces the call with its id.
             Some(Ok(call)) => core.show_tool(id, call),
-            Some(Err(update)) => core.tool_update(id, update),
-            None => {}
+            // An update carrying only terminal `_meta` waits for the frame.
+            Some(Err(update)) if update.fields != ToolCallUpdateFields::default() => {
+                core.tool_update(id, update)
+            }
+            _ => {}
         }
+        core.terminal_meta(id, meta.as_ref());
     }
 
     /// Shows a permission request from a ready session and cancels one from an ended or killed
@@ -929,11 +1021,15 @@ fn first_line(text: &str) -> String {
     line
 }
 
-/// A tool call's header line, `<title> (<kind>, <status>)` with the title's first line, and the
-/// title part's length in chars.
-fn tool_header(call: &ToolCall) -> (String, usize) {
+/// A tool call's header line, `<title> (<kind>, <status>)` with the title's first line and its
+/// terminal's exit after the status, and the title part's length in chars.
+fn tool_header(call: &ToolCall, term: Option<&Term>) -> (String, usize) {
     let title = first_line(&call.title);
-    let suffix = format!(" ({}, {})", acp_name(call.kind), acp_name(call.status));
+    let (kind, status) = (acp_name(call.kind), acp_name(call.status));
+    let suffix = match term.and_then(|t| t.exit.as_ref()) {
+        Some(exit) => format!(" ({kind}, {status}, {exit})"),
+        None => format!(" ({kind}, {status})"),
+    };
     (format!("{title}{suffix}"), title.chars().count())
 }
 
@@ -1011,18 +1107,24 @@ fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
     buffer.remove_marker(ask.start);
 }
 
-/// Everything a tool call carries, uncut, as markdown: its raw input, its content items, and its
-/// raw output when no item carries the result.
-fn tool_content(call: &ToolCall) -> String {
+/// Everything a tool call carries, uncut, as markdown: its raw input, its content items without
+/// ANSI escapes, and its terminal's output, or its raw output when no item carries the result.
+fn tool_content(call: &ToolCall, term: Option<&Term>) -> String {
     let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
     let mut parts = Vec::new();
     if let Some(input) = &call.raw_input {
         parts.push(format!("Input:\n{}", fenced("json", &pretty(input))));
     }
     for item in &call.content {
+        if let (ToolCallContent::Terminal(t), Some(term)) = (item, term)
+            && *t.terminal_id.0 == *term.id
+        {
+            continue;
+        }
         parts.push(match item {
             ToolCallContent::Content(c) => match &c.content {
-                ContentBlock::Text(text) => text.text.clone(),
+                // Codex sends a read or list command's output here, colored.
+                ContentBlock::Text(text) => plain(&text.text),
                 ContentBlock::ResourceLink(link) => link.uri.clone(),
                 other => match serde_json::to_value(other) {
                     Ok(v) => format!("[{}]", v["type"].as_str().unwrap_or("?")),
@@ -1040,7 +1142,11 @@ fn tool_content(call: &ToolCall) -> String {
             _ => "[?]".into(),
         });
     }
-    if let (true, Some(output)) = (call.content.is_empty(), &call.raw_output) {
+    if let Some(term) = term {
+        if !term.output.is_empty() {
+            parts.push(format!("Output:\n{}", fenced("", &plain(&term.output))));
+        }
+    } else if let (true, Some(output)) = (call.content.is_empty(), &call.raw_output) {
         let text = match output {
             Value::String(text) => text.clone(),
             // Claude's adapter passes a tool result's text blocks through.
@@ -1057,6 +1163,25 @@ fn tool_content(call: &ToolCall) -> String {
     parts.join("\n\n").trim_end_matches('\n').to_string()
 }
 
+/// `text` without ANSI escape sequences or carriage returns.
+// shortcut: `\r` is dropped, not taken as a return to the line's start; overwrite the line if progress output shows garbled.
+fn plain(text: &str) -> String {
+    struct Plain(String);
+    impl Perform for Plain {
+        fn print(&mut self, c: char) {
+            self.0.push(c);
+        }
+        fn execute(&mut self, byte: u8) {
+            if matches!(byte, b'\n' | b'\t') {
+                self.0.push(byte.into());
+            }
+        }
+    }
+    let mut plain = Plain(String::new());
+    Parser::new().advance(&mut plain, text.as_bytes());
+    plain.0
+}
+
 /// `text` in a fenced code block whose fence is longer than any run of backticks in it.
 fn fenced(lang: &str, text: &str) -> String {
     let run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
@@ -1070,7 +1195,7 @@ fn fenced(lang: &str, text: &str) -> String {
 /// contains another's end, so starts and ends ascend.
 fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
     let start = buffer.marker(tool.start).expect("live while shown");
-    let (header, title) = tool_header(&tool.call);
+    let (header, title) = tool_header(&tool.call, tool.term.as_ref());
     let rule = Prop::Line(Decoration::Rule(theme.dim));
     let dim = Face {
         fg: Some(theme.dim),
@@ -1857,26 +1982,119 @@ mod tests {
     #[test]
     fn tool_content_is_uncut_in_long_enough_fences() {
         let mut call = ToolCall::new("t", "Run\nmore");
-        assert_eq!(tool_header(&call), ("Run … (other, pending)".into(), 5));
+        assert_eq!(
+            tool_header(&call, None),
+            ("Run … (other, pending)".into(), 5)
+        );
         // A list of text blocks shows as their text; other output as JSON.
         call.raw_output = Some(serde_json::json!([{"type": "text", "text": "x ``` y"}]));
-        assert_eq!(tool_content(&call), "Output:\n````\nx ``` y\n````");
+        assert_eq!(tool_content(&call, None), "Output:\n````\nx ``` y\n````");
         call.raw_output = Some(serde_json::json!({"code": 0}));
         assert_eq!(
-            tool_content(&call),
+            tool_content(&call, None),
             "Output:\n```\n{\n  \"code\": 0\n}\n```"
         );
         // Content items replace the raw output.
         call.content = vec![
-            "**hi**".into(),
+            "**hi**\u{1b}[0m".into(),
             ToolCallContent::Diff(
                 agent_client_protocol_schema::v1::Diff::new("a.rs", "b\n")
                     .old_text("a\n".to_string()),
             ),
         ];
         assert_eq!(
-            tool_content(&call),
+            tool_content(&call, None),
             "**hi**\n\na.rs\n```diff\n--- a.rs\n+++ a.rs\n@@ -1 +1 @@\n-a\n+b\n```"
+        );
+    }
+
+    /// An `execute` call `t` titled `make`, announcing terminal `t` in its content and `_meta`.
+    fn command() -> ToolCall {
+        serde_json::from_value(serde_json::json!({
+            "toolCallId": "t", "title": "make", "kind": "execute", "status": "in_progress",
+            "content": [{"type": "terminal", "terminalId": "t"}],
+            "_meta": {"terminal_info": {"terminal_id": "t"}},
+        }))
+        .unwrap()
+    }
+
+    /// Sends call `t` an update with `fields` and `meta`.
+    fn meta_update(h: &mut Harness, fields: ToolCallUpdateFields, meta: Value) {
+        let update = ToolCallUpdate::new("t", fields).meta(meta.as_object().cloned());
+        self::update(h, 0, SessionUpdate::ToolCallUpdate(update));
+    }
+
+    fn output(h: &mut Harness, key: &str, terminal: &str, data: &str) {
+        let meta = serde_json::json!({key: {"terminal_id": terminal, "data": data}});
+        meta_update(h, ToolCallUpdateFields::new(), meta);
+    }
+
+    #[test]
+    fn terminal_output_streams_into_its_call_once_per_frame() {
+        let mut h = session();
+        tool(&mut h, command());
+        assert_eq!(h.core.text(), "make (execute, in_progress)\n\n> ");
+        output(&mut h, "terminal_output_delta", "t", "\u{1b}[31mre");
+        output(&mut h, "terminal_output", "t", "d\u{1b}[0m\r\n");
+        output(&mut h, "terminal_output", "other", "lost");
+        assert_eq!(h.core.text(), "make (execute, in_progress)\n\n> ");
+        h.frame(800., 600.);
+        assert_eq!(
+            h.core.text(),
+            "make (execute, in_progress)\nOutput:\n```\nred\n```\n\n> "
+        );
+    }
+
+    #[test]
+    fn a_failed_command_shows_its_exit_in_the_header() {
+        let mut h = session();
+        tool(&mut h, command());
+        let header = |h: &mut Harness| {
+            h.frame(800., 600.);
+            h.core.text().lines().next().unwrap().to_string()
+        };
+        let exit = |code: Value, signal: Value| {
+            serde_json::json!({"terminal_exit":
+                {"terminal_id": "t", "exit_code": code, "signal": signal}})
+        };
+        let failed = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
+        meta_update(&mut h, failed, exit(2.into(), Value::Null));
+        assert_eq!(header(&mut h), "make (execute, failed, exit 2)");
+        meta_update(
+            &mut h,
+            ToolCallUpdateFields::new(),
+            exit(Value::Null, "SIGTERM".into()),
+        );
+        assert_eq!(header(&mut h), "make (execute, failed, signal SIGTERM)");
+        let completed = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
+        meta_update(&mut h, completed, exit(0.into(), Value::Null));
+        assert_eq!(header(&mut h), "make (execute, completed)");
+    }
+
+    #[test]
+    fn a_call_started_from_an_update_opens_its_terminal() {
+        let mut h = session();
+        let meta = serde_json::json!({"terminal_info": {"terminal_id": "t"}});
+        meta_update(&mut h, ToolCallUpdateFields::new().title("make"), meta);
+        output(&mut h, "terminal_output", "t", "ok\n");
+        h.frame(800., 600.);
+        assert_eq!(
+            h.core.text(),
+            "make (other, pending)\nOutput:\n```\nok\n```\n\n> "
+        );
+    }
+
+    #[test]
+    fn terminal_info_alone_opens_a_terminal() {
+        let mut h = session();
+        let mut call = command();
+        call.content.clear();
+        tool(&mut h, call);
+        output(&mut h, "terminal_output", "t", "ok\n");
+        h.frame(800., 600.);
+        assert_eq!(
+            h.core.text(),
+            "make (execute, in_progress)\nOutput:\n```\nok\n```\n\n> "
         );
     }
 
