@@ -30,7 +30,7 @@ labels:
   - { name: terminal, color: "000000", description: "PTY, VT emulator, terminal buffers" }
   - { name: acp, color: "d93f0b", description: "ACP client, agents, sessions" }
   - { name: project, color: "0052cc", description: "Projects and workspaces" }
-  - { name: persistence, color: "bfd4f2", description: "Session index, auto-save and recovery" }
+  - { name: persistence, color: "bfd4f2", description: "Auto-save and recovery" }
   - { name: infra, color: "ededed", description: "Build, CI, test harness" }
   # kind
   - { name: epic, color: "3e4b9e", description: "Parent issue grouping one feature area" }
@@ -1242,11 +1242,11 @@ milestones:
     gate: "One session makes a change across two repos."
     epics:
       - key: m4-index
-        title: "Session index in SQLite"
-        labels: [persistence, acp]
+        title: "List past sessions with session/list"
+        labels: [acp]
         design: "#acp-integration-and-session-management"
         body: |
-          Index of ACP session id, agent, project, `cwd` and additional directories, title, last activity and status, under the platform data dir. No transcripts. Break down when M4 starts.
+          The project's past sessions come from the agents themselves: `session/list` to each registry agent with each project root as `cwd`, merged newest first. No index of our own; sessions started in the Claude Code CLI or the Codex app appear too. Break down when M4 starts.
       - key: m4-resume
         title: "Resume sessions with session/load"
         labels: [acp]
