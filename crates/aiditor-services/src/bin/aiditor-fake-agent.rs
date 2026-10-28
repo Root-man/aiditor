@@ -1,7 +1,8 @@
 //! A scripted ACP agent for tests. It reports what the client sent on stderr and opens a session
 //! with a two-value mode option, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its
 //! `session` steps after `session/new` and the n-th list of `prompts` on the n-th
-//! `session/prompt`. With `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
+//! `session/prompt`, and answers `session/list` from its `sessions` pages. With
+//! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
 //! Both are in docs/editor.md under Testing.
 
 use std::collections::HashMap;
@@ -12,11 +13,13 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ConfigOptionUpdate, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest, PromptResponse,
-    RequestPermissionRequest, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, ToolCallUpdate,
+    AgentCapabilities, CancelNotification, ConfigOptionUpdate, InitializeRequest,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PromptRequest, PromptResponse, RequestPermissionRequest,
+    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionInfo, SessionListCapabilities, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    ToolCallUpdate,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
@@ -48,6 +51,8 @@ struct Script {
     session: Vec<Step>,
     #[serde(default)]
     prompts: Vec<Vec<Step>>,
+    /// `session/list`'s pages; without them the fake can't list.
+    sessions: Option<Vec<Vec<SessionInfo>>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -243,7 +248,8 @@ async fn main() -> agent_client_protocol::Result<()> {
     };
     let state = Arc::new(Mutex::new(State::default()));
     let (session_state, prompt_state, cancel_state) = (state.clone(), state.clone(), state);
-    let prompt_script = script.clone();
+    let (prompt_script, init_script, list_script) =
+        (script.clone(), script.clone(), script.clone());
     let transport = ByteStreams::new(
         tokio::io::stdout().compat_write(),
         tokio::io::stdin().compat(),
@@ -251,7 +257,7 @@ async fn main() -> agent_client_protocol::Result<()> {
     let result = Agent
         .builder()
         .on_receive_request(
-            async |request: InitializeRequest, responder, _| {
+            async move |request: InitializeRequest, responder, _| {
                 let caps = &request.client_capabilities;
                 eprintln!("pid={}", std::process::id());
                 eprintln!(
@@ -262,7 +268,14 @@ async fn main() -> agent_client_protocol::Result<()> {
                     (caps.meta.as_ref()).and_then(|m| m.get("terminal_output"))
                         == Some(&true.into())
                 );
-                responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                let mut sessions = SessionCapabilities::new();
+                if init_script.sessions.is_some() {
+                    sessions = sessions.list(SessionListCapabilities::new());
+                }
+                let capabilities = AgentCapabilities::new().session_capabilities(sessions);
+                responder.respond(
+                    InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(capabilities),
+                )
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -319,6 +332,23 @@ async fn main() -> agent_client_protocol::Result<()> {
                 let update =
                     SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options(value)));
                 client.send_notification(SessionNotification::new(SESSION, update))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ListSessionsRequest, responder, _| {
+                let pages = list_script.sessions.as_deref().unwrap_or_default();
+                let n = (request.cursor.as_deref()).map_or(Ok(0), str::parse::<usize>);
+                let Some((n, page)) = n.ok().and_then(|n| Some((n, pages.get(n)?))) else {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::invalid_params());
+                };
+                let sessions = (page.iter())
+                    .filter(|s| request.cwd.as_ref().is_none_or(|cwd| &s.cwd == cwd))
+                    .cloned()
+                    .collect();
+                let next = (n + 1 < pages.len()).then(|| (n + 1).to_string());
+                responder.respond(ListSessionsResponse::new(sessions).next_cursor(next))
             },
             agent_client_protocol::on_receive_request!(),
         )

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,12 +14,12 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentRequest, CancelNotification, ClientCapabilities, Implementation, InitializeRequest,
-    NewSessionRequest, RequestId, SessionNotification,
+    ListSessionsRequest, NewSessionRequest, RequestId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Request};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -27,11 +27,15 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 /// JSON, so replies are serialized.
 type Pending = Arc<Mutex<HashMap<RequestId, Responder>>>;
 
-/// The spawned agents by id.
+/// The spawned agents by id, and the processes still listing sessions by request.
 #[derive(Default)]
 pub struct Agents {
     handles: HashMap<AgentId, Handle>,
+    lists: Lists,
 }
+
+/// Each running list's process group and whether it exited; its task removes it to terminate it.
+type Lists = Arc<Mutex<HashMap<u64, (libc::pid_t, Arc<AtomicBool>)>>>;
 
 /// The connection to the agent and its sender, while its session is open; dropped with the
 /// connection so the receiver closes after the exit.
@@ -47,6 +51,10 @@ struct Handle {
 
 /// How long a terminated agent has to exit before SIGKILL.
 const GRACE: Duration = Duration::from_millis(100);
+
+/// shortcut: sessions past this many `session/list` pages are left out; page on demand if a
+/// real history ever gets that long.
+const LIST_PAGES: usize = 50;
 
 impl Handle {
     /// SIGTERM to the agent's group unless it has exited; returns the group for the SIGKILL.
@@ -147,6 +155,13 @@ impl Agents {
                 }
                 None
             }
+            AgentOp::List {
+                request,
+                command,
+                args,
+                cwd,
+                env,
+            } => Some(self.list(request, command, args, cwd, env)),
         }
     }
 
@@ -157,8 +172,14 @@ impl Agents {
 
     /// Kill every agent, blocking for one shared grace, so no agent outlives the app.
     pub fn kill_all(&mut self) {
+        let lists: Vec<_> = self.lists.lock().unwrap().drain().collect();
         let groups: Vec<_> = (self.handles.drain())
             .filter_map(|(_, agent)| agent.terminate())
+            .chain(
+                lists
+                    .iter()
+                    .filter_map(|(_, (pid, exited))| terminate(*pid, exited)),
+            )
             .collect();
         if groups.is_empty() {
             return;
@@ -189,18 +210,7 @@ impl Agents {
             fail(format!("{}: not a directory", cwd.display()));
             return rx;
         }
-        // With `PATH` in `env`, the program is looked up on that `PATH`.
-        let spawned = Command::new(&command)
-            .args(args)
-            .current_dir(&cwd)
-            .envs(env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn();
-        let mut child = match spawned {
+        let mut child = match command_in(&command, args, &cwd, env, Stdio::piped()) {
             Ok(child) => child,
             Err(err) => {
                 fail(format!("{command}: {err}"));
@@ -254,6 +264,110 @@ impl Agents {
         });
         rx
     }
+
+    /// Starts the process here, so a quit right after can kill it; the rest runs in a task.
+    fn list(
+        &mut self,
+        request: u64,
+        command: String,
+        args: Vec<String>,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+    ) -> Receiver<Msg> {
+        let (tx, rx) = channel(1);
+        let fail = |err: String| {
+            _ = tx.try_send(Msg::AgentListed {
+                request,
+                result: Err(err),
+            });
+        };
+        if !cwd.is_dir() {
+            fail(format!("{}: not a directory", cwd.display()));
+            return rx;
+        }
+        // No log buffer for a throwaway process, so its stderr goes nowhere.
+        let mut child = match command_in(&command, args, &cwd, env, Stdio::null()) {
+            Ok(child) => child,
+            Err(err) => {
+                fail(format!("{command}: {err}"));
+                return rx;
+            }
+        };
+        let pid = child.id().expect("a spawned child has a pid") as libc::pid_t;
+        let (stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let exited = Arc::new(AtomicBool::new(false));
+        (self.lists.lock().unwrap()).insert(request, (pid, exited.clone()));
+        let lists = self.lists.clone();
+        tokio::spawn(async move {
+            // shortcut: an agent that never answers keeps its process until quit; time this out
+            // if one ever hangs.
+            let result = list_sessions(cwd, stdin, stdout).await;
+            _ = tx.send(Msg::AgentListed { request, result }).await;
+            // A quit that drained it terminates it instead.
+            if lists.lock().unwrap().remove(&request).is_some()
+                && let Some(group) = terminate(pid, &exited)
+            {
+                kill_after_grace(group);
+            }
+            _ = child.wait().await;
+            exited.store(true, Ordering::SeqCst);
+        });
+        rx
+    }
+}
+
+/// Initializes the agent and asks for its sessions in `cwd`, following `nextCursor`.
+async fn list_sessions(
+    cwd: PathBuf,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+) -> Result<Vec<SessionInfo>, String> {
+    let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
+    let listed = Client
+        .builder()
+        .connect_with(transport, async |agent: ConnectionTo<Agent>| {
+            let initialize = InitializeRequest::new(ProtocolVersion::V1)
+                .client_info(Implementation::new("aiditor", env!("CARGO_PKG_VERSION")));
+            let initialized = agent.send_request(initialize).block_task().await?;
+            let capabilities = initialized.agent_capabilities.session_capabilities;
+            if capabilities.list.is_none() {
+                return Ok(Err("the agent can't list sessions".to_owned()));
+            }
+            let (mut sessions, mut cursor) = (Vec::new(), None);
+            for _ in 0..LIST_PAGES {
+                let page = ListSessionsRequest::new().cwd(cwd.clone()).cursor(cursor);
+                let page = agent.send_request(page).block_task().await?;
+                sessions.extend(page.sessions);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            Ok(Ok(sessions))
+        })
+        .await;
+    listed.map_err(|err| err.to_string())?
+}
+
+/// Starts `command` in `cwd` leading its own process group, with piped stdin and stdout.
+fn command_in(
+    command: &str,
+    args: Vec<String>,
+    cwd: &Path,
+    env: Vec<(String, String)>,
+    stderr: Stdio,
+) -> std::io::Result<Child> {
+    // With `PATH` in `env`, the program is looked up on that `PATH`.
+    Command::new(command)
+        .args(args)
+        .current_dir(cwd)
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(stderr)
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
 }
 
 /// Initializes the agent and opens a session in `cwd`, then forwards the agent's requests until
