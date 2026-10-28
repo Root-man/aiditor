@@ -1353,6 +1353,43 @@ milestones:
             acceptance:
               - "Markdown files open with their block structure highlighted"
             blocked_by: [m5-highlight-js]
+      - key: m5-treesitter-more
+        title: "Tree-sitter injections and richer highlighting"
+        labels: [text]
+        design: "#subsystems"
+        body: |
+          What the highlighting pipeline left out: injected languages, locals, and bold and italic faces. Parsing moves off the core thread only if large files lag; folding and structural motion wait until after the MVP. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m5-ts-markdown-inline
+            title: "Highlight inline Markdown and code fences"
+            body: |
+              Injections in the pipeline, built for Markdown first: inline emphasis, code spans and links with `tree-sitter-md`'s inline grammar, and code fences in their info string's language (`rust`, `elixir`, `js`, `ts`, `yaml`, `toml`) with that grammar's highlights. Injected trees are parsed incrementally with their host's, and only the visible lines are queried.
+            acceptance:
+              - "Emphasis, code spans and links in Markdown are highlighted"
+              - "A fenced Rust or Elixir block is highlighted as that language, and an unknown language stays plain"
+              - "A test checks a fence's faces"
+            blocked_by: [m5-highlight-markdown]
+          - key: m5-ts-heex-sigils
+            title: "Highlight HEEx in ~H sigils"
+            body: |
+              Use the injections pipeline for Elixir's `~H` sigils, highlighted with the HEEx grammar, and HEEx's own embedded Elixir expressions.
+            acceptance:
+              - "A `~H` sigil in an `.ex` file is highlighted as HEEx, with its `{}` and `<%= %>` expressions as Elixir"
+            blocked_by: [m5-ts-markdown-inline]
+          - key: m5-ts-locals
+            title: "Highlight locals"
+            body: |
+              Run each grammar's `locals` query where it has one, so a parameter or local keeps its `variable.parameter` or definition colour where it is used, as Zed and Helix do.
+            acceptance:
+              - "A Rust function's parameter is coloured as a parameter at each use"
+            blocked_by: [m5-highlight-langs]
+          - key: m5-ts-font-styles
+            title: "Bold and italic syntax faces"
+            body: |
+              Let `theme.syntax` entries carry bold and italic as well as a colour, in the form the theme decision chose, and draw them in the display builder.
+            acceptance:
+              - "A theme can make comments italic and keywords bold, and settings.toml can override either"
+            blocked_by: [m5-decide-theme]
       - key: m5-indent
         title: "TAB indentation"
         labels: [text]
@@ -1369,11 +1406,11 @@ milestones:
             acceptance:
               - "Decision recorded in docs/editor.md"
           - key: m5-decide-settings
-            title: "Decide: per-language and per-project settings, themes, fonts"
+            title: "Decide: per-language and per-project settings"
             labels: [decision]
             design: "#open-questions"
             body: |
-              Indent width and style per language and project, `.editorconfig` support, themes and fonts beyond M0's single defaults. Per-project values come from the project file overriding the global files, VS Code style (see "Project overrides for settings and keymaps"); this settles how per-language values and `.editorconfig` fit into those layers. Record the answer in `docs/editor.md`.
+              Indent width and style per language and project, and `.editorconfig` support. Themes and fonts moved to "Decide: theme and font configuration". Per-project values come from the project file overriding the global files, VS Code style (see "Project overrides for settings and keymaps"); this settles how per-language values and `.editorconfig` fit into those layers. Record the answer in `docs/editor.md`.
             acceptance:
               - "Decision recorded in docs/editor.md"
       - key: m5-files
@@ -1423,6 +1460,30 @@ milestones:
               - "Typing `pff` in `M-x` highlights the `p`, `f` and `f` that matched in `project-find-file`"
               - "Every completing prompt highlights its matches, and annotations stay dimmed"
             blocked_by: [m1-find-in-project]
+          - key: m5-count-width
+            title: "Keep completion lists still while the match count changes"
+            body: |
+              The count before the prompt (`1/100 `) changes width as matches arrive or the pattern changes, shifting the prompt and making the list appear to jump, most visibly in project grep. Pad the count to a stable width, as Vertico's `vertico-count-format` does. If the jump also comes from the selection or scroll moving while grep batches stream in, fix that too.
+            acceptance:
+              - "Typing in project grep while the count goes from 9 to 100 matches leaves the prompt text and the list in place"
+              - "A test checks the prompt's width stays the same as the count grows"
+            blocked_by: [m0-find-file]
+      - key: m5-search
+        title: "Project grep and search polish"
+        labels: [minibuffer, project]
+        design: "#subsystems"
+        body: |
+          Faster project grep, visible progress, matches highlighted in the buffer, and searching large multi-root projects. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m5-grep-progress
+            title: "Show that a project grep is running"
+            body: |
+              Seen in the "Legacy crap" project (11 roots, about 8,700 files): `INVALID_SITE` showed nothing for 5 s and more, then appeared at once when typed again. Grep has no timeout and caches nothing; its roots are searched in order, file by file, and every hit was in the 7th and 11th roots, so a cold file cache made the first search slow. The prompt shows nothing while a search runs, so a slow search looks like no matches. Show a running search in the prompt (a `[searching]` marker, with the count growing as batches arrive) and `[no matches]` once a finished search found nothing.
+            acceptance:
+              - "While a search runs the prompt says so; it stops once the search is done, cancelled or superseded"
+              - "A finished search with no hits says so"
+              - "Core tests cover the running, done and superseded states"
+            blocked_by: [m1-grep-service]
           - key: m5-parallel-grep
             title: "Parallel project grep with configurable workers"
             labels: [project, files]
@@ -1446,6 +1507,26 @@ milestones:
               - "Record complete-search and first-batch measurements for one and several workers on each platform, without introducing timing thresholds into ordinary CI."
               - "Document the implemented setting and search behavior in docs/editor.md."
             blocked_by: [m1-grep-service, m0-config]
+          - key: m5-buffer-match-highlight
+            title: "Highlight search matches in the previewed buffer"
+            body: |
+              While project grep or swiper previews a hit, highlight every match of the pattern in the visible lines of the previewed window, and the selected match more strongly, as consult's preview and swiper do. Highlights are computed by the display builder over the window's lines, as syntax highlighting is, and are gone once the prompt closes; they are not text properties. Matches use the same smart case as the search.
+            acceptance:
+              - "Previewing a grep hit highlights every visible match in that window and the selected one distinctly"
+              - "Swiper highlights its matches the same way"
+              - "Nothing stays highlighted after the prompt closes or is aborted"
+              - "A test checks a previewed window's match faces"
+            blocked_by: [m5-highlight-matches]
+          - key: m5-grep-roots
+            title: "Grep large multi-root projects"
+            body: |
+              In a project of many roots, hits from the root the work is in can sit behind thousands of files of other roots. Search the current buffer's root first, so its hits are listed first, then the other roots in their order. `C-u` before project grep asks for the roots to search, completing over the project's root names, consult-style, instead of adding a separate command.
+            acceptance:
+              - "Project grep lists the current buffer's root's hits before the other roots'"
+              - "`C-u C-x p g` asks for a root and searches only that one"
+              - "A buffer outside the project's roots searches them in their order"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m5-parallel-grep]
       - key: m5-crash
         title: "Crash safety beyond commands"
         labels: [frontend]
@@ -1500,6 +1581,25 @@ milestones:
         design: "#commands-and-keymaps"
         body: |
           Implement the commands chosen in M1's "Decide: C-s and the remaining editing commands": comment toggle (`M-;`), fill paragraph (`M-q`) with Markdown prefixes, literal query-replace (`M-%`), save-as (`C-x C-w`) and a global recent files list. Break down when M5 starts.
+        tasks:
+          - key: m5-next-buffer
+            title: "next-buffer and previous-buffer"
+            body: |
+              Emacs's `C-x <right>` (`next-buffer`) and `C-x <left>` (`previous-buffer`): cycle the selected window through the buffers it has shown, most recent first, as Emacs's per-window previous buffers do. A window that has shown only one buffer falls back to the workspace's other buffers in `buffer-list` order. Today only a global `buffer-list` order exists.
+            acceptance:
+              - "In a window that showed a, then b, then c, `C-x <left>` shows b, again shows a, and `C-x <right>` goes back to b"
+              - "Two windows keep their own histories"
+              - "A killed buffer drops out of every window's history"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m0-keymap-toml]
+          - key: m5-recent-files
+            title: "Recent files and projects history"
+            body: |
+              A global list of recently visited files and recently switched-to projects, kept across restarts as Emacs's `recentf` does, with a completing command to visit one. The welcome dashboard lists from it.
+            acceptance:
+              - "Visited files and switched-to projects are listed most recent first, and survive a restart"
+              - "A completing command visits a recent file; missing files are dropped from the list"
+              - "Spec updated in docs/editor.md"
       - key: m5-keymap-config
         title: "Keymap configuration polish"
         labels: [keymap]
@@ -1525,12 +1625,48 @@ milestones:
         body: |
           VS Code's user and workspace settings, for aiditor: a project file can override any setting of `settings.toml` and any binding of `keymap.toml`, in `[settings]` and `[keymap.<keymap>]` tables. The project layer applies over the user files entry by entry, as the user keymap applies over the bundled one, while a workspace of that project is current; switching workspace switches the layer, and `C-x C-r` reloads it. Bad entries are reported as in the global files. Project-only keys such as `watch` and `max_watched_files` (#191, #192) stay as they are; per-project indent width becomes an ordinary override. Unbinding a key needs "Named keymap prefixes, remappable as a whole" or its own unbind support. Break down when M5 starts.
         blocked_by: [m5-decide-settings]
+      - key: m5-visual-design
+        title: "Visual design"
+        labels: [frontend]
+        design: "#subsystems"
+        body: |
+          One direction for how aiditor looks, settled before the visual work that follows it, then the theme and font configuration and the display features it shapes. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m5-decide-visual
+            title: "Decide: visual direction"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Settle the overall look with mockups made in Claude Design: spacing and padding, window dividers and the fringe, the buffer and workspace mode lines' styling, the line number gutter, the minibuffer and completion list, the welcome dashboard, and the direction for the rich session buffer (M6's "Block rows and proportional faces"). Name the faces the look needs, which the theme decision then makes configurable. Record the answer and links to the mockups in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md, with the mockups linked"
+              - "The faces the look needs are listed"
+          - key: m5-decide-theme
+            title: "Decide: theme and font configuration"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              Today one theme lives in the `[theme]` table of `settings.toml`, with a fixed set of colours and one font family and size, all reloaded by `C-x C-r`. Decide whether themes become their own files picked by name (bundled light and dark ones, user themes in the config dir, a `load-theme` command), which faces the visual direction adds, whether syntax faces gain bold and italic, and what font settings exist beyond family and size (line height, a font per face for the mode line and agent prose). Record the answer in `docs/editor.md`.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+            blocked_by: [m5-decide-visual]
+          - key: m5-line-numbers
+            title: "Display line numbers"
+            body: |
+              Emacs's `display-line-numbers-mode`: a gutter of line numbers in file buffers, absolute or relative, the current line's in its own face, styled as the visual direction says. A `line_numbers` setting picks the default and a command toggles it per buffer. The gutter's width follows the buffer's line count, and soft-wrapped continuation lines have no number.
+            acceptance:
+              - "File buffers show line numbers by the setting, and the command toggles them per buffer"
+              - "Relative numbers count from point's line"
+              - "Wrapped continuation lines show no number, and the gutter never overlaps text"
+              - "A display test checks the gutter"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m5-decide-visual]
       - key: m5-workspace-presentation
-        title: "Workspace presentation"
+        title: "Mode lines"
         labels: [frontend, project]
         design: "#workspaces"
         body: |
-          Keep the current project and workspace visible across buffer splits and in fullscreen mode. The initial scope is a thin workspace modeline showing only those two names; additional content can be considered later.
+          Keep the current project and workspace visible across buffer splits and in fullscreen mode with a thin workspace modeline, then settle what it and each buffer's mode line show. Tasks are tracked as sub-issues.
         tasks:
           - key: m5-workspace-modeline
             title: "Add a thin frame-wide workspace modeline"
@@ -1568,12 +1704,22 @@ milestones:
               - "Content limited to project and workspace; existing buffer mode lines and native title retained."
               - "Works on macOS and Linux; macOS fullscreen checked explicitly."
               - "Display behavior covered by tests and documented in `docs/editor.md`."
+          - key: m5-spike-mode-lines
+            title: "Spike: mode line and workspace modeline contents"
+            labels: [spike]
+            body: |
+              Decide what the workspace modeline and each buffer's mode line show, per buffer type: file, terminal, agent session, grep results, special buffers and the dashboard. Candidates include modified and read-only state, major mode, position and selection size, encoding and line endings, VCS branch, agent mode and status, and the workspace's running agents and terminals. Look at doom-modeline and Zed's status bar, decide which segments live where so nothing repeats across splits, and write the segments and their order per type into `docs/editor.md`, with the follow-up tasks they need.
+            acceptance:
+              - "Segments per buffer type and for the workspace modeline written into docs/editor.md"
+              - "Follow-up tasks added to the roadmap"
+            blocked_by: [m5-decide-visual, m5-workspace-modeline]
       - key: m5-dashboard
         title: "Welcome dashboard"
         labels: [frontend, project]
         design: "#projects"
         body: |
           Doom's dashboard for aiditor: a launch with no argument shows a welcome buffer in the `$HOME` workspace (see "Decide: launching without a project"), with quick commands such as recent files, recent projects and open project. Needs a recent files and projects history, which doesn't exist yet (see "Decide: C-s and the remaining editing commands"). Break down when M5 starts.
+        blocked_by: [m5-recent-files, m5-decide-visual]
       - key: m5-editor-client
         title: "$EDITOR client for terminal buffers"
         labels: [terminal]
