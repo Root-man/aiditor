@@ -1078,6 +1078,7 @@ impl Core {
         self.watch(&mut effects);
         self.sync_terminals(&mut effects);
         self.sync_agents(&mut effects);
+        self.sync_session_lists();
         effects
     }
 

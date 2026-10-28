@@ -19,6 +19,8 @@ pub(crate) struct SessionList {
     agents: Vec<Listing>,
     /// Each session row's line, agent index and session.
     rows: Vec<(usize, usize, SessionId)>,
+    /// Each row's state as rendered, to rebuild when one changes.
+    states: Vec<Option<&'static str>>,
     /// The agent and session point was last on, kept while no rows are listed.
     at: Option<(usize, SessionId)>,
 }
@@ -68,6 +70,25 @@ impl Core {
         .collect()
     }
 
+    /// Rebuilds the live sessions buffers whose rows' states changed since they were rendered.
+    pub(crate) fn sync_session_lists(&mut self) {
+        let buffers = &self.buffers;
+        self.session_lists
+            .retain(|id, _| buffers.get(*id).is_some());
+        let stale: Vec<_> = (self.session_lists.iter())
+            .filter(|(_, list)| {
+                let states = (list.rows.iter()).map(|(_, agent, session)| {
+                    self.session_state(&list.agents[*agent].name, session)
+                });
+                !states.eq(list.states.iter().copied())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            self.render_sessions(id);
+        }
+    }
+
     /// Rebuilds sessions buffer `id`'s text from its answers, keeping point on its session.
     fn render_sessions(&mut self, id: BufferId) {
         let (Some(list), Some(buffer)) = (self.session_lists.get(&id), self.buffers.get(id)) else {
@@ -106,20 +127,19 @@ impl Core {
             .map(|&(agent, ..)| list.agents[agent].name.chars().count())
             .max()
             .unwrap_or(0);
-        let mut rows = Vec::new();
+        let (mut rows, mut states) = (Vec::new(), Vec::new());
         for (agent, info, time) in sessions {
             let name = &list.agents[agent].name;
             let time = time.map_or_else(String::new, |t| local(t, &self.time_zone));
-            let open = match self.open_session(name, &info.session_id) {
-                Some(_) => "[open] ",
-                None => "",
-            };
+            let state = self.session_state(name, &info.session_id);
+            states.push(state);
+            let state = state.map_or_else(String::new, |s| format!("{s} "));
             let title = (info.title.as_deref())
                 .and_then(|t| t.lines().next())
                 .filter(|t| !t.is_empty())
                 .map_or_else(|| info.session_id.to_string(), str::to_string);
             rows.push((lines.len(), agent, info.session_id.clone()));
-            lines.push(format!("{name:<width$}  {time:<16}  {open}{title}"));
+            lines.push(format!("{name:<width$}  {time:<16}  {state}{title}"));
         }
         if rows.is_empty() && list.agents.iter().all(|a| a.answer.is_some()) {
             lines.push("No sessions".into());
@@ -137,7 +157,7 @@ impl Core {
         };
         let rows_first = rows.first().map(|row| row.0);
         let list = self.session_lists.get_mut(&id).expect("checked above");
-        (list.rows, list.at) = (rows, at);
+        (list.rows, list.states, list.at) = (rows, states, at);
         let buffer = self.buffers.get_mut(id).expect("checked above");
         buffer.set_text(&lines.join("\n"));
         let point = match target {
@@ -220,6 +240,7 @@ impl Ctx<'_> {
             project,
             agents,
             rows: Vec::new(),
+            states: Vec::new(),
             at,
         };
         core.session_lists.insert(id, list);
@@ -300,13 +321,16 @@ impl Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol_schema::v1::NewSessionResponse;
+    use agent_client_protocol_schema::v1::{
+        AgentRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, RequestId,
+        RequestPermissionRequest, StopReason, ToolCallUpdate, ToolCallUpdateFields,
+    };
     use jiff::tz::Offset;
 
     use super::*;
     use crate::harness::Harness;
     use crate::settings::Agent;
-    use crate::{AgentId, Effect, Msg};
+    use crate::{AgentId, Effect, Msg, Request};
 
     /// A harness in workspace `work` on a project at `app`, with agents `claude` (`env` `A=2`)
     /// and `codex`, showing times in UTC.
@@ -624,7 +648,7 @@ mod tests {
         answer(&mut h, requests[1].0, Ok(sessions[..1].to_vec()));
         assert_eq!(
             body(&h),
-            "claude  2026-10-28 10:00  [open] Mine\n\
+            "claude  2026-10-28 10:00  [idle] Mine\n\
              codex   2026-10-28 10:00  Mine\n\
              claude  2026-10-28 09:00  Other"
         );
@@ -647,11 +671,56 @@ mod tests {
         h.keys("M-x agent-sessions RET");
         let requests = lists(&mut h);
         answer(&mut h, requests[0].0, Ok(vec![info("c1", None, None)]));
-        assert_eq!(line(&h), "claude                    [open] c1");
+        assert_eq!(line(&h), "claude                    [idle] c1");
         h.keys("RET");
         assert_eq!(
             (h.core.workspace(), h.core.windows.window.buffer()),
             (work, session)
         );
+    }
+
+    #[test]
+    fn states_follow_the_session_without_g() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("c1")),
+        });
+        let session = h.core.windows.window.buffer();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        answer(&mut h, requests[0].0, Ok(vec![info("c1", None, None)]));
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        assert_eq!(body(&h), "claude                    [idle] c1");
+        h.core.switch_to(session);
+        h.keys("a RET");
+        assert_eq!(body(&h), "claude                    [working] c1");
+        let option = PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce);
+        let call = ToolCallUpdate::new("t", ToolCallUpdateFields::new());
+        let ask = RequestPermissionRequest::new("c1", call, vec![option]);
+        h.send(Msg::AgentRequest {
+            id: AgentId(0),
+            request: RequestId::Number(1),
+            body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
+        });
+        assert_eq!(body(&h), "claude                    [waiting] c1");
+        h.keys("C-c C-y");
+        assert_eq!(body(&h), "claude                    [working] c1");
+        h.send(Msg::AgentPrompted {
+            id: AgentId(0),
+            result: Ok(StopReason::EndTurn),
+        });
+        assert_eq!(body(&h), "claude                    [idle] c1");
+        h.send(Msg::AgentExited {
+            id: AgentId(0),
+            code: 1,
+            signal: None,
+        });
+        assert_eq!(body(&h), "claude                    [ended] c1");
+        h.core.switch_to(session);
+        h.keys("C-x k RET");
+        assert!(h.core.buffers.get(session).is_none());
+        assert_eq!(body(&h), "claude                    c1");
     }
 }
