@@ -27,6 +27,7 @@ fn spawn(agents: &mut Agents, command: &str, cwd: &Path, env: &[(&str, &str)]) -
         command: command.into(),
         args: Vec::new(),
         cwd: cwd.into(),
+        roots: Vec::new(),
         env,
         session: None,
     }))
@@ -264,6 +265,7 @@ fn load(agents: &mut Agents, dir: &Path, script_text: &str) -> Receiver<Msg> {
         command: AGENT.into(),
         args: Vec::new(),
         cwd: dir.into(),
+        roots: Vec::new(),
         env: vec![(key.into(), path)],
         session: Some("old".into()),
     }))
@@ -305,6 +307,67 @@ async fn a_load_replays_the_history_before_it_starts() {
     stderr_until(&mut rx, &mut lines, "load=old").await;
     let cwd = format!("cwd={}", dir.path().display());
     stderr_until(&mut rx, &mut lines, &cwd).await;
+    agents.kill_all();
+}
+
+/// Spawns the fake agent with `script` in `dir` with `roots`, loading `session` if any; returns
+/// the receiver and whether the agent was reported unable to take the roots before it started.
+async fn with_roots(
+    agents: &mut Agents,
+    dir: &Path,
+    script_text: &str,
+    roots: &[&str],
+    session: Option<&str>,
+) -> (Receiver<Msg>, Vec<String>, bool) {
+    let (key, path) = script(dir, script_text);
+    let mut rx = (agents.run(AgentOp::Spawn {
+        id: ID,
+        command: AGENT.into(),
+        args: Vec::new(),
+        cwd: dir.into(),
+        roots: roots.iter().map(Into::into).collect(),
+        env: vec![(key.into(), path)],
+        session: session.map(|s| s.to_owned().into()),
+    }))
+    .expect("spawn returns a receiver");
+    let (mut lines, mut unscoped) = (Vec::new(), false);
+    loop {
+        match next(&mut rx).await {
+            Some(Msg::AgentStderr { line, .. }) => lines.push(line),
+            Some(Msg::AgentUnscoped { id }) => unscoped = id == ID,
+            Some(Msg::AgentStarted { result, .. }) => break result.map(drop).unwrap(),
+            msg => panic!("expected stderr, unscoped or started, got {msg:?}"),
+        }
+    }
+    (rx, lines, unscoped)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_roots_reach_session_new_and_load_when_the_agent_takes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = r#"{"directories": true, "history": []}"#;
+    for session in [None, Some("old")] {
+        let mut agents = Agents::default();
+        let (mut rx, mut lines, unscoped) =
+            with_roots(&mut agents, dir.path(), script, &["/a", "/b"], session).await;
+        assert!(!unscoped);
+        stderr_until(&mut rx, &mut lines, "dirs=/a,/b").await;
+        agents.kill_all();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_cant_take_the_roots_starts_without_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agents = Agents::default();
+    let (mut rx, mut lines, unscoped) =
+        with_roots(&mut agents, dir.path(), "{}", &["/a"], None).await;
+    assert!(unscoped);
+    stderr_until(&mut rx, &mut lines, "dirs=").await;
+    agents.kill_all();
+    // Without roots there is nothing to leave out.
+    let (_, _, unscoped) = with_roots(&mut agents, dir.path(), "{}", &[], None).await;
+    assert!(!unscoped);
     agents.kill_all();
 }
 
@@ -361,6 +424,7 @@ async fn quitting_kills_every_agent() {
             command: AGENT.into(),
             args: Vec::new(),
             cwd: "/".into(),
+            roots: Vec::new(),
             env: script.map(|s| (key.into(), s.into())).into_iter().collect(),
             session: None,
         }))

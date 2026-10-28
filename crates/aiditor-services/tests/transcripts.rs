@@ -34,6 +34,7 @@ fn spawn(
         command: RECORDER.into(),
         args,
         cwd: cwd.into(),
+        roots: Vec::new(),
         env: (env.iter()).map(|&(k, v)| (k.into(), v.into())).collect(),
         session: None,
     }))

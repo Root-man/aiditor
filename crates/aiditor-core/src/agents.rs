@@ -19,7 +19,7 @@ use std::ops::Range;
 use crate::buffer::{self, Buffer, BufferId, Decoration, Face, InsertionType, MarkerId, Prop};
 use crate::command::Args;
 use crate::markdown;
-use crate::project::ProjectId;
+use crate::project::{Project, ProjectId};
 use crate::settings::Theme;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Request};
 
@@ -63,6 +63,24 @@ pub(crate) struct Session {
     plan: Option<(MarkerId, usize)>,
     /// Permission requests waiting for an answer, oldest first.
     asks: Vec<Ask>,
+    /// The roots preamble a new session's first prompt carries, if there is anything to list.
+    preamble: Option<String>,
+}
+
+/// The project's roots with their role lines, the primary first; `None` with nothing to list.
+fn preamble(project: &Project) -> Option<String> {
+    if project.roots.is_empty() && project.primary.role.is_empty() {
+        return None;
+    }
+    let mut text = "Project roots:".to_owned();
+    let others = project.roots.iter().map(|root| (root, ""));
+    for (root, primary) in std::iter::once((&project.primary, " (primary)")).chain(others) {
+        text += &format!("\n- {}{primary}", root.path.display());
+        if !root.role.is_empty() {
+            text += &format!(": {}", root.role);
+        }
+    }
+    Some(text)
 }
 
 fn session_name(agent: &str, workspace: &str, title: Option<&str>) -> String {
@@ -592,6 +610,8 @@ impl Ctx<'_> {
         // Under the captured environment, which `release_agents` puts first.
         let env = (agent.env.into_iter()).chain(loaded.env.clone()).collect();
         let cwd = loaded.primary.path.clone();
+        let roots = loaded.roots.iter().map(|r| r.path.clone()).collect();
+        let preamble = preamble(loaded).filter(|_| load.is_none());
         let id = AgentId(core.next_agent);
         core.next_agent += 1;
         let log = core.buffers.create(&log);
@@ -612,6 +632,7 @@ impl Ctx<'_> {
             command: agent.command,
             args: agent.args,
             cwd,
+            roots,
             env,
             session: load.clone(),
         };
@@ -636,6 +657,7 @@ impl Ctx<'_> {
             tools: HashMap::new(),
             plan: None,
             asks: Vec::new(),
+            preamble,
         };
         core.agents.insert(id, session);
         core.echo(echo);
@@ -728,6 +750,13 @@ impl Ctx<'_> {
                 self.effects.push(Effect::Agent(AgentOp::Kill { id }));
                 core.echo(format!("{agent} session failed to start: {err}"));
             }
+        }
+    }
+
+    pub(crate) fn agent_unscoped(&mut self, id: AgentId) {
+        if let Some(session) = self.core.agents.get(&id) {
+            let note = format!("{} can't take additional directories", session.agent);
+            self.core.log(&note);
         }
     }
 
@@ -955,7 +984,8 @@ impl Ctx<'_> {
         b.clear_undo();
         let session = core.agents.get_mut(&id).expect("found above");
         session.turn = true;
-        let request = PromptRequest::new(session_id, vec![input.into()]);
+        let blocks = session.preamble.take().into_iter().chain([input]);
+        let request = PromptRequest::new(session_id, blocks.map(Into::into).collect());
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
         self.goto(end)
@@ -1425,6 +1455,7 @@ mod tests {
     use crate::Msg;
     use crate::buffer::Prop;
     use crate::harness::{Harness, listed, name};
+    use crate::project::Root;
     use crate::settings::Agent;
 
     /// A harness in workspace `work` on a project at `/aiditor-test/app`, with agents `claude`
@@ -1480,10 +1511,13 @@ mod tests {
                     format!("reply {} {request} {answer}", id.0)
                 }
                 AgentOp::Prompt { id, request } => {
-                    let [ContentBlock::Text(text)] = &request.prompt[..] else {
-                        panic!("one text block: {request:?}");
-                    };
-                    format!("prompt {} {} {:?}", id.0, request.session_id, text.text)
+                    let texts: Vec<_> = (request.prompt.iter())
+                        .map(|block| match block {
+                            ContentBlock::Text(text) => format!("{:?}", text.text),
+                            _ => panic!("text blocks only: {request:?}"),
+                        })
+                        .collect();
+                    format!("prompt {} {} {}", id.0, request.session_id, texts.join(" "))
                 }
                 AgentOp::SetConfigOption { id, request } => {
                     let value = request.value.as_value_id().unwrap();
@@ -1913,6 +1947,7 @@ mod tests {
     fn a_prompt_is_sent_and_its_reply_streams_above_the_prompt() {
         let mut h = session();
         h.keys("h e l l o RET");
+        // No other roots and no role line: nothing to list, so no preamble.
         assert_eq!(ops(&mut h), [r#"prompt 0 s "hello""#]);
         assert_eq!(h.core.text(), "> hello\n\n> ");
         assert_eq!(h.core.point(), 11);
@@ -1927,6 +1962,57 @@ mod tests {
         assert_eq!(
             h.core.text(),
             "> hello\n\nHi there\n\n> again\n\nAgain\n\n> "
+        );
+    }
+
+    #[test]
+    fn a_new_sessions_first_prompt_carries_the_roots_preamble() {
+        let mut h = work();
+        let project = &mut h.core.projects[0].project;
+        project.primary.role = "The app".into();
+        let lib = Root {
+            path: h.path("lib"),
+            role: String::new(),
+        };
+        let docs = Root {
+            path: h.path("docs"),
+            role: "Docs".into(),
+        };
+        h.core.projects[0].project.roots = vec![lib, docs];
+        h.keys("M-x agent-start RET claude RET");
+        let roots: Vec<_> = (h.agent_ops.iter())
+            .filter_map(|op| match op {
+                AgentOp::Spawn { roots, .. } => Some(roots.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(roots, [vec![h.path("lib"), h.path("docs")]]);
+        ready(&mut h, 0);
+        // Taken at start: a root added later waits for the next start.
+        h.core.projects[0].project.roots.clear();
+        ops(&mut h);
+        h.keys("h i RET");
+        let preamble = format!(
+            "Project roots:\n- {} (primary): The app\n- {}\n- {}: Docs",
+            h.path("app").display(),
+            h.path("lib").display(),
+            h.path("docs").display()
+        );
+        assert_eq!(ops(&mut h), [format!(r#"prompt 0 s {preamble:?} "hi""#)]);
+        assert_eq!(h.core.text(), "> hi\n\n> ");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.keys("a g a i n RET");
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "again""#]);
+    }
+
+    #[test]
+    fn an_agent_that_cant_take_the_roots_is_noted() {
+        let mut h = session();
+        h.send(Msg::AgentUnscoped { id: AgentId(0) });
+        assert!(
+            messages(&h).ends_with("claude can't take additional directories\n"),
+            "{}",
+            messages(&h)
         );
     }
 

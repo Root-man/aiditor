@@ -177,6 +177,11 @@ pub enum Msg {
         id: AgentId,
         result: Result<NewSessionResponse, String>,
     },
+    /// The agent can't take additional directories, so its session starts without the spawn's
+    /// roots; sent before `AgentStarted`, and only when there were roots.
+    AgentUnscoped {
+        id: AgentId,
+    },
     /// One line of the agent's stderr, without its line ending.
     AgentStderr {
         id: AgentId,
@@ -457,13 +462,15 @@ pub struct AgentId(pub u64);
 /// Work for the agent service.
 pub enum AgentOp {
     /// Start `command` in `cwd` with `env` on top of the editor's environment, later pairs
-    /// winning, then `initialize` and `session/new` in `cwd`, or `session/load` of `session`;
-    /// answered with `Msg::AgentStarted`.
+    /// winning, then `initialize` and `session/new` in `cwd`, or `session/load` of `session`,
+    /// with `roots` as `additionalDirectories` if the agent takes them; answered with
+    /// `Msg::AgentStarted`.
     Spawn {
         id: AgentId,
         command: String,
         args: Vec<String>,
         cwd: PathBuf,
+        roots: Vec<PathBuf>,
         env: Vec<(String, String)>,
         session: Option<SessionId>,
     },
@@ -637,6 +644,7 @@ impl Ctx<'_> {
             Msg::TerminalExited { id, .. } => self.end_terminal(id, None),
             Msg::AgentRequest { id, request, body } => self.agent_request(id, request, body),
             Msg::AgentStarted { id, result } => self.agent_started(id, result),
+            Msg::AgentUnscoped { id } => self.agent_unscoped(id),
             Msg::AgentStderr { id, line } => self.agent_stderr(id, line),
             Msg::AgentUpdate { id, update } => self.agent_update(id, *update),
             Msg::AgentPrompted { id, result } => self.agent_prompted(id, result),

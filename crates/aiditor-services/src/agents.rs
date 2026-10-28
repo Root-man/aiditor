@@ -93,9 +93,10 @@ impl Agents {
                 command,
                 args,
                 cwd,
+                roots,
                 env,
                 session,
-            } => Some(self.spawn(id, command, args, (cwd, session), env)),
+            } => Some(self.spawn(id, command, args, (cwd, roots, session), env)),
             AgentOp::Reply {
                 id,
                 request,
@@ -198,7 +199,7 @@ impl Agents {
         id: AgentId,
         command: String,
         args: Vec<String>,
-        (cwd, session): (PathBuf, Option<SessionId>),
+        (cwd, roots, session): (PathBuf, Vec<PathBuf>, Option<SessionId>),
         env: Vec<(String, String)>,
     ) -> Receiver<Msg> {
         let (tx, rx) = channel(4);
@@ -239,7 +240,7 @@ impl Agents {
         let process = (pid, exited.clone());
         let connection = tokio::spawn(connect(
             id,
-            (cwd, session),
+            (cwd, roots, session),
             streams,
             process,
             pending,
@@ -372,11 +373,12 @@ fn command_in(
         .spawn()
 }
 
-/// Initializes the agent and opens a session in `cwd`, then forwards the agent's requests until
-/// it closes its stdout, and then terminates it, so a session that stops speaking still exits.
+/// Initializes the agent and opens a session in `cwd`, with `roots` if it takes them, then
+/// forwards the agent's requests until it closes its stdout, and then terminates it, so a
+/// session that stops speaking still exits.
 async fn connect(
     id: AgentId,
-    (cwd, load): (PathBuf, Option<SessionId>),
+    (cwd, mut roots, load): (PathBuf, Vec<PathBuf>, Option<SessionId>),
     (stdin, stdout): (ChildStdin, ChildStdout),
     (pid, exited): (libc::pid_t, Arc<AtomicBool>),
     pending: Pending,
@@ -418,11 +420,20 @@ async fn connect(
                 .client_capabilities(ClientCapabilities::new().meta(meta.as_object().cloned()))
                 .client_info(Implementation::new("aiditor", env!("CARGO_PKG_VERSION")));
             let initialized = agent.send_request(initialize).block_task().await?;
+            let capabilities = &initialized.agent_capabilities;
+            if capabilities
+                .session_capabilities
+                .additional_directories
+                .is_none()
+                && !roots.is_empty()
+            {
+                roots.clear();
+                _ = tx.send(Msg::AgentUnscoped { id }).await;
+            }
             let session = match load {
                 None => {
-                    (agent.send_request(NewSessionRequest::new(cwd)))
-                        .block_task()
-                        .await?
+                    let new = NewSessionRequest::new(cwd).additional_directories(roots);
+                    agent.send_request(new).block_task().await?
                 }
                 // The core kills an agent whose start failed, as after an error answer.
                 Some(_) if !initialized.agent_capabilities.load_session => {
@@ -432,7 +443,8 @@ async fn connect(
                 }
                 // The replayed history arrives as notifications before this answer.
                 Some(session) => {
-                    let load = LoadSessionRequest::new(session.clone(), cwd);
+                    let load =
+                        LoadSessionRequest::new(session.clone(), cwd).additional_directories(roots);
                     let loaded = agent.send_request(load).block_task().await?;
                     (NewSessionResponse::new(session).modes(loaded.modes))
                         .config_options(loaded.config_options)
