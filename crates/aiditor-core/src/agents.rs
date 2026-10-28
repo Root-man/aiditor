@@ -31,6 +31,8 @@ pub(crate) const MODE: &str = "agent-session-mode";
 pub(crate) struct Session {
     /// The registry name it was started as.
     agent: String,
+    /// The workspace name it was started in; workspace renames don't change it.
+    workspace: String,
     /// The session buffer, the session's handle: killing it stops the agent.
     pub(crate) buffer: BufferId,
     /// Its stderr log.
@@ -58,6 +60,24 @@ pub(crate) struct Session {
     plan: Option<(MarkerId, usize)>,
     /// Permission requests waiting for an answer, oldest first.
     asks: Vec<Ask>,
+}
+
+fn session_name(agent: &str, workspace: &str, title: Option<&str>) -> String {
+    let title = title
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if title.is_empty() {
+        return format!("*{agent}*<{workspace}>");
+    }
+    let mut chars = title.chars();
+    let mut title: String = chars.by_ref().take(40).collect();
+    if chars.next().is_some() {
+        title.push('…');
+    }
+    format!("*{agent}: {title}*<{workspace}>")
 }
 
 /// The session's mode: the first config option of category `mode`, when it is a select.
@@ -500,10 +520,11 @@ impl Ctx<'_> {
             .ok_or_else(|| format!("{name:?} is not a registered agent"))?
             .clone();
         let workspace = core.current_workspace();
-        let (project, log, title) = (
+        let (project, log, title, workspace) = (
             workspace.project,
             format!("*{name} stderr*<{}>", workspace.name),
-            format!("*{name}*<{}>", workspace.name),
+            session_name(name, &workspace.name, None),
+            workspace.name.clone(),
         );
         let loaded = &core.projects[core.project_at(project)?].project;
         // Under the captured environment, which `release_agents` puts first.
@@ -530,6 +551,7 @@ impl Ctx<'_> {
         };
         let session = Session {
             agent: name.clone(),
+            workspace,
             buffer,
             log,
             project,
@@ -683,6 +705,12 @@ impl Ctx<'_> {
             if let Some(ready) = &mut session.session {
                 ready.config_options = Some(options.config_options.clone());
             }
+        }
+        if let SessionUpdate::SessionInfoUpdate(info) = &update.update
+            && let Some(title) = info.title.as_opt_deref()
+        {
+            let name = session_name(&session.agent, &session.workspace, title);
+            core.buffers.rename(session.buffer, &name);
         }
         session.updates.push(update);
         if let Some(plan) = plan {
@@ -1667,6 +1695,115 @@ mod tests {
         ready(&mut h, 0);
         ops(&mut h);
         h
+    }
+
+    fn info(h: &mut Harness, id: u64, info: Value) {
+        update(
+            h,
+            id,
+            SessionUpdate::SessionInfoUpdate(serde_json::from_value(info).unwrap()),
+        );
+    }
+
+    #[test]
+    fn a_session_title_names_the_shown_buffer() {
+        let mut h = session();
+        info(
+            &mut h,
+            0,
+            serde_json::json!({"title": " Fruit list \nMore"}),
+        );
+        assert_eq!(name(&h), "*claude: Fruit list*<work>");
+    }
+
+    #[test]
+    fn each_title_renames_the_session_buffer() {
+        let mut h = work();
+        h.keys("M-x agent-start RET codex RET");
+        ready(&mut h, 0);
+        for title in [
+            "Reply with a list",
+            "Two-fruit markdown list",
+            "Two-fruit markdown list",
+        ] {
+            info(&mut h, 0, serde_json::json!({"title": title}));
+            assert_eq!(name(&h), format!("*codex: {title}*<work>"));
+        }
+    }
+
+    #[test]
+    fn long_titles_use_forty_chars_of_the_first_line() {
+        let mut h = session();
+        for (title, shown) in [
+            (
+                format!(" {} \nSecond line", "é".repeat(60)),
+                format!("{}…", "é".repeat(40)),
+            ),
+            ("🦀".repeat(40), "🦀".repeat(40)),
+        ] {
+            info(&mut h, 0, serde_json::json!({"title": title}));
+            assert_eq!(name(&h), format!("*claude: {shown}*<work>"));
+        }
+    }
+
+    #[test]
+    fn a_meta_only_update_keeps_the_session_title() {
+        let mut h = session();
+        info(&mut h, 0, serde_json::json!({"title": "Fruit list"}));
+        info(&mut h, 0, serde_json::json!({"_meta": {"status": "idle"}}));
+        assert_eq!(name(&h), "*claude: Fruit list*<work>");
+    }
+
+    #[test]
+    fn null_and_empty_titles_restore_the_base_name() {
+        let mut h = session();
+        for title in [
+            Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(" \t\nSecond line"),
+        ] {
+            info(&mut h, 0, serde_json::json!({"title": "Fruit list"}));
+            info(&mut h, 0, serde_json::json!({"title": title}));
+            assert_eq!(name(&h), "*claude*<work>");
+        }
+    }
+
+    #[test]
+    fn sessions_with_the_same_title_get_unique_names() {
+        let mut h = session();
+        let first = h.core.agents[&AgentId(0)].buffer;
+        h.keys("M-x agent-start RET claude RET");
+        ready(&mut h, 1);
+        info(&mut h, 0, serde_json::json!({"title": "Fruit list"}));
+        info(&mut h, 1, serde_json::json!({"title": "Fruit list"}));
+        assert_eq!(name(&h), "*claude: Fruit list*<work><2>");
+        h.core.switch_to(first);
+        assert_eq!(name(&h), "*claude: Fruit list*<work>");
+    }
+
+    #[test]
+    fn titles_keep_the_workspace_name_the_session_started_with() {
+        let mut h = session();
+        info(
+            &mut h,
+            0,
+            serde_json::json!({"title": "Fruit *list* <today>"}),
+        );
+        h.core.rename_workspace("renamed").unwrap();
+        assert_eq!(name(&h), "*claude: Fruit *list* <today>*<work>");
+        info(&mut h, 0, serde_json::json!({"title": "New title"}));
+        assert_eq!(name(&h), "*claude: New title*<work>");
+        info(&mut h, 0, serde_json::json!({"title": null}));
+        assert_eq!(name(&h), "*claude*<work>");
+    }
+
+    #[test]
+    fn an_ended_session_keeps_its_last_title() {
+        let mut h = session();
+        info(&mut h, 0, serde_json::json!({"title": "Fruit list"}));
+        exited(&mut h, 0, 0);
+        info(&mut h, 0, serde_json::json!({"title": "Late title"}));
+        assert_eq!(name(&h), "*claude: Fruit list*<work>");
     }
 
     #[test]
