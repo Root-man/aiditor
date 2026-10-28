@@ -460,6 +460,23 @@ impl Core {
             .filter(|&b| self.buffers.get(b).is_some())
     }
 
+    /// The state label of the session `agent` started or answered as `id`, while it is open.
+    pub(crate) fn session_state(&self, agent: &str, id: &SessionId) -> Option<&'static str> {
+        let buffer = self.open_session(agent, id)?;
+        let s = self.agents.values().find(|s| s.buffer == buffer)?;
+        Some(if s.ended {
+            "[ended]"
+        } else if s.session.is_none() {
+            "[starting]"
+        } else if !s.asks.is_empty() {
+            "[waiting]"
+        } else if s.turn {
+            "[working]"
+        } else {
+            "[idle]"
+        })
+    }
+
     /// Whether any agent session hasn't ended: waiting, starting or ready.
     pub(crate) fn live_agents(&self) -> bool {
         self.agents.values().any(|s| !s.ended)
