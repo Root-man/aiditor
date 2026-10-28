@@ -1,7 +1,8 @@
 //! A scripted ACP agent for tests. It reports what the client sent on stderr and opens a session
 //! with a two-value mode option, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its
 //! `session` steps after `session/new` and the n-th list of `prompts` on the n-th
-//! `session/prompt`, and answers `session/list` from its `sessions` pages. With
+//! `session/prompt`, answers `session/list` from its `sessions` pages and replays its
+//! `history` on `session/load`. With
 //! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
 //! Both are in docs/editor.md under Testing.
 
@@ -14,12 +15,12 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ConfigOptionUpdate, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PromptRequest, PromptResponse, RequestPermissionRequest,
-    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionInfo, SessionListCapabilities, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    ToolCallUpdate,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest,
+    PromptResponse, RequestPermissionRequest, SessionCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo, SessionListCapabilities,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, ToolCallUpdate,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
@@ -53,6 +54,8 @@ struct Script {
     prompts: Vec<Vec<Step>>,
     /// `session/list`'s pages; without them the fake can't list.
     sessions: Option<Vec<Vec<SessionInfo>>>,
+    /// The updates `session/load` replays; without them the fake can't load.
+    history: Option<Vec<SessionUpdate>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -248,8 +251,13 @@ async fn main() -> agent_client_protocol::Result<()> {
     };
     let state = Arc::new(Mutex::new(State::default()));
     let (session_state, prompt_state, cancel_state) = (state.clone(), state.clone(), state);
-    let (prompt_script, init_script, list_script) =
-        (script.clone(), script.clone(), script.clone());
+    let (prompt_script, init_script, list_script, load_script) = (
+        script.clone(),
+        script.clone(),
+        script.clone(),
+        script.clone(),
+    );
+    let load_state = session_state.clone();
     let transport = ByteStreams::new(
         tokio::io::stdout().compat_write(),
         tokio::io::stdin().compat(),
@@ -272,7 +280,8 @@ async fn main() -> agent_client_protocol::Result<()> {
                 if init_script.sessions.is_some() {
                     sessions = sessions.list(SessionListCapabilities::new());
                 }
-                let capabilities = AgentCapabilities::new().session_capabilities(sessions);
+                let capabilities = (AgentCapabilities::new().session_capabilities(sessions))
+                    .load_session(init_script.history.is_some());
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(capabilities),
                 )
@@ -297,6 +306,24 @@ async fn main() -> agent_client_protocol::Result<()> {
                 client.clone().spawn(async move {
                     run(&script.session, &cwd, &client, &cancel).await.map(drop)
                 })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: LoadSessionRequest, responder, client: ConnectionTo<Client>| {
+                eprintln!("load={}", request.session_id);
+                eprintln!("cwd={}", request.cwd.display());
+                let Some(history) = &load_script.history else {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::method_not_found());
+                };
+                for update in history {
+                    let update =
+                        SessionNotification::new(request.session_id.clone(), update.clone());
+                    client.send_notification(update)?;
+                }
+                load_state.lock().unwrap().cwd = request.cwd;
+                responder.respond(LoadSessionResponse::new().config_options(options(MODES[0])))
             },
             agent_client_protocol::on_receive_request!(),
         )

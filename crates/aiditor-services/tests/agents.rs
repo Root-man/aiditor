@@ -28,6 +28,7 @@ fn spawn(agents: &mut Agents, command: &str, cwd: &Path, env: &[(&str, &str)]) -
         args: Vec::new(),
         cwd: cwd.into(),
         env,
+        session: None,
     }))
     .expect("spawn returns a receiver")
 }
@@ -255,6 +256,68 @@ async fn session_updates_reach_the_core() {
     agents.kill_all();
 }
 
+/// Spawns the fake agent with `script` in `dir` to load session `old`.
+fn load(agents: &mut Agents, dir: &Path, script_text: &str) -> Receiver<Msg> {
+    let (key, path) = script(dir, script_text);
+    (agents.run(AgentOp::Spawn {
+        id: ID,
+        command: AGENT.into(),
+        args: Vec::new(),
+        cwd: dir.into(),
+        env: vec![(key.into(), path)],
+        session: Some("old".into()),
+    }))
+    .expect("spawn returns a receiver")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_load_replays_the_history_before_it_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let chunk = |kind: &str, text: &str| {
+        format!(r#"{{"sessionUpdate": "{kind}", "content": {{"type": "text", "text": "{text}"}}}}"#)
+    };
+    let history = [
+        chunk("user_message_chunk", "hi"),
+        chunk("agent_message_chunk", "hello"),
+    ];
+    let mut agents = Agents::default();
+    let mut rx = load(
+        &mut agents,
+        dir.path(),
+        &format!(r#"{{"history": [{}]}}"#, history.join(",")),
+    );
+    let (mut lines, mut updates) = (Vec::new(), Vec::new());
+    let session = loop {
+        match next(&mut rx).await {
+            Some(Msg::AgentStderr { line, .. }) => lines.push(line),
+            Some(Msg::AgentUpdate { update, .. }) => updates.push(format!("{update:?}")),
+            Some(Msg::AgentStarted { result, .. }) => break format!("{:?}", result.unwrap()),
+            msg => panic!("expected stderr, updates or started, got {msg:?}"),
+        }
+    };
+    assert!(
+        session.contains("\"old\"") && session.contains("plan"),
+        "{session}"
+    );
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    assert!(updates[0].contains("UserMessageChunk") && updates[0].contains("\"old\""));
+    assert!(updates[1].contains("AgentMessageChunk") && updates[1].contains("hello"));
+    stderr_until(&mut rx, &mut lines, "load=old").await;
+    let cwd = format!("cwd={}", dir.path().display());
+    stderr_until(&mut rx, &mut lines, &cwd).await;
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_cant_load_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agents = Agents::default();
+    let mut rx = load(&mut agents, dir.path(), "{}");
+    let (_, result) = started(&mut rx).await;
+    assert_eq!(result, Err("agent can't load sessions".into()));
+    agents.kill_all();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_killed_agent_exits_and_is_gone() {
     let mut agents = Agents::default();
@@ -299,6 +362,7 @@ async fn quitting_kills_every_agent() {
             args: Vec::new(),
             cwd: "/".into(),
             env: script.map(|s| (key.into(), s.into())).into_iter().collect(),
+            session: None,
         }))
         .unwrap();
         // The trapping agent is killed only once SIGTERM is ignored.

@@ -14,7 +14,8 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentRequest, CancelNotification, ClientCapabilities, Implementation, InitializeRequest,
-    ListSessionsRequest, NewSessionRequest, RequestId, SessionInfo, SessionNotification,
+    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, NewSessionResponse, RequestId,
+    SessionId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Request};
@@ -93,7 +94,8 @@ impl Agents {
                 args,
                 cwd,
                 env,
-            } => Some(self.spawn(id, command, args, cwd, env)),
+                session,
+            } => Some(self.spawn(id, command, args, (cwd, session), env)),
             AgentOp::Reply {
                 id,
                 request,
@@ -196,7 +198,7 @@ impl Agents {
         id: AgentId,
         command: String,
         args: Vec<String>,
-        cwd: PathBuf,
+        (cwd, session): (PathBuf, Option<SessionId>),
         env: Vec<(String, String)>,
     ) -> Receiver<Msg> {
         let (tx, rx) = channel(4);
@@ -237,7 +239,7 @@ impl Agents {
         let process = (pid, exited.clone());
         let connection = tokio::spawn(connect(
             id,
-            cwd,
+            (cwd, session),
             streams,
             process,
             pending,
@@ -374,7 +376,7 @@ fn command_in(
 /// it closes its stdout, and then terminates it, so a session that stops speaking still exits.
 async fn connect(
     id: AgentId,
-    cwd: PathBuf,
+    (cwd, load): (PathBuf, Option<SessionId>),
     (stdin, stdout): (ChildStdin, ChildStdout),
     (pid, exited): (libc::pid_t, Arc<AtomicBool>),
     pending: Pending,
@@ -415,10 +417,27 @@ async fn connect(
             let initialize = InitializeRequest::new(ProtocolVersion::V1)
                 .client_capabilities(ClientCapabilities::new().meta(meta.as_object().cloned()))
                 .client_info(Implementation::new("aiditor", env!("CARGO_PKG_VERSION")));
-            agent.send_request(initialize).block_task().await?;
-            let session = (agent.send_request(NewSessionRequest::new(cwd)))
-                .block_task()
-                .await?;
+            let initialized = agent.send_request(initialize).block_task().await?;
+            let session = match load {
+                None => {
+                    (agent.send_request(NewSessionRequest::new(cwd)))
+                        .block_task()
+                        .await?
+                }
+                // The core kills an agent whose start failed, as after an error answer.
+                Some(_) if !initialized.agent_capabilities.load_session => {
+                    let result = Err("agent can't load sessions".into());
+                    _ = tx.send(Msg::AgentStarted { id, result }).await;
+                    return Ok(());
+                }
+                // The replayed history arrives as notifications before this answer.
+                Some(session) => {
+                    let load = LoadSessionRequest::new(session.clone(), cwd);
+                    let loaded = agent.send_request(load).block_task().await?;
+                    (NewSessionResponse::new(session).modes(loaded.modes))
+                        .config_options(loaded.config_options)
+                }
+            };
             started = true;
             // Before the core hears of it, so its first prompt finds the connection.
             *open.lock().unwrap() = Some((agent.clone(), tx.clone()));

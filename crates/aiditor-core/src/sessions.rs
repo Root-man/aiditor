@@ -291,16 +291,25 @@ impl Ctx<'_> {
         self.goto(self.core.current().char_idx(line, 0)?)
     }
 
-    /// `agent-sessions-visit`: shows the session on point's row when it is open.
+    /// `agent-sessions-visit`: shows the session on point's row, loading it in the current
+    /// workspace unless it is open.
     pub(crate) fn sessions_visit(&mut self) -> Result<(), String> {
         let list = self.session_rows()?;
         let line = self.core.current().line_col(self.core.point())?.0;
         let (_, agent, session) = (list.rows.iter())
             .find(|r| r.0 == line)
             .ok_or("Select a session row")?;
-        let name = &list.agents[*agent].name;
-        let buffer = (self.core.open_session(name, session))
-            .ok_or("Loading sessions isn't supported yet")?;
+        let listing = &list.agents[*agent];
+        let Some(buffer) = self.core.open_session(&listing.name, session) else {
+            let title = match &listing.answer {
+                Some(Ok(infos)) => (infos.iter())
+                    .find(|i| i.session_id == *session)
+                    .and_then(|i| i.title.clone()),
+                _ => None,
+            };
+            let (name, session) = (listing.name.clone(), session.clone());
+            return self.start_session(&name, Some((session, title.as_deref())));
+        };
         let owner = self.core.buffers.get(buffer).and_then(|b| b.workspace);
         if let Some(owner) = owner.filter(|w| *w != self.core.workspace()) {
             self.core.switch_workspace(owner)?;
@@ -322,8 +331,10 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
-        AgentRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, RequestId,
-        RequestPermissionRequest, StopReason, ToolCallUpdate, ToolCallUpdateFields,
+        AgentRequest, ContentChunk, NewSessionResponse, PermissionOption, PermissionOptionKind,
+        RequestId, RequestPermissionRequest, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
     use jiff::tz::Offset;
 
@@ -576,11 +587,6 @@ mod tests {
         assert!(line(&h).ends_with("Port"));
         h.keys("p p");
         assert!(line(&h).ends_with("Fix it"));
-        h.keys("RET");
-        assert_eq!(
-            h.core.message(),
-            Some("Loading sessions isn't supported yet")
-        );
         h.keys("M-<").keys("RET");
         assert_eq!(h.core.message(), Some("Select a session row"));
         h.keys("q");
@@ -654,6 +660,70 @@ mod tests {
         );
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
+    }
+
+    #[test]
+    fn ret_loads_a_session_not_open_and_then_shows_it() {
+        let mut h = listed();
+        let agents = &mut h.core.settings.agents;
+        agents.get_mut("claude").unwrap().default_mode = Some("plan".into());
+        let list = h.core.windows.window.buffer();
+        h.keys("RET");
+        let spawns: Vec<_> = (h.agent_ops.drain(..))
+            .filter_map(|op| match op {
+                AgentOp::Spawn {
+                    command,
+                    cwd,
+                    session,
+                    ..
+                } => Some((command, cwd, session)),
+                _ => None,
+            })
+            .collect();
+        let c1 = Some(SessionId::from("c1"));
+        assert_eq!(spawns, [("claude-agent-acp".into(), h.path("app"), c1)]);
+        assert_eq!(h.core.current().name, "*claude: Fix it*<work>");
+        assert_eq!(h.core.message(), Some("Loading claude session..."));
+        let session = h.core.windows.window.buffer();
+        let user = SessionUpdate::UserMessageChunk(ContentChunk::new("hi".into()));
+        let reply = SessionUpdate::AgentMessageChunk(ContentChunk::new("hello".into()));
+        for update in [user, reply] {
+            let update = Box::new(SessionNotification::new("c1", update));
+            h.send(Msg::AgentUpdate {
+                id: AgentId(0),
+                update,
+            });
+        }
+        assert_eq!(h.text(), "> hi\n\nhello\n\n> ");
+        h.keys("RET");
+        assert_eq!(h.core.message(), Some("claude is not ready"));
+        h.core.switch_to(list);
+        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [starting] Fix it\n"));
+        h.keys("RET");
+        assert_eq!(h.core.windows.window.buffer(), session);
+        assert!(h.agent_ops.is_empty());
+        let mode = SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "auto",
+            vec![
+                SessionConfigSelectOption::new("auto", "auto"),
+                SessionConfigSelectOption::new("plan", "plan"),
+            ],
+        );
+        let mode = mode.category(SessionConfigOptionCategory::Mode);
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("c1").config_options(vec![mode])),
+        });
+        // A loaded session keeps its mode.
+        assert!(h.agent_ops.is_empty());
+        assert_eq!(
+            h.core.message(),
+            Some("claude session ready (modes: auto, plan)")
+        );
+        h.core.switch_to(list);
+        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
     }
 
     #[test]

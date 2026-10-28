@@ -42,6 +42,8 @@ pub(crate) struct Session {
     held: Option<AgentOp>,
     /// The `session/new` answer, once the agent is ready, its config options the latest reported.
     pub(crate) session: Option<NewSessionResponse>,
+    /// The session it loads instead of opening one.
+    load: Option<SessionId>,
     /// The mode value last sent with `session/set_config_option`, for a refusal's note.
     mode_sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
@@ -211,6 +213,24 @@ impl Core {
             thought,
             dirty: true,
         });
+    }
+
+    /// Puts a replayed user message above session `id`'s prompt line as a sent prompt shows.
+    // shortcut: one block per chunk, as both adapters send whole messages; join chunks by
+    // `messageId` if one ever splits a message.
+    fn show_user(&mut self, id: AgentId, text: &str) {
+        self.output(id, &format!("{PROMPT}{text}"), None);
+        let session = self.agents.get(&id);
+        let Some(buffer) = session.and_then(|s| self.buffers.get_mut(s.buffer)) else {
+            return;
+        };
+        let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
+        render(
+            buffer,
+            end - text.chars().count()..end,
+            false,
+            &self.settings.theme,
+        );
     }
 
     /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
@@ -452,10 +472,13 @@ impl Core {
             .unwrap_or(0)
     }
 
-    /// The session buffer of `agent`'s session `id`, if one is open.
+    /// The session buffer of `agent`'s session `id`, if one is open or loading.
     pub(crate) fn open_session(&self, agent: &str, id: &SessionId) -> Option<BufferId> {
         (self.agents.values())
-            .find(|s| s.agent == agent && s.session.as_ref().is_some_and(|r| r.session_id == *id))
+            .find(|s| {
+                let answered = s.session.as_ref().map(|r| &r.session_id);
+                s.agent == agent && answered.or(s.load.as_ref()) == Some(id)
+            })
             .map(|s| s.buffer)
             .filter(|&b| self.buffers.get(b).is_some())
     }
@@ -539,8 +562,18 @@ impl Ctx<'_> {
     /// `agent-start`: starts the named agent in the current workspace's project, showing a new
     /// session buffer, with a new log buffer for its stderr.
     pub(crate) fn agent_start(&mut self, args: Args) -> Result<(), String> {
+        self.start_session(&args.strings[0], None)
+    }
+
+    /// Starts agent `name` as `agent-start` does; with `load`, loads that session, titled,
+    /// instead of opening one.
+    pub(crate) fn start_session(
+        &mut self,
+        name: &str,
+        load: Option<(SessionId, Option<&str>)>,
+    ) -> Result<(), String> {
         let core = &mut *self.core;
-        let name = &args.strings[0];
+        let (load, title) = load.unzip();
         let agent = (core.settings.agents.get(name))
             .ok_or_else(|| format!("{name:?} is not a registered agent"))?
             .clone();
@@ -548,7 +581,7 @@ impl Ctx<'_> {
         let (project, log, title, workspace) = (
             workspace.project,
             format!("*{name} stderr*<{}>", workspace.name),
-            session_name(name, &workspace.name, None),
+            session_name(name, &workspace.name, title.flatten()),
             workspace.name.clone(),
         );
         let loaded = &core.projects[core.project_at(project)?].project;
@@ -573,15 +606,21 @@ impl Ctx<'_> {
             args: agent.args,
             cwd,
             env,
+            session: load.clone(),
+        };
+        let echo = match load {
+            Some(_) => format!("Loading {name} session..."),
+            None => format!("Starting {name}..."),
         };
         let session = Session {
-            agent: name.clone(),
+            agent: name.into(),
             workspace,
             buffer,
             log,
             project,
             held: Some(spawn),
             session: None,
+            load,
             mode_sent: None,
             ended: false,
             updates: Vec::new(),
@@ -592,7 +631,7 @@ impl Ctx<'_> {
             asks: Vec::new(),
         };
         core.agents.insert(id, session);
-        core.echo(format!("Starting {name}..."));
+        core.echo(echo);
         self.release_agents(project);
         Ok(())
     }
@@ -605,22 +644,11 @@ impl Ctx<'_> {
         };
         let sessions = self.core.agents.values_mut();
         for session in sessions.filter(|s| s.project == project) {
-            if let Some(AgentOp::Spawn {
-                id,
-                command,
-                args,
-                cwd,
-                env,
-            }) = session.held.take()
-            {
-                let env = vars.iter().cloned().chain(env).collect();
-                self.effects.push(Effect::Agent(AgentOp::Spawn {
-                    id,
-                    command,
-                    args,
-                    cwd,
-                    env,
-                }));
+            if let Some(mut spawn) = session.held.take() {
+                if let AgentOp::Spawn { env, .. } = &mut spawn {
+                    env.splice(0..0, vars.iter().cloned());
+                }
+                self.effects.push(Effect::Agent(spawn));
             }
         }
         let lists = self.core.release_lists(project, &vars);
@@ -651,8 +679,10 @@ impl Ctx<'_> {
                 if let Some(b) = core.buffers.get_mut(session.buffer) {
                     b.agent_mode = mode(options);
                 }
-                let default =
-                    (core.settings.agents.get(&agent)).and_then(|a| a.default_mode.clone());
+                // A loaded session keeps its own mode.
+                let default = (core.settings.agents.get(&agent))
+                    .and_then(|a| a.default_mode.clone())
+                    .filter(|_| session.load.is_none());
                 let (mut set, mut note) = (None, None);
                 match (default, option) {
                     (Some(default), Some((config, select)))
@@ -711,6 +741,13 @@ impl Ctx<'_> {
             ContentBlock::Text(text) => Some((text.text.clone(), thought)),
             _ => None,
         });
+        let user = match &update.update {
+            SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
         let tool = match &update.update {
             SessionUpdate::ToolCall(call) => Some(Ok(call.clone())),
             SessionUpdate::ToolCallUpdate(update) => Some(Err(update.clone())),
@@ -745,6 +782,9 @@ impl Ctx<'_> {
         }
         if let Some((text, thought)) = text {
             core.output(id, &text, Some(thought));
+        }
+        if let Some(text) = user {
+            core.show_user(id, &text);
         }
         match tool {
             // A `tool_call` replaces the call with its id.
@@ -1363,7 +1403,7 @@ fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
-        ConfigOptionUpdate, ContentChunk, PlanEntryPriority, PlanEntryStatus,
+        ConfigOptionUpdate, ContentChunk, ImageContent, PlanEntryPriority, PlanEntryStatus,
         SessionConfigSelectOption, SessionUpdate, ToolCallStatus, ToolCallUpdateFields, ToolKind,
     };
 
@@ -1873,6 +1913,28 @@ mod tests {
         assert_eq!(
             h.core.text(),
             "> hello\n\nHi there\n\n> again\n\nAgain\n\n> "
+        );
+    }
+
+    #[test]
+    fn replayed_user_messages_show_as_sent_prompts() {
+        let mut h = session();
+        chunk(&mut h, "a");
+        let user = |text: &str| SessionUpdate::UserMessageChunk(ContentChunk::new(text.into()));
+        update(&mut h, 0, user("see `b`"));
+        let image = ContentBlock::Image(ImageContent::new("", "image/png"));
+        update(
+            &mut h,
+            0,
+            SessionUpdate::UserMessageChunk(ContentChunk::new(image)),
+        );
+        chunk(&mut h, "c");
+        assert_eq!(h.core.text(), "a\n\n> see `b`\n\nc\n\n> ");
+        let code = h.core.settings.theme.code_block;
+        let b = props(&h).into_iter().find(|(t, _)| t == "b");
+        assert!(
+            matches!(b, Some((_, Prop::Face(f))) if f.bg == Some(code)),
+            "{b:?}"
         );
     }
 
