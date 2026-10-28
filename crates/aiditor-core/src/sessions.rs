@@ -345,6 +345,7 @@ mod tests {
 
     use super::*;
     use crate::harness::Harness;
+    use crate::project::Root;
     use crate::settings::Agent;
     use crate::{AgentId, Effect, Msg, Request};
 
@@ -672,6 +673,11 @@ mod tests {
         let mut h = listed();
         let agents = &mut h.core.settings.agents;
         agents.get_mut("claude").unwrap().default_mode = Some("plan".into());
+        let lib = Root {
+            path: h.path("lib"),
+            role: "Lib".into(),
+        };
+        h.core.projects[0].project.roots.push(lib);
         let list = h.core.windows.window.buffer();
         h.keys("RET");
         let spawns: Vec<_> = (h.agent_ops.drain(..))
@@ -679,14 +685,19 @@ mod tests {
                 AgentOp::Spawn {
                     command,
                     cwd,
+                    roots,
                     session,
                     ..
-                } => Some((command, cwd, session)),
+                } => Some((command, cwd, roots, session)),
                 _ => None,
             })
             .collect();
         let c1 = Some(SessionId::from("c1"));
-        assert_eq!(spawns, [("claude-agent-acp".into(), h.path("app"), c1)]);
+        let roots = vec![h.path("lib")];
+        assert_eq!(
+            spawns,
+            [("claude-agent-acp".into(), h.path("app"), roots, c1)]
+        );
         assert_eq!(h.core.message(), Some("Loading claude session..."));
         // The list stays shown while the history loads.
         assert_eq!(h.core.windows.window.buffer(), list);
@@ -722,6 +733,15 @@ mod tests {
         assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
+        // A loaded session already has the roots preamble in its history.
+        h.keys("x RET");
+        let prompts: Vec<_> = (h.agent_ops.drain(..))
+            .filter_map(|op| match op {
+                AgentOp::Prompt { request, .. } => Some(request.prompt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, [vec!["x".into()]]);
     }
 
     /// A `mode` select at `auto` with values `auto` and `plan`.

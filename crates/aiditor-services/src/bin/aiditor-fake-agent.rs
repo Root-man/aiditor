@@ -2,7 +2,7 @@
 //! with a two-value mode option, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its
 //! `session` steps after `session/new` and the n-th list of `prompts` on the n-th
 //! `session/prompt`, answers `session/list` from its `sessions` pages and replays its
-//! `history` on `session/load`. With
+//! `history` on `session/load`, taking additional directories with `directories`. With
 //! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
 //! Both are in docs/editor.md under Testing.
 
@@ -17,10 +17,11 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ConfigOptionUpdate, InitializeRequest,
     InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest,
-    PromptResponse, RequestPermissionRequest, SessionCapabilities, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo, SessionListCapabilities,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, ToolCallUpdate,
+    PromptResponse, RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities,
+    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionInfo, SessionListCapabilities, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    ToolCallUpdate,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
@@ -56,6 +57,9 @@ struct Script {
     sessions: Option<Vec<Vec<SessionInfo>>>,
     /// The updates `session/load` replays; without them the fake can't load.
     history: Option<Vec<SessionUpdate>>,
+    /// Whether it advertises `additionalDirectories`.
+    #[serde(default)]
+    directories: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -85,6 +89,11 @@ struct State {
     cwd: PathBuf,
     turns: usize,
     turn: CancellationToken,
+}
+
+fn dirs(paths: &[PathBuf]) -> String {
+    let paths: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
+    paths.join(",")
 }
 
 fn load() -> Result<Script, String> {
@@ -280,6 +289,10 @@ async fn main() -> agent_client_protocol::Result<()> {
                 if init_script.sessions.is_some() {
                     sessions = sessions.list(SessionListCapabilities::new());
                 }
+                if init_script.directories {
+                    sessions = sessions
+                        .additional_directories(SessionAdditionalDirectoriesCapabilities::new());
+                }
                 let capabilities = (AgentCapabilities::new().session_capabilities(sessions))
                     .load_session(init_script.history.is_some());
                 responder.respond(
@@ -291,6 +304,7 @@ async fn main() -> agent_client_protocol::Result<()> {
         .on_receive_request(
             async move |request: NewSessionRequest, responder, client: ConnectionTo<Client>| {
                 eprintln!("cwd={}", request.cwd.display());
+                eprintln!("dirs={}", dirs(&request.additional_directories));
                 eprintln!("A={}", std::env::var("A").unwrap_or_default());
                 let options = options(MODES[0]);
                 responder.respond(NewSessionResponse::new(SESSION).config_options(options))?;
@@ -313,6 +327,7 @@ async fn main() -> agent_client_protocol::Result<()> {
             async move |request: LoadSessionRequest, responder, client: ConnectionTo<Client>| {
                 eprintln!("load={}", request.session_id);
                 eprintln!("cwd={}", request.cwd.display());
+                eprintln!("dirs={}", dirs(&request.additional_directories));
                 let Some(history) = &load_script.history else {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::method_not_found());
