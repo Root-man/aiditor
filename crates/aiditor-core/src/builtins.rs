@@ -656,6 +656,31 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.agent_start(args),
         },
         Command {
+            name: "agent-sessions",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_sessions(),
+        },
+        Command {
+            name: "agent-sessions-next",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.sessions_move(true),
+        },
+        Command {
+            name: "agent-sessions-previous",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.sessions_move(false),
+        },
+        Command {
+            name: "agent-sessions-visit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.sessions_visit(),
+        },
+        Command {
+            name: "agent-sessions-quit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.sessions_quit(),
+        },
+        Command {
             name: "agent-send-input",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.agent_send_input(),

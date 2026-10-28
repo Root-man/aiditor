@@ -8,6 +8,8 @@ edition = "2024"
 # The ACP types `Msg` and `Effect` carry, as the ACP crate uses them.
 agent-client-protocol-schema = { version = "1.12.0", default-features = false }
 alacritty_terminal = { version = "0.26.0", default-features = false }
+# Sessions' `updatedAt` as RFC 3339, shown in the local time zone.
+jiff = "0.2.38"
 libc = "0.2.189"
 nucleo = "0.5.0"
 regex = "1.13.1"

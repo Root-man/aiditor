@@ -6,9 +6,9 @@ use agent_client_protocol_schema::v1::{
     PermissionOptionKind, Plan, PlanEntry, PromptRequest, RequestId, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelect, SessionConfigSelectOptions, SessionConfigValueId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    SessionConfigSelect, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall,
+    ToolCallContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
 use alacritty_terminal::vte::ansi::{Attr, Color, Handler, Processor};
 use serde_json::{Map, Value};
@@ -452,6 +452,14 @@ impl Core {
             .unwrap_or(0)
     }
 
+    /// The session buffer of `agent`'s session `id`, if one is open.
+    pub(crate) fn open_session(&self, agent: &str, id: &SessionId) -> Option<BufferId> {
+        (self.agents.values())
+            .find(|s| s.agent == agent && s.session.as_ref().is_some_and(|r| r.session_id == *id))
+            .map(|s| s.buffer)
+            .filter(|&b| self.buffers.get(b).is_some())
+    }
+
     /// Whether any agent session hasn't ended: waiting, starting or ready.
     pub(crate) fn live_agents(&self) -> bool {
         self.agents.values().any(|s| !s.ended)
@@ -572,8 +580,8 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Sends the held spawns of `project`'s sessions, the captured environment first, unless a
-    /// capture is still running.
+    /// Sends the held spawns of `project`'s sessions and its sessions buffers' list requests,
+    /// the captured environment first, unless a capture is still running.
     pub(crate) fn release_agents(&mut self, project: ProjectId) {
         let Some(vars) = self.core.captured(project) else {
             return;
@@ -598,6 +606,8 @@ impl Ctx<'_> {
                 }));
             }
         }
+        let lists = self.core.release_lists(project, &vars);
+        self.effects.extend(lists.into_iter().map(Effect::Agent));
     }
 
     pub(crate) fn agent_started(

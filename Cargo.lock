@@ -113,6 +113,7 @@ dependencies = [
  "agent-client-protocol-schema",
  "alacritty_terminal",
  "insta",
+ "jiff",
  "libc",
  "nucleo",
  "proptest",
