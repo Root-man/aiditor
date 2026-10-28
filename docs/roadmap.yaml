@@ -1299,6 +1299,16 @@ milestones:
         design: "#acp-integration-and-session-management"
         body: |
           Pass the project's other roots as `additionalDirectories`; the first prompt carries a preamble listing the roots and their role lines. Break down when M4 starts.
+        tasks:
+          - key: m4-preamble-roots
+            title: "Pass the other roots and send the roots preamble"
+            body: |
+              `AgentOp::Spawn` carries the project's other roots beside `cwd`. When the agent advertises `sessionCapabilities.additionalDirectories`, the service sends them as `additionalDirectories` on `session/new` and on `session/load`; otherwise the session starts without them and `*Messages*` notes `<agent> can't take additional directories`. A new session's first prompt carries the preamble as a text block before the user's: each root's path with its role line, the primary marked as such. It is not shown in the session buffer, and is skipped when the project has no other roots and the primary has no role line. A loaded session gets no preamble: one started in the editor already has it in its history. Roots added or removed while a session runs apply from its next start or load. Record these decisions in docs/editor.md.
+            acceptance:
+              - "The fake agent receives the other roots on `session/new` and `session/load`, and none when it doesn't advertise the capability, with the note in `*Messages*`"
+              - "The first prompt of a new session carries the preamble once; later prompts, loaded sessions and projects with nothing to list carry none"
+              - "The session buffer shows only the user's text"
+              - "One claude-agent-acp session changes files in two roots on macOS"
 
   # ───────────────────────────────────────────── M5 ─────────────────────────────────────────────
   - key: m5
