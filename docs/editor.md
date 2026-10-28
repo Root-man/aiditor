@@ -45,7 +45,7 @@ Languages with first-class support: Elixir (with HEEx), Rust, JS/TS, YAML and Ma
 2. **Everything is a command.** Keys and `M-x` call the same named commands, so every feature is reachable both ways.
 3. **Every layer is testable on its own**, and the whole app is testable end to end (see Testing).
 4. **One owner of state.** A single-threaded core, running on the UI thread, owns editor state; I/O (agents, PTYs, file watching) and heavy CPU work (grep, fuzzy matching, parsing) run in tasks that talk to it by messages.
-5. **Agents use their own tooling, scoped by the project.** The editor gives each agent a working directory and extra roots, then shows what it does: its changes to files that are already open appear in their buffers, and terminals it asks the editor for are terminal buffers.
+5. **Agents use their own tooling, scoped by the project.** The editor gives each agent a working directory and extra roots, then shows what it does: its changes to files that are already open appear in their buffers, and the output of the shell commands it runs shows in its session buffer.
 
 ## Architecture at a glance
 
@@ -293,10 +293,15 @@ The editor is an ACP **client**. Each agent session spawns its own agent process
 
 | Agent asks for | Editor does |
 | --- | --- |
-| `terminal/create` and friends | Spawn a regular terminal buffer in the session's workspace. Open question: whether either adapter calls it |
 | `session/request_permission` | Prompt inline in the session buffer: `C-c C-y` allows once, `C-c C-n` rejects once, `RET` picks the option on its line |
 
 `fs/read_text_file` and `fs/write_text_file` are not offered (see above).
+
+**Agent command output (decided in [#100](https://github.com/Root-man/aiditor/issues/100)).** Neither adapter calls `terminal/create`, even when the client advertises `terminal`: both run shell commands themselves (checked against claude-agent-acp 0.97.1-preview.7 and codex-acp 2.2.2), so the editor offers no terminal capability and agent commands never become terminal buffers. Both report a command through an unspecified `_meta` extension that ACP v2 standardizes as display-only terminals: the `tool_call` carries a `{type: "terminal", terminalId}` content item and `_meta.terminal_info`; `tool_call_update`s carry output in `_meta.terminal_output` or `_meta.terminal_output_delta` (`{terminal_id, data}`); and `_meta.terminal_exit` carries `{terminal_id, exit_code, signal}` with the final status. The editor advertises `clientCapabilities._meta.terminal_output: true` and appends every `data` chunk under either key to that terminal's output, which the tool call shows as its content. What each adapter sends:
+
+- claude-agent-acp switches to the extension only when the capability is advertised; without it, it sends the output once as a fenced text block and in `rawOutput`. Either way the output arrives once, after the command ends, with an `Exit code N` line on top when the command fails.
+- codex-acp 2.2.2 uses the extension whatever the client advertises (`terminal_output_delta` without the capability, `terminal_output` with it) and streams chunks while the command runs; it sends no `rawOutput` and no text fallback. Output written before its `tool_call` goes out is lost (seen: the first second of a command), an adapter bug the client can't recover from.
+- In both, stdout and stderr arrive as one stream and ANSI escapes are passed through raw.
 
 ## Subsystems
 
@@ -378,7 +383,6 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Agents**
 
-- Whether the Claude Code and Codex adapters call `terminal/create`. If they don't, agent shell commands run inside the agent and never become terminal buffers.
 - Whether sessions started outside the editor can be listed for resume.
 
 ## Testing
@@ -474,7 +478,7 @@ Build the editor core first and add the agent at M3, so agent features land on a
 | M0 · Skeleton | Rope buffers, undo; window splits, keymap trie; minibuffer, find-file, save; auto-save and recovery | Edit and save a file using Emacs keys only |
 | M1 · Projects + workspaces | Primary repo + extra roots, project commands; finder + grep across repos; workspaces with their own layouts and buffers | In two workspaces on different projects, find a file from an additional root, grep across two roots and jump to a hit, then keep editing while an external write auto-reverts another open buffer |
 | M2 · Terminal | PTY + VT emulator buffers; char mode and copy mode; shell integration marks | Run the test suite and make a git commit in a terminal buffer |
-| M3 · First agent | Claude Code via ACP; session buffer (with soft wrap) and modes; process environment; agent terminals as buffers (if the adapter uses `terminal/create`) | Land one real change with an agent, in the editor |
+| M3 · First agent | Claude Code via ACP; session buffer (with soft wrap) and modes; process environment; agent command output in the session buffer | Land one real change with an agent, in the editor |
 | M4 · Sessions | Resume after restart via `session/load`; Claude + Codex side by side; extra roots, project preamble | One session makes a change across two repos |
 | M5 · Polish | Tree-sitter for 5 languages, TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results; `$EDITOR` client for terminals | Daily driver for real work, without LSP (knowingly deferred) |
 

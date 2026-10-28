@@ -955,7 +955,7 @@ milestones:
   # ───────────────────────────────────────────── M3 ─────────────────────────────────────────────
   - key: m3
     title: "M3 · First agent"
-    description: "Claude Code via ACP, session buffer and modes, process environment, agent terminals as buffers."
+    description: "Claude Code via ACP, session buffer and modes, process environment, agent command output in the session buffer."
     gate: "Land one real change with an agent, in the editor."
     epics:
       - key: m3-env
@@ -1203,13 +1203,29 @@ milestones:
               - "`C-c C-c` during a pending permission request answers it `Cancelled` and ends the turn"
               - "No permission request is left unanswered while its agent lives"
             blocked_by: [m3-permission-prompt]
-      - key: m3-agent-terminals
-        title: "Agent terminals as terminal buffers"
-        labels: [acp, terminal]
+      - key: m3-command-output
+        title: "Agent command output"
+        labels: [acp, frontend]
         design: "#acp-integration-and-session-management"
         body: |
-          Handle `terminal/create` and friends by spawning terminal buffers in the session's workspace, if the adapters use it.
+          Show the output of the shell commands an agent runs in its tool calls, from the `_meta` terminal extension both adapters use (#100): advertise `_meta.terminal_output`, collect output per terminal id, show the exit code, and colour the output from its ANSI escapes.
         tasks:
+          - key: m3-command-output-show
+            title: "Show agent command output in its tool call"
+            body: |
+              `initialize` advertises `clientCapabilities._meta.terminal_output: true`. The core collects output per terminal id: a `tool_call` with `_meta.terminal_info` or a `terminal` content item opens it, and every `tool_call_update` appends the `data` of `_meta.terminal_output` or `_meta.terminal_output_delta` (Codex streams chunks under both names; Claude sends one at the end). The tool call shows that output, ANSI escapes stripped, as its `Output:` block in place of the `Terminal <id>` line. `_meta.terminal_exit` puts a non-zero exit code or a signal in the header. A command streaming fast re-renders its tool call at most once per frame. Output for a terminal id no tool call announced is dropped. Tests drive the scripted fake agent with `_meta` updates.
+            acceptance:
+              - "Streamed chunks under either key show in the tool call's output as they arrive"
+              - "A failing command shows its exit code in the tool call's header"
+              - "Every committed transcript still replays; checked against the real claude-agent-acp on macOS and Linux"
+            blocked_by: [m3-decide-terminal-create]
+          - key: m3-command-output-ansi
+            title: "Colour agent command output from its ANSI escapes"
+            body: |
+              Instead of stripping them, turn SGR escapes in command output into faces (the 16 colours from the theme, bold, underline, reset) and drop every other escape, so `cargo test` and `git diff` output keeps its colours. The escapes stay out of the buffer's text, so copying output yields plain text.
+            acceptance:
+              - "Coloured command output shows its colours; copying it yields text without escapes"
+            blocked_by: [m3-command-output-show]
           - key: m3-decide-terminal-create
             title: "Check: do the adapters call terminal/create?"
             labels: [decision, acp]
