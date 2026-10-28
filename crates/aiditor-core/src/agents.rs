@@ -1107,8 +1107,8 @@ fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
     buffer.remove_marker(ask.start);
 }
 
-/// Everything a tool call carries, uncut, as markdown: its raw input, its content items, and its
-/// terminal's output, or its raw output when no item carries the result.
+/// Everything a tool call carries, uncut, as markdown: its raw input, its content items without
+/// ANSI escapes, and its terminal's output, or its raw output when no item carries the result.
 fn tool_content(call: &ToolCall, term: Option<&Term>) -> String {
     let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
     let mut parts = Vec::new();
@@ -1123,7 +1123,8 @@ fn tool_content(call: &ToolCall, term: Option<&Term>) -> String {
         }
         parts.push(match item {
             ToolCallContent::Content(c) => match &c.content {
-                ContentBlock::Text(text) => text.text.clone(),
+                // Codex sends a read or list command's output here, colored.
+                ContentBlock::Text(text) => plain(&text.text),
                 ContentBlock::ResourceLink(link) => link.uri.clone(),
                 other => match serde_json::to_value(other) {
                     Ok(v) => format!("[{}]", v["type"].as_str().unwrap_or("?")),
@@ -1995,7 +1996,7 @@ mod tests {
         );
         // Content items replace the raw output.
         call.content = vec![
-            "**hi**".into(),
+            "**hi**\u{1b}[0m".into(),
             ToolCallContent::Diff(
                 agent_client_protocol_schema::v1::Diff::new("a.rs", "b\n")
                     .old_text("a\n".to_string()),
