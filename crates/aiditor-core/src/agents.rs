@@ -42,8 +42,9 @@ pub(crate) struct Session {
     held: Option<AgentOp>,
     /// The `session/new` answer, once the agent is ready, its config options the latest reported.
     pub(crate) session: Option<NewSessionResponse>,
-    /// The session it loads instead of opening one.
-    load: Option<SessionId>,
+    /// The session it loads instead of opening one, and the buffer it was loaded from, which
+    /// shows it once loaded if still selected.
+    load: Option<(SessionId, BufferId)>,
     /// The mode value last sent with `session/set_config_option`, for a refusal's note.
     mode_sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
@@ -477,7 +478,8 @@ impl Core {
         (self.agents.values())
             .find(|s| {
                 let answered = s.session.as_ref().map(|r| &r.session_id);
-                s.agent == agent && answered.or(s.load.as_ref()) == Some(id)
+                let loading = s.load.as_ref().map(|(id, _)| id);
+                s.agent == agent && answered.or(loading) == Some(id)
             })
             .map(|s| s.buffer)
             .filter(|&b| self.buffers.get(b).is_some())
@@ -489,6 +491,8 @@ impl Core {
         let s = self.agents.values().find(|s| s.buffer == buffer)?;
         Some(if s.ended {
             "[ended]"
+        } else if s.session.is_none() && s.load.is_some() {
+            "[loading]"
         } else if s.session.is_none() {
             "[starting]"
         } else if !s.asks.is_empty() {
@@ -566,7 +570,7 @@ impl Ctx<'_> {
     }
 
     /// Starts agent `name` as `agent-start` does; with `load`, loads that session, titled,
-    /// instead of opening one.
+    /// instead of opening one, showing its buffer only once loaded.
     pub(crate) fn start_session(
         &mut self,
         name: &str,
@@ -599,7 +603,10 @@ impl Ctx<'_> {
         b.prompt = Some((b.add_marker(start, InsertionType::Stay)).expect("after the prompt"));
         b.set_marker(b.point, start).expect("after the prompt");
         b.major_mode = MODE;
-        core.switch_to(buffer);
+        let from = core.windows.window.buffer();
+        if load.is_none() {
+            core.switch_to(buffer);
+        }
         let spawn = AgentOp::Spawn {
             id,
             command: agent.command,
@@ -620,7 +627,7 @@ impl Ctx<'_> {
             project,
             held: Some(spawn),
             session: None,
-            load,
+            load: load.map(|id| (id, from)),
             mode_sent: None,
             ended: false,
             updates: Vec::new(),
@@ -702,6 +709,13 @@ impl Ctx<'_> {
                     (None, _) => {}
                 }
                 session.session = Some(response);
+                let selected = core.windows.window.buffer();
+                let show = (session.load.as_ref())
+                    .filter(|(_, from)| *from == selected)
+                    .map(|_| session.buffer);
+                if let Some(buffer) = show {
+                    core.switch_to(buffer);
+                }
                 core.echo(format!("{agent} session ready (modes: {modes})"));
                 if let Some(note) = note {
                     core.log(&note);

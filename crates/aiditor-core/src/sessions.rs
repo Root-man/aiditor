@@ -310,6 +310,11 @@ impl Ctx<'_> {
             let (name, session) = (listing.name.clone(), session.clone());
             return self.start_session(&name, Some((session, title.as_deref())));
         };
+        if self.core.session_state(&listing.name, session) == Some("[loading]") {
+            let echo = format!("Loading {} session...", listing.name);
+            self.core.echo(echo);
+            return Ok(());
+        }
         let owner = self.core.buffers.get(buffer).and_then(|b| b.workspace);
         if let Some(owner) = owner.filter(|w| *w != self.core.workspace()) {
             self.core.switch_workspace(owner)?;
@@ -682,9 +687,11 @@ mod tests {
             .collect();
         let c1 = Some(SessionId::from("c1"));
         assert_eq!(spawns, [("claude-agent-acp".into(), h.path("app"), c1)]);
-        assert_eq!(h.core.current().name, "*claude: Fix it*<work>");
         assert_eq!(h.core.message(), Some("Loading claude session..."));
-        let session = h.core.windows.window.buffer();
+        // The list stays shown while the history loads.
+        assert_eq!(h.core.windows.window.buffer(), list);
+        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [loading] Fix it\n"));
+        let session = h.core.buffers.find("*claude: Fix it*<work>").unwrap();
         let user = SessionUpdate::UserMessageChunk(ContentChunk::new("hi".into()));
         let reply = SessionUpdate::AgentMessageChunk(ContentChunk::new("hello".into()));
         for update in [user, reply] {
@@ -694,27 +701,15 @@ mod tests {
                 update,
             });
         }
-        assert_eq!(h.text(), "> hi\n\nhello\n\n> ");
+        let text = h.core.buffers.get(session).unwrap().text().to_string();
+        assert_eq!(text, "> hi\n\nhello\n\n> ");
         h.keys("RET");
-        assert_eq!(h.core.message(), Some("claude is not ready"));
-        h.core.switch_to(list);
-        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [starting] Fix it\n"));
-        h.keys("RET");
-        assert_eq!(h.core.windows.window.buffer(), session);
+        assert_eq!(h.core.windows.window.buffer(), list);
+        assert_eq!(h.core.message(), Some("Loading claude session..."));
         assert!(h.agent_ops.is_empty());
-        let mode = SessionConfigOption::select(
-            "mode",
-            "Mode",
-            "auto",
-            vec![
-                SessionConfigSelectOption::new("auto", "auto"),
-                SessionConfigSelectOption::new("plan", "plan"),
-            ],
-        );
-        let mode = mode.category(SessionConfigOptionCategory::Mode);
         h.send(Msg::AgentStarted {
             id: AgentId(0),
-            result: Ok(NewSessionResponse::new("c1").config_options(vec![mode])),
+            result: Ok(NewSessionResponse::new("c1").config_options(vec![mode()])),
         });
         // A loaded session keeps its mode.
         assert!(h.agent_ops.is_empty());
@@ -722,6 +717,33 @@ mod tests {
             h.core.message(),
             Some("claude session ready (modes: auto, plan)")
         );
+        assert_eq!(h.core.windows.window.buffer(), session);
+        h.core.switch_to(list);
+        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
+        h.keys("RET");
+        assert_eq!(h.core.windows.window.buffer(), session);
+    }
+
+    /// A `mode` select at `auto` with values `auto` and `plan`.
+    fn mode() -> SessionConfigOption {
+        let values = ["auto", "plan"].map(|v| SessionConfigSelectOption::new(v, v));
+        let mode = SessionConfigOption::select("mode", "Mode", "auto", values.to_vec());
+        mode.category(SessionConfigOptionCategory::Mode)
+    }
+
+    #[test]
+    fn a_session_loaded_after_leaving_the_list_stays_hidden() {
+        let mut h = listed();
+        let list = h.core.windows.window.buffer();
+        h.keys("RET");
+        let other = h.core.buffers.find("*claude stderr*<work>").unwrap();
+        h.core.switch_to(other);
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("c1")),
+        });
+        assert_eq!(h.core.windows.window.buffer(), other);
+        assert_eq!(h.core.message(), Some("claude session ready (modes: none)"));
         h.core.switch_to(list);
         assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
     }

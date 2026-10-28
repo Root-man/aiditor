@@ -10,7 +10,7 @@
 
 - [x] 2.1 Render `user_message_chunk` text as a `> ` block; verify a test with agent, user and agent chunks
 - [x] 2.2 Share `agent_start`'s body with loading, add `Session::load`, match it in `open_session`, and skip `default_mode` for a loaded session; verify a test that a loaded session with `default_mode` sends nothing
-- [x] 2.3 `RET` on a row not open loads it in the current workspace with its listed title; verify tests replacing `Loading sessions isn't supported yet`: the spawn carries the session and primary root, the buffer name, `[starting]` then `[idle]`, a second `RET` spawns nothing
+- [x] 2.3 `RET` on a row not open loads it in the current workspace with its listed title; verify tests replacing `Loading sessions isn't supported yet`: the spawn carries the session and primary root, the buffer name, `[loading]` then `[idle]`, the list staying shown until the load answers, a second `RET` spawns nothing
 
 ## 3. Docs and checks
 
