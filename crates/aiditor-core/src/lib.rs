@@ -33,6 +33,7 @@ mod motion;
 mod prefix;
 pub mod project;
 mod project_commands;
+mod sessions;
 pub mod settings;
 mod swiper;
 mod syntax;
@@ -639,8 +640,7 @@ impl Ctx<'_> {
             Msg::AgentPrompted { id, result } => self.agent_prompted(id, result),
             Msg::AgentConfigured { id, result } => self.agent_configured(id, result),
             Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
-            // shortcut: nothing asks yet; the sessions buffer (#323) handles the answer.
-            Msg::AgentListed { .. } => {}
+            Msg::AgentListed { request, result } => self.agent_listed(request, result),
             Msg::Key(key) => {
                 self.key(key);
                 // The clipboard text was for this key only.
@@ -932,6 +932,12 @@ pub struct Core {
     capture: bool,
     environments: HashMap<ProjectId, environment::Environment>,
     environment_requests: u64,
+    /// Each sessions buffer's state, until its buffer is killed.
+    session_lists: HashMap<BufferId, sessions::SessionList>,
+    /// The number of the last list request, so each answer names its request.
+    list_requests: u64,
+    /// The zone sessions' times show in.
+    time_zone: jiff::tz::TimeZone,
 }
 
 impl Default for Core {
@@ -1009,6 +1015,9 @@ impl Default for Core {
             capture: false,
             environments: HashMap::new(),
             environment_requests: 0,
+            session_lists: HashMap::new(),
+            list_requests: 0,
+            time_zone: jiff::tz::TimeZone::system(),
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");

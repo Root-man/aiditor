@@ -134,6 +134,18 @@
 "C-c C-y" = "agent-allow-once"
 "C-c C-n" = "agent-reject-once"
 
+# The read-only list of an agent's past sessions.
+[agent-sessions-mode]
+"n" = "agent-sessions-next"
+"p" = "agent-sessions-previous"
+"C-n" = "agent-sessions-next"
+"C-p" = "agent-sessions-previous"
+"<down>" = "agent-sessions-next"
+"<up>" = "agent-sessions-previous"
+"RET" = "agent-sessions-visit"
+"g" = "agent-sessions"
+"q" = "agent-sessions-quit"
+
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
 "C-g" = "abort-minibuffers"
