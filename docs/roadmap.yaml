@@ -1768,3 +1768,30 @@ milestones:
         design: "#acp-integration-and-session-management"
         body: |
           Option C of the session-buffer display decision: block rows (non-text rows between lines, with their own height, that point skips) for permission cards, tool-call diffs and images; faces that carry a font family and size for proportional prose and larger headings. Selectable content stays text. Break down when M6 starts.
+      - key: m6-fork
+        title: "Fork and roll back sessions"
+        labels: [acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Branch a session with ACP's `session/fork`, from its last message or a chosen one, and roll a session back to an earlier message by forking from it. Both adapters advertise `sessionCapabilities.fork`; the method is behind `agent-client-protocol`'s `unstable_session_fork` feature, and the fork point travels in `_meta.jetbrains.air.fork`, an extension both adapters read (checked in claude-agent-acp 0.95.0 and codex-acp 2.2.2).
+        tasks:
+          - key: m6-fork-session
+            title: "Fork a session from its last or a chosen message"
+            body: |
+              `agent-fork-session` in a session buffer forks it into a new session buffer in the same workspace. With point in the prompt area it forks from the last message: `session/fork` without a fork point copies the whole session. With point on a message in the transcript it forks up to that message, passing `_meta.jetbrains.air.fork = { version: 1, messageId }`; claude-agent-acp cuts at that message, codex-acp at the end of the turn that holds it. The core keeps each message's ACP `messageId` from the `session/update` chunks, replayed ones included. Keeping one process per session, the fork spawns its own agent process (same command, env, `cwd` and additional directories as the source), sends `initialize`, then `session/fork` with the source's session id. The new buffer starts with the source transcript up to the fork point and is named like any session buffer; the source session is untouched. An agent that doesn't advertise `sessionCapabilities.fork`, or a fork that fails, echoes the error and opens nothing. Enable `unstable_session_fork` and record these decisions in docs/editor.md.
+            acceptance:
+              - "With point in the prompt area, the fake agent receives `session/fork` without a fork point, and a new session buffer shows the whole transcript"
+              - "With point on a message, the fork carries that message's `messageId` and the new buffer shows the transcript up to it"
+              - "An agent without `sessionCapabilities.fork` echoes an error and opens no buffer"
+              - "The source session keeps working after the fork"
+              - "Checked against the real claude-agent-acp and codex-acp on macOS"
+          - key: m6-rollback
+            title: "Roll a session back to a chosen message"
+            body: |
+              `agent-rollback-session` returns a session to the message at point: it forks from that message as `agent-fork-session` does, then the fork takes the source's place, reusing its buffer (rendered from the transcript up to the message) and window, and the source's process is stopped. With point not on a transcript message it echoes `No message at point` and does nothing. The agents' file edits since that message stay on disk; the command says so in its confirmation prompt (`Roll back to this message? Files stay as they are`). The source session isn't deleted, so it still shows in `agent-sessions`. Record these decisions in docs/editor.md.
+            acceptance:
+              - "Rolling back on a message replaces the session buffer's transcript with the transcript up to it, and the next prompt goes to the fork"
+              - "The source session's process exits and the session still lists in `agent-sessions`"
+              - "Files the agent changed after that message are left as they are"
+              - "Point outside the transcript echoes `No message at point`"
+            blocked_by: [m6-fork-session]
