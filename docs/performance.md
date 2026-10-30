@@ -66,8 +66,22 @@ The service suite creates two roots with 5,000 source files each, plus `.gitigno
 | `index/10k-files-two-roots-warm-cache` | Walk and sort both roots; assert 5,001 indexed entries per root including `.gitignore` |
 | `grep/10k-hits-two-roots-complete-warm-cache` | Search both roots to the production 10k hit cap, consuming result batches |
 | `grep/first-batch-two-roots-warm-cache` | Search until the first nonempty emitted batch, then cancel; includes cancellation/unwinding overhead. The first hit is sent at once, so this is time to the first hit; results before the refactor-scan fixes include the 50 ms batch deadline and are not comparable |
+| `*-4-workers` | The same two grep operations with `grep_workers = 4`; the names without a suffix use one worker |
 
 Fixture creation and initial validation run before measurement. These are **warm filesystem-cache** workloads; they do not flush OS caches or claim cold-disk performance. First-result timing includes the service's batching policy, but excludes the prompt's 200 ms input debounce, channel scheduling and GUI painting. The complete search verifies hit counts, text and positions.
+
+### Grep workers
+
+Medians (min–max) in ms, release build, warm cache, recorded 2026-10-30 at the parallel grep change ([#265](https://github.com/Root-man/aiditor/issues/265)):
+
+| Platform | Workers | Complete search | First batch |
+| --- | ---: | ---: | ---: |
+| Linux 7.2 (Fedora 44), AMD Ryzen 7 5800X3D, 16 threads, Rust 1.99.0 | 1 | 93.9 (91.2–101.7) | 0.40 (0.39–0.58) |
+| Linux 7.2 (Fedora 44), AMD Ryzen 7 5800X3D, 16 threads, Rust 1.99.0 | 4 | 29.9 (28.6–33.9) | 0.45 (0.43–0.47) |
+| macOS | 1 | not yet measured | not yet measured |
+| macOS | 4 | not yet measured | not yet measured |
+
+Workers overlap file opens and searches, so they shorten complete searches; the first hit already arrives at once, so the first batch gains nothing and pays for starting the workers.
 
 ## Sampling
 

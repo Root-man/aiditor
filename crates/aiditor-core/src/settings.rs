@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use toml::Table;
 
 pub const BUNDLED: &str = include_str!("../settings.toml");
@@ -50,6 +51,8 @@ pub struct Settings {
     /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
     pub option_as_meta: bool,
     pub max_watched_files: usize,
+    /// Files project grep searches at once.
+    pub grep_workers: NonZeroUsize,
     pub theme: Theme,
     /// The agents sessions can start, by name.
     pub agents: BTreeMap<String, Agent>,
@@ -135,6 +138,9 @@ mod tests {
         assert_eq!(s.theme.cursor, 0xffcc00);
         assert!(s.option_as_meta);
         assert_eq!(s.max_watched_files, 10000);
+        assert_eq!(s.grep_workers.get(), 1);
+        let s = Settings::parse(Some("grep_workers = 8")).unwrap();
+        assert_eq!(s.grep_workers.get(), 8);
         assert_eq!(
             Settings::parse(Some("max_watched_files = 0"))
                 .unwrap()
@@ -205,6 +211,10 @@ mod tests {
             ("font_size = ", ""),
             ("max_watched_files = -1", "max_watched_files"),
             ("max_watched_files = \"many\"", "max_watched_files"),
+            ("grep_workers = 0", "grep_workers"),
+            ("grep_workers = -1", "grep_workers"),
+            ("grep_workers = \"many\"", "grep_workers"),
+            ("grep_workers = 1.5", "grep_workers"),
             ("[agents.claude]\ncomand = \"x\"", "agents.claude"),
             ("[agents.mine]\nargs = []", "agents.mine"),
             (

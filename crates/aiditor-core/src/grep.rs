@@ -106,6 +106,7 @@ impl Core {
             ignore: grep.ignore.clone(),
             pattern: text,
             limit: LIMIT,
+            workers: self.settings.grep_workers,
         })));
     }
 
@@ -290,6 +291,24 @@ mod tests {
         assert_eq!(h.core.message(), Some("Match required"));
         h.keys("needle").advance(WAIT).keys("RET C-x p g M-p");
         assert_eq!(h.text(), "needle");
+    }
+
+    #[test]
+    fn a_search_carries_the_worker_count_set_when_it_starts() {
+        let mut h = grepping(FILES, HITS);
+        h.collect_effects = true;
+        let workers = |h: &mut Harness| {
+            h.keys("C-x p g needle").advance(WAIT);
+            let effects = std::mem::take(&mut h.effects);
+            h.keys("C-g");
+            effects.into_iter().find_map(|effect| match effect {
+                crate::Effect::Grep(crate::GrepOp::Search(op)) => Some(op.workers.get()),
+                _ => None,
+            })
+        };
+        assert_eq!(workers(&mut h), Some(1));
+        h.send(Msg::SettingsLoaded(Ok(Some("grep_workers = 4".into()))));
+        assert_eq!(workers(&mut h), Some(4));
     }
 
     #[test]

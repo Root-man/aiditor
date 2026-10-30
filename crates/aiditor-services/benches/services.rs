@@ -1,6 +1,7 @@
-use std::cell::Cell;
 use std::hint::black_box;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aiditor_core::{GrepSearch, Msg};
 use aiditor_services::{files, grep};
@@ -27,7 +28,7 @@ fn main() {
             }
         }
     }
-    let ignore = vec!["generated/".into()];
+    let ignore: Vec<String> = vec!["generated/".into()];
     let patterns = files::Patterns::new(&ignore).unwrap();
     let index = || {
         roots
@@ -49,19 +50,20 @@ fn main() {
         },
         &mut output,
     );
-    let search = GrepSearch {
+    let search = |workers| GrepSearch {
         id: 1,
-        roots,
-        ignore,
+        roots: roots.clone(),
+        ignore: ignore.clone(),
         pattern: "needle".into(),
         limit: 10_000,
+        workers: NonZeroUsize::new(workers).unwrap(),
     };
-    let run = |first_only: bool| {
-        let stop = Cell::new(false);
+    let run = |search: &GrepSearch, first_only: bool| {
+        let stop = AtomicBool::new(false);
         let (mut count, mut done_seen) = (0, false);
         grep::search(
-            &search,
-            || stop.get(),
+            search,
+            || stop.load(Ordering::Relaxed),
             |msg| {
                 let Msg::Grepped { hits, done, .. } = msg else {
                     unreachable!()
@@ -75,7 +77,7 @@ fn main() {
                 count += hits.len();
                 done_seen |= done;
                 if first_only && count > 0 {
-                    stop.set(true);
+                    stop.store(true, Ordering::Relaxed);
                 }
                 black_box(hits);
             },
@@ -86,19 +88,23 @@ fn main() {
             assert!(done_seen);
         }
     };
-    run(false);
-    support::measure(
-        "grep/10k-hits-two-roots-complete-warm-cache",
-        || run(false),
-        &mut output,
-    );
-    // Cancelling in the first callback includes the small cost of unwinding the search.
-    support::prepared(
-        "grep/first-batch-two-roots-warm-cache",
-        || (),
-        |_| run(true),
-        &mut output,
-    );
+    // One worker keeps the names of the measurements from before workers.
+    for (workers, suffix) in [(1, ""), (4, "-4-workers")] {
+        let search = search(workers);
+        run(&search, false);
+        support::measure(
+            &format!("grep/10k-hits-two-roots-complete-warm-cache{suffix}"),
+            || run(&search, false),
+            &mut output,
+        );
+        // Cancelling in the first callback includes the small cost of unwinding the search.
+        support::prepared(
+            &format!("grep/first-batch-two-roots-warm-cache{suffix}"),
+            || (),
+            |_| run(&search, true),
+            &mut output,
+        );
+    }
     if let Some(path) = std::env::var_os("BENCH_OUTPUT") {
         std::fs::write(path, output).expect("write benchmark results");
     }

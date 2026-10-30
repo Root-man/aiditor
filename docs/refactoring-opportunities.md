@@ -26,7 +26,7 @@ One smaller opportunity omitted: display construction collects all copy-mode pro
 
 ## Grep investigation (#5)
 
-**Status:** Deferred to **M5 · Polish**, tracked by [#265 — Parallel project grep with configurable workers](https://github.com/Root-man/aiditor/issues/265), under Minibuffer polish. The planned `grep_workers` setting is a positive integer in `settings.toml`, defaulting to `1`; parallel searching will be opt-in. This report records the investigation, not an implemented fix.
+**Status:** Built in [#265 — Parallel project grep with configurable workers](https://github.com/Root-man/aiditor/issues/265): the opt-in `grep_workers` setting (default `1`) searches files on that many workers with ordered streaming delivery; see [Performance benchmarks](performance.md#grep-workers) for production measurements. The rest of this section records the original investigation.
 
 **Measured conclusion:** opening files is the dominant bottleneck on this Mac. The original complete-search scenario reproduced at **965.7 ms median**. Instrumentation attributed **843.6 ms** to file opens out of a **959.8 ms** search; sampling located **91.6% of samples inside `__open`**. Reading bytes, regex work, traversal, and result handling are much smaller. This identifies the expensive operation; it does not identify which kernel component or security product makes that operation expensive.
 
@@ -87,11 +87,11 @@ This experiment measures **complete-search throughput only**. It buffers results
 
 ### Proposed change and acceptance criteria
 
-Implement this later in M5 through [#265](https://github.com/Root-man/aiditor/issues/265). Expose the worker count as the positive integer `grep_workers` in `settings.toml`, with bundled default `1`. One worker preserves serial searching; a higher configured count bounds concurrent file searches. Use the existing settings validation and reload path, with changes applying to the next search and an active search retaining its captured count.
+Built in [#265](https://github.com/Root-man/aiditor/issues/265) as proposed below; the criteria are kept as the record of what it was built against. Expose the worker count as the positive integer `grep_workers` in `settings.toml`, with bundled default `1`. One worker preserves serial searching; a higher configured count bounds concurrent file searches. Use the existing settings validation and reload path, with changes applying to the next search and an active search retaining its captured count.
 
 Keep the existing ordered, ignore-aware walk initially and overlap file searches within that configured bound. Retain a searcher per worker. A coordinator should own the public `cancelled` and `send` callbacks and deliver incremental chunks in current root/walk/line order. Bound in-flight files and result queues, and stop outstanding work when cancelled or when the ordered global cap is reached. The setting crosses the core configuration and service boundary, so this row's complexity is now high.
 
-Locked `ignore` 0.4.33 ignores `sort_by_file_name` when using `build_parallel`, so a direct builder substitution would break [the specified order](editor.md#subsystems) and [its test](../crates/aiditor-services/src/grep.rs#L203). The proposal needs parallel **file searching**, not just a parallel directory walk. Keeping every file open or caching all file contents would introduce descriptor limits or invalidation responsibilities; neither is needed for this refactor.
+Locked `ignore` 0.4.33 ignores `sort_by_file_name` when using `build_parallel`, so a direct builder substitution would break [the specified order](editor.md#subsystems) and its test (`lists_roots_in_order_and_files_in_path_order` in `crates/aiditor-services/src/grep.rs`). The proposal needs parallel **file searching**, not just a parallel directory walk. Keeping every file open or caching all file contents would introduce descriptor limits or invalidation responsibilities; neither is needed for this refactor.
 
 - **Given** `grep_workers` is omitted or set to `1`, **when** project grep runs, **then** it uses one file-search worker and preserves serial behavior.
 - **Given** a valid `grep_workers = N` greater than one and enough files, **when** project grep runs, **then** file searches overlap with at most N workers and deliver the same ordered hits as a one-worker search.
@@ -101,9 +101,9 @@ Locked `ignore` 0.4.33 ignores `sort_by_file_name` when using `build_parallel`, 
 - **Given** one large matching file, **when** it is still being searched, **then** hits stream at the existing approximate 50 ms checks rather than waiting for file completion.
 - **Given** a superseding query or cancellation, **when** workers and the coordinator observe it at their file/match/send checks, **then** they stop work and the coordinator emits no further results for that search.
 - **Given** more than 10,000 hits, **when** the default search reaches its cap, **then** exactly the first 10,000 ordered hits and one final completion are delivered, and unnecessary work stops.
-- [ ] Preserve ignore rules, binary handling, Unicode columns, unreadable-file handling, and the existing callback API for production, headless, benchmark, and test callers.
-- [ ] Bound worker count, queued work, and buffered results; cover cancellation while queues are full and an earlier file is slow.
-- [ ] Validate production streaming and cancellation through behavioral tests; the throughput prototype does not establish these properties.
+- [x] Preserve ignore rules, binary handling, Unicode columns, unreadable-file handling, and the existing callback API for production, headless, benchmark, and test callers (the cancel check is now `Sync`, as workers call it).
+- [x] Bound worker count, queued work, and buffered results; cover cancellation while queues are full and an earlier file is slow.
+- [x] Validate production streaming and cancellation through behavioral tests; the throughput prototype does not establish these properties.
 - [ ] Repeat complete-search measurements after implementation; separately obtain approval before running other benchmark scenarios, including first-batch latency. Validate on Linux before treating this as a cross-platform improvement.
 
 Temporary diagnostic artifacts are under `/private/tmp/aiditor-grep-investigation-20261025/`: `baseline.rs`, `src/main.rs`, `src/parallel.rs`, `src/instrumented.rs`, `src/stats.rs`, `baseline.sample.txt`, per-run TSV/log files, and `summary.json`. They are investigation artifacts, not repository implementation code. The table and component measurements above preserve the results if that temporary directory is later removed.
