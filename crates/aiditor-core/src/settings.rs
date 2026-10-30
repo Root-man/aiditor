@@ -350,6 +350,8 @@ mod tests {
         ];
         let theme = Settings::default().theme;
         assert_eq!(theme.faces.len(), names.len());
+        // A theme can't unset what it inherits, and inline code sits on whatever is under it.
+        assert_eq!(theme.face(FaceName::SessionCode).bg, None);
         for name in names {
             let parsed = toml::Value::String(name.into()).try_into().unwrap();
             assert!(theme.faces.contains_key(&parsed), "{name}");

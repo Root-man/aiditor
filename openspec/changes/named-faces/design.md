@@ -20,7 +20,7 @@
 
 **`Decoration` holds a `FaceName`**: the frontend resolves it when painting, `Background` from `bg` and `Rule` from `fg`. Display model tests stop depending on colours, and no second "resolved" enum is needed.
 
-**Inline code is `session-code` alone**, as frame 6 draws it, with the bundled `session-code` carrying the old background so the default look holds.
+**Inline code is `session-code` alone**, as frame 6 draws it, with no background, in the bundled theme too: a theme merged over `default` can't unset an attribute, so a bundled `bg` would show through every theme that sets only `fg`.
 
 **`dim` maps to `session-thought` everywhere it was used in sessions**, including tool and plan suffixes and rules, as the issue says, and to `separator` for the workspace modeline's ` › `, whose design colour that is.
 
@@ -29,6 +29,7 @@
 ## Risks / Trade-offs
 
 - A theme can't turn off `bold`, `italic` or `underline` by layering a face over another: they add, as `Face` always did. Within a theme's own table, `italic = false` over the merged default works.
+- A theme can't unset an attribute it inherits from `themes.default`, so a bundled face must not set what other themes want left unset.
 - Gruvbox's italic `session-thought` also slants tool suffixes until #365 redraws them.
 - Terminal copy mode resolves colours when entered, so a theme change shows on the next entry, as today.
 

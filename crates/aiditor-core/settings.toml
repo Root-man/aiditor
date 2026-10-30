@@ -64,7 +64,7 @@ status-info = { fg = 0x569cd6 }
 session-user = { bg = 0x2a2a2a }
 session-thought = { fg = 0x808080 }
 session-block = { bg = 0x2a2a2a }
-session-code = { fg = 0xce9178, bg = 0x2a2a2a }
+session-code = { fg = 0xce9178 }
 diff-added = { fg = 0x0dbc79 }
 diff-removed = { fg = 0xf14c4c }
 diff-hunk = { fg = 0x569cd6 }
