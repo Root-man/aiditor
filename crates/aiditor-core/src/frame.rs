@@ -1,6 +1,7 @@
 //! Windows and the frame's display model.
 
 use crate::buffer::{BufferId, Buffers};
+use crate::display::TEXT_INSET;
 use crate::settings::{LineNumbers, Settings};
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx, display};
@@ -82,18 +83,12 @@ impl Ctx<'_> {
 }
 
 impl Core {
-    /// The selected window's display model for a window `height` px high, mode line included.
+    /// The selected window's display model for a window of `rows` text rows.
     /// It has no width, so point's line never scrolls sideways.
     #[cfg(test)]
-    pub fn display(&mut self, height: f32) -> display::WindowDisplay {
+    pub fn display(&mut self, rows: usize) -> display::WindowDisplay {
         let window = &mut self.windows.window;
-        window_display(
-            window,
-            &mut self.buffers,
-            &self.settings,
-            height,
-            usize::MAX,
-        )
+        window_display(window, &mut self.buffers, &self.settings, rows, usize::MAX)
     }
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
@@ -111,7 +106,8 @@ impl Core {
             width,
             height,
         };
-        let windows = (self.windows.tree.layout(frame, cell).into_iter())
+        let chrome = self.settings.window_chrome();
+        let windows = (self.windows.tree.layout(frame, cell, chrome).into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;
                 let window = match selected {
@@ -127,10 +123,12 @@ impl Core {
                 let style = buffer.line_numbers(settings.line_numbers);
                 let width = display::gutter_width(buffer.len_lines(), cell_width);
                 // A window too narrow for it keeps its one column of text.
-                let numbered = style != LineNumbers::Off && rect.width - width > cell_width;
-                let text = rect.width - if numbered { width } else { 0. };
-                let cols = (text / cell_width) as usize;
-                let mut display = window_display(window, buffers, settings, rect.height, cols);
+                let room = rect.width - TEXT_INSET;
+                let numbered = style != LineNumbers::Off && room - width > cell_width;
+                let cols =
+                    ((room - if numbered { width } else { TEXT_INSET }) / cell_width) as usize;
+                let rows = settings.text_rows(rect.height);
+                let mut display = window_display(window, buffers, settings, rows, cols);
                 let gutter = numbered.then(|| {
                     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
                     let (point, _) = buffer.line_col(window.point(buffers)).unwrap_or_default();
@@ -166,7 +164,9 @@ impl Core {
         let (project, workspace) = fit_names(
             self.project_name(workspace.project),
             &workspace.name,
-            (width / cell_width) as usize,
+            // A monospace advance is linear in the font size.
+            ((width - 2. * TEXT_INSET) * self.settings.font_size
+                / (cell_width * self.settings.workspace_font_size())) as usize,
         );
         display::FrameDisplay {
             windows,
@@ -202,18 +202,15 @@ impl Core {
     }
 }
 
-/// `window`'s display model for a window `height` px high and `cols` chars wide, mode line
-/// included, point's line shown from the column that keeps point visible.
+/// `window`'s display model for `rows` text rows `cols` chars wide, point's line shown from the
+/// column that keeps point visible.
 pub(crate) fn window_display(
     window: &mut Window,
     buffers: &mut Buffers,
     settings: &Settings,
-    height: f32,
+    rows: usize,
     cols: usize,
 ) -> display::WindowDisplay {
-    let rows = ((height / settings.line_height()) as usize)
-        .saturating_sub(1)
-        .max(1);
     window.set_cols(cols);
     // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
     let top = window.scroll(buffers, rows);
@@ -543,7 +540,7 @@ mod tests {
         let mut h = on(&format!("{long}\n{long}\n{long}"));
         h.keys("M-x toggle-truncate-lines RET C-n");
         // 40 columns of 8 px cells.
-        let (width, height) = (320., 600.);
+        let (width, height) = (344., 600.);
         h.keys("C-e");
         let (lines, cursor) = shown(&h.frame(width, height));
         // Each line holds 40 columns plus the partly visible 41st.
@@ -577,7 +574,7 @@ mod tests {
         );
         // 20 columns of 8 px cells.
         h.keys("C-e");
-        let frame = h.frame(160., 600.);
+        let frame = h.frame(184., 600.);
         assert_eq!(
             shown(&frame),
             (vec![long[9_981..].into(), "next".into()], Some((0, 19)))
@@ -585,14 +582,14 @@ mod tests {
         let decorations = &frame.windows[0].display.lines[0].decorations;
         assert_eq!(decorations.len(), 1, "a decoration in the cut-off tail");
         h.keys("C-n");
-        let frame = h.frame(160., 600.);
+        let frame = h.frame(184., 600.);
         assert_eq!(shown(&frame).0, [&long[..21], "next"]);
         assert_eq!(frame.windows[0].display.lines[0].decorations.len(), 1);
         // A fold over the long line's newline still joins it to the next line.
         let buffer = h.core.buffers.get_mut(id).unwrap();
         let fold = crate::buffer::Prop::Invisible("…".into());
         buffer.add_property(9_998..10_002, fold).unwrap();
-        let frame = h.frame(160., 600.);
+        let frame = h.frame(184., 600.);
         let lines = &frame.windows[0].display.lines;
         assert_eq!(shown(&frame).0, [&long[..21]]);
         assert_eq!((lines[0].number, lines.len()), (0, 1));
@@ -607,7 +604,7 @@ mod tests {
         ]);
         // 5 columns of 8 px cells, 4 chars to a row.
         h.open("a.rs");
-        let frame = h.frame(40., 600.);
+        let frame = h.frame(64., 600.);
         assert_eq!(
             shown(&frame).0,
             ["abcd\\", "efgh\\", "ij", "abcd"],
@@ -621,22 +618,22 @@ mod tests {
         assert_eq!((marker.text.as_str(), marker.face.fg), ("\\", comment));
         h.keys("C-f C-f C-f C-f C-f");
         assert_eq!(
-            shown(&h.frame(40., 600.)).1,
+            shown(&h.frame(64., 600.)).1,
             Some((1, 1)),
             "the cursor on row 1"
         );
         h.keys("C-f C-f C-f");
         assert_eq!(
-            shown(&h.frame(40., 600.)).1,
+            shown(&h.frame(64., 600.)).1,
             Some((2, 0)),
             "point at a break"
         );
         // 9 columns, 8 chars to a row.
         h.open("a.md");
-        assert_eq!(shown(&h.frame(72., 600.)).0, ["one two ", "three"]);
+        assert_eq!(shown(&h.frame(96., 600.)).0, ["one two ", "three"]);
         h.open("b.md");
         assert_eq!(
-            shown(&h.frame(40., 600.)).0,
+            shown(&h.frame(64., 600.)).0,
             ["abcd", "efgh", "ij"],
             "a long word"
         );
@@ -649,9 +646,9 @@ mod tests {
             .collect();
         let mut h = Harness::new(&[("a.rs", &long)]);
         h.open("a.rs").keys("M->");
-        let height = 3. * h.core.settings().line_height();
+        let height = 2. * h.core.settings().line_height() + h.core.settings().window_chrome();
         // 21 columns, 20 chars to a row; 500 rows, the last one holding point.
-        let (lines, cursor) = shown(&h.frame(168., height));
+        let (lines, cursor) = shown(&h.frame(192., height));
         let rows = [format!("{}\\", &long[9_960..9_980]), long[9_980..].into()];
         assert_eq!((lines, cursor), (rows.to_vec(), Some((1, 20))));
         assert_eq!(h.core.windows.window.top_row(), 498);
@@ -662,9 +659,9 @@ mod tests {
         let long = "word ".repeat(1_000);
         let mut h = Harness::new(&[("a.md", &long)]);
         h.open("a.md").keys("M->");
-        let height = 4. * h.core.settings().line_height();
+        let height = 3. * h.core.settings().line_height() + h.core.settings().window_chrome();
         // 21 columns, 20 chars to a row, 3 rows.
-        let (lines, cursor) = shown(&h.frame(168., height));
+        let (lines, cursor) = shown(&h.frame(192., height));
         let starts = crate::display::row_starts(long.len(), 20, true, |i| &long[i..=i] == " ");
         let ends = starts[1..].iter().copied().chain([long.len()]);
         let rows: Vec<String> = (starts.iter().zip(ends))
@@ -682,7 +679,7 @@ mod tests {
         let id = h.core.windows.window.buffer();
         let fold = crate::buffer::Prop::Invisible("…".into());
         (h.core.buffers.get_mut(id).unwrap().add_property(1..3, fold)).unwrap();
-        let frame = h.frame(40., 600.);
+        let frame = h.frame(64., 600.);
         assert_eq!(shown(&frame).0, ["a…de\\", "fghi\\", "j"]);
         assert!(frame.windows[0].display.lines[0].spans[1].fold);
     }
@@ -691,14 +688,14 @@ mod tests {
     fn toggle_truncate_lines_switches_between_wrapping_and_truncation() {
         let mut h = on("abcdefghij");
         h.keys("M-x toggle-truncate-lines RET");
-        let frame = h.frame(40., 600.);
+        let frame = h.frame(64., 600.);
         assert_eq!(
             frame.message.as_deref(),
             Some("Truncate long lines enabled")
         );
         assert_eq!(shown(&frame).0, ["abcdef"], "cut at the edge");
         h.keys("M-x toggle-truncate-lines RET");
-        let frame = h.frame(40., 600.);
+        let frame = h.frame(64., 600.);
         assert_eq!(
             frame.message.as_deref(),
             Some("Truncate long lines disabled")
@@ -714,9 +711,9 @@ mod tests {
     fn a_window_inside_a_wrapped_line_shows_from_its_row() {
         // 4 rows of 4 chars, as a text file, in a window of 2 rows and the mode line.
         let mut h = on(&"abcd".repeat(4));
-        let height = 3. * h.core.settings().line_height();
+        let height = 2. * h.core.settings().line_height() + h.core.settings().window_chrome();
         h.keys("M->");
-        let frame = h.frame(40., height);
+        let frame = h.frame(64., height);
         assert_eq!(
             shown(&frame),
             (vec!["abcd".into(), "abcd".into()], Some((1, 4)))
@@ -728,7 +725,7 @@ mod tests {
         let mut h = on("text");
         ask(&mut h, &["Text: "]);
         // 20 columns, 14 after the prompt.
-        h.frame(160., 600.);
+        h.frame(184., 600.);
         h.keys("C-c p abcdefghijklmnopqrstuvwxyzABCD");
         let mb = h.core.minibuffer().unwrap();
         let text: String = mb.display.lines[0].spans.iter().map(|s| &*s.text).collect();
@@ -739,14 +736,34 @@ mod tests {
     }
 
     #[test]
+    fn text_keeps_clear_of_a_window_s_sides() {
+        let mut h = on(&"x".repeat(30));
+        let (lines, _) = shown(&h.frame(100., 600.));
+        assert_eq!(lines[0].chars().count(), 8, "9 columns less the wrap's");
+    }
+
+    #[test]
+    fn the_minibuffer_keeps_clear_of_the_frame_s_sides() {
+        let mut h = on("text");
+        ask(&mut h, &["Text: "]);
+        // 9 columns, 3 after the prompt.
+        h.frame(100., 600.);
+        h.keys("C-c p abcd");
+        let mb = h.core.minibuffer().unwrap();
+        let text: String = mb.display.lines[0].spans.iter().map(|s| &*s.text).collect();
+        assert_eq!((text.as_str(), mb.display.cursor), ("cd", Some((0, 2))));
+    }
+
+    #[test]
     fn resizing_re_lays_out_snapped_to_lines() {
         let mut h = on("one");
         h.keys("C-x 2");
         let line = h.core.settings().line_height();
-        // Heights in lines, to two places.
+        let chrome = h.core.settings().window_chrome();
+        // Text heights in lines, to two places.
         let heights = |h: &mut Harness, lines: f32| -> Vec<f32> {
-            let frame = h.frame(800., line * lines);
-            let lines = |w: &FrameWindow| (w.rect.height / line * 100.).round() / 100.;
+            let frame = h.frame(800., line * lines + 2. * chrome);
+            let lines = |w: &FrameWindow| ((w.rect.height - chrome) / line * 100.).round() / 100.;
             frame.windows.iter().map(lines).collect()
         };
         assert_eq!(heights(&mut h, 10.), [5., 5.]);
@@ -853,7 +870,7 @@ mod tests {
         // 30 px of gutter leaves 10 of 110 px's columns, 9 chars to a row.
         h.open("a.rs");
         assert_eq!(labels(&mut h, 110.), ["1*", "↪", "2"]);
-        let frame = h.frame(110., 600.);
+        let frame = h.frame(122., 600.);
         let (window, gutter) = (&frame.windows[0], frame.windows[0].gutter.as_ref());
         assert_eq!(gutter.unwrap().width, 30.);
         assert_eq!(window.display.lines[0].spans[0].text, "abcdefghi");
@@ -896,7 +913,7 @@ mod tests {
     fn a_window_too_narrow_for_it_has_no_gutter() {
         let mut h = numbered(&[("a.txt", "a")], "absolute");
         h.open("a.txt");
-        assert!(labels(&mut h, 38.).is_empty(), "one cell left");
-        assert_eq!(labels(&mut h, 39.), ["1*"]);
+        assert!(labels(&mut h, 50.).is_empty(), "one cell left");
+        assert_eq!(labels(&mut h, 51.), ["1*"]);
     }
 }

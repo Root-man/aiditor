@@ -153,6 +153,10 @@ pub struct Wrap {
 /// The px between a gutter's left edge and its digits, and between them and the text.
 const GUTTER_LEFT: f32 = 10.;
 pub const GUTTER_RIGHT: f32 = 12.;
+/// Between text and a window's side where no gutter stands.
+pub const TEXT_INSET: f32 = 12.;
+/// Between a window's top and its first row.
+pub const WINDOW_TOP: f32 = 6.;
 
 /// The width of a gutter for a buffer of `lines` lines in `cell` px cells.
 pub(crate) fn gutter_width(lines: usize, cell: f32) -> f32 {

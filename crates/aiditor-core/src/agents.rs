@@ -2178,7 +2178,8 @@ mod tests {
 
     /// The text of each display line of a frame `rows` lines high.
     fn shown(h: &mut Harness, rows: usize) -> Vec<String> {
-        let height = (rows + 1) as f32 * h.core.settings().line_height();
+        let settings = h.core.settings();
+        let height = rows as f32 * settings.line_height() + settings.window_chrome();
         let frame = h.frame(800., height);
         (frame.windows[0].display.lines.iter())
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())

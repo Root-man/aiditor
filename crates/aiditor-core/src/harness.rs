@@ -494,10 +494,9 @@ impl Harness {
         self.core.point()
     }
 
-    /// The display model for a window `rows` text lines high, plus its mode line.
+    /// The display model for a window `rows` text lines high.
     pub fn display(&mut self, rows: usize) -> WindowDisplay {
-        let height = (rows + 1) as f32 * self.core.settings().line_height();
-        self.core.display(height)
+        self.core.display(rows)
     }
 
     /// The frame display after the frontend reports a windows area `width` by `height` px

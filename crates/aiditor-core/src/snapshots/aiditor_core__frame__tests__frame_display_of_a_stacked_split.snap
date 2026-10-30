@@ -12,7 +12,7 @@ FrameDisplay {
                 x: 0.0,
                 y: 0.0,
                 width: 800.0,
-                height: 294.0,
+                height: 305.4,
             },
             selected: true,
             display: WindowDisplay {
@@ -71,9 +71,9 @@ FrameDisplay {
             ),
             rect: Rect {
                 x: 0.0,
-                y: 294.0,
+                y: 305.4,
                 width: 800.0,
-                height: 306.0,
+                height: 294.6,
             },
             selected: false,
             display: WindowDisplay {

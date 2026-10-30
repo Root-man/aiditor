@@ -309,7 +309,7 @@ mod tests {
     fn line_motion_steps_through_visual_rows() {
         let mut h = Harness::new(&[("a.rs", "abcdefghij\nxy")]);
         // 5 columns of 8 px cells: rows abcd, efgh, ij, xy.
-        h.open("a.rs").frame(40., 600.);
+        h.open("a.rs").frame(64., 600.);
         h.keys("C-f");
         for p in [5, 9, 12] {
             h.keys("C-n");
@@ -338,7 +338,7 @@ mod tests {
     fn a_short_word_wrapped_row_clamps_to_its_last_char() {
         // 9 columns, 8 chars to a row: rows "ab " and "cdefghij".
         let mut h = on("ab cdefghij");
-        h.frame(72., 600.);
+        h.frame(96., 600.);
         h.keys("C-u 8 C-f C-p");
         assert_eq!(h.point(), 2, "the space ending the first row");
         h.keys("C-n");
@@ -349,7 +349,7 @@ mod tests {
     fn row_motion_reports_the_ends_of_a_wrapped_line() {
         // Rows abcd, efgh, ij.
         let mut h = Harness::new(&[("a.rs", "abcdefghij")]);
-        h.open("a.rs").frame(40., 600.);
+        h.open("a.rs").frame(64., 600.);
         h.keys("C-u 8 C-f C-n");
         assert_eq!((h.point(), h.core.message()), (10, Some("End of buffer")));
         h.keys("M-< C-f C-p");

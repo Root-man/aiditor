@@ -8,10 +8,12 @@ use std::ops::RangeInclusive;
 use toml::Table;
 
 use crate::buffer::{Face, FaceRef};
+use crate::display::WINDOW_TOP;
 
 pub const BUNDLED: &str = include_str!("../settings.toml");
 
 const FONT_SIZES: RangeInclusive<f32> = 6.0..=72.0;
+const LINE_HEIGHTS: RangeInclusive<f32> = 1.0..=3.0;
 
 /// Parses `bundled`, merges `user` over it key by key and deserializes the result.
 pub fn load<T: DeserializeOwned>(bundled: &str, user: Option<&str>) -> Result<T, String> {
@@ -56,6 +58,10 @@ pub struct Settings {
     /// `font_size` as the settings give it, which the text-scale commands move away from.
     #[serde(skip)]
     pub default_font_size: f32,
+    /// A multiple of the font size; `line_height()` gives it in px.
+    pub line_height: f32,
+    /// The workspace modeline's size before any zoom; `workspace_font_size()` adds it.
+    pub workspace_font_size: f32,
     /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
     pub option_as_meta: bool,
     /// How files, `*scratch*` and `*Messages*` number their lines, until one toggles it.
@@ -222,6 +228,18 @@ impl Settings {
                 settings.font_size
             ));
         }
+        if !LINE_HEIGHTS.contains(&settings.line_height) {
+            return Err(format!(
+                "line_height {} is outside 1 to 3",
+                settings.line_height
+            ));
+        }
+        if !FONT_SIZES.contains(&settings.workspace_font_size) {
+            return Err(format!(
+                "workspace_font_size {} is outside 6 to 72",
+                settings.workspace_font_size
+            ));
+        }
         settings.default_font_size = settings.font_size;
         for (name, agent) in &settings.agents {
             if agent.command.trim().is_empty() {
@@ -253,7 +271,34 @@ impl Settings {
 
     /// The height of one line of text in px.
     pub fn line_height(&self) -> f32 {
-        self.font_size * 1.4
+        self.font_size * self.line_height
+    }
+
+    /// The height of a mode line and the echo line in px.
+    pub fn mode_line_height(&self) -> f32 {
+        (self.line_height() + 5.).round()
+    }
+
+    /// The workspace modeline's font size in px, with the frame's zoom.
+    pub fn workspace_font_size(&self) -> f32 {
+        let zoom = self.font_size - self.default_font_size;
+        (self.workspace_font_size + zoom).clamp(*FONT_SIZES.start(), *FONT_SIZES.end())
+    }
+
+    /// The height of the workspace modeline in px.
+    pub fn workspace_modeline_height(&self) -> f32 {
+        (self.workspace_font_size() * self.line_height + 4.).round()
+    }
+
+    /// What a window takes for itself besides its text rows, in px.
+    pub fn window_chrome(&self) -> f32 {
+        WINDOW_TOP + self.mode_line_height()
+    }
+
+    /// The text rows a window `height` px high shows, at least one.
+    pub fn text_rows(&self, height: f32) -> usize {
+        // A height of whole rows must not lose one to float error.
+        (((height - self.window_chrome()) / self.line_height() + 0.001) as usize).max(1)
     }
 }
 
@@ -286,6 +331,28 @@ mod tests {
                 .max_watched_files,
             0
         );
+    }
+
+    #[test]
+    fn chrome_heights_follow_the_design() {
+        let s = Settings::parse(Some("font_size = 15")).unwrap();
+        assert_eq!(s.line_height(), 21.);
+        assert_eq!(s.mode_line_height(), 26.);
+        assert_eq!(s.workspace_modeline_height(), 22.);
+        let s = Settings::parse(Some("line_height = 2\nworkspace_font_size = 10")).unwrap();
+        assert_eq!(s.line_height(), 28.);
+        assert_eq!(s.mode_line_height(), 33.);
+        assert_eq!(s.workspace_modeline_height(), 24.);
+    }
+
+    #[test]
+    fn the_workspace_font_takes_the_zoom_within_the_range() {
+        let mut s = Settings::parse(Some("workspace_font_size = 6")).unwrap();
+        assert_eq!(s.workspace_font_size(), 6.);
+        s.zoom(2.);
+        assert_eq!(s.workspace_font_size(), 8.);
+        s.zoom(-4.);
+        assert_eq!(s.workspace_font_size(), 6.);
     }
 
     #[test]
@@ -441,6 +508,16 @@ mod tests {
             ("[themes.other]\nbackground = 1", "background"),
             ("line_numbers = \"sometimes\"", "sometimes"),
             ("font_size = 0", "outside"),
+            ("line_height = 0.5", "line_height 0.5 is outside"),
+            ("line_height = 3.5", "line_height 3.5 is outside"),
+            (
+                "workspace_font_size = 5",
+                "workspace_font_size 5 is outside",
+            ),
+            (
+                "workspace_font_size = 100",
+                "workspace_font_size 100 is outside",
+            ),
             ("font_size = ", ""),
             ("max_watched_files = -1", "max_watched_files"),
             ("max_watched_files = \"many\"", "max_watched_files"),

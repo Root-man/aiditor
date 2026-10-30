@@ -10,6 +10,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 
 use crate::buffer::{BufferId, file_name};
 use crate::command::{Args, Command, Filter, Preview};
+use crate::display::TEXT_INSET;
 use crate::frame::window_display;
 use crate::project::ProjectId;
 use crate::timer::TimerId;
@@ -639,13 +640,12 @@ impl Core {
             completion.rows = completion.rows.max(rows.len());
             shown = completion.rows;
         }
-        // The minibuffer is selected while open; one row, as the height leaves out a mode line.
-        let height = 2. * self.settings.line_height();
+        // The minibuffer is selected while open.
         let (width, _, cell_width) = self.frame_size;
-        let cols =
-            ((width / cell_width) as usize).saturating_sub(count.len() + prompt.chars().count());
+        let cols = (((width - 2. * TEXT_INSET) / cell_width) as usize)
+            .saturating_sub(count.len() + prompt.chars().count());
         let (window, buffers) = (&mut self.windows.window, &mut self.buffers);
-        let display = window_display(window, buffers, &self.settings, height, cols);
+        let display = window_display(window, buffers, &self.settings, 1, cols);
         Some(display::Minibuffer {
             count,
             prompt,

@@ -5,14 +5,15 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
+use aiditor_core::display::TEXT_INSET;
 use aiditor_core::settings::FaceName;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
 use aiditor_services::{
     agents, configuration, environment, files, grep, recovery, terminal, watcher,
 };
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Font, FontWeight, KeyDownEvent, Pixels, Task, Window, div,
-    font, prelude::*, px, rgb,
+    ClipboardItem, Context, FocusHandle, Font, FontFeatures, FontWeight, KeyDownEvent, Pixels,
+    Task, Window, div, font, prelude::*, px, rgb,
 };
 use tokio::sync::mpsc;
 
@@ -231,7 +232,9 @@ impl Editor {
     /// The buffer font and the width of one of its cells.
     pub(crate) fn font(&self, window: &Window) -> (Font, Pixels) {
         let settings = self.core.settings();
-        let font = font(settings.font_family.clone().unwrap_or(FONT.into()));
+        let mut font = font(settings.font_family.clone().unwrap_or(FONT.into()));
+        // Ligatures hide which characters are really there.
+        font.features = FontFeatures::disable_ligatures();
         let size = px(settings.font_size);
         let text = window.text_system();
         let cell = text.ch_advance(text.resolve_font(&font), size);
@@ -297,7 +300,14 @@ impl Render for Editor {
             .unwrap_or(theme.background());
         let line_height = px(settings.line_height());
         window.set_window_title(&frame.title);
-        let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
+        let mode_line_height = px(settings.mode_line_height());
+        let inset = px(TEXT_INSET);
+        let row = |height: Pixels| {
+            (div().h(height).line_height(height))
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        let line = || row(line_height);
         let hint = frame.hint.map(|hint| {
             // Keys right-aligned so the colons line up, as Emacs's which-key.
             let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
@@ -310,6 +320,7 @@ impl Render for Editor {
             div()
                 .flex()
                 .flex_wrap()
+                .px(inset)
                 .child(line().w_full().child(format!("{}-", hint.keys)))
                 .children(entries.into_iter().map(|e| line().w(column).child(e)))
         });
@@ -332,11 +343,12 @@ impl Render for Editor {
                     .top_0()
                     .left(x)
                     .w(width)
-                    .h(line_height)
+                    .h(mode_line_height)
                     .bg(rgb(theme.cursor()))
                     .text_color(rgb(cursor_fg))
                     .child(under.to_string());
-                let prompt = line().relative().child(text).child(cursor);
+                let prompt = row(mode_line_height).relative().child(text).child(cursor);
+                let prompt = div().px(inset).child(prompt);
                 let padding = (mb.candidates.len()..mb.rows).map(|_| line());
                 let selected = theme
                     .face(FaceName::CompletionSelected)
@@ -346,15 +358,15 @@ impl Render for Editor {
                 let candidates = rows.map(|(i, (c, note))| {
                     let note =
                         (!note.is_empty()).then(|| div().ml(cell * 2.).opacity(0.6).child(note));
-                    let row = line().flex().child(c).children(note);
+                    let candidate = line().flex().px(inset).child(c).children(note);
                     match Some(i) == mb.selected {
-                        true => row.bg(rgb(selected)),
-                        false => row,
+                        true => candidate.bg(rgb(selected)),
+                        false => candidate,
                     }
                 });
                 div().child(prompt).children(candidates).children(padding)
             }
-            None => div().child(line().child(message)),
+            None => div().child(row(mode_line_height).px(inset).child(message)),
         };
         let bar = theme.face(FaceName::WorkspaceBar);
         let separator = theme
@@ -365,24 +377,20 @@ impl Render for Editor {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
-            // A gap like Emacs's 8px fringes, so the rounded window corners never clip text.
-            .px(px(8.))
-            .pb(px(2.))
             .overflow_hidden()
             .flex()
             .flex_col()
             .bg(rgb(theme.background()))
             .text_color(rgb(theme.foreground()))
-            .font_family(font.family.clone())
+            .font(font)
             .text_size(px(settings.font_size))
-            .children(stats.map(|s| line().child(s)))
+            .children(stats.map(|s| line().px(inset).child(s)))
             .child(
-                line()
+                row(px(settings.workspace_modeline_height()))
                     .flex()
                     .flex_none()
-                    // Edge to edge across the frame's gap, its text still in line with the windows'.
-                    .mx(px(-8.))
-                    .px(px(8.))
+                    .px(inset)
+                    .text_size(px(settings.workspace_font_size()))
                     .debug_selector(|| "workspace-modeline".into())
                     .bg(rgb(bar.bg.unwrap_or(theme.background())))
                     .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
@@ -551,16 +559,16 @@ mod tests {
     fn the_workspace_modeline_sits_above_the_windows(cx: &mut TestAppContext) {
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 3");
-        let (tops, line) = editor.read_with(cx, |e, _| {
+        let (tops, bar) = editor.read_with(cx, |e, _| {
             let tops: Vec<_> = e.painted.iter().map(|p| p.bounds.origin.y).collect();
-            (tops, px(e.core.settings().line_height()))
+            (tops, px(e.core.settings().workspace_modeline_height()))
         });
         assert_eq!(tops.len(), 2);
         for top in tops {
             // Layout rounds to device pixels.
             assert!(
-                (top - line).abs() < px(1.),
-                "windows start at {top:?}, a line is {line:?}"
+                (top - bar).abs() < px(1.),
+                "windows start at {top:?}, the bar is {bar:?}"
             );
         }
         let bar = cx.debug_bounds("workspace-modeline").unwrap();
@@ -570,6 +578,7 @@ mod tests {
             (px(0.), width),
             "no side gap"
         );
+        assert_eq!(bar.size.height, px(22.), "13 px type: 18.2 plus 4, rounded");
         let frame = editor.update(cx, |e, _| e.core.frame());
         let title = format!("t.txt | {} | {}", frame.workspace, frame.project);
         assert_eq!(
@@ -1149,7 +1158,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         let (number, _, text_x, cursor) = gutter(cx);
-        assert_eq!((number, text_x, cursor), (None, px(0.), px(0.)));
+        assert_eq!((number, text_x, cursor), (None, px(12.), px(12.)));
     }
 
     #[gpui::test]
@@ -1163,6 +1172,7 @@ mod tests {
             })
         };
         let (cell, line) = laid_out(cx);
+        let bar = cx.debug_bounds("workspace-modeline").unwrap().size.height;
         let [up, reset] = if cfg!(target_os = "macos") {
             ["cmd-=", "cmd-0"]
         } else {
@@ -1173,9 +1183,127 @@ mod tests {
         let (bigger_cell, bigger_line) = laid_out(cx);
         assert!(bigger_cell > cell, "{bigger_cell:?} after {cell:?}");
         assert!(bigger_line > line, "{bigger_line:?} after {line:?}");
+        let bigger_bar = cx.debug_bounds("workspace-modeline").unwrap().size.height;
+        assert!(bigger_bar > bar, "{bigger_bar:?} after {bar:?}");
         cx.simulate_keystrokes(reset);
         cx.run_until_parked();
         assert_eq!(laid_out(cx), (cell, line));
+    }
+
+    #[gpui::test]
+    fn windows_reach_the_frame_edges_with_their_text_inset(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "a");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("display-line-numbers-mode");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let width = cx.update(|window, _| window.viewport_size().width);
+        let (bounds, text_x, top, cursor) = editor.read_with(cx, |e, _| {
+            let p = &e.painted[0];
+            (p.bounds, p.text_x, p.rows[0].top, p.cursor.unwrap())
+        });
+        assert_eq!((bounds.left(), bounds.size.width), (px(0.), width));
+        assert_eq!(text_x, px(12.));
+        assert_eq!(top, px(6.));
+        assert_eq!(cursor.left(), px(12.));
+        assert_eq!(cursor.top(), bounds.top() + px(6.));
+    }
+
+    #[gpui::test]
+    fn the_echo_line_is_as_high_as_a_mode_line_and_never_moves_the_windows(
+        cx: &mut TestAppContext,
+    ) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "a");
+        let (bottom, height) = editor.read_with(cx, |e, _| {
+            let settings = e.core.settings();
+            (
+                e.painted[0].bounds.bottom(),
+                px(settings.mode_line_height()),
+            )
+        });
+        let frame = cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            (frame - bottom - height).abs() < px(1.),
+            "{frame:?} less {bottom:?} is one {height:?} echo line"
+        );
+        let bar = editor.read_with(cx, |e, _| e.painted[0].mode_line_fill[0].0);
+        assert_eq!(bar.size.height, height);
+        assert_eq!(bar.bottom(), bottom);
+    }
+
+    #[gpui::test]
+    fn side_by_side_windows_leave_a_pixel_for_the_divider(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_keystrokes("ctrl-x 3");
+        cx.run_until_parked();
+        let (left, right) = editor.read_with(cx, |e, _| (e.painted[0].bounds, e.painted[1].bounds));
+        assert_eq!(right.left() - left.right(), px(1.));
+        cx.simulate_keystrokes("ctrl-x 1 ctrl-x 2 ctrl-x 3");
+        cx.run_until_parked();
+        let (left, right, lower) = editor.read_with(cx, |e, _| {
+            let bounds = |i: usize| e.painted[i].bounds;
+            (bounds(0), bounds(1), bounds(2))
+        });
+        assert_eq!(
+            right.left() - left.right(),
+            px(1.),
+            "above the third window"
+        );
+        assert_eq!(
+            left.size.height, right.size.height,
+            "down their full height"
+        );
+        assert_eq!(lower.top(), left.bottom(), "none above the third");
+        assert_eq!(lower.size.width, right.right() - left.left());
+        cx.simulate_keystrokes("ctrl-x 1 ctrl-x 2");
+        cx.run_until_parked();
+        let (upper, lower) =
+            editor.read_with(cx, |e, _| (e.painted[0].bounds, e.painted[1].bounds));
+        assert_eq!(
+            lower.top(),
+            upper.bottom(),
+            "stacked windows have no divider"
+        );
+    }
+
+    #[gpui::test]
+    fn only_an_inactive_mode_line_has_a_rule(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_keystrokes("ctrl-x 2");
+        cx.run_until_parked();
+        let (active, inactive, theme) = editor.read_with(cx, |e, _| {
+            let fill = |i: usize| e.painted[i].mode_line_fill.clone();
+            (fill(0), fill(1), e.core.settings().theme.clone())
+        });
+        let (mode_line, off) = (FaceName::ModeLine, FaceName::ModeLineInactive);
+        assert_eq!(
+            active.iter().map(|f| f.1).collect::<Vec<_>>(),
+            [theme.face(mode_line).bg.unwrap()]
+        );
+        let colors: Vec<_> = inactive.iter().map(|f| f.1).collect();
+        assert_eq!(
+            colors,
+            [
+                theme.face(off).bg.unwrap(),
+                theme.face(mode_line).bg.unwrap()
+            ]
+        );
+        let (bar, rule) = (inactive[0].0, inactive[1].0);
+        assert_eq!((rule.origin, rule.size.width), (bar.origin, bar.size.width));
+        assert_eq!(rule.size.height, px(1.));
+    }
+
+    #[gpui::test]
+    fn ligatures_are_off_for_all_text(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        let calt =
+            cx.update(|window, cx| editor.read(cx).font(window).0.features.is_calt_enabled());
+        assert_eq!(calt, Some(false));
     }
 
     #[gpui::test]
