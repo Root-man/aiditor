@@ -515,13 +515,15 @@ pub enum GrepOp {
 }
 
 /// Search the files the index lists under `roots`, with the project's `ignore` patterns, for the
-/// regexp `pattern`, smart case, until `limit` hits; numbered `id`, from 1.
+/// regexp `pattern`, smart case, until `limit` hits, searching up to `workers` files at once;
+/// numbered `id`, from 1.
 pub struct GrepSearch {
     pub id: u64,
     pub roots: Vec<PathBuf>,
     pub ignore: Vec<String>,
     pub pattern: String,
     pub limit: usize,
+    pub workers: std::num::NonZeroUsize,
 }
 
 /// Recovery file work for the recovery thread.

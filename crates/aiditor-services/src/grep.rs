@@ -1,15 +1,19 @@
 //! Project grep: the files the index lists, searched with ripgrep's crates on the blocking pool.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aiditor_core::{GrepOp, GrepSearch, Hit, Msg};
 use grep_matcher::Matcher;
-use grep_regex::RegexMatcherBuilder;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::sinks::Lossy;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
-use tokio::sync::mpsc;
+use std::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 
 /// How long hits wait to be sent, so a fast search doesn't flood the core with messages.
 const BATCH: Duration = Duration::from_millis(50);
@@ -23,7 +27,7 @@ pub struct Grep {
 
 impl Grep {
     /// Carries out `op` on Tokio's blocking pool, sending the search's messages on `tx`.
-    pub fn run(&self, op: GrepOp, tx: mpsc::Sender<Msg>) {
+    pub fn run(&self, op: GrepOp, tx: tokio_mpsc::Sender<Msg>) {
         let GrepOp::Search(op) = op else {
             return self.latest.store(0, Ordering::Relaxed);
         };
@@ -38,16 +42,24 @@ impl Grep {
     }
 }
 
-/// Searches `op`'s roots, sending `Msg::Grepped` batches until done or `op.limit` hits.
-/// `cancelled` is checked before each file, after each match and before each send; once it is
-/// true nothing more is sent.
-pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool, send: impl FnMut(Msg)) {
+/// Most files walked but not yet delivered, per worker.
+const WINDOW: usize = 4;
+/// Most hits a file holds back while earlier files are delivered.
+const HELD: usize = 64;
+
+/// A file for a worker: its root's index, its path and where its hits go.
+type Job = (usize, PathBuf, SyncSender<Hit>);
+
+/// Searches `op`'s roots on `op.workers` threads, sending `Msg::Grepped` batches in root, file
+/// and line order until done or `op.limit` hits. `cancelled` is checked before each file, after
+/// each match and before each send; once it is true nothing more is sent.
+pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool + Sync, send: impl FnMut(Msg)) {
     search_with_clock(op, cancelled, send, Instant::now);
 }
 
 fn search_with_clock(
     op: &GrepSearch,
-    cancelled: impl Fn() -> bool,
+    cancelled: impl Fn() -> bool + Sync,
     mut send: impl FnMut(Msg),
     now: impl Fn() -> Instant,
 ) {
@@ -68,10 +80,6 @@ fn search_with_clock(
         Ok(matcher) => matcher,
         Err(err) => return reply(Err(err.to_string()), true),
     };
-    let mut searcher = SearcherBuilder::new()
-        .line_number(true)
-        .binary_detection(BinaryDetection::quit(b'\0'))
-        .build();
     // As if a batch went out a deadline ago, so the first hit is sent at once; one `now()` call,
     // since a test clock advances on each.
     let t = now();
@@ -87,49 +95,119 @@ fn search_with_clock(
         }
         true
     };
-    let patterns = crate::files::Patterns::lenient(&op.ignore);
-    'roots: for root in &op.roots {
-        for file in crate::files::walk(root, &patterns) {
-            if cancelled() {
-                return;
-            }
-            if found >= op.limit {
-                break 'roots;
-            }
-            let path = file.strip_prefix(root).unwrap_or(&file);
-            let sink = Lossy(|line, text: &str| {
-                if cancelled() {
-                    return Ok(false);
-                }
-                let text = text.strip_suffix('\n').unwrap_or(text);
-                let text = text.strip_suffix('\r').unwrap_or(text);
-                // shortcut: a non-UTF-8 line's lossy text may not match, giving column 0; match bytes if that matters.
-                let start = (matcher.find(text.as_bytes()).ok().flatten()).map_or(0, |m| m.start());
-                hits.push(Hit {
-                    root: root.clone(),
-                    path: path.to_path_buf(),
-                    line: line as usize - 1,
-                    col: text[..start].chars().count(),
-                    text: text.to_string(),
-                });
-                found += 1;
-                Ok(flush(&mut hits, false) && found < op.limit)
-            });
-            // Unreadable files are skipped, as `rg` skips them.
-            _ = searcher.search_path(&matcher, &file, sink);
-            if !flush(&mut hits, false) {
-                return;
-            }
+    let stop = AtomicBool::new(false);
+    let halted = || stop.load(Ordering::Relaxed) || cancelled();
+    let (jobs, queue) = mpsc::channel::<Job>();
+    let queue = Mutex::new(queue);
+    std::thread::scope(|scope| {
+        for _ in 0..op.workers.get() {
+            scope.spawn(|| worker(op, &matcher, &queue, &halted));
         }
+        // Each outstanding file's hits, in walk order; only the front one is delivered.
+        let mut pending: VecDeque<Receiver<Hit>> = VecDeque::new();
+        // Delivers the front files' hits, waiting for them while more than `keep` are
+        // outstanding; false once the search must stop.
+        let mut drain = |pending: &mut VecDeque<Receiver<Hit>>, keep: usize| {
+            while let Some(front) = pending.front() {
+                let hit = if pending.len() > keep {
+                    front.recv().ok()
+                } else {
+                    match front.try_recv() {
+                        Err(TryRecvError::Empty) => break,
+                        hit => hit.ok(),
+                    }
+                };
+                let Some(hit) = hit else {
+                    pending.pop_front();
+                    if !flush(&mut hits, false) {
+                        return false;
+                    }
+                    continue;
+                };
+                hits.push(hit);
+                found += 1;
+                if !flush(&mut hits, false) || found >= op.limit {
+                    return false;
+                }
+            }
+            true
+        };
+        let patterns = crate::files::Patterns::lenient(&op.ignore);
+        let files = (op.roots.iter().enumerate())
+            .flat_map(|(i, root)| crate::files::walk(root, &patterns).map(move |f| (i, f)));
+        let window = WINDOW * op.workers.get();
+        let mut going = op.limit > 0;
+        for (root, file) in files {
+            if !going || cancelled() {
+                break;
+            }
+            let (tx, rx) = mpsc::sync_channel(HELD);
+            _ = jobs.send((root, file, tx));
+            pending.push_back(rx);
+            going = drain(&mut pending, window - 1);
+        }
+        going = going && drain(&mut pending, 0);
+        // Stops the workers, failing their sends to the dropped receivers.
+        stop.store(true, Ordering::Relaxed);
+        drop((jobs, pending));
+        if going || found >= op.limit {
+            flush(&mut hits, true);
+        }
+    });
+}
+
+/// Searches the files `queue` hands out with its own searcher, until it closes or `halted`.
+fn worker(
+    op: &GrepSearch,
+    matcher: &RegexMatcher,
+    queue: &Mutex<Receiver<Job>>,
+    halted: &(impl Fn() -> bool + Sync),
+) {
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(b'\0'))
+        .build();
+    loop {
+        // Bound first, so the lock is released before searching.
+        let job = queue.lock().unwrap().recv();
+        let Ok((root, file, tx)) = job else { return };
+        if halted() {
+            return;
+        }
+        let root = &op.roots[root];
+        let path = file.strip_prefix(root).unwrap_or(&file);
+        let mut found = 0;
+        let sink = Lossy(|line, text: &str| {
+            if halted() {
+                return Ok(false);
+            }
+            let text = text.strip_suffix('\n').unwrap_or(text);
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            // shortcut: a non-UTF-8 line's lossy text may not match, giving column 0; match bytes if that matters.
+            let start = (matcher.find(text.as_bytes()).ok().flatten()).map_or(0, |m| m.start());
+            let hit = Hit {
+                root: root.clone(),
+                path: path.to_path_buf(),
+                line: line as usize - 1,
+                col: text[..start].chars().count(),
+                text: text.to_string(),
+            };
+            found += 1;
+            // A failed send means the coordinator stopped.
+            Ok(tx.send(hit).is_ok() && found < op.limit)
+        });
+        // Unreadable files are skipped, as `rg` skips them.
+        _ = searcher.search_path(matcher, &file, sink);
     }
-    flush(&mut hits, true);
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::fs;
+    use std::num::NonZeroUsize;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicUsize;
 
     use super::*;
 
@@ -150,6 +228,14 @@ mod tests {
             ignore: Vec::new(),
             pattern: pattern.into(),
             limit,
+            workers: NonZeroUsize::MIN,
+        }
+    }
+
+    fn with_workers(op: GrepSearch, workers: usize) -> GrepSearch {
+        GrepSearch {
+            workers: NonZeroUsize::new(workers).unwrap(),
+            ..op
         }
     }
 
@@ -350,7 +436,7 @@ mod tests {
     #[test]
     fn a_search_cancelled_after_an_in_file_batch_sends_nothing_more() {
         let dir = tree(&[("a", &"x\n".repeat(100))]);
-        let sent = Cell::new(false);
+        let sent = AtomicBool::new(false);
         let ticks = Cell::new(0);
         let start = Instant::now();
         let now = || {
@@ -361,9 +447,9 @@ mod tests {
         let mut msgs = Vec::new();
         search_with_clock(
             &op(&[dir.path()], "x", 100),
-            || sent.get(),
+            || sent.load(Ordering::Relaxed),
             |m| {
-                sent.set(true);
+                sent.store(true, Ordering::Relaxed);
                 msgs.push(m);
             },
             now,
@@ -376,25 +462,179 @@ mod tests {
         let names: Vec<String> = (0..200).map(|i| format!("f{i:03}")).collect();
         let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x\n")).collect();
         let (many, big) = (tree(&files), tree(&[("big", &"x\n".repeat(10_000))]));
-        for root in [many.path(), big.path()] {
+        // Four workers fill their queues and held hits before the cancel.
+        for (root, workers) in [
+            (many.path(), 1),
+            (big.path(), 1),
+            (many.path(), 4),
+            (big.path(), 4),
+        ] {
             // Cancelled from the 11th check on, wherever the search is by then.
-            let (checks, after) = (Cell::new(0), Cell::new(0));
+            let (checks, after) = (AtomicUsize::new(0), AtomicUsize::new(0));
             let cancelled = || {
-                checks.set(checks.get() + 1);
-                let cancelled = checks.get() > 10;
-                after.set(after.get() + usize::from(cancelled));
+                let cancelled = checks.fetch_add(1, Ordering::Relaxed) >= 10;
+                after.fetch_add(usize::from(cancelled), Ordering::Relaxed);
                 cancelled
             };
             let mut msgs = Vec::new();
-            search(&op(&[root], "x", 1 << 20), cancelled, |m| {
-                assert_eq!(after.get(), 0, "sent after the cancel");
+            let op = with_workers(op(&[root], "x", 1 << 20), workers);
+            search(&op, cancelled, |m| {
+                assert_eq!(after.load(Ordering::Relaxed), 0, "sent after the cancel");
                 msgs.push(m);
             });
             let done = msgs
                 .iter()
                 .any(|m| matches!(m, Msg::Grepped { done: true, .. }));
-            assert!(!done && after.get() <= 2, "{}", after.get());
+            // Each worker checks once in its file and once before its next; the coordinator twice.
+            let after = after.load(Ordering::Relaxed);
+            assert!(!done && after <= 2 + 2 * workers, "{after}");
         }
+    }
+
+    /// Every hit of a search with `workers`, as `root/path:line:col:text`, in order.
+    fn ordered(roots: &[&Path], limit: usize, workers: usize) -> Vec<String> {
+        let msgs = run(&with_workers(op(roots, "x", limit), workers));
+        assert_eq!(batches(&msgs).iter().filter(|(_, done)| *done).count(), 1);
+        assert!(matches!(msgs.last(), Some(Msg::Grepped { done: true, .. })));
+        (msgs.into_iter())
+            .flat_map(|m| match m {
+                Msg::Grepped { hits, .. } => hits.unwrap(),
+                _ => panic!("not grepped"),
+            })
+            .map(|h| {
+                let (root, path) = (h.root.display(), h.path.display());
+                format!("{root}/{path}:{}:{}:{}", h.line, h.col, h.text)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn workers_find_the_same_hits_in_the_same_order() {
+        let names: Vec<String> = (0..60).map(|i| format!("d{}/f{i:02}", i % 7)).collect();
+        let texts: Vec<String> = (0..60)
+            .map(|i| "été x\nno\n".repeat(i % 5) + &"x\n".repeat(if i == 9 { 500 } else { 0 }))
+            .collect();
+        let files: Vec<(&str, &str)> = (names.iter().zip(&texts))
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .chain([("blob", "x\0\n"), (".gitignore", "d6/\n"), ("Big", "X\n")])
+            .collect();
+        let (a, b) = (tree(&files), tree(&files));
+        let roots = [a.path(), b.path()];
+        let one = ordered(&roots, 1 << 20, 1);
+        // Per root: 120 lines in the small files, less 14 under d6/, 500 in d2/f09 and `Big`.
+        assert_eq!(one.len(), 2 * 607);
+        for workers in [2, 3, 8, 200] {
+            assert_eq!(ordered(&roots, 1 << 20, workers), one, "{workers} workers");
+        }
+        // The limit cuts the same ordered hits, even inside a file held back for later.
+        for limit in [0, 3, 40, 600] {
+            assert_eq!(ordered(&roots, limit, 4), one[..limit], "limit {limit}");
+        }
+    }
+
+    #[test]
+    fn files_are_searched_on_at_most_the_given_workers_at_once() {
+        let names: Vec<String> = (0..40).map(|i| format!("f{i:02}")).collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x\n")).collect();
+        let dir = tree(&files);
+        let coordinator = std::thread::current().id();
+        let (inside, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        // Workers check before each file and at each match; holding them there makes them overlap.
+        let cancelled = || {
+            if std::thread::current().id() != coordinator {
+                let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(2));
+                inside.fetch_sub(1, Ordering::SeqCst);
+            }
+            false
+        };
+        let op = with_workers(op(&[dir.path()], "x", 100), 3);
+        let mut found = 0;
+        search(&op, cancelled, |m| {
+            if let Msg::Grepped { hits, .. } = m {
+                found += hits.unwrap().len();
+            }
+        });
+        assert_eq!(found, 40);
+        let most = most.load(Ordering::SeqCst);
+        assert!((2..=3).contains(&most), "{most} at once");
+    }
+
+    #[test]
+    fn a_later_file_finishing_first_still_streams_in_order() {
+        let dir = tree(&[("a", &"x\n".repeat(2_000)), ("b", "x\n")]);
+        let coordinator = std::thread::current().id();
+        let calls = Mutex::new(std::collections::HashMap::new());
+        // `b`'s worker checks twice (its file, its match); `a`'s waits at its third until then.
+        let cancelled = || {
+            let me = std::thread::current().id();
+            if me == coordinator {
+                return false;
+            }
+            let mine = {
+                let mut calls = calls.lock().unwrap();
+                *calls.entry(me).and_modify(|n| *n += 1).or_insert(1)
+            };
+            if mine == 3 {
+                while !(calls.lock().unwrap().iter()).any(|(&t, &n)| t != me && n >= 2) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // Lets `b`'s worker send its hit and close its file.
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let now = || {
+            let at = start + elapsed.get();
+            elapsed.set(elapsed.get() + BATCH / 2);
+            at
+        };
+        let mut msgs = Vec::new();
+        let op = with_workers(op(&[dir.path()], "x", 1 << 20), 2);
+        search_with_clock(&op, cancelled, |m| msgs.push(m), now);
+        let batches = batches(&msgs);
+        // The first hit at once, then a batch every other hit, and one done.
+        assert_eq!(batches[0], (1, false));
+        assert!(batches.len() > 100, "{}", batches.len());
+        assert_eq!(batches.iter().filter(|(_, done)| *done).count(), 1);
+        let paths: Vec<_> = (msgs.into_iter())
+            .flat_map(|m| match m {
+                Msg::Grepped { hits, .. } => hits.unwrap(),
+                _ => panic!("not grepped"),
+            })
+            .map(|h| (h.path.display().to_string(), h.line))
+            .collect();
+        let expected: Vec<_> = (0..2_000)
+            .map(|l| ("a".into(), l))
+            .chain([("b".into(), 0)])
+            .collect();
+        assert_eq!(paths, expected);
+    }
+
+    #[test]
+    fn a_cancel_while_held_hits_are_full_stops_the_workers() {
+        let names: Vec<String> = (0..40).map(|i| format!("f{i:02}")).collect();
+        let body = "x\n".repeat(HELD * 3);
+        let files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), body.as_str())).collect();
+        let dir = tree(&files);
+        let cancel = AtomicBool::new(false);
+        let mut sends = 0;
+        let op = with_workers(op(&[dir.path()], "x", 1 << 20), 4);
+        search(
+            &op,
+            || cancel.load(Ordering::Relaxed),
+            |_| {
+                sends += 1;
+                // Holding the first batch lets every worker fill its file's held hits and block.
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, Ordering::Relaxed);
+            },
+        );
+        // Returning at all means the blocked workers were released.
+        assert_eq!(sends, 1);
     }
 
     #[test]
@@ -451,7 +691,11 @@ mod tests {
     }
 
     /// Takes the next message, telling whether it is search `id`'s last.
-    async fn done_with(rx: &mut mpsc::Receiver<Msg>, take: &mut impl FnMut(Msg), id: u64) -> bool {
+    async fn done_with(
+        rx: &mut tokio_mpsc::Receiver<Msg>,
+        take: &mut impl FnMut(Msg),
+        id: u64,
+    ) -> bool {
         let msg = rx.recv().await.unwrap();
         let last = matches!(msg, Msg::Grepped { search, done: true, .. } if search == id);
         take(msg);
