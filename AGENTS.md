@@ -22,14 +22,16 @@ The approved designs are on the [aiditor visual direction canvas](https://claude
 - **6 · Agent session, monospace:** the interactive session buffer: messages, timings, tool-call blocks, the permission request, file chips and the growing prompt.
 - **6b · Session prompt:** `@` references, `/` commands, `agent-attach-file` and folded pastes.
 - **6c · File chips:** the chip's kinds and states, and file links in agent prose.
-- **7 · Agent session, rich:** the M7 direction, with proportional prose and cards.
-- **8 · Welcome dashboard:** the dashboard, also M7.
+- **7 · Agent session, rich:** a sketch for M7, with proportional prose and cards. Not approved; see below.
+- **8 · Welcome dashboard:** a sketch for M7. Not approved; see below.
 - **9 · Mode line study:** the workspace modeline and every buffer type's mode line, where each segment lives, and the rules.
 - **10 · Gruvbox light:** the light theme, with swiper.
 - **11 · Narrow frame:** truncation and the `↪` continuation marker at 900×600.
 - **12 · Faces and spacing:** every named face in both themes, the spacing scale and type sizes.
 
 Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those.
+
+Frames 7 and 8 stay open until the monospace session has been used. Don't build from them before "Decide: rich session and dashboard direction" settles them. Frame 12 lists 30 faces; `docs/editor.md` adds the rest and the changed `annotation`.
 
 ## GitHub
 

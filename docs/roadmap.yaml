@@ -1526,7 +1526,7 @@ milestones:
           - key: m5-named-faces
             title: "Named faces in the theme"
             body: |
-              Replace the theme's fixed colour keys with the named faces the approved design lists (the canvas's Faces board): `default`, `mode-line`, `mode-line-inactive`, `mode-line-dim`, `workspace-bar`, `divider`, `line-number`, `line-number-current`, `hl-line`, `region`, `match`, `match-current`, `completion-match`, `completion-selected`, `annotation`, `prompt`, `directory`, `status-modified`, `status-waiting`, `status-running`, `status-failed`, `session-user`, `session-thought`, `diff-added`, `diff-removed`, `key-hint`, `permission`, `link`, `attachment` and `message-at-point`. Each face has a foreground, a background, bold, italic and underline, in the format the theme decision chose. The bundled settings define every face, and the code reads faces by name instead of the old keys.
+              Replace the theme's fixed colour keys with the named faces the approved design lists (the canvas's Faces board): `default`, `cursor`, `echo`, `separator`, `mode-line`, `mode-line-inactive`, `mode-line-dim`, `workspace-bar`, `workspace-current`, `divider`, `line-number`, `line-number-current`, `hl-line`, `region`, `match`, `match-current`, `completion-match`, `completion-selected`, `annotation`, `prompt`, `directory`, `grep-file`, `grep-line-number`, `vcs-branch`, `status-modified`, `status-waiting`, `status-running`, `status-failed`, `status-info`, `session-user`, `session-thought`, `session-block`, `session-code`, `diff-added`, `diff-removed`, `diff-hunk`, `key-hint`, `permission`, `link`, `attachment` and `message-at-point`. Each face has a foreground, a background, bold, italic and underline, in the format the theme decision chose, and an attribute left unset takes what is underneath, so `status-failed` keeps its bar's background in any bar. `dim` becomes `session-thought` and `code_block` becomes `session-block`. The bundled settings define every face, and the code reads faces by name instead of the old keys.
             acceptance:
               - "Every face above is defined in the bundled settings and read by name"
               - "A user file overrides one attribute of one face, and `C-x C-r` applies it"
@@ -1608,7 +1608,7 @@ milestones:
           - key: m5-mode-line-segments
             title: "Mode line segments with separators"
             body: |
-              Buffer mode lines are built from segments, as the design's mode line study draws them: a left group (what the buffer is) and a right group (where point is and what is running), split by `│` in the `divider` face, each segment shown only when it applies. Inactive windows keep the layout and drop every segment's colour. Each buffer type supplies its segments; this task moves today's contents onto them.
+              Buffer mode lines are built from segments, as the design's mode line study draws them: a left group (what the buffer is) and a right group (where point is and what is running), split by `│` in the `separator` face, each segment shown only when it applies. Inactive windows keep the layout and drop every segment's colour. Each buffer type supplies its segments; this task moves today's contents onto them.
             acceptance:
               - "Today's mode line contents render as segments with separators"
               - "A segment that doesn't apply leaves no separator behind"
@@ -1637,10 +1637,10 @@ milestones:
             title: "Terminal buffer mode line"
             labels: [terminal]
             body: |
-              Left: the buffer name and the shell's current directory. Right: the running command in `status-running` (from the shell integration marks), the last command's exit status in `status-failed` when it isn't zero, the input mode (`char`, `line` or `copy`), and `line:col` in copy mode.
+              Left: the buffer name and the shell's current directory. Right: the running command in `status-running` (from the shell integration marks), the last command's exit status in `status-failed` when it isn't zero, the input mode (`char` or `copy`), and `line:col` in copy mode.
             acceptance:
               - "The running command and a non-zero exit show and clear as commands run"
-              - "The mode segment follows char, line and copy mode"
+              - "The mode segment follows char and copy mode"
               - "Display tests cover each state"
             blocked_by: [m5-mode-line-segments]
           - key: m5-session-mode-line
@@ -1657,7 +1657,7 @@ milestones:
           - key: m5-workspace-bar-contents
             title: "Every workspace and a clock in the workspace modeline"
             body: |
-              The workspace modeline (22px, 13px type) lists every workspace as `project › workspace` in creation order, split by `│`, the current one bright and the rest dim. A workspace with agent sessions gets a dot in the face of its most urgent state: waiting, then failed, then working. When they don't fit, the current workspace and its neighbours stay and the rest fold into `+N ●`, its dot the most urgent hidden one. A clock (`20:41`) sits on the right and updates each minute.
+              The workspace modeline (22px, 13px type, in the `workspace-bar` face) lists every workspace as `project › workspace` in creation order, split by `│` in `separator`, the current one bright, its name in `workspace-current`, and the rest dim. A workspace with agent sessions gets a dot in the face of its most urgent state: waiting, then failed, then working. When they don't fit, the current workspace and its neighbours stay and the rest fold into `+N ●`, its dot the most urgent hidden one. A clock (`20:41`) sits on the right and updates each minute.
             acceptance:
               - "Every workspace shows in creation order, the current one highlighted"
               - "Dots follow session states across workspaces"
@@ -1824,13 +1824,23 @@ milestones:
         design: "#acp-integration-and-session-management"
         body: |
           Option C of the session-buffer display decision: block rows (non-text rows between lines, with their own height, that point skips) for permission cards, tool-call diffs and images; faces that carry a font family and size for proportional prose and larger headings. Selectable content stays text. Break down when M6 starts.
+        tasks:
+          - key: m7-decide-direction
+            title: "Decide: rich session and dashboard direction"
+            labels: [decision]
+            design: "#subsystems"
+            body: |
+              "Decide: visual direction" left these two open until the monospace session has been used. With feedback from frames 6, 6b and 6c built, decide how far the rich session follows frame 7, which is older than them (no timings, file chips or folded tool calls, and its permission prompt reads as mouse buttons), and how the dashboard follows frame 8, whose two-column card grid in a proportional font a text buffer can't draw and whose agent queue and project cards go beyond the dashboard task. Also pick the proportional font; Inter doesn't ship with macOS or aiditor.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+              - "The rich session and dashboard tasks follow the answer"
       - key: m5-dashboard
         title: "Welcome dashboard"
         labels: [frontend, project]
         design: "#projects"
         body: |
           Doom's dashboard for aiditor: a launch with no argument shows a welcome buffer in the `$HOME` workspace (see "Decide: launching without a project"), with quick commands such as recent files, recent projects and open project. Needs a recent files and projects history, which doesn't exist yet (see "Decide: C-s and the remaining editing commands"). Break down when M5 starts.
-        blocked_by: [m5-recent-files, m5-decide-visual]
+        blocked_by: [m5-recent-files, m5-decide-visual, m7-decide-direction]
 
 
   # ───────────────────────────────────────────── M8 ─────────────────────────────────────────────

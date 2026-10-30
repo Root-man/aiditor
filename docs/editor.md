@@ -343,6 +343,24 @@ Built in [#316](https://github.com/Root-man/aiditor/issues/316): a `tool_call` (
 
 **Frontend.** A native GUI built on GPUI, targeting macOS and also running on Linux for development; one frame only. The core produces a display model: per window, the visible lines (each with its own height) with styled spans, folds (invisible ranges with a placeholder), whole-line decorations, cursors and overlays. Positions come from shaped lines, not a cell grid (the frontend shapes each display line whole and draws the cursor over it at point's x offset, so moving point never moves text; since #54 the cursor is a block, the char under it in the background color, and the frame keeps an 8 px gap at the sides, Emacs's fringe width, and 2 px at the bottom so macOS's rounded corners never clip text), so a face can later carry its own font and size; the frontend draws it and feeds input events back. Keeping that boundary means the frontend stays thin and the core is testable without it. (Emoji, [#237](https://github.com/Root-man/aiditor/issues/237): GPUI 0.2.2 on Linux rasterizes with swash, which draws colour bitmaps and COLR v0 layers but not COLRv1, still so in Zed master. Fedora's only colour emoji font, `Noto-COLRv1.ttf`, drew every emoji blank, in buffers and terminals alike. At start the frontend asks `fc-match` for `Noto Color Emoji`'s file; if it has COLR with no v0 glyphs and no CBDT or sbix, it resolves that family by name, which GPUI's `load_family` answers by removing the face, as it does any face without an `m`. Emoji then fall back to whichever installed font has them, monochrome Noto Emoji (`google-noto-emoji-fonts`) or Symbola, in the text's colour. Colour emoji GPUI can draw, Apple Color Emoji or CBDT Noto Color Emoji, are untouched. A monochrome emoji font can't be named in a run either: the same removal drops it. In a terminal an emoji is a wide char, a run of two cells.)
 
+**Visual direction** (decided in [#344](https://github.com/Root-man/aiditor/issues/344)). The look is the [visual direction canvas](https://claude.ai/artifact/VyRd2AK1RfiVhuBx6nA1KP): Gruvbox dark and light, in Cascadia Code at 15/21 with the workspace modeline at 13px. Frames 1 to 6c and 9 to 12 are approved; frames 1 and 9 win for the workspace modeline and mode lines, and frame 12 for faces, spacing and type. Where frames disagree: mode lines, the echo line and minibuffer rows sit 12px from the frame edge, the gutter is 10px + digits + 12px at every width, wrapped lines start at the text's left edge with no extra indent, and a terminal's input mode is `char` or `copy`. The frame has a 1px `divider` between side-by-side windows and no fringe bitmaps or other borders. Frame 7 (rich session) and frame 8 (dashboard) stay open until the monospace session of frames 6, 6b and 6c has been used, as `Decide: rich session and dashboard direction` in M7. The bundled settings don't change: Gruvbox and Cascadia stay in the user's own `settings.toml`, since aiditor only runs on machines sharing that config.
+
+The faces are frame 12's 30, with `annotation` raised to `#928374` in dark and `#7c6f64` in light for mode bits, sizes and counts (4.0:1 and 4.3:1), plus these, which the frames draw without naming. `dim` becomes `session-thought` and `code_block` becomes `session-block`. An attribute left unset takes what is underneath; the backgrounds frame 12 shows for faces such as `status-failed` are samples, so they keep the background of whichever bar they sit on.
+
+| Face | Dark | Light | Used for |
+| --- | --- | --- | --- |
+| `cursor` | `#282828` on `#ebdbb2` | `#fbf1c7` on `#3c3836` | the block cursor |
+| `echo` | `#928374` | `#7c6f64` | echo line messages |
+| `separator` | `#504945` | `#bdae93` | `│`, `›` and grep's file rules |
+| `workspace-current` | `#fabd2f` | `#b57614` | the current workspace's name |
+| `vcs-branch` | `#8ec07c` | `#427b58` | `⎇ main` |
+| `status-info` | `#83a598` | `#076678` | plan mode, terminal copy mode |
+| `grep-file` | `#8ec07c` italic | `#427b58` italic | grep's file groups |
+| `grep-line-number` | `#d3869b` | `#8f3f71` | grep hits' line numbers |
+| `session-block` | on `#32302f` | on `#f2e5bc` | tool-call output and diffs |
+| `session-code` | `#8ec07c` | `#427b58` | inline code in sessions |
+| `diff-hunk` | `#83a598` | `#076678` | hunk headers |
+
 **Runtime.** Tokio for the async services, on background threads. The core runs on GPUI's main thread; see below.
 
 ## Core thread and output floods
