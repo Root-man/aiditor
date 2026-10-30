@@ -366,6 +366,10 @@ impl Render for Editor {
                 line()
                     .flex()
                     .flex_none()
+                    // Edge to edge across the frame's gap, its text still in line with the windows'.
+                    .mx(px(-8.))
+                    .px(px(8.))
+                    .debug_selector(|| "workspace-modeline".into())
                     .bg(rgb(theme.mode_line_inactive))
                     .child(div().font_weight(FontWeight::BOLD).child(frame.project))
                     .child(div().text_color(rgb(theme.dim)).child(" › "))
@@ -544,6 +548,13 @@ mod tests {
                 "windows start at {top:?}, a line is {line:?}"
             );
         }
+        let bar = cx.debug_bounds("workspace-modeline").unwrap();
+        let width = cx.update(|window, _| window.viewport_size().width);
+        assert_eq!(
+            (bar.origin.x, bar.size.width),
+            (px(0.), width),
+            "no side gap"
+        );
         let frame = editor.update(cx, |e, _| e.core.frame());
         let title = format!("t.txt | {} | {}", frame.workspace, frame.project);
         assert_eq!(
