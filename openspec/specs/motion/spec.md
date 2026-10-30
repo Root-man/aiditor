@@ -28,7 +28,7 @@ The global keymap SHALL bind `C-f` and `<right>` to `forward-char`, `C-b` and `<
 - **THEN** point is 4
 
 #### Scenario: Negative count reverses
-- **WHEN** point is 5 in `abcdef` and `C-- 2 C-f` is pressed
+- **WHEN** point is 5 in `abcdef` and `M-- 2 C-f` is pressed
 - **THEN** point is 3
 
 ### Requirement: Char motion crosses lines and stops at the ends

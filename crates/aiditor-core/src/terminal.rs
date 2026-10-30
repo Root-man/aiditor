@@ -755,7 +755,9 @@ pub(crate) fn editor_key(key: Key) -> bool {
                 shift: true,
                 ..Key::plain(KeyCode::Char('v'))
             };
-    key.super_ || ctrl('x') || ctrl('c') || key == meta_x || paste
+    // Text scale, as in Linux terminals.
+    let zoom = !cfg!(target_os = "macos") && ['=', '+', '-', '0'].into_iter().any(ctrl);
+    key.super_ || ctrl('x') || ctrl('c') || key == meta_x || paste || zoom
 }
 
 impl Core {
@@ -1557,6 +1559,18 @@ mod tests {
                 Some("2"),
                 "the line, without a region"
             );
+        }
+
+        #[test]
+        fn the_zoom_keys_stay_with_the_editor() {
+            let (mut h, _) = shown();
+            let key = if cfg!(target_os = "macos") {
+                "s-="
+            } else {
+                "C-="
+            };
+            assert_eq!(typed(&mut h, key), "");
+            assert_eq!(h.core.settings().font_size, 15.);
         }
 
         #[test]

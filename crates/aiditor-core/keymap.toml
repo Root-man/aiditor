@@ -37,7 +37,7 @@
 "C-g" = "keyboard-quit"
 "M-x" = "execute-extended-command"
 "C-u" = "universal-argument"
-"C--" = "negative-argument"
+"M--" = "negative-argument"
 "M-0" = "digit-argument"
 "M-1" = "digit-argument"
 "M-2" = "digit-argument"

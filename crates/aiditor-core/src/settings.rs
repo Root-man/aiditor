@@ -4,11 +4,14 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
 use toml::Table;
 
 use crate::buffer::{Face, FaceRef};
 
 pub const BUNDLED: &str = include_str!("../settings.toml");
+
+const FONT_SIZES: RangeInclusive<f32> = 6.0..=72.0;
 
 /// Parses `bundled`, merges `user` over it key by key and deserializes the result.
 pub fn load<T: DeserializeOwned>(bundled: &str, user: Option<&str>) -> Result<T, String> {
@@ -50,6 +53,9 @@ pub struct Settings {
     /// `None` means the platform's monospace font.
     pub font_family: Option<String>,
     pub font_size: f32,
+    /// `font_size` as the settings give it, which the text-scale commands move away from.
+    #[serde(skip)]
+    pub default_font_size: f32,
     /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
     pub option_as_meta: bool,
     /// How files, `*scratch*` and `*Messages*` number their lines, until one toggles it.
@@ -210,12 +216,13 @@ impl Settings {
     /// The bundled defaults with the user's `settings.toml` text, if any, over them.
     pub fn parse(user: Option<&str>) -> Result<Self, String> {
         let mut settings: Settings = load(BUNDLED, user)?;
-        if !(6.0..=72.0).contains(&settings.font_size) {
+        if !FONT_SIZES.contains(&settings.font_size) {
             return Err(format!(
                 "font_size {} is outside 6 to 72",
                 settings.font_size
             ));
         }
+        settings.default_font_size = settings.font_size;
         for (name, agent) in &settings.agents {
             if agent.command.trim().is_empty() {
                 return Err(format!("agents.{name}: command is empty"));
@@ -239,6 +246,11 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Moves the font size by `px`, staying in the range `font_size` allows.
+    pub(crate) fn zoom(&mut self, px: f32) {
+        self.font_size = (self.font_size + px).clamp(*FONT_SIZES.start(), *FONT_SIZES.end());
+    }
+
     /// The height of one line of text in px.
     pub fn line_height(&self) -> f32 {
         self.font_size * 1.4
@@ -260,6 +272,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.font_family, None);
         assert_eq!(s.font_size, 14.0);
+        assert_eq!(s.default_font_size, 14.0);
         assert_eq!(s.theme.cursor(), 0xffcc00);
         assert!(s.option_as_meta);
         assert_eq!(s.line_numbers, LineNumbers::Absolute);
@@ -283,6 +296,7 @@ mod tests {
         .unwrap();
         let bundled = Settings::default().theme;
         assert_eq!(s.font_size, 18.0);
+        assert_eq!(s.default_font_size, 18.0);
         assert_eq!(s.theme.face(FaceName::Region).bg, Some(0x123456));
         let line = s.theme.face(FaceName::ModeLine);
         assert_eq!(line.bg, Some(0x111111));

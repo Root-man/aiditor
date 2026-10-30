@@ -185,7 +185,7 @@ A wide char SHALL take two columns, its run counting two cells, so the chars aft
 - **THEN** `🦀` is a run of two cells at column 0 and `x` is at column 2, the same column as `c` on the second row
 
 ### Requirement: Char mode sends keys to the shell
-While a terminal buffer's shell is live, it isn't in copy mode and no key sequence is pending, every key except `C-x`, `C-c`, `M-x`, keys with super held and, on Linux, `C-S-v` SHALL be written to the shell, encoded as xterm does, instead of running a command. Those and the keys that follow a prefix SHALL go through the keymaps as in any buffer. A key with no encoding SHALL be dropped.
+While a terminal buffer's shell is live, it isn't in copy mode and no key sequence is pending, every key except `C-x`, `C-c`, `M-x`, keys with super held and, on Linux, `C-S-v` and the zoom keys `C-=`, `C-+`, `C--` and `C-0` SHALL be written to the shell, encoded as xterm does, instead of running a command. Those and the keys that follow a prefix SHALL go through the keymaps as in any buffer. A key with no encoding SHALL be dropped.
 
 #### Scenario: Typing a command
 - **WHEN** `echo hi` is typed and `RET` pressed in a terminal
@@ -202,6 +202,10 @@ While a terminal buffer's shell is live, it isn't in copy mode and no key sequen
 #### Scenario: Keys go to the minibuffer while it is open
 - **WHEN** `M-x` is pressed in a terminal and `vterm` typed
 - **THEN** the text goes to the minibuffer, not the shell
+
+#### Scenario: Zoom keys in a terminal
+- **WHEN** the platform's zoom key is pressed in a terminal in char mode
+- **THEN** nothing is written to the shell and the font size changes
 
 ### Requirement: Keys are encoded as xterm does
 Chars SHALL be sent as UTF-8; `C-` with a letter or one of `@[\]^_` as its control byte (shift ignored), `C-SPC` as `\x00` and `C-?` as `\x7f`; `M-` as an ESC before the key's encoding; `RET` as `\r` (`S-RET` `\n`), `TAB` `\t`, `S-TAB` `\x1b[Z`, `ESC` `\x1b`, `DEL` `\x7f` (`C-DEL` `\x08`). Unmodified arrows, Home and End SHALL send `\x1b[X` in normal cursor mode and `\x1bOX` in application cursor mode, as the program set with DECCKM; with modifiers, `\x1b[1;<m>X`, where `<m>` is 1 plus 1 for shift, 2 for meta and 4 for ctrl. PageUp, PageDown and Delete SHALL send `\x1b[5~`, `\x1b[6~` and `\x1b[3~`; F1–F4 `\x1bOP`–`\x1bOS`; F5–F12 `\x1b[<n>~` with n 15, 17–21, 23, 24; modified, `\x1b[<n>;<m>~` and `\x1b[1;<m>P`–`S`.

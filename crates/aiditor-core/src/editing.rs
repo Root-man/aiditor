@@ -211,7 +211,7 @@ mod tests {
         assert_eq!((h.text().as_str(), h.point()), ("\n\n\n\n", 4));
         h.keys("C-u 0 b");
         assert_eq!(h.text(), "\n\n\n\n");
-        h.keys("C-- a");
+        h.keys("M-- a");
         assert_eq!(h.text(), "\n\n\n\n");
         assert_eq!(h.core.message(), Some("Negative repetition argument -1"));
     }
@@ -224,7 +224,7 @@ mod tests {
         let mut h = on("ab");
         h.keys("C-f C-u 2 C-o");
         assert_eq!((h.text().as_str(), h.point()), ("a\n\nb", 1));
-        h.keys("C-- C-o");
+        h.keys("M-- C-o");
         assert_eq!(h.core.message(), Some("Negative repetition argument -1"));
     }
 
@@ -234,13 +234,13 @@ mod tests {
         h.keys("C-d");
         assert_eq!((h.text().as_str(), h.point()), ("bc", 0));
         let mut h = on("abc");
-        h.keys("M-> C-- 2 C-d");
+        h.keys("M-> M-- 2 C-d");
         assert_eq!((h.text().as_str(), h.point()), ("a", 1));
         let mut h = on("abc");
         h.keys("C-u 2 C-f C-u 2 C-d");
         assert_eq!(h.text(), "abc");
         assert_eq!(h.core.message(), Some("End of buffer"));
-        h.keys("C-- 3 DEL");
+        h.keys("M-- 3 DEL");
         assert_eq!(
             h.text(),
             "abc",
@@ -260,7 +260,7 @@ mod tests {
         let mut h = on("foo bar");
         h.keys("M-> M-DEL");
         assert_eq!((h.text().as_str(), h.point()), ("foo ", 4));
-        h.keys("C-- M-d");
+        h.keys("M-- M-d");
         assert_eq!(
             (h.text().as_str(), h.point()),
             ("", 0),
