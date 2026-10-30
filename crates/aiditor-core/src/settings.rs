@@ -8,7 +8,6 @@ use std::ops::RangeInclusive;
 use toml::Table;
 
 use crate::buffer::{Face, FaceRef};
-use crate::display::WINDOW_TOP;
 
 pub const BUNDLED: &str = include_str!("../settings.toml");
 
@@ -290,15 +289,16 @@ impl Settings {
         (self.workspace_font_size() * self.line_height + 4.).round()
     }
 
-    /// What a window takes for itself besides its text rows, in px.
-    pub fn window_chrome(&self) -> f32 {
-        WINDOW_TOP + self.mode_line_height()
-    }
-
-    /// The text rows a window `height` px high shows, at least one.
+    /// The whole text rows above the mode line of a window `height` px high, at least one.
     pub fn text_rows(&self, height: f32) -> usize {
         // A height of whole rows must not lose one to float error.
-        (((height - self.window_chrome()) / self.line_height() + 0.001) as usize).max(1)
+        (((height - self.mode_line_height()) / self.line_height() + 0.001) as usize).max(1)
+    }
+
+    /// `text_rows` plus the row the mode line cuts off, if any, as Emacs draws it.
+    pub fn drawn_rows(&self, height: f32) -> usize {
+        let rows = (height - self.mode_line_height()) / self.line_height();
+        ((rows - 0.001).ceil() as usize).max(1)
     }
 }
 

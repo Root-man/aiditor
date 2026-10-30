@@ -1205,9 +1205,9 @@ mod tests {
         });
         assert_eq!((bounds.left(), bounds.size.width), (px(0.), width));
         assert_eq!(text_x, px(12.));
-        assert_eq!(top, px(6.));
+        assert_eq!(top, px(0.));
         assert_eq!(cursor.left(), px(12.));
-        assert_eq!(cursor.top(), bounds.top() + px(6.));
+        assert_eq!(cursor.top(), bounds.top());
     }
 
     #[gpui::test]

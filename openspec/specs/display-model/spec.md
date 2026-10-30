@@ -6,7 +6,7 @@ The display model is what the core shows for a window, built from core state for
 ## Requirements
 
 ### Requirement: Visible lines fill the window
-Given the window's height in pixels, the display SHALL list the lines shown from the window's first line down, each with its buffer line number and height, as many as fit between the 6 px under the window's top and the mode line. Every line SHALL be one line height (the font size times `line_height`) while the font is monospace. Point's line SHALL be among them.
+Given the window's height in pixels, the display SHALL list the lines shown from the window's first line down, each with its buffer line number and height, as many as fit above the mode line, plus one the mode line cuts off when they don't fill the height. Every line SHALL be one line height (the font size times `line_height`) while the font is monospace. Point's line SHALL be among the rows that fit whole.
 
 #### Scenario: A short buffer
 - **WHEN** a three-line buffer is shown in a window ten lines high
@@ -15,6 +15,10 @@ Given the window's height in pixels, the display SHALL list the lines shown from
 #### Scenario: A long buffer scrolled to point
 - **WHEN** a window fits three lines plus the mode line and point is on line 5
 - **THEN** the display shows lines 3, 4 and 5
+
+#### Scenario: A partly visible last row
+- **WHEN** a five-line buffer is shown in a window 2.5 lines high above the mode line and point moves to line 2
+- **THEN** the display shows lines 1, 2 and 3, point's line among the two that fit whole
 
 ### Requirement: Lines are runs of styled spans
 Each display line SHALL hold its text, without the LF, as spans: runs of chars with one face, where a face is an optional foreground and background color. Chars no face property covers SHALL have the default face. Where face properties overlap, the later-added one SHALL win for each color it sets.

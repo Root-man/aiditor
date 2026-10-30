@@ -88,7 +88,8 @@ impl Core {
     #[cfg(test)]
     pub fn display(&mut self, rows: usize) -> display::WindowDisplay {
         let window = &mut self.windows.window;
-        window_display(window, &mut self.buffers, &self.settings, rows, usize::MAX)
+        let (buffers, settings) = (&mut self.buffers, &self.settings);
+        window_display(window, buffers, settings, rows, rows, usize::MAX)
     }
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
@@ -106,7 +107,7 @@ impl Core {
             width,
             height,
         };
-        let chrome = self.settings.window_chrome();
+        let chrome = self.settings.mode_line_height();
         let windows = (self.windows.tree.layout(frame, cell, chrome).into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;
@@ -128,7 +129,8 @@ impl Core {
                 let cols =
                     ((room - if numbered { width } else { TEXT_INSET }) / cell_width) as usize;
                 let rows = settings.text_rows(rect.height);
-                let mut display = window_display(window, buffers, settings, rows, cols);
+                let drawn = settings.drawn_rows(rect.height);
+                let mut display = window_display(window, buffers, settings, rows, drawn, cols);
                 let gutter = numbered.then(|| {
                     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
                     let (point, _) = buffer.line_col(window.point(buffers)).unwrap_or_default();
@@ -202,13 +204,14 @@ impl Core {
     }
 }
 
-/// `window`'s display model for `rows` text rows `cols` chars wide, point's line shown from the
-/// column that keeps point visible.
+/// `window`'s display model `cols` chars wide, keeping point in the first `rows` of the `drawn`
+/// text rows, point's line shown from the column that keeps point visible.
 pub(crate) fn window_display(
     window: &mut Window,
     buffers: &mut Buffers,
     settings: &Settings,
     rows: usize,
+    drawn: usize,
     cols: usize,
 ) -> display::WindowDisplay {
     window.set_cols(cols);
@@ -243,10 +246,10 @@ pub(crate) fn window_display(
     };
     // Wrapped, a line is laid out only from the window's first row through the rows it can show.
     let shown = match wrap {
-        Some(_) => 0..(rows + 1).saturating_mul(cols),
+        Some(_) => 0..(drawn + 1).saturating_mul(cols),
         None => left..left.saturating_add(width),
     };
-    let mut display = display::build(buffer, top, rows, point, mark, settings, shown, wrap);
+    let mut display = display::build(buffer, top, drawn, point, mark, settings, shown, wrap);
     if let Some(terminal) = buffer.terminal().filter(|_| !buffer.copy_mode()) {
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }
@@ -646,7 +649,7 @@ mod tests {
             .collect();
         let mut h = Harness::new(&[("a.rs", &long)]);
         h.open("a.rs").keys("M->");
-        let height = 2. * h.core.settings().line_height() + h.core.settings().window_chrome();
+        let height = 2. * h.core.settings().line_height() + h.core.settings().mode_line_height();
         // 21 columns, 20 chars to a row; 500 rows, the last one holding point.
         let (lines, cursor) = shown(&h.frame(192., height));
         let rows = [format!("{}\\", &long[9_960..9_980]), long[9_980..].into()];
@@ -659,7 +662,7 @@ mod tests {
         let long = "word ".repeat(1_000);
         let mut h = Harness::new(&[("a.md", &long)]);
         h.open("a.md").keys("M->");
-        let height = 3. * h.core.settings().line_height() + h.core.settings().window_chrome();
+        let height = 3. * h.core.settings().line_height() + h.core.settings().mode_line_height();
         // 21 columns, 20 chars to a row, 3 rows.
         let (lines, cursor) = shown(&h.frame(192., height));
         let starts = crate::display::row_starts(long.len(), 20, true, |i| &long[i..=i] == " ");
@@ -711,7 +714,7 @@ mod tests {
     fn a_window_inside_a_wrapped_line_shows_from_its_row() {
         // 4 rows of 4 chars, as a text file, in a window of 2 rows and the mode line.
         let mut h = on(&"abcd".repeat(4));
-        let height = 2. * h.core.settings().line_height() + h.core.settings().window_chrome();
+        let height = 2. * h.core.settings().line_height() + h.core.settings().mode_line_height();
         h.keys("M->");
         let frame = h.frame(64., height);
         assert_eq!(
@@ -755,11 +758,35 @@ mod tests {
     }
 
     #[test]
+    fn the_mode_line_cuts_off_a_last_row_point_never_sits_on() {
+        let mut h = on("0\n1\n2\n3\n4");
+        let settings = h.core.settings();
+        let height = 2.5 * settings.line_height() + settings.mode_line_height();
+        assert_eq!(
+            shown(&h.frame(800., height)),
+            (vec!["0".into(), "1".into(), "2".into()], Some((0, 0)))
+        );
+        h.keys("C-n C-n");
+        let (lines, cursor) = shown(&h.frame(800., height));
+        assert_eq!(
+            (lines[0].as_str(), cursor),
+            ("1", Some((1, 0))),
+            "scrolled as for 2 rows"
+        );
+        let height = 3. * h.core.settings().line_height() + h.core.settings().mode_line_height();
+        assert_eq!(
+            shown(&h.frame(800., height)).0.len(),
+            3,
+            "no extra row at whole rows"
+        );
+    }
+
+    #[test]
     fn resizing_re_lays_out_snapped_to_lines() {
         let mut h = on("one");
         h.keys("C-x 2");
         let line = h.core.settings().line_height();
-        let chrome = h.core.settings().window_chrome();
+        let chrome = h.core.settings().mode_line_height();
         // Text heights in lines, to two places.
         let heights = |h: &mut Harness, lines: f32| -> Vec<f32> {
             let frame = h.frame(800., line * lines + 2. * chrome);

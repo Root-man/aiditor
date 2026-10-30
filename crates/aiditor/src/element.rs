@@ -3,7 +3,7 @@ use std::time::Instant;
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
 use aiditor_core::display::{
-    CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, TEXT_INSET, Terminal, WINDOW_TOP,
+    CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, TEXT_INSET, Terminal,
 };
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
@@ -126,7 +126,7 @@ impl Element for FrameElement {
             let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
                 let bounds = to_bounds(w.rect, bounds.origin);
                 let text_x = px(w.gutter.as_ref().map_or(TEXT_INSET, |g| g.width));
-                let mut top = px(WINDOW_TOP);
+                let mut top = px(0.);
                 let mut cursor = None;
                 let mut cursor_char = None;
                 let rows = (w.display.lines.iter().enumerate()).map(|(i, line)| {
@@ -168,8 +168,8 @@ impl Element for FrameElement {
                 let mut hollow = false;
                 if let Some(terminal) = &w.display.terminal {
                     let grid = |row: u16, col: u16| {
-                        let text = point(text_x, px(WINDOW_TOP));
-                        bounds.origin + text + point(cell * col as f32, line_height * row as f32)
+                        let x = text_x + cell * col as f32;
+                        bounds.origin + point(x, line_height * row as f32)
                     };
                     for (row, runs) in terminal.rows.iter().enumerate() {
                         for r in runs {

@@ -85,7 +85,7 @@ A terminal buffer's text SHALL be empty outside copy mode and the buffer read-on
 - **THEN** the new shell is spawned in `/r/app`
 
 ### Requirement: The terminal is sized to its smallest window
-A live terminal's grid and PTY SHALL be as many rows as the text area (the window less its top padding and mode line) and as many columns as fit between its 12 px side insets in the narrowest and shortest window of the current workspace showing it, taking rows and columns independently, as Emacs's `window-adjust-process-window-size-smallest`. When that size changes, the core SHALL resize the grid and send one `TerminalOp::Resize`. A terminal no window shows, or one before the frame size is known, SHALL keep its size; a new one starts at 24x80 until the frame size is known.
+A live terminal's grid and PTY SHALL be as many rows as the text area (the window less its mode line) and as many columns as fit between its 12 px side insets in the narrowest and shortest window of the current workspace showing it, taking rows and columns independently, as Emacs's `window-adjust-process-window-size-smallest`. When that size changes, the core SHALL resize the grid and send one `TerminalOp::Resize`. A terminal no window shows, or one before the frame size is known, SHALL keep its size; a new one starts at 24x80 until the frame size is known.
 
 #### Scenario: Spawned at the window's size
 - **WHEN** the window's text area is 80 cells by 24 lines and `M-x vterm` runs in it

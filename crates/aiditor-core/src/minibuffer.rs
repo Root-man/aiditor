@@ -645,7 +645,7 @@ impl Core {
         let cols = (((width - 2. * TEXT_INSET) / cell_width) as usize)
             .saturating_sub(count.len() + prompt.chars().count());
         let (window, buffers) = (&mut self.windows.window, &mut self.buffers);
-        let display = window_display(window, buffers, &self.settings, 1, cols);
+        let display = window_display(window, buffers, &self.settings, 1, 1, cols);
         Some(display::Minibuffer {
             count,
             prompt,

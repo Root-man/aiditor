@@ -6,7 +6,7 @@ How the frontend draws the core's frame display: every window's lines, cursor, r
 ## Requirements
 
 ### Requirement: Every window is drawn at its rectangle
-The frontend SHALL draw every window of the frame display at its rectangle, clipped to it, with its lines from 6 px below its top and its mode line along its bottom. Resizing the OS window SHALL re-lay out and redraw every window.
+The frontend SHALL draw every window of the frame display at its rectangle, clipped to it, with its lines from its top and its mode line along its bottom, over any row it cuts off. Resizing the OS window SHALL re-lay out and redraw every window.
 
 #### Scenario: A side-by-side split
 - **WHEN** `C-x 3` is typed
@@ -16,9 +16,9 @@ The frontend SHALL draw every window of the frame display at its rectangle, clip
 - **WHEN** the OS window is made taller with two stacked windows
 - **THEN** both windows grow and show more lines
 
-#### Scenario: Breathing room under the bar
+#### Scenario: Flush with the bar
 - **WHEN** a window is drawn
-- **THEN** its first row starts 6 px below the window's top
+- **THEN** its first row starts at the window's top
 
 ### Requirement: Lines are drawn whole with their spans' faces
 Each display line SHALL be laid out as one piece of text in the settings' font family and size, each span in its face's foreground and background colors, the default foreground where a face sets none. A line background decoration SHALL fill the line's width and a rule decoration SHALL be drawn at the line's left edge.

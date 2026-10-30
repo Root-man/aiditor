@@ -793,7 +793,7 @@ impl Core {
         (self
             .windows
             .tree
-            .layout(frame, (cell_width, line), self.settings.window_chrome())
+            .layout(frame, (cell_width, line), self.settings.mode_line_height())
             .into_iter())
         .map(|(id, rect)| {
             let window = match id == self.windows.selected {
@@ -1688,8 +1688,8 @@ mod tests {
         fn the_terminal_follows_its_smallest_window() {
             let mut h = work();
             let line = h.core.settings().line_height();
-            // 80 cells between the insets, 24.5 lines under the top padding and over the mode line.
-            let chrome = h.core.settings().window_chrome();
+            // 80 cells between the insets, 24.5 lines over the mode line.
+            let chrome = h.core.settings().mode_line_height();
             h.frame(664., 24.5 * line + chrome);
             h.keys("M-x vterm RET");
             let app = h.path("app");
