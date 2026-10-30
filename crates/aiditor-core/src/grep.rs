@@ -384,6 +384,58 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_and_the_list_hold_while_hits_stream_in() {
+        let mut h = grepping(FILES, HITS);
+        h.keys("C-x p g needle").advance(WAIT);
+        h.hits.clear();
+        h.keys("s").advance(WAIT);
+        let hit = Hit {
+            root: h.path("app"),
+            path: "a.rs".into(),
+            line: 0,
+            col: 0,
+            text: "needles".into(),
+        };
+        let batch = |lines: std::ops::Range<usize>| {
+            let hit = hit.clone();
+            lines
+                .map(|line| Hit {
+                    line,
+                    ..hit.clone()
+                })
+                .collect()
+        };
+        let search = h.core.grep.searches;
+        let send = |h: &mut Harness, search, hits: Vec<Hit>| {
+            h.send(Msg::Grepped {
+                search,
+                hits: Ok(hits),
+                done: false,
+            });
+            let mb = h.core.minibuffer().unwrap();
+            (mb.count, mb.candidates, mb.selected)
+        };
+        let (count, ..) = send(&mut h, search, batch(0..9));
+        assert_eq!(count, "   1/9 ");
+        h.keys("C-u 2 C-n");
+        let (count, rows, selected) = send(&mut h, search, batch(9..100));
+        assert_eq!(count, " 3/100 ", "as wide as with 9 hits");
+        assert_eq!(selected, Some(2));
+        let (count, grown, selected) = send(&mut h, search, batch(100..10_000));
+        assert_eq!(count, "3/10000 ", "a wider count widens the field");
+        assert_eq!((grown, selected), (rows, Some(2)), "the list stays put");
+
+        h.keys("s").advance(WAIT);
+        let search = h.core.grep.searches;
+        let (count, _, selected) = send(&mut h, search, batch(0..9));
+        assert_eq!(count, "    1/9 ", "the field never narrows");
+        assert_eq!(selected, Some(0), "a new search starts at its first hit");
+
+        h.keys("C-g C-x p g").advance(WAIT);
+        assert_eq!(h.core.minibuffer().unwrap().count, "   0/0 ");
+    }
+
+    #[test]
     fn an_invalid_pattern_shows_its_error() {
         let mut h = grepping(FILES, HITS);
         h.hits

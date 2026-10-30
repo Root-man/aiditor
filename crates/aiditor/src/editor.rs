@@ -924,8 +924,8 @@ mod tests {
                 &frame.message.unwrap_or_default(),
             )
         });
-        let text = "0/0 M-x abc [M-z is undefined]".to_string();
-        assert_eq!(line, (text, "0/0 M-x a".len()));
+        let text = "   0/0 M-x abc [M-z is undefined]".to_string();
+        assert_eq!(line, (text, "   0/0 M-x a".len()));
     }
 
     #[gpui::test]
