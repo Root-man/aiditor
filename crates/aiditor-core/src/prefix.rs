@@ -55,14 +55,14 @@ mod tests {
             ("C-u 3", Prefix::Number(3)),
             ("C-u", Prefix::Universal(4)),
             ("C-u C-u", Prefix::Universal(16)),
-            ("C--", Prefix::Minus),
+            ("M--", Prefix::Minus),
             ("C-u 1 2", Prefix::Number(12)),
             ("C-u - 5", Prefix::Number(-5)),
             ("C-u - 0 5", Prefix::Number(-5)),
             ("M-4 2", Prefix::Number(42)),
             ("M-4 M-2", Prefix::Number(42)),
-            ("C-- 7", Prefix::Number(-7)),
-            ("C-u C--", Prefix::Minus),
+            ("M-- 7", Prefix::Number(-7)),
+            ("C-u M--", Prefix::Minus),
             ("C-u 3 C-u", Prefix::Number(3)),
         ] {
             let got = prefix_after(&mut h, &format!("{keys} C-c p"));

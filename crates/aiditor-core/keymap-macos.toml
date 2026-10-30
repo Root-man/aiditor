@@ -1,8 +1,13 @@
-# Bound after keymap.toml on macOS: copy, cut and paste on Cmd keys.
+# Bound after keymap.toml on macOS: copy, cut, paste and text scale on Cmd keys.
 [global]
 "s-x" = "kill-region"
 "s-c" = "kill-ring-save"
 "s-v" = "yank"
+"s-=" = "text-scale-increase"
+"s-+" = "text-scale-increase"
+"s--" = "text-scale-decrease"
+"s-0" = "text-scale-reset"
+"C--" = "negative-argument"
 
 [vterm-mode]
 "s-v" = "vterm-yank"

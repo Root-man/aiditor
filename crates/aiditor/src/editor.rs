@@ -1153,6 +1153,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_zoom_keys_lay_the_frame_out_again(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "a\nb");
+        let laid_out = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |e, _| {
+                let p = &e.painted[0];
+                (e.reported.2, p.rows[1].top - p.rows[0].top)
+            })
+        };
+        let (cell, line) = laid_out(cx);
+        let [up, reset] = if cfg!(target_os = "macos") {
+            ["cmd-=", "cmd-0"]
+        } else {
+            ["ctrl-=", "ctrl-0"]
+        };
+        cx.simulate_keystrokes(up);
+        cx.run_until_parked();
+        let (bigger_cell, bigger_line) = laid_out(cx);
+        assert!(bigger_cell > cell, "{bigger_cell:?} after {cell:?}");
+        assert!(bigger_line > line, "{bigger_line:?} after {line:?}");
+        cx.simulate_keystrokes(reset);
+        cx.run_until_parked();
+        assert_eq!(laid_out(cx), (cell, line));
+    }
+
+    #[gpui::test]
     fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "hello world");

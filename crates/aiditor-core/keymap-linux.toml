@@ -1,9 +1,13 @@
 # Bound after keymap.toml on Linux, where the desktop takes Super keys: copy, cut and paste on
-# C-S- keys, as in Linux terminals.
+# C-S- keys, as in Linux terminals, and text scale on C- keys.
 [global]
 "C-S-x" = "kill-region"
 "C-S-c" = "kill-ring-save"
 "C-S-v" = "yank"
+"C-=" = "text-scale-increase"
+"C-+" = "text-scale-increase"
+"C--" = "text-scale-decrease"
+"C-0" = "text-scale-reset"
 
 [vterm-mode]
 "C-S-v" = "vterm-yank"

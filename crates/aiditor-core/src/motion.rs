@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(h.point(), 3);
         h.keys("M-< C-u C-f");
         assert_eq!(h.point(), 4);
-        h.keys("C-f C-- 2 C-f");
+        h.keys("C-f M-- 2 C-f");
         assert_eq!(h.point(), 3);
         h.keys("C-u 2 C-b");
         assert_eq!(h.point(), 1);
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(h.point(), 5);
         h.keys("C-u 9 M-f");
         assert_eq!((h.point(), h.core.message()), (12, None));
-        h.keys("C-- M-f");
+        h.keys("M-- M-f");
         assert_eq!(h.point(), 9, "negative goes back");
         h.keys("C-u 99999999999 M-b");
         assert_eq!(h.point(), 0);
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!((h.core.scroll(5), h.point()), (0, line_start(&h, 3)));
         h.keys("C-u 2 C-v");
         assert_eq!(h.core.scroll(5), 2);
-        h.keys("C-- C-v");
+        h.keys("M-- C-v");
         assert_eq!(h.core.scroll(5), 0, "lone minus scrolls a screenful back");
         h.keys("M-v");
         assert_eq!(
@@ -471,7 +471,7 @@ mod tests {
         }
         h.keys("C-u 1 C-l");
         assert_eq!(h.core.scroll(5), 9);
-        h.keys("C-- C-l");
+        h.keys("M-- C-l");
         assert_eq!(h.core.scroll(5), 6, "minus is the bottom row");
         h.keys("C-l");
         assert_eq!(h.core.scroll(5), 10, "a prefixed C-l keeps the cycle");

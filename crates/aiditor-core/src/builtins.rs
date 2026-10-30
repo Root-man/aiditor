@@ -582,6 +582,31 @@ pub(crate) fn builtins() -> Vec<Command> {
             },
         },
         Command {
+            name: "text-scale-increase",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                ctx.core.settings.zoom(1.);
+                Ok(())
+            },
+        },
+        Command {
+            name: "text-scale-decrease",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                ctx.core.settings.zoom(-1.);
+                Ok(())
+            },
+        },
+        Command {
+            name: "text-scale-reset",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                let settings = &mut ctx.core.settings;
+                settings.font_size = settings.default_font_size;
+                Ok(())
+            },
+        },
+        Command {
             name: "set-mark-command",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.set_mark_command(args.prefix),
@@ -927,5 +952,57 @@ mod tests {
         assert_eq!(h.submitted("a.txt"), "ab\n");
         h.call("reload-settings", Args::default());
         assert_eq!(h.core.settings().font_size, 18.0);
+    }
+
+    fn size(h: &Harness) -> f32 {
+        h.core.settings().font_size
+    }
+
+    #[test]
+    fn text_scale_steps_stay_in_range_and_reset_to_the_settings_size() {
+        let mut h = Harness::new(&[("settings.toml", "font_size = 18")]);
+        h.call("reload-settings", Args::default());
+        h.call("text-scale-increase", Args::default());
+        h.call("text-scale-increase", Args::default());
+        h.call("text-scale-decrease", Args::default());
+        assert_eq!(size(&h), 19.);
+        assert_eq!(h.core.settings().line_height(), 19. * 1.4);
+        h.call("text-scale-reset", Args::default());
+        assert_eq!(size(&h), 18.);
+        for _ in 0..70 {
+            h.call("text-scale-increase", Args::default());
+        }
+        assert_eq!(size(&h), 72.);
+        for _ in 0..70 {
+            h.call("text-scale-decrease", Args::default());
+        }
+        assert_eq!(size(&h), 6.);
+    }
+
+    #[test]
+    fn text_scale_survives_a_reload() {
+        let mut h = Harness::new(&[("settings.toml", "font_size = 18")]);
+        h.call("text-scale-increase", Args::default());
+        h.call("text-scale-increase", Args::default());
+        assert_eq!(size(&h), 16.);
+        h.call("reload-settings", Args::default());
+        assert_eq!(size(&h), 20.);
+        h.call("text-scale-reset", Args::default());
+        assert_eq!(size(&h), 18.);
+    }
+
+    #[test]
+    fn the_platforms_keys_scale_text() {
+        let keys = if cfg!(target_os = "macos") {
+            ["s-=", "s-+", "s--", "s-0"]
+        } else {
+            ["C-=", "C-+", "C--", "C-0"]
+        };
+        let mut h = Harness::new(&[]);
+        let mut pressed = |key| {
+            h.keys(key);
+            size(&h)
+        };
+        assert_eq!(keys.map(&mut pressed), [15., 16., 15., 14.]);
     }
 }
