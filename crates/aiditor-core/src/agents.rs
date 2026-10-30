@@ -16,11 +16,11 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::buffer::{self, Buffer, BufferId, Decoration, Face, InsertionType, MarkerId, Prop};
+use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
 use crate::command::Args;
 use crate::markdown;
 use crate::project::{Project, ProjectId};
-use crate::settings::Theme;
+use crate::settings::FaceName;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Request};
 
 /// The prompt line's text, just before the prompt area.
@@ -152,7 +152,7 @@ struct Tool {
 }
 
 /// Faces on char ranges.
-type Faces = Vec<(Range<usize>, Face)>;
+type Faces = Vec<(Range<usize>, Vec<FaceRef>)>;
 
 /// A command's terminal, from the `_meta` extension (#100).
 struct Term {
@@ -244,12 +244,7 @@ impl Core {
             return;
         };
         let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
-        render(
-            buffer,
-            end - text.chars().count()..end,
-            false,
-            &self.settings.theme,
-        );
+        render(buffer, end - text.chars().count()..end, false);
     }
 
     /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
@@ -294,7 +289,7 @@ impl Core {
                 })
             });
         let header = tool_header(&call, term.as_ref()).0;
-        let (content, faces) = tool_content(&call, term.as_ref(), &self.settings.theme);
+        let (content, faces) = tool_content(&call, term.as_ref());
         let text = match content.is_empty() {
             true => header.clone(),
             false => format!("{header}\n{content}"),
@@ -327,7 +322,7 @@ impl Core {
                     .or_insert(tool)
             }
         };
-        render_tool(buffer, tool, &self.settings.theme);
+        render_tool(buffer, tool);
     }
 
     /// Appends the command output in `meta` to the terminals it names and records their exit,
@@ -391,7 +386,7 @@ impl Core {
                 end
             }
         };
-        render_rows(buffer, start, &rows, &self.settings.theme);
+        render_rows(buffer, start, &rows);
     }
 
     /// Puts permission request `ask` above session `id`'s prompt line as a block of its own,
@@ -412,7 +407,7 @@ impl Core {
         let text = rows_text(&rows);
         let end = buffer.prompt_start() - PROMPT.len();
         buffer.insert_output(end, &format!("{text}\n\n"));
-        render_rows(buffer, end, &rows, &self.settings.theme);
+        render_rows(buffer, end, &rows);
         session.asks.push(Ask {
             request,
             title,
@@ -435,7 +430,7 @@ impl Core {
         if std::mem::take(&mut stream.dirty) {
             let start = buffer.marker(stream.start).expect("live while streaming");
             let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
-            render(buffer, start..end, stream.thought, &self.settings.theme);
+            render(buffer, start..end, stream.thought);
         }
     }
 
@@ -542,41 +537,6 @@ impl Core {
             }
             live
         });
-    }
-
-    /// Changes each colour session buffers took from the current theme's `dim`, `code_block`,
-    /// `text.title`, `text.literal`, `text.uri` and ANSI colours to `theme`'s, keeping colours the
-    /// current theme lacks.
-    pub(crate) fn retheme_sessions(&mut self, theme: &Theme) {
-        let old = &self.settings.theme;
-        let syntax = ["text.title", "text.literal", "text.uri"].map(|name| {
-            let color = |t: &Theme| crate::syntax::color(&t.syntax, name);
-            (color(old), color(theme))
-        });
-        let pairs: Vec<(u32, u32)> = [(old.dim, theme.dim), (old.code_block, theme.code_block)]
-            .map(|(o, n)| (Some(o), Some(n)))
-            .into_iter()
-            .chain(syntax)
-            .chain((old.ansi.into_iter().zip(theme.ansi)).map(|(o, n)| (Some(o), Some(n))))
-            .filter_map(|pair| match pair {
-                (Some(o), Some(n)) if o != n => Some((o, n)),
-                _ => None,
-            })
-            .collect();
-        if pairs.is_empty() {
-            return;
-        }
-        // shortcut: two names sharing an old colour but given different new ones both take the first's; store theme names in faces if themes ever collide.
-        let map = |c| pairs.iter().find(|&&(o, _)| o == c).map_or(c, |&(_, n)| n);
-        for session in self.agents.values_mut() {
-            if let Some(b) = self.buffers.get_mut(session.buffer) {
-                b.map_colors(map);
-            }
-            // A call re-renders its faces when it folds and opens.
-            for (_, face) in session.tools.values_mut().flat_map(|t| &mut t.faces) {
-                (face.fg, face.bg) = (face.fg.map(map), face.bg.map(map));
-            }
-        }
     }
 }
 
@@ -976,8 +936,7 @@ impl Ctx<'_> {
             .get_mut(buffer)
             .expect("current buffer is live");
         b.append(&format!("\n\n{PROMPT}"));
-        let theme = &core.settings.theme;
-        render(b, start..start + input.chars().count(), false, theme);
+        render(b, start..start + input.chars().count(), false);
         let end = b.len_chars();
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
         // The old prompt area's edits would replay into read-only text.
@@ -1012,7 +971,7 @@ impl Ctx<'_> {
         tool.open = !tool.open && tool.len > tool.header;
         let start = b.marker(tool.start).expect("live while shown");
         b.remove_properties(start..start + tool.len);
-        render_tool(b, tool, &core.settings.theme);
+        render_tool(b, tool);
         if point > start + tool.header {
             return self.goto(start);
         }
@@ -1135,10 +1094,10 @@ impl Ctx<'_> {
 }
 
 /// Renders `range` of `buffer` as markdown, replacing its properties.
-fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool, theme: &Theme) {
+fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool) {
     buffer.remove_properties(range.clone());
     let text = buffer.text().slice(range.clone()).to_string();
-    for (r, prop) in markdown::render(&text, thought, theme) {
+    for (r, prop) in markdown::render(&text, thought) {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
@@ -1224,12 +1183,9 @@ fn rows_text(rows: &[(String, usize)]) -> String {
 
 /// Renders the block of `rows` at `start`, whose properties were removed: a rule beside each
 /// line and each row's text past its length before the suffix dim.
-fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, usize)], theme: &Theme) {
-    let rule = Prop::Line(Decoration::Rule(theme.dim));
-    let dim = Prop::Face(Face {
-        fg: Some(theme.dim),
-        ..Face::default()
-    });
+fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, usize)]) {
+    let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
+    let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
     let mut props = Vec::new();
     let mut line = 0;
     for (text, content) in rows {
@@ -1260,7 +1216,7 @@ fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
 /// Everything a tool call carries, uncut, as markdown: its raw input, its content items without
 /// ANSI escapes, and its terminal's output, or its raw output when no item carries the result;
 /// and the faces of the escapes.
-fn tool_content(call: &ToolCall, term: Option<&Term>, theme: &Theme) -> (String, Faces) {
+fn tool_content(call: &ToolCall, term: Option<&Term>) -> (String, Faces) {
     let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
     let (mut content, mut faces) = (String::new(), Vec::new());
     // Appends a part whose faces start `at` chars into it.
@@ -1288,7 +1244,7 @@ fn tool_content(call: &ToolCall, term: Option<&Term>, theme: &Theme) -> (String,
         let (part, part_faces) = match item {
             ToolCallContent::Content(c) => match &c.content {
                 // Codex sends a read or list command's output here, colored.
-                ContentBlock::Text(text) => coloured(&text.text, theme),
+                ContentBlock::Text(text) => coloured(&text.text),
                 ContentBlock::ResourceLink(link) => (link.uri.clone(), vec![]),
                 other => match serde_json::to_value(other) {
                     Ok(v) => (format!("[{}]", v["type"].as_str().unwrap_or("?")), vec![]),
@@ -1309,7 +1265,7 @@ fn tool_content(call: &ToolCall, term: Option<&Term>, theme: &Theme) -> (String,
     }
     if let Some(term) = term {
         if !term.output.is_empty() {
-            let (output, output_faces) = coloured(&term.output, theme);
+            let (output, output_faces) = coloured(&term.output);
             let block = fenced("", &output);
             // The faces start after `Output:` and the fence line.
             let at = "Output:\n".len() + block.find('\n').expect("fenced") + 1;
@@ -1335,21 +1291,21 @@ fn tool_content(call: &ToolCall, term: Option<&Term>, theme: &Theme) -> (String,
 /// `text` without ANSI escape sequences or carriage returns, and the faces its SGR escapes give
 /// its chars: the theme's 16 colours, bold and underline.
 // shortcut: `\r` is dropped, not taken as a return to the line's start; overwrite the line if progress output shows garbled.
-fn coloured(text: &str, theme: &Theme) -> (String, Faces) {
-    struct Sgr<'a> {
+fn coloured(text: &str) -> (String, Faces) {
+    #[derive(Default)]
+    struct Sgr {
         text: String,
         len: usize,
-        face: Face,
+        face: Vec<FaceRef>,
         faces: Faces,
-        ansi: &'a [u32; 16],
     }
-    impl Handler for Sgr<'_> {
+    impl Handler for Sgr {
         fn input(&mut self, c: char) {
             self.text.push(c);
-            if self.face != Face::default() {
+            if !self.face.is_empty() {
                 match self.faces.last_mut() {
                     Some((r, f)) if r.end == self.len && *f == self.face => r.end += 1,
-                    _ => self.faces.push((self.len..self.len + 1, self.face)),
+                    _ => self.faces.push((self.len..self.len + 1, self.face.clone())),
                 }
             }
             self.len += 1;
@@ -1363,30 +1319,30 @@ fn coloured(text: &str, theme: &Theme) -> (String, Faces) {
             self.len += 1;
         }
         fn terminal_attribute(&mut self, attr: Attr) {
-            let colour = |c: Color| match c {
-                Color::Named(n) if (n as usize) < 16 => Some(self.ansi[n as usize]),
-                Color::Indexed(i) if i < 16 => Some(self.ansi[i as usize]),
+            let index = |c: Color| match c {
+                Color::Named(n) if (n as usize) < 16 => Some(n as u8),
+                Color::Indexed(i) if i < 16 => Some(i),
                 _ => None,
             };
+            let mut set = |of: fn(&FaceRef) -> bool, new: Option<FaceRef>| {
+                self.face.retain(|f| !of(f));
+                self.face.extend(new);
+            };
+            let fg = |f: &FaceRef| matches!(f, FaceRef::Fg(_));
+            let bg = |f: &FaceRef| matches!(f, FaceRef::Bg(_));
             match attr {
-                Attr::Reset => self.face = Face::default(),
-                Attr::Foreground(c) => self.face.fg = colour(c),
-                Attr::Background(c) => self.face.bg = colour(c),
-                Attr::Bold => self.face.bold = true,
-                Attr::CancelBold | Attr::CancelBoldDim => self.face.bold = false,
-                Attr::Underline => self.face.underline = true,
-                Attr::CancelUnderline => self.face.underline = false,
+                Attr::Reset => self.face.clear(),
+                Attr::Foreground(c) => set(fg, index(c).map(FaceRef::Fg)),
+                Attr::Background(c) => set(bg, index(c).map(FaceRef::Bg)),
+                Attr::Bold => set(|f| *f == FaceRef::Bold, Some(FaceRef::Bold)),
+                Attr::CancelBold | Attr::CancelBoldDim => set(|f| *f == FaceRef::Bold, None),
+                Attr::Underline => set(|f| *f == FaceRef::Underline, Some(FaceRef::Underline)),
+                Attr::CancelUnderline => set(|f| *f == FaceRef::Underline, None),
                 _ => {}
             }
         }
     }
-    let mut sgr = Sgr {
-        text: String::new(),
-        len: 0,
-        face: Face::default(),
-        faces: Vec::new(),
-        ansi: &theme.ansi,
-    };
+    let mut sgr = Sgr::default();
     <Processor>::new().advance(&mut sgr, text.as_bytes());
     (sgr.text, sgr.faces)
 }
@@ -1402,19 +1358,16 @@ fn fenced(lang: &str, text: &str) -> String {
 /// Renders a tool call's block, whose properties were removed: its header with a rule beside it,
 /// then its content as markdown with a rule beside each line, or folded behind ` …`. No property
 /// contains another's end, so starts and ends ascend.
-fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
+fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     let start = buffer.marker(tool.start).expect("live while shown");
     let (header, title) = tool_header(&tool.call, tool.term.as_ref());
-    let rule = Prop::Line(Decoration::Rule(theme.dim));
-    let dim = Face {
-        fg: Some(theme.dim),
-        ..Face::default()
-    };
+    let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
+    let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
     // A rule on one char touches only its line and sorts before the faces on it.
     let mut props = vec![(0..1, rule.clone())];
     let title: String = header.chars().take(title).collect();
-    props.extend(markdown::render(&title, false, theme));
-    props.push((title.chars().count()..tool.header, Prop::Face(dim)));
+    props.extend(markdown::render(&title, false));
+    props.push((title.chars().count()..tool.header, dim));
     let body = tool.header + 1..tool.len;
     if tool.open && !body.is_empty() {
         let content = buffer
@@ -1422,13 +1375,9 @@ fn render_tool(buffer: &mut Buffer, tool: &Tool, theme: &Theme) {
             .slice(start + body.start..start + body.end)
             .to_string();
         let shifted = |(r, p): (Range<usize>, Prop)| (body.start + r.start..body.start + r.end, p);
-        props.extend(
-            markdown::render(&content, false, theme)
-                .into_iter()
-                .map(shifted),
-        );
+        props.extend(markdown::render(&content, false).into_iter().map(shifted));
         // Sorted with the markdown faces by range; where both apply, the later sorted one wins.
-        let faces = tool.faces.iter().map(|(r, f)| (r.clone(), Prop::Face(*f)));
+        let faces = (tool.faces.iter()).map(|(r, f)| (r.clone(), Prop::Named(f.clone())));
         props.extend(faces.map(shifted));
         let mut line = body.start;
         for l in content.split('\n') {
@@ -1453,7 +1402,7 @@ mod tests {
 
     use super::*;
     use crate::Msg;
-    use crate::buffer::Prop;
+    use crate::buffer::{Face, Prop};
     use crate::harness::{Harness, listed, name};
     use crate::project::Root;
     use crate::settings::Agent;
@@ -2030,12 +1979,9 @@ mod tests {
         );
         chunk(&mut h, "c");
         assert_eq!(h.core.text(), "a\n\n> see `b`\n\nc\n\n> ");
-        let code = h.core.settings.theme.code_block;
         let b = props(&h).into_iter().find(|(t, _)| t == "b");
-        assert!(
-            matches!(b, Some((_, Prop::Face(f))) if f.bg == Some(code)),
-            "{b:?}"
-        );
+        let code = vec![FaceRef::Face(FaceName::SessionCode)];
+        assert_eq!(b, Some(("b".into(), Prop::Named(code))));
     }
 
     /// Each property of the current buffer, with the text it covers.
@@ -2054,58 +2000,80 @@ mod tests {
         );
     }
 
-    /// The settings with `dim` and `code_block` changed, reloaded.
+    /// Reloads settings that switch to a theme giving `session-thought` and `session-block`
+    /// these colours, as a user's `theme` change does.
     fn retheme(h: &mut Harness) -> (u32, u32) {
-        let settings = "[theme]\ndim = 0x010203\ncode_block = 0x040506";
+        let settings = "theme = \"other\"\n[themes.other.faces]\nsession-thought = { fg = 0x010203 }\nsession-block = { bg = 0x040506 }";
         h.send(Msg::SettingsLoaded(Ok(Some(settings.into()))));
         (0x010203, 0x040506)
     }
 
-    #[test]
-    fn a_theme_reload_rethemes_completed_replies() {
-        let mut h = session();
-        h.keys("a RET");
-        thought(&mut h, "hmm");
-        chunk(&mut h, "see `x`");
-        prompted(&mut h, Ok(StopReason::EndTurn));
-        h.core.frame();
-        let (dim, code) = retheme(&mut h);
-        let all = props(&h);
-        let face = |text: &str| match all.iter().find(|(t, _)| t == text) {
-            Some((_, Prop::Face(f))) => *f,
-            other => panic!("{text}: {other:?} in {all:?}"),
-        };
-        assert_eq!(face("hmm").fg, Some(dim));
-        assert_eq!(face("x").bg, Some(code));
+    /// The face the display gives `text`, a span of the frame.
+    fn drawn(h: &mut Harness, text: &str) -> Face {
+        h.keys("M-<");
+        let frame = h.frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        let mut spans = lines.iter().flat_map(|l| &l.spans);
+        spans.find(|s| s.text == text).expect("drawn").face
     }
 
     #[test]
-    fn a_theme_reload_rethemes_a_tool_calls_rule() {
+    fn a_theme_change_redraws_completed_replies() {
+        let mut h = session();
+        h.keys("a RET");
+        thought(&mut h, "hmm");
+        chunk(&mut h, "see `x`\n\n```\nblock\n```");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.core.frame();
+        let before = props(&h);
+        let (dim, code) = retheme(&mut h);
+        assert_eq!(props(&h), before, "only the display changes");
+        assert_eq!(drawn(&mut h, "hmm").fg, Some(dim));
+        let frame = h.frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        let block = (lines.iter())
+            .find(|l| l.spans.iter().any(|s| s.text == "block"))
+            .expect("drawn");
+        let face = Decoration::Background(FaceName::SessionBlock);
+        assert_eq!(block.decorations, [face]);
+        assert_eq!(
+            h.core.settings().theme.face(FaceName::SessionBlock).bg,
+            Some(code)
+        );
+    }
+
+    #[test]
+    fn a_tool_calls_rule_names_its_face() {
         let mut h = session();
         tool(&mut h, ls());
-        let (dim, _) = retheme(&mut h);
         let rules: Vec<_> = (props(&h).into_iter())
             .filter_map(|(_, p)| match p {
-                Prop::Line(Decoration::Rule(c)) => Some(c),
+                Prop::Line(Decoration::Rule(name)) => Some(name),
                 _ => None,
             })
             .collect();
         assert!(
-            !rules.is_empty() && rules.iter().all(|&c| c == dim),
+            !rules.is_empty() && rules.iter().all(|&n| n == FaceName::SessionThought),
             "{rules:?}"
         );
     }
 
     #[test]
-    fn an_unchanged_theme_leaves_sessions_alone() {
+    fn faces_sharing_a_colour_part_on_a_theme_change() {
         let mut h = session();
-        h.keys("a RET");
-        chunk(&mut h, "see `x` *y*");
+        let same =
+            "[themes.default.faces]\nsession-thought = { fg = 5 }\nsession-code = { fg = 5 }";
+        h.send(Msg::SettingsLoaded(Ok(Some(same.into()))));
+        thought(&mut h, "hmm");
+        chunk(&mut h, "`x`");
         h.core.frame();
-        tool(&mut h, ls());
-        let before = props(&h);
-        h.send(Msg::SettingsLoaded(Ok(None)));
-        assert_eq!(props(&h), before);
+        let apart = format!(
+            "{same}\n[themes.other.faces]\nsession-thought = {{ fg = 6 }}\nsession-code = {{ fg = 7 }}\n"
+        );
+        let apart = format!("theme = \"other\"\n{apart}");
+        h.send(Msg::SettingsLoaded(Ok(Some(apart))));
+        assert_eq!(drawn(&mut h, "hmm").fg, Some(6));
+        assert_eq!(drawn(&mut h, "x").fg, Some(7));
     }
 
     #[test]
@@ -2117,14 +2085,11 @@ mod tests {
         assert_eq!(h.core.text(), "> a\n\n**ab**\n\n> ");
         assert!(props(&h).is_empty(), "nothing rendered before the frame");
         h.core.frame();
-        let bold = Face {
-            bold: true,
-            ..Face::default()
-        };
+        let bold = Prop::Named(vec![FaceRef::Bold]);
         let hidden = Prop::Invisible(String::new());
         let first = vec![
             ("**".into(), hidden.clone()),
-            ("ab".into(), Prop::Face(bold)),
+            ("ab".into(), bold),
             ("**".into(), hidden.clone()),
         ];
         assert_eq!(props(&h), first);
@@ -2134,15 +2099,12 @@ mod tests {
         chunk(&mut h, "*c*");
         assert_eq!(props(&h), first);
         h.core.frame();
-        let italic = Face {
-            italic: true,
-            ..Face::default()
-        };
+        let italic = Prop::Named(vec![FaceRef::Italic]);
         let all = [
             first.clone(),
             vec![
                 ("*".into(), hidden.clone()),
-                ("c".into(), Prop::Face(italic)),
+                ("c".into(), italic),
                 ("*".into(), hidden.clone()),
             ],
         ]
@@ -2160,11 +2122,8 @@ mod tests {
         // The message rendered when the thought began; the thought waits for the frame.
         assert_eq!(props(&h).len(), 3);
         h.core.frame();
-        let dim = Face {
-            fg: Some(h.core.settings().theme.dim),
-            ..Face::default()
-        };
-        assert_eq!(props(&h).last(), Some(&("hmm".into(), Prop::Face(dim))));
+        let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
+        assert_eq!(props(&h).last(), Some(&("hmm".into(), dim)));
     }
 
     #[test]
@@ -2172,11 +2131,8 @@ mod tests {
         let mut h = session();
         h.keys("* * h i * * RET");
         assert_eq!(h.core.text(), "> **hi**\n\n> ");
-        let bold = Face {
-            bold: true,
-            ..Face::default()
-        };
-        assert!(props(&h).contains(&("hi".into(), Prop::Face(bold))));
+        let bold = Prop::Named(vec![FaceRef::Bold]);
+        assert!(props(&h).contains(&("hi".into(), bold)));
     }
 
     #[test]
@@ -2195,7 +2151,7 @@ mod tests {
             shown[..7],
             ["Title", "", "Some bold docs.", "", "", "fn main() {}", ""]
         );
-        let code = Decoration::Background(h.core.settings().theme.code_block);
+        let code = Decoration::Background(FaceName::SessionBlock);
         assert!((4..7).all(|i| lines[i].decorations == [code]));
         assert!(lines[3].decorations.is_empty());
         // Swiper matches the hidden markup, and copying yields it.
@@ -2282,14 +2238,14 @@ mod tests {
         // The header carries the rule, the suffix is dim.
         let frame = h.frame(800., 600.);
         let header = &frame.windows[0].display.lines[4];
-        let dim = h.core.settings().theme.dim;
+        let dim = FaceName::SessionThought;
         assert_eq!(header.decorations, [Decoration::Rule(dim)]);
         let suffix = header
             .spans
             .iter()
             .find(|s| s.text.contains("execute"))
             .unwrap();
-        assert_eq!(suffix.face.fg, Some(dim));
+        assert_eq!(suffix.face.fg, h.core.settings().theme.face(dim).fg);
     }
 
     #[test]
@@ -2328,7 +2284,7 @@ mod tests {
         assert_eq!(shown(&mut h, 10)[..9], open);
         let frame = h.frame(800., 600.);
         let lines = &frame.windows[0].display.lines;
-        let rule = Decoration::Rule(h.core.settings().theme.dim);
+        let rule = Decoration::Rule(FaceName::SessionThought);
         assert!(
             (0..7).all(|i| lines[i].decorations.contains(&rule)),
             "{lines:?}"
@@ -2387,8 +2343,7 @@ mod tests {
             ("Run … (other, pending)".into(), 5)
         );
         // A list of text blocks shows as their text; other output as JSON.
-        let theme = crate::settings::Settings::default().theme;
-        let content = |call: &ToolCall| tool_content(call, None, &theme).0;
+        let content = |call: &ToolCall| tool_content(call, None).0;
         call.raw_output = Some(serde_json::json!([{"type": "text", "text": "x ``` y"}]));
         assert_eq!(content(&call), "Output:\n````\nx ``` y\n````");
         call.raw_output = Some(serde_json::json!({"code": 0}));
@@ -2408,12 +2363,9 @@ mod tests {
         // A coloured text item's faces land on its chars after the parts before it.
         call.raw_input = Some(serde_json::json!(1));
         call.content = vec!["\u{1b}[34mfile\u{1b}[0m".into()];
-        let blue = Face {
-            fg: Some(theme.ansi[4]),
-            ..Face::default()
-        };
+        let blue = vec![FaceRef::Fg(4)];
         assert_eq!(
-            tool_content(&call, None, &theme),
+            tool_content(&call, None),
             (
                 "Input:\n```json\n1\n```\n\nfile".into(),
                 vec![(22..26, blue)]
@@ -2423,48 +2375,31 @@ mod tests {
 
     #[test]
     fn sgr_escapes_become_faces() {
-        let theme = crate::settings::Settings::default().theme;
-        let fg = |i: usize| Face {
-            fg: Some(theme.ansi[i]),
-            ..Face::default()
-        };
-        let underlined = Face {
-            underline: true,
-            ..fg(10)
-        };
-        let bold = Face {
-            bold: true,
-            ..underlined
-        };
+        use FaceRef::{Bg, Bold, Fg, Underline};
         assert_eq!(
-            coloured("\u{1b}[1;4;92mok\u{1b}[22mx\u{1b}[0my", &theme),
-            ("okxy".into(), vec![(0..2, bold), (2..3, underlined)])
+            coloured("\u{1b}[1;4;92mok\u{1b}[22mx\u{1b}[0my"),
+            (
+                "okxy".into(),
+                vec![
+                    (0..2, vec![Bold, Underline, Fg(10)]),
+                    (2..3, vec![Underline, Fg(10)])
+                ]
+            )
         );
         // Colours beyond the 16 show in the default colour.
         let beyond = "\u{1b}[38;5;196ma\u{1b}[38;2;1;2;3mb\u{1b}[38;5;4mc";
-        assert_eq!(
-            coloured(beyond, &theme),
-            ("abc".into(), vec![(2..3, fg(4))])
-        );
+        assert_eq!(coloured(beyond), ("abc".into(), vec![(2..3, vec![Fg(4)])]));
         // A face stops at each line's end; `39` and `49` reset the colours.
-        let on_red = Face {
-            bg: Some(theme.ansi[1]),
-            ..fg(2)
-        };
-        let bg = |i: usize| Face {
-            bg: Some(theme.ansi[i]),
-            ..Face::default()
-        };
         assert_eq!(
-            coloured("\u{1b}[48;5;4ma\u{1b}[101mb", &theme),
-            ("ab".into(), vec![(0..1, bg(4)), (1..2, bg(9))])
+            coloured("\u{1b}[48;5;4ma\u{1b}[101mb"),
+            ("ab".into(), vec![(0..1, vec![Bg(4)]), (1..2, vec![Bg(9)])])
         );
         assert_eq!(
-            coloured(
-                "\u{1b}[32;41ma\r\nb\u{1b}[39;49mc\u{1b}]0;title\u{7}",
-                &theme
-            ),
-            ("a\nbc".into(), vec![(0..1, on_red), (2..3, on_red)])
+            coloured("\u{1b}[32;41ma\r\nb\u{1b}[39;49mc\u{1b}]0;title\u{7}"),
+            (
+                "a\nbc".into(),
+                vec![(0..1, vec![Fg(2), Bg(1)]), (2..3, vec![Fg(2), Bg(1)])]
+            )
         );
     }
 
@@ -2505,11 +2440,8 @@ mod tests {
         );
         // Its colour shows once the call is open.
         h.keys("M-< C-e TAB");
-        let red = Face {
-            fg: Some(h.core.settings().theme.ansi[1]),
-            ..Face::default()
-        };
-        assert!(props(&h).contains(&("red".into(), Prop::Face(red))));
+        let red = h.core.settings().theme.ansi[1];
+        assert_eq!(drawn(&mut h, "red").fg, Some(red));
     }
 
     #[test]
@@ -2519,15 +2451,12 @@ mod tests {
         tool(&mut h, call);
         h.keys("M-< C-e TAB");
         assert_eq!(h.core.text(), "ls (other, pending)\nfile\n\n> ");
-        let blue = Face {
-            fg: Some(h.core.settings().theme.ansi[4]),
-            ..Face::default()
-        };
-        assert!(props(&h).contains(&("file".into(), Prop::Face(blue))));
+        let blue = h.core.settings().theme.ansi[4];
+        assert_eq!(drawn(&mut h, "file").fg, Some(blue));
     }
 
     #[test]
-    fn a_theme_reload_rethemes_command_output() {
+    fn a_theme_change_redraws_command_output() {
         let mut h = session();
         tool(&mut h, command());
         output(&mut h, "terminal_output", "t", "\u{1b}[31mred");
@@ -2538,16 +2467,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         h.send(Msg::SettingsLoaded(Ok(Some(format!(
-            "[theme]\nansi = [{ansi}]"
+            "[themes.default]\nansi = [{ansi}]"
         )))));
-        let red = Prop::Face(Face {
-            fg: Some(2),
-            ..Face::default()
-        });
-        assert!(props(&h).contains(&("red".into(), red.clone())));
+        assert_eq!(drawn(&mut h, "red").fg, Some(2));
         // Folding and opening the call again keeps the new colour.
         h.keys("TAB M-< C-e TAB");
-        assert!(props(&h).contains(&("red".into(), red)));
+        assert_eq!(drawn(&mut h, "red").fg, Some(2));
     }
 
     #[test]
@@ -2627,7 +2552,7 @@ mod tests {
         );
         let first = "Plan\nRead the code (in_progress, high)\nWrite tests (pending, medium)";
         assert_eq!(h.core.text(), format!("Planning.\n\n{first}\n\n> "));
-        let rule = Prop::Line(Decoration::Rule(h.core.settings().theme.dim));
+        let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
         let rules = |h: &Harness| {
             (props(h).into_iter())
                 .filter(|(_, p)| *p == rule)
@@ -3022,12 +2947,8 @@ mod tests {
         assert!(ops(&mut h).is_empty(), "nothing answered yet");
         let block = asked("Edit a.txt");
         assert_eq!(h.core.text(), format!("> a\n\nEditing.\n\n{block}\n\n> "));
-        let theme = &h.core.settings().theme;
-        let rule = Prop::Line(Decoration::Rule(theme.dim));
-        let dim = Prop::Face(Face {
-            fg: Some(theme.dim),
-            ..Face::default()
-        });
+        let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
+        let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
         let props: Vec<_> = (props(&h).into_iter())
             .filter(|(_, p)| *p == rule || *p == dim)
             .map(|(t, _)| t)

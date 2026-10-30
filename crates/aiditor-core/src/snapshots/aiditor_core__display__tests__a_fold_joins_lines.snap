@@ -51,7 +51,7 @@ WindowDisplay {
             ],
             decorations: [
                 Rule(
-                    8947848,
+                    SessionThought,
                 ),
             ],
         },

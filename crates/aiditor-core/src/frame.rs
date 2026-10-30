@@ -548,7 +548,9 @@ mod tests {
         let id = h.core.windows.window.buffer();
         let buffer = h.core.buffers.get_mut(id).unwrap();
         buffer.truncate_lines = true;
-        let rule = crate::buffer::Prop::Line(crate::buffer::Decoration::Rule(0x888888));
+        let rule = crate::buffer::Prop::Line(crate::buffer::Decoration::Rule(
+            crate::settings::FaceName::SessionThought,
+        ));
         buffer.add_property(9_990..9_995, rule).unwrap();
         // Before any resize the frame has no size: one row and no width.
         let unsized_frame = h.core.frame();
@@ -598,7 +600,7 @@ mod tests {
         let lines = &frame.windows[0].display.lines;
         let numbers: Vec<_> = lines.iter().map(|l| l.number).collect();
         assert_eq!(numbers, [0, 0, 0, 1]);
-        let comment = h.core.settings().theme.syntax.get("comment").copied();
+        let comment = h.core.settings().theme.syntax["comment"].fg;
         let marker = lines[0].spans.last().unwrap();
         assert_eq!((marker.text.as_str(), marker.face.fg), ("\\", comment));
         h.keys("C-f C-f C-f C-f C-f");

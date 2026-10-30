@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use ropey::Rope;
+use serde::Deserialize;
 
+use crate::settings::FaceName;
 use crate::syntax::{self, Syntax};
 use crate::terminal::{ShellCommand, Terminal};
 use crate::workspace::WorkspaceId;
@@ -334,7 +336,8 @@ struct History {
 
 /// Colors as 0xRRGGBB, `None` keeping whatever is under it, and font attributes, added to those
 /// under it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Face {
     pub fg: Option<u32>,
     pub bg: Option<u32>,
@@ -343,18 +346,47 @@ pub struct Face {
     pub underline: bool,
 }
 
-/// Something drawn across a whole line.
+impl Face {
+    /// This face drawn over `under`.
+    pub fn over(self, under: Face) -> Face {
+        Face {
+            fg: self.fg.or(under.fg),
+            bg: self.bg.or(under.bg),
+            bold: self.bold || under.bold,
+            italic: self.italic || under.italic,
+            underline: self.underline || under.underline,
+        }
+    }
+}
+
+/// One layer of a stored face, named so a theme change needs no rewrite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceRef {
+    Face(FaceName),
+    /// A syntax capture's face.
+    Syntax(&'static str),
+    /// An ANSI colour's index, as text colour or background.
+    Fg(u8),
+    Bg(u8),
+    Bold,
+    Italic,
+    Underline,
+}
+
+/// Something drawn across a whole line, in a face's `bg` or, for a rule, its `fg`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decoration {
-    Background(u32),
+    Background(FaceName),
     /// A rule beside the line, like the one beside tool calls.
-    Rule(u32),
+    Rule(FaceName),
 }
 
 /// A text property on a char range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prop {
     Face(Face),
+    /// Layers resolved against the theme at each redisplay, later ones on top.
+    Named(Vec<FaceRef>),
     /// Hidden text, shown as this placeholder (empty for none).
     Invisible(String),
     /// Applies to every line the range touches.
@@ -726,17 +758,6 @@ impl Buffer {
         }
     }
 
-    /// Rewrites every colour the properties hold, faces' and line decorations', through `f`.
-    pub(crate) fn map_colors(&mut self, f: impl Fn(u32) -> u32) {
-        for (.., prop) in &mut self.props {
-            match prop {
-                Prop::Face(face) => (face.fg, face.bg) = (face.fg.map(&f), face.bg.map(&f)),
-                Prop::Line(Decoration::Background(c) | Decoration::Rule(c)) => *c = f(*c),
-                Prop::Invisible(_) => {}
-            }
-        }
-    }
-
     /// Whether any property hides text.
     pub(crate) fn has_folds(&self) -> bool {
         (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_)))
@@ -762,13 +783,13 @@ impl Buffer {
         self.syntax.is_some()
     }
 
-    /// The syntax colours `palette` gives the chars of sorted, disjoint `ranges`, as sorted,
+    /// The syntax faces `palette` gives the chars of sorted, disjoint `ranges`, as sorted,
     /// disjoint char ranges.
     pub(crate) fn highlights(
         &self,
         ranges: &[Range<usize>],
-        palette: &BTreeMap<String, u32>,
-    ) -> Vec<(Range<usize>, u32)> {
+        palette: &BTreeMap<String, Face>,
+    ) -> Vec<(Range<usize>, Face)> {
         (self.syntax.as_ref()).map_or(Vec::new(), |s| s.highlights(self.text(), ranges, palette))
     }
 
@@ -1373,33 +1394,6 @@ mod tests {
             near(b, 0..10),
             [5..9],
             "only the one past the range is left"
-        );
-    }
-
-    #[test]
-    fn map_colors_rewrites_faces_and_decorations() {
-        let (mut buffers, id) = with_text("abcdef");
-        let b = buffers.get_mut(id).unwrap();
-        let face = |fg, bg| {
-            Prop::Face(Face {
-                fg,
-                bg,
-                ..Face::default()
-            })
-        };
-        b.add_property(0..2, face(Some(1), Some(2))).unwrap();
-        b.add_property(2..4, Prop::Line(Decoration::Rule(1)))
-            .unwrap();
-        b.add_property(4..6, Prop::Invisible("…".into())).unwrap();
-        b.map_colors(|c| c * 10);
-        let props: Vec<_> = b.properties().map(|(_, p)| p.clone()).collect();
-        assert_eq!(
-            props,
-            [
-                face(Some(10), Some(20)),
-                Prop::Line(Decoration::Rule(10)),
-                Prop::Invisible("…".into())
-            ]
         );
     }
 

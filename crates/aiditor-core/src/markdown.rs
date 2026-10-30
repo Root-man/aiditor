@@ -6,31 +6,22 @@ use std::ops::Range;
 use tree_sitter::Node;
 use tree_sitter_md::MarkdownParser;
 
-use crate::buffer::{Decoration, Face, Prop};
-use crate::settings::Theme;
-use crate::syntax::color;
+use crate::buffer::{Decoration, FaceRef, Prop};
+use crate::settings::FaceName;
 
 /// The properties that show `text` as rendered markdown, in char offsets of `text`, sorted by
 /// start then end. Faces and hidden markup never overlap, and code blocks decorate whole lines,
 /// so starts and ends both ascend.
-pub(crate) fn render(text: &str, thought: bool, theme: &Theme) -> Vec<(Range<usize>, Prop)> {
+pub(crate) fn render(text: &str, thought: bool) -> Vec<(Range<usize>, Prop)> {
     let Some(tree) = MarkdownParser::default().parse(text.as_bytes(), None) else {
         return Vec::new();
     };
-    let title = Face {
-        fg: color(&theme.syntax, "text.title"),
-        bold: true,
-        ..Face::default()
-    };
-    let mut faces = Vec::new();
+    let title = &[FaceRef::Syntax("text.title"), FaceRef::Bold][..];
+    let mut faces: Vec<(Range<usize>, &[FaceRef])> = Vec::new();
     let mut hidden = Vec::new();
     let mut code = Vec::new();
     if thought {
-        let dim = Face {
-            fg: Some(theme.dim),
-            ..Face::default()
-        };
-        faces.push((0..text.len(), dim));
+        faces.push((0..text.len(), &[FaceRef::Face(FaceName::SessionThought)]));
     }
     walk(
         tree.block_tree().root_node(),
@@ -73,34 +64,16 @@ pub(crate) fn render(text: &str, thought: bool, theme: &Theme) -> Vec<(Range<usi
             _ => {}
         },
     );
-    let code_face = Face {
-        fg: color(&theme.syntax, "text.literal"),
-        bg: Some(theme.code_block),
-        ..Face::default()
-    };
-    let link = Face {
-        fg: color(&theme.syntax, "text.uri"),
-        underline: true,
-        ..Face::default()
-    };
+    let link = &[FaceRef::Face(FaceName::Link), FaceRef::Underline][..];
     for inline in tree.inline_trees() {
         walk(inline.root_node(), &mut |node| {
             let (face, markup) = match node.kind() {
-                "emphasis" => (
-                    Face {
-                        italic: true,
-                        ..Face::default()
-                    },
-                    "emphasis_delimiter",
+                "emphasis" => (&[FaceRef::Italic][..], "emphasis_delimiter"),
+                "strong_emphasis" => (&[FaceRef::Bold][..], "emphasis_delimiter"),
+                "code_span" => (
+                    &[FaceRef::Face(FaceName::SessionCode)][..],
+                    "code_span_delimiter",
                 ),
-                "strong_emphasis" => (
-                    Face {
-                        bold: true,
-                        ..Face::default()
-                    },
-                    "emphasis_delimiter",
-                ),
-                "code_span" => (code_face, "code_span_delimiter"),
                 "uri_autolink" => {
                     faces.push((node.byte_range(), link));
                     hidden.push(node.start_byte()..node.start_byte() + 1);
@@ -160,24 +133,18 @@ pub(crate) fn render(text: &str, thought: bool, theme: &Theme) -> Vec<(Range<usi
         hidden_open += hiding[k];
         let prop = match hidden_open > 0 {
             true => Prop::Invisible(String::new()),
-            false => Prop::Face(open.values().fold(Face::default(), |acc, f| Face {
-                fg: f.fg.or(acc.fg),
-                bg: f.bg.or(acc.bg),
-                bold: acc.bold || f.bold,
-                italic: acc.italic || f.italic,
-                underline: acc.underline || f.underline,
-            })),
+            false => Prop::Named(open.values().copied().flatten().copied().collect()),
         };
         match props.last_mut() {
             // Not joined across a code line's start, so a face never ends inside a later line's decoration.
             Some((last, p)) if last.end == piece.start && *p == prop && !line_starts[k] => {
                 last.end = piece.end
             }
-            _ if prop != Prop::Face(Face::default()) => props.push((piece, prop)),
+            _ if prop != Prop::Named(Vec::new()) => props.push((piece, prop)),
             _ => {}
         }
     }
-    let line = Prop::Line(Decoration::Background(theme.code_block));
+    let line = Prop::Line(Decoration::Background(FaceName::SessionBlock));
     props.extend(code.into_iter().map(|r| (r, line.clone())));
     // Byte offsets to char offsets.
     let mut chars = vec![0; text.len() + 1];
@@ -207,13 +174,15 @@ fn walk<'a>(node: Node<'a>, f: &mut impl FnMut(Node<'a>)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::Face;
     use crate::settings::Settings;
+    use crate::syntax::face as syntax_face;
 
     /// What the text shows with its hidden ranges dropped, and each visible run with its face,
     /// for faces that aren't the default.
     fn shown(text: &str, thought: bool) -> (String, Vec<(String, Face)>) {
         let theme = Settings::default().theme;
-        let props = render(text, thought, &theme);
+        let props = render(text, thought);
         let chars: Vec<char> = text.chars().collect();
         let hidden = |i: usize| {
             (props.iter()).any(|(r, p)| matches!(p, Prop::Invisible(_)) && r.contains(&i))
@@ -224,7 +193,7 @@ mod tests {
             .collect();
         let faces = (props.iter())
             .filter_map(|(r, p)| match p {
-                Prop::Face(f) => Some((chars[r.clone()].iter().collect(), *f)),
+                Prop::Named(refs) => Some((chars[r.clone()].iter().collect(), theme.resolve(refs))),
                 _ => None,
             })
             .collect();
@@ -244,30 +213,27 @@ mod tests {
     #[test]
     fn inline_markup_is_hidden_and_faced() {
         let theme = Settings::default().theme;
-        let syntax = |name| color(&theme.syntax, name);
         let (text, faces) = shown(
             "Some **bold**, *it*, `code` and [docs](https://x.dev).",
             false,
         );
         assert_eq!(text, "Some bold, it, code and docs.");
-        let code = Face {
-            bg: Some(theme.code_block),
-            ..face(syntax("text.literal"), false, false, false)
-        };
+        let link = theme.face(FaceName::Link).fg;
         assert_eq!(
             faces,
             [
                 ("bold".into(), face(None, true, false, false)),
                 ("it".into(), face(None, false, true, false)),
-                ("code".into(), code),
-                ("docs".into(), face(syntax("text.uri"), false, false, true)),
+                ("code".into(), theme.face(FaceName::SessionCode)),
+                ("docs".into(), face(link, false, false, true)),
             ]
         );
     }
 
     #[test]
     fn headings_and_autolinks() {
-        let title = color(&Settings::default().theme.syntax, "text.title");
+        let title = syntax_face(&Settings::default().theme.syntax, "text.title");
+        let title = title.and_then(|f| f.fg);
         let (text, faces) = shown("# Title\n\nSub\n===\n\nsee <https://x.dev>\n", false);
         assert_eq!(text, "Title\n\nSub\n\n\nsee https://x.dev\n");
         assert_eq!(
@@ -280,9 +246,8 @@ mod tests {
 
     #[test]
     fn code_blocks_decorate_their_lines_and_hide_fences() {
-        let theme = Settings::default().theme;
         let text = "```rust\nfn main() {}\n```\nafter\n\n    indented\n";
-        let props = render(text, false, &theme);
+        let props = render(text, false);
         let lines: Vec<_> = (props.iter())
             .filter(|(_, p)| matches!(p, Prop::Line(_)))
             .map(|(r, _)| text.chars().skip(r.start).take(r.len()).collect::<String>())
@@ -299,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_thought_is_dim_under_other_faces() {
-        let dim = Some(Settings::default().theme.dim);
+        let dim = Settings::default().theme.face(FaceName::SessionThought).fg;
         let (_, faces) = shown("I *think*", true);
         assert_eq!(
             faces,
@@ -313,8 +278,9 @@ mod tests {
     #[test]
     fn inner_faces_win_and_code_lines_stay_apart() {
         let theme = Settings::default().theme;
-        let (dim, title) = (Some(theme.dim), color(&theme.syntax, "text.title"));
-        let uri = color(&theme.syntax, "text.uri");
+        let dim = theme.face(FaceName::SessionThought).fg;
+        let title = syntax_face(&theme.syntax, "text.title").and_then(|f| f.fg);
+        let uri = theme.face(FaceName::Link).fg;
         let text = "# T **s [k](https://x.dev) e**\n\n```\nx\ny\n```\n";
         let (_, faces) = shown(text, true);
         let title = face(title, true, false, false);
@@ -342,7 +308,7 @@ mod tests {
         assert_eq!(shown, "é ünï ç\n\n\nß\nx\n\n");
         // A thought's dim face runs through the code lines too.
         for thought in [false, true] {
-            let props = render(text, thought, &Settings::default().theme);
+            let props = render(text, thought);
             let ascend = |w: &[(Range<usize>, Prop)]| {
                 w[0].0.start <= w[1].0.start && w[0].0.end <= w[1].0.end
             };

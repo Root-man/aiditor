@@ -3,7 +3,7 @@ use std::time::Instant;
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
 use aiditor_core::display::{CursorShape, FrameWindow, Line, Rect, Terminal};
-use aiditor_core::settings::Theme;
+use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
     FontStyle, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels, Point,
@@ -132,7 +132,7 @@ impl Element for FrameElement {
                         let origin = bounds.origin + point(x, top);
                         cursor = Some(Bounds::new(origin, gpui::size(width, height)));
                         let face = Face {
-                            fg: Some(settings.theme.background),
+                            fg: settings.theme.face(FaceName::Cursor).fg,
                             ..Face::default()
                         };
                         let run = text_run(under.len(), face, false, &font, &settings.theme);
@@ -198,7 +198,7 @@ impl Element for FrameElement {
                         if !hollow && c.shape == CursorShape::Block {
                             cursor_char = under_cursor(terminal, c.row, c.col).map(|text| {
                                 let face = Face {
-                                    fg: Some(settings.theme.background),
+                                    fg: settings.theme.face(FaceName::Cursor).fg,
                                     ..Face::default()
                                 };
                                 let run = text_run(text.len(), face, false, &font, &settings.theme);
@@ -212,9 +212,13 @@ impl Element for FrameElement {
                         }
                     }
                 }
+                let line_face = match w.selected {
+                    true => FaceName::ModeLine,
+                    false => FaceName::ModeLineInactive,
+                };
                 let run = text_run(
                     w.display.mode_line.len(),
-                    Face::default(),
+                    settings.theme.face(line_face),
                     false,
                     &font,
                     &settings.theme,
@@ -265,11 +269,13 @@ impl Element for FrameElement {
                     let origin = p.bounds.origin + point(px(0.), row.top);
                     for decoration in &row.decorations {
                         let (width, color) = match *decoration {
-                            Decoration::Background(color) => (width, color),
-                            Decoration::Rule(color) => (px(2.), color),
+                            Decoration::Background(name) => (width, theme.face(name).bg),
+                            Decoration::Rule(name) => (px(2.), theme.face(name).fg),
                         };
-                        let bounds = Bounds::new(origin, size(width, row.height));
-                        window.paint_quad(fill(bounds, rgb(color)));
+                        if let Some(color) = color {
+                            let bounds = Bounds::new(origin, size(width, row.height));
+                            window.paint_quad(fill(bounds, rgb(color)));
+                        }
                     }
                     row.text
                         .paint_background(origin, row.height, window, cx)
@@ -285,9 +291,9 @@ impl Element for FrameElement {
                     c.text.paint(c.origin, line_height, window, cx).ok();
                 }
                 if let Some(cursor) = p.cursor.filter(|_| p.hollow) {
-                    window.paint_quad(outline(cursor, rgb(theme.cursor), BorderStyle::Solid));
+                    window.paint_quad(outline(cursor, rgb(theme.cursor()), BorderStyle::Solid));
                 } else if let Some(cursor) = p.cursor {
-                    window.paint_quad(fill(cursor, rgb(theme.cursor)));
+                    window.paint_quad(fill(cursor, rgb(theme.cursor())));
                     if let Some(under) = &p.cursor_char {
                         under
                             .paint(cursor.origin, cursor.size.height, window, cx)
@@ -295,12 +301,14 @@ impl Element for FrameElement {
                     }
                 }
                 let origin = point(p.bounds.left(), p.bounds.bottom() - line_height);
-                let color = match p.selected {
-                    true => theme.mode_line,
-                    false => theme.mode_line_inactive,
+                let face = match p.selected {
+                    true => FaceName::ModeLine,
+                    false => FaceName::ModeLineInactive,
                 };
                 let bounds = Bounds::new(origin, size(width, line_height));
-                window.paint_quad(fill(bounds, rgb(color)));
+                if let Some(color) = theme.face(face).bg {
+                    window.paint_quad(fill(bounds, rgb(color)));
+                }
                 p.mode_line.paint(origin, line_height, window, cx).ok();
             });
         }
@@ -369,7 +377,7 @@ pub(crate) fn text_run(
     TextRun {
         len,
         font: styled(font, face.bold, face.italic),
-        color: rgb(face.fg.unwrap_or(theme.foreground)).into(),
+        color: rgb(face.fg.unwrap_or(theme.foreground())).into(),
         background_color: face.bg.map(|bg| rgb(bg).into()),
         underline: (underline || face.underline).then(|| UnderlineStyle {
             thickness: px(1.),

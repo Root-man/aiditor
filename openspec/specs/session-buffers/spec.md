@@ -69,7 +69,7 @@ Each text agent message chunk SHALL be appended above the prompt line, consecuti
 - **THEN** `session/cancel` is sent and `Turn ended: cancelled` appears above the prompt line
 
 ### Requirement: Messages render as markdown
-Each agent message block, thought block and echoed prompt's text SHALL be rendered as markdown with text properties while its markup stays in the text: ATX and setext headings in the bold `text.title` colour, emphasis italic, strong emphasis bold, inline code in the `text.literal` colour on the `code_block` background, and link text and autolinks underlined in the `text.uri` colour. Heading markers, emphasis delimiters, code span backticks and a link's brackets and destination SHALL be invisible with no placeholder. Every line of a fenced or indented code block SHALL carry the `code_block` background decoration, and a code fence's text SHALL be invisible, its newline kept. A thought block SHALL be in the `dim` colour wherever no other colour applies. `Turn ended` and `Error` lines SHALL stay plain.
+Each agent message block, thought block and echoed prompt's text SHALL be rendered as markdown with text properties while its markup stays in the text: ATX and setext headings bold in the `text.title` syntax face, emphasis italic, strong emphasis bold, inline code in the `session-code` face, and link text and autolinks underlined in the `link` face. Heading markers, emphasis delimiters, code span backticks and a link's brackets and destination SHALL be invisible with no placeholder. Every line of a fenced or indented code block SHALL carry the `session-block` background decoration, and a code fence's text SHALL be invisible, its newline kept. A thought block SHALL be in the `session-thought` face wherever no other colour applies. `Turn ended` and `Error` lines SHALL stay plain.
 
 #### Scenario: Hidden markup
 - **WHEN** the agent streams `# Title\n\nSome **bold**, *it*, `code` and [docs](https://x.dev).` and a frame is built
@@ -81,7 +81,7 @@ Each agent message block, thought block and echoed prompt's text SHALL be render
 
 #### Scenario: A dim thought
 - **WHEN** the agent streams the thought chunk `thinking` and a frame is built
-- **THEN** `thinking` is drawn in the `dim` colour
+- **THEN** `thinking` is drawn in the `session-thought` face
 
 #### Scenario: The echoed prompt
 - **WHEN** `**hi** RET` is sent
@@ -110,7 +110,7 @@ A streamed chunk's text SHALL be inserted at once, and the block being streamed 
 - **THEN** building frames leaves the first reply's properties as they were
 
 ### Requirement: Tool calls show folded
-Each `tool_call` update SHALL add a block above the prompt line, after any block being streamed, separated from the next by a blank line. Its first line, the header, SHALL read `<title> (<kind>, <status>)`, or `<title> (<kind>, <status>, <exit>)` for a failed command (see Command output shows in its tool call), with the title's first line rendered as markdown and followed by ` …` when the title has more lines, ` (<kind>, <status>)` in the `dim` colour, and a rule in the `dim` colour beside it; `kind` and `status` are the ACP names (`execute`, `in_progress`). When the call has content, the header SHALL be followed by a newline and the content, which SHALL start folded: invisible, shown as ` …` at the header's end.
+Each `tool_call` update SHALL add a block above the prompt line, after any block being streamed, separated from the next by a blank line. Its first line, the header, SHALL read `<title> (<kind>, <status>)`, or `<title> (<kind>, <status>, <exit>)` for a failed command (see Command output shows in its tool call), with the title's first line rendered as markdown and followed by ` …` when the title has more lines, ` (<kind>, <status>)` in the `session-thought` face, and a rule in the `session-thought` face beside it; `kind` and `status` are the ACP names (`execute`, `in_progress`). When the call has content, the header SHALL be followed by a newline and the content, which SHALL start folded: invisible, shown as ` …` at the header's end.
 
 The content SHALL hold, in order and each separated by a blank line: `Input:` and the call's whole `rawInput` as pretty-printed JSON in a fenced `json` code block, when it has one; each content item, a text block as its markdown, a resource link as its URI, a diff as its path and a unified diff in a fenced `diff` code block, a terminal other than the call's own terminal (see Command output shows in its tool call) as `Terminal <id>`, and any other item as `[<type>]`; and `Output:` in a fenced code block, holding the call's terminal output when it has a terminal, else the call's whole `rawOutput` when it has one and no content item: a string as itself, a list of text blocks as their text joined, anything else as pretty-printed JSON. No part SHALL be cut. A fence SHALL be longer than any run of backticks in what it encloses.
 
@@ -173,7 +173,7 @@ A `tool_call_update` SHALL merge its fields into the call with that id and rewri
 - **THEN** the call stays unfolded, showing the new output
 
 ### Requirement: The plan shows and is replaced in place
-The first `plan` update of a session SHALL add a block above the prompt line, after any block being streamed, separated from the next by a blank line. The block SHALL read `Plan`, then one line per entry in order: the entry's content's first line, followed by ` …` when it has more lines, then ` (<status>, <priority>)` in the `dim` colour, with the ACP names (`pending`, `in_progress`, `completed`; `high`, `medium`, `low`). Every line of the block SHALL have a rule in the `dim` colour beside it. Each later `plan` update SHALL replace the block's entries where the block is, even with later blocks after it; the rest of the transcript and the prompt area SHALL be unchanged. A plan with no entries SHALL show the `Plan` line alone.
+The first `plan` update of a session SHALL add a block above the prompt line, after any block being streamed, separated from the next by a blank line. The block SHALL read `Plan`, then one line per entry in order: the entry's content's first line, followed by ` …` when it has more lines, then ` (<status>, <priority>)` in the `session-thought` face, with the ACP names (`pending`, `in_progress`, `completed`; `high`, `medium`, `low`). Every line of the block SHALL have a rule in the `session-thought` face beside it. Each later `plan` update SHALL replace the block's entries where the block is, even with later blocks after it; the rest of the transcript and the prompt area SHALL be unchanged. A plan with no entries SHALL show the `Plan` line alone.
 
 #### Scenario: A plan shows
 - **WHEN** the agent sends a plan with `Read the code` (`in_progress`, `high`) and `Write tests` (`pending`, `medium`)
@@ -226,7 +226,7 @@ A session buffer's mode line SHALL show ` [<value>]` after the buffer name once 
 - **THEN** `*Messages*` has `claude could not set mode auto: ` followed by the reason and the mode line keeps `[plan]`
 
 ### Requirement: Permission requests show inline
-A `session/request_permission` from a session whose `session/new` was answered and whose agent hasn't exited SHALL add a block above the prompt line and stay pending: the line `Permission: <title>`, then a line per option in order, `<n>. <name> (<kind>)`, numbered from 1, with the ACP name of the kind in the `dim` colour and a `dim` rule beside every line of the block. The title is the first line of the request's tool call title (followed by ` …` if it has more), else that of the tool call shown with the same id, else the tool call id. Several requests MAY be pending at once, each in its own block.
+A `session/request_permission` from a session whose `session/new` was answered and whose agent hasn't exited SHALL add a block above the prompt line and stay pending: the line `Permission: <title>`, then a line per option in order, `<n>. <name> (<kind>)`, numbered from 1, with the ACP name of the kind in the `session-thought` colour and a `session-thought` rule beside every line of the block. The title is the first line of the request's tool call title (followed by ` …` if it has more), else that of the tool call shown with the same id, else the tool call id. Several requests MAY be pending at once, each in its own block.
 
 #### Scenario: A request shows
 - **WHEN** the agent asks permission for tool call `Edit a.txt` with options `Yes` (`allow_once`) and `No` (`reject_once`)
@@ -274,23 +274,10 @@ When `C-c C-c` sends `session/cancel`, every pending permission request of the s
 - **WHEN** the session buffer was killed and a permission request from its agent arrives before the agent exits
 - **THEN** it is answered `cancelled`
 
-### Requirement: Transcript colours follow the theme
-When reloaded settings change the theme, every session buffer's text properties and line decorations SHALL change each colour the old theme gave as `dim`, `code_block`, or the `text.title`, `text.literal` or `text.uri` syntax colour to the new theme's colour for the same name. This SHALL apply to completed blocks, the block being streamed, tool calls, the plan and permission requests alike. A colour the old theme did not define for a name SHALL stay as it was. Reloaded settings that leave the theme unchanged SHALL leave session buffers untouched.
-
-#### Scenario: A completed reply after a theme change
-- **GIVEN** a session holds a rendered reply with inline code and a thought
-- **WHEN** the user's settings change `code_block` and `dim` and are reloaded
-- **THEN** the inline code's background and the thought's colour are the new theme's `code_block` and `dim`
-
-#### Scenario: A rule beside a tool call
-- **GIVEN** a session shows a tool call
-- **WHEN** the reloaded theme changes `dim`
-- **THEN** the tool call's rule decoration is in the new `dim`
-
 ### Requirement: Command output shows in its tool call
 A `tool_call`, or a call started from an update, SHALL open a terminal for the call when its `_meta.terminal_info` names a `terminal_id` or a content item is a terminal, the first of these naming the terminal's id; a call keeps the terminal it opened when later updates replace its content. Every `tool_call` and `tool_call_update` SHALL append the `data` string of `_meta.terminal_output` and of `_meta.terminal_output_delta`, in that order, to the output of the terminal their `terminal_id` names, whichever call announced it. `_meta.terminal_exit` SHALL record that terminal's exit: `signal <signal>` when `signal` is a string, else `exit <code>` when `exit_code` is a non-zero number, else none. Data or an exit for a terminal no shown call opened SHALL be dropped.
 
-The call's own terminal SHALL show as `Output:` and its output in a fenced code block, with ANSI escape sequences and carriage returns removed, in the place of `rawOutput` in the content, and its `terminal` content item SHALL NOT show as `Terminal <id>`. A terminal without output yet SHALL show nothing. The exit, when recorded, SHALL follow the status in the header, `dim` like it. An update that changes only a terminal's output or exit SHALL re-render that call when the next frame is built, once however many such updates came, and an update with fields SHALL rewrite the call at once.
+The call's own terminal SHALL show as `Output:` and its output in a fenced code block, with ANSI escape sequences and carriage returns removed, in the place of `rawOutput` in the content, and its `terminal` content item SHALL NOT show as `Terminal <id>`. A terminal without output yet SHALL show nothing. The exit, when recorded, SHALL follow the status in the header, `session-thought` like it. An update that changes only a terminal's output or exit SHALL re-render that call when the next frame is built, once however many such updates came, and an update with fields SHALL rewrite the call at once.
 
 The SGR escapes removed from the terminal output and from text content items SHALL become faces on the chars they precede, shown when the call is open: foreground (`30`–`37`, `90`–`97`, `38;5;<n>` for n below 16) and background (`40`–`47`, `100`–`107`, `48;5;<n>`) in the theme's ANSI colours, bold (`1`), underline (`4`), and their resets (`0`, `39`, `49`, `22`, `24`). Other colours SHALL show in the default colour, and other attributes and escapes SHALL be ignored. The buffer's text SHALL hold no escapes, so copying the output yields plain text.
 
@@ -393,3 +380,26 @@ A `user_message_chunk` with text SHALL be put above the prompt line as its own b
 #### Scenario: A user message between agent messages
 - **WHEN** an agent message chunk `a`, a user message chunk `b` and an agent message chunk `c` arrive
 - **THEN** the transcript reads `a`, `> b` and `c`, each followed by a blank line
+
+### Requirement: Transcripts are drawn in the current theme
+Session buffers SHALL store face names, not colours, and the display SHALL resolve them against the current theme at each redisplay. A theme change SHALL apply to completed blocks, the block being streamed, tool calls and their ANSI colours, the plan and permission requests alike, and two faces sharing a colour in the old theme SHALL keep their own colours in the new one.
+
+#### Scenario: A completed reply after a theme change
+- **GIVEN** a session holds a rendered reply with a code block and a thought
+- **WHEN** `theme` is changed and the settings are reloaded
+- **THEN** the code block's background and the thought's colour are the new theme's `session-block` and `session-thought`
+
+#### Scenario: Faces sharing a colour
+- **GIVEN** the old theme gives `session-thought` and `session-block` the same colours
+- **WHEN** the new theme gives them different ones
+- **THEN** each takes its own
+
+#### Scenario: A rule beside a tool call
+- **GIVEN** a session shows a tool call
+- **WHEN** the reloaded theme changes `session-thought`
+- **THEN** the tool call's rule decoration is in the new `fg`
+
+#### Scenario: ANSI output
+- **GIVEN** an open tool call shows output in ANSI red
+- **WHEN** the reloaded theme changes `ansi`
+- **THEN** the output is drawn in the new ANSI colour 1

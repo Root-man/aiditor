@@ -35,11 +35,11 @@ The selected window SHALL draw the cursor as a block in the theme's cursor color
 - **THEN** the cursor is as wide as that char
 
 ### Requirement: The mode line marks the selected window
-Each window's mode line SHALL be drawn on the theme's mode line color for the selected window and on its inactive mode line color for the others.
+Each window's mode line SHALL be drawn in the theme's `mode-line` face for the selected window and in its `mode-line-inactive` face for the others.
 
 #### Scenario: Two windows
 - **WHEN** the frame is split with `C-x 2`
-- **THEN** the upper mode line uses the mode line color and the lower one the inactive color
+- **THEN** the upper mode line uses the `mode-line` face and the lower one `mode-line-inactive`
 
 ### Requirement: The echo area is always shown
 The frame SHALL end with one echo area line, showing the core's message or blank when there is none, so messages never resize the windows.
@@ -95,7 +95,7 @@ Emoji SHALL be drawn wherever the frontend draws text. When the colour emoji fon
 - **THEN** the crab is drawn in colour from Apple Color Emoji
 
 ### Requirement: The workspace modeline is drawn above every window
-The frontend SHALL draw one workspace modeline row above the window tree, its background spanning the frame edge to edge through the side gap while its text keeps the 8 px inset, one line high in the editor's font, showing the project name bold, ` › ` dim and the workspace name, on the inactive mode line background. The windows SHALL be laid out below it, so it never covers buffer text, in windowed and fullscreen frames alike.
+The frontend SHALL draw one workspace modeline row above the window tree, its background spanning the frame edge to edge through the side gap while its text keeps the 8 px inset, one line high in the editor's font, showing the project name bold, ` › ` in the `separator` face and the workspace name, in the `workspace-bar` face. The windows SHALL be laid out below it, so it never covers buffer text, in windowed and fullscreen frames alike.
 
 #### Scenario: One bar above the splits
 - **WHEN** the frame shows two side-by-side windows in workspace `main` of project `home`

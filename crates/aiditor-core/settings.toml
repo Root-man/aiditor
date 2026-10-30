@@ -1,5 +1,8 @@
 # Bundled defaults. Copy any key to settings.toml in the config dir to override it.
 
+# Which [themes.<name>] table to draw, merged over themes.default; C-x C-r applies a change.
+theme = "default"
+
 # font_family = "Menlo"  # unset: Menlo on macOS, Noto Sans Mono on Linux
 font_size = 14.0
 # macOS: Option as Meta, or false to type special characters and dead keys with it.
@@ -19,47 +22,82 @@ default_mode = "auto"
 # The Claude Agent SDK leaves its to-do and task tools off; they are what sends ACP plans.
 env = { CLAUDE_CODE_ENABLE_TASKS = "1", CLAUDE_CODE_ENABLE_TODO_TOOLS = "1" }
 
-[theme]
-background = 0x1e1e1e
-foreground = 0xd4d4d4
-cursor = 0xffcc00
-region = 0x264f78
-# The selected window's mode line, and the other windows'.
-mode_line = 0x3c3c3c
-mode_line_inactive = 0x282828
-# Agent thoughts' text, and code's background in agent messages.
-dim = 0x808080
-code_block = 0x2a2a2a
+# A theme holds ansi, faces and syntax, and lists only what it changes from themes.default.
 # The 16 ANSI colours terminals use: black, red, green, yellow, blue, magenta, cyan, white, then their bright forms.
+[themes.default]
 ansi = [
   0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5,
   0x666666, 0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xe5e5e5,
 ]
 
-# Code colours by tree-sitter capture name; one without an entry takes its longest dotted
-# prefix's (`function.method` falls back to `function`), and none means the foreground.
-[theme.syntax]
-attribute = 0x9cdcfe
-boolean = 0x569cd6
-comment = 0x6a9955
-constant = 0x4fc1ff
-"constant.builtin" = 0x569cd6
-constructor = 0x4ec9b0
-function = 0xdcdcaa
-keyword = 0x569cd6
-module = 0x4ec9b0
-number = 0xb5cea8
-operator = 0xd4d4d4
-property = 0x9cdcfe
-"punctuation.special" = 0x6796e6
-string = 0xce9178
-"string.special" = 0xd16969
-tag = 0x569cd6
-"text.literal" = 0xce9178
-"text.reference" = 0x9cdcfe
-"text.title" = 0x569cd6
-"text.uri" = 0xce9178
-type = 0x4ec9b0
-variable = 0x9cdcfe
-"variable.builtin" = 0x569cd6
-"variable.parameter" = 0x9cdcfe
+# A face has fg, bg, bold, italic and underline; what it leaves unset takes what is underneath.
+[themes.default.faces]
+default = { fg = 0xd4d4d4, bg = 0x1e1e1e }
+cursor = { fg = 0x1e1e1e, bg = 0xffcc00 }
+echo = { fg = 0x808080 }
+separator = { fg = 0x808080 }
+mode-line = { fg = 0xd4d4d4, bg = 0x3c3c3c }
+mode-line-inactive = { fg = 0xd4d4d4, bg = 0x282828 }
+mode-line-dim = { fg = 0x808080 }
+workspace-bar = { fg = 0xd4d4d4, bg = 0x282828 }
+workspace-current = { fg = 0xffcc00 }
+divider = { bg = 0x3c3c3c }
+line-number = { fg = 0x808080 }
+line-number-current = { fg = 0xd4d4d4 }
+hl-line = { bg = 0x2a2a2a }
+region = { bg = 0x264f78 }
+match = { bg = 0x613315 }
+match-current = { fg = 0x1e1e1e, bg = 0xffcc00, bold = true }
+completion-match = { fg = 0x569cd6, bold = true }
+completion-selected = { bg = 0x264f78 }
+annotation = { fg = 0x808080 }
+prompt = { fg = 0x569cd6, bold = true }
+directory = { fg = 0x569cd6, bold = true }
+grep-file = { fg = 0x4ec9b0, italic = true }
+grep-line-number = { fg = 0xb5cea8 }
+vcs-branch = { fg = 0x4ec9b0 }
+status-modified = { fg = 0xce9178 }
+status-waiting = { fg = 0xe5e510 }
+status-running = { fg = 0x0dbc79 }
+status-failed = { fg = 0xf14c4c }
+status-info = { fg = 0x569cd6 }
+session-user = { bg = 0x2a2a2a }
+session-thought = { fg = 0x808080 }
+session-block = { bg = 0x2a2a2a }
+session-code = { fg = 0xce9178 }
+diff-added = { fg = 0x0dbc79 }
+diff-removed = { fg = 0xf14c4c }
+diff-hunk = { fg = 0x569cd6 }
+key-hint = { fg = 0x1e1e1e, bg = 0xffcc00, bold = true }
+permission = { bg = 0x3c3c3c }
+link = { fg = 0xce9178, underline = true }
+attachment = { bg = 0x3c3c3c }
+message-at-point = { fg = 0xffcc00 }
+
+# Code's faces by tree-sitter capture name; one without an entry takes its longest dotted
+# prefix's (`function.method` falls back to `function`), and none means the default face.
+[themes.default.syntax]
+attribute = { fg = 0x9cdcfe }
+boolean = { fg = 0x569cd6 }
+comment = { fg = 0x6a9955 }
+constant = { fg = 0x4fc1ff }
+"constant.builtin" = { fg = 0x569cd6 }
+constructor = { fg = 0x4ec9b0 }
+function = { fg = 0xdcdcaa }
+keyword = { fg = 0x569cd6 }
+module = { fg = 0x4ec9b0 }
+number = { fg = 0xb5cea8 }
+operator = { fg = 0xd4d4d4 }
+property = { fg = 0x9cdcfe }
+"punctuation.special" = { fg = 0x6796e6 }
+string = { fg = 0xce9178 }
+"string.special" = { fg = 0xd16969 }
+tag = { fg = 0x569cd6 }
+"text.literal" = { fg = 0xce9178 }
+"text.reference" = { fg = 0x9cdcfe }
+"text.title" = { fg = 0x569cd6 }
+"text.uri" = { fg = 0xce9178 }
+type = { fg = 0x4ec9b0 }
+variable = { fg = 0x9cdcfe }
+"variable.builtin" = { fg = 0x569cd6 }
+"variable.parameter" = { fg = 0x9cdcfe }

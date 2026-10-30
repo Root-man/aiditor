@@ -314,7 +314,7 @@ impl Terminal {
                 };
                 if face
                     != (Face {
-                        fg: Some(theme.foreground),
+                        fg: Some(theme.foreground()),
                         ..Face::default()
                     })
                 {
@@ -429,7 +429,7 @@ impl Terminal {
             if flags.contains(Flags::DIM) {
                 fg = dim(fg);
             }
-            let bg = (bg != theme.background).then_some(bg);
+            let bg = (bg != theme.background()).then_some(bg);
             let (bold, italic) = (flags.contains(Flags::BOLD), flags.contains(Flags::ITALIC));
             let underline = flags.intersects(Flags::ALL_UNDERLINES);
             if cell.c == ' ' && bg.is_none() && !underline {
@@ -542,10 +542,12 @@ impl Terminal {
         }
         let level = |v: usize| if v == 0 { 0 } else { 55 + 40 * v as u32 };
         match color {
-            Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => theme.foreground,
-            Color::Named(NamedColor::Background) => theme.background,
-            Color::Named(NamedColor::Cursor) => theme.cursor,
-            Color::Named(NamedColor::DimForeground) => dim(theme.foreground),
+            Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
+                theme.foreground()
+            }
+            Color::Named(NamedColor::Background) => theme.background(),
+            Color::Named(NamedColor::Cursor) => theme.cursor(),
+            Color::Named(NamedColor::DimForeground) => dim(theme.foreground()),
             Color::Named(_) if index > 256 => {
                 dim(theme.ansi[index - NamedColor::DimBlack as usize])
             }
@@ -1001,7 +1003,7 @@ mod tests {
         assert_eq!(faces, [(1..4, red), (4..6, red)]);
         let t = fed(1, 10, "\x1b[1mb\x1b[0;3mi\x1b[0;4mu\x1b[0m.");
         let (text, faces, ..) = t.copy_text(&theme);
-        let fg = Some(theme.foreground);
+        let fg = Some(theme.foreground());
         let attrs: Vec<_> = (faces.iter())
             .inspect(|(_, face)| assert_eq!(face.fg, fg))
             .map(|(r, f)| (r.clone(), f.bold, f.italic, f.underline))
@@ -1027,7 +1029,7 @@ mod tests {
 
     #[test]
     fn runs_sit_at_their_columns() {
-        let fg = Settings::default().theme.foreground;
+        let fg = Settings::default().theme.foreground();
         let t = fed(3, 10, "ab\x1b[1;6Hc");
         let want = vec![(0, 2, "ab".into(), fg, None), (5, 1, "c".into(), fg, None)];
         assert_eq!(runs(&t, 0), want);
@@ -1054,12 +1056,12 @@ mod tests {
         assert_eq!(
             runs(&t, 0),
             vec![
-                (0, 1, " ".into(), theme.foreground, Some(0x0000ff)),
-                (1, 1, "x".into(), 0x0000ff, Some(theme.foreground)),
+                (0, 1, " ".into(), theme.foreground(), Some(0x0000ff)),
+                (1, 1, "x".into(), 0x0000ff, Some(theme.foreground())),
             ]
         );
         let t = fed(1, 10, "\x1b[7mx");
-        let inverse = (theme.background, Some(theme.foreground));
+        let inverse = (theme.background(), Some(theme.foreground()));
         assert_eq!((runs(&t, 0)[0].3, runs(&t, 0)[0].4), inverse);
         assert_eq!(
             runs(&fed(1, 10, "\x1b[2;38;2;150;90;30mx"), 0)[0].3,

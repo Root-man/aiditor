@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use toml::Table;
 
+use crate::buffer::{Face, FaceRef};
+
 pub const BUNDLED: &str = include_str!("../settings.toml");
 
 /// Parses `bundled`, merges `user` over it key by key and deserializes the result.
@@ -53,6 +55,13 @@ pub struct Settings {
     pub max_watched_files: usize,
     /// Files project grep searches at once.
     pub grep_workers: NonZeroUsize,
+    /// The file's `theme`: which of `themes` is drawn.
+    #[serde(rename = "theme")]
+    pub theme_name: String,
+    /// Themes by name, as written; each lists only what it changes from `default`.
+    pub themes: BTreeMap<String, Table>,
+    /// `themes.default` with the selected theme over it.
+    #[serde(skip)]
     pub theme: Theme,
     /// The agents sessions can start, by name.
     pub agents: BTreeMap<String, Agent>,
@@ -72,33 +81,123 @@ pub struct Agent {
     pub default_mode: Option<String>,
 }
 
-/// Colors as 0xRRGGBB.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+/// The faces the design names, spelled in kebab-case in `settings.toml`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FaceName {
+    Default,
+    Cursor,
+    Echo,
+    Separator,
+    ModeLine,
+    ModeLineInactive,
+    ModeLineDim,
+    WorkspaceBar,
+    WorkspaceCurrent,
+    Divider,
+    LineNumber,
+    LineNumberCurrent,
+    HlLine,
+    Region,
+    Match,
+    MatchCurrent,
+    CompletionMatch,
+    CompletionSelected,
+    Annotation,
+    Prompt,
+    Directory,
+    GrepFile,
+    GrepLineNumber,
+    VcsBranch,
+    StatusModified,
+    StatusWaiting,
+    StatusRunning,
+    StatusFailed,
+    StatusInfo,
+    SessionUser,
+    SessionThought,
+    SessionBlock,
+    SessionCode,
+    DiffAdded,
+    DiffRemoved,
+    DiffHunk,
+    KeyHint,
+    Permission,
+    Link,
+    Attachment,
+    MessageAtPoint,
+}
+
+/// A resolved theme: `themes.default` with the selected one merged over it.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme {
-    pub background: u32,
-    pub foreground: u32,
-    pub cursor: u32,
-    /// The region's background.
-    pub region: u32,
-    /// The selected window's mode line background.
-    pub mode_line: u32,
-    /// Every other window's mode line background.
-    pub mode_line_inactive: u32,
-    /// Agent thoughts' text.
-    pub dim: u32,
-    /// Code's background in agent messages.
-    pub code_block: u32,
     /// Terminals' ANSI colours 0 to 15.
     pub ansi: [u32; 16],
-    /// Code's colours by tree-sitter capture name; `function.method` falls back to `function`.
-    pub syntax: BTreeMap<String, u32>,
+    pub faces: BTreeMap<FaceName, Face>,
+    /// Code's faces by tree-sitter capture name; `function.method` falls back to `function`.
+    pub syntax: BTreeMap<String, Face>,
+}
+
+impl Theme {
+    /// `name`'s face; the bundled theme defines all of them.
+    pub fn face(&self, name: FaceName) -> Face {
+        self.faces.get(&name).copied().unwrap_or_default()
+    }
+
+    /// `refs` over each other, later ones on top.
+    pub(crate) fn resolve(&self, refs: &[FaceRef]) -> Face {
+        (refs.iter()).fold(Face::default(), |under, r| {
+            let face = match *r {
+                FaceRef::Face(name) => self.face(name),
+                FaceRef::Syntax(name) => {
+                    crate::syntax::face(&self.syntax, name).unwrap_or_default()
+                }
+                FaceRef::Fg(i) => Face {
+                    fg: Some(self.ansi[i as usize]),
+                    ..Face::default()
+                },
+                FaceRef::Bg(i) => Face {
+                    bg: Some(self.ansi[i as usize]),
+                    ..Face::default()
+                },
+                FaceRef::Bold => Face {
+                    bold: true,
+                    ..Face::default()
+                },
+                FaceRef::Italic => Face {
+                    italic: true,
+                    ..Face::default()
+                },
+                FaceRef::Underline => Face {
+                    underline: true,
+                    ..Face::default()
+                },
+            };
+            face.over(under)
+        })
+    }
+
+    /// The `default` face's text colour.
+    pub fn foreground(&self) -> u32 {
+        self.face(FaceName::Default).fg.unwrap_or_default()
+    }
+
+    /// The `default` face's background.
+    pub fn background(&self) -> u32 {
+        self.face(FaceName::Default).bg.unwrap_or_default()
+    }
+
+    /// The `cursor` face's background.
+    pub fn cursor(&self) -> u32 {
+        self.face(FaceName::Cursor).bg.unwrap_or_default()
+    }
 }
 
 impl Settings {
     /// The bundled defaults with the user's `settings.toml` text, if any, over them.
     pub fn parse(user: Option<&str>) -> Result<Self, String> {
-        let settings: Settings = load(BUNDLED, user)?;
+        let mut settings: Settings = load(BUNDLED, user)?;
         if !(6.0..=72.0).contains(&settings.font_size) {
             return Err(format!(
                 "font_size {} is outside 6 to 72",
@@ -110,6 +209,20 @@ impl Settings {
                 return Err(format!("agents.{name}: command is empty"));
             }
             check_env(&agent.env).map_err(|err| format!("agents.{name}: {err}"))?;
+        }
+        let default = settings.themes.get("default").cloned().unwrap_or_default();
+        for (name, theme) in &settings.themes {
+            let mut merged = default.clone();
+            merge(&mut merged, theme.clone());
+            let merged: Theme =
+                (merged.try_into()).map_err(|e: toml::de::Error| format!("themes.{name}: {e}"))?;
+            if *name == settings.theme_name {
+                settings.theme = merged;
+            }
+        }
+        if !settings.themes.contains_key(&settings.theme_name) {
+            let name = &settings.theme_name;
+            return Err(format!("theme {name:?}: no [themes.{name}] table"));
         }
         Ok(settings)
     }
@@ -135,7 +248,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.font_family, None);
         assert_eq!(s.font_size, 14.0);
-        assert_eq!(s.theme.cursor, 0xffcc00);
+        assert_eq!(s.theme.cursor(), 0xffcc00);
         assert!(s.option_as_meta);
         assert_eq!(s.max_watched_files, 10000);
         assert_eq!(s.grep_workers.get(), 1);
@@ -152,27 +265,111 @@ mod tests {
     #[test]
     fn user_keys_override_and_the_rest_stay_default() {
         let s = Settings::parse(Some(
-            "font_size = 18\n[theme]\ncursor = 0x00ff00\nregion = 0x123456\nmode_line = 0x111111\ncode_block = 0x222222",
+            "font_size = 18\n[themes.default.faces]\nregion = { bg = 0x123456 }\nmode-line = { bg = 0x111111 }",
         ))
         .unwrap();
+        let bundled = Settings::default().theme;
         assert_eq!(s.font_size, 18.0);
-        assert_eq!(s.theme.cursor, 0x00ff00);
-        assert_eq!(s.theme.region, 0x123456);
-        assert_eq!(s.theme.mode_line, 0x111111);
-        assert_eq!(s.theme.code_block, 0x222222);
-        let inactive = Settings::default().theme.mode_line_inactive;
-        assert_eq!(s.theme.mode_line_inactive, inactive);
-        assert_eq!(s.theme.background, Settings::default().theme.background);
+        assert_eq!(s.theme.face(FaceName::Region).bg, Some(0x123456));
+        let line = s.theme.face(FaceName::ModeLine);
+        assert_eq!(line.bg, Some(0x111111));
+        assert_eq!(line.fg, bundled.face(FaceName::ModeLine).fg);
+        let inactive = FaceName::ModeLineInactive;
+        assert_eq!(s.theme.face(inactive), bundled.face(inactive));
+        assert_eq!(s.theme.background(), bundled.background());
         let ansi = (0..16).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-        let s = Settings::parse(Some(&format!("[theme]\nansi = [{ansi}]"))).unwrap();
+        let s = Settings::parse(Some(&format!("[themes.default]\nansi = [{ansi}]"))).unwrap();
         assert_eq!(s.theme.ansi[1], 1);
-        let s = Settings::parse(Some("[theme.syntax]\nkeyword = 0xff0000\nfoo = 1")).unwrap();
-        let bundled = Settings::default().theme.syntax;
-        assert_eq!(s.theme.syntax["keyword"], 0xff0000);
-        assert_eq!(
-            (s.theme.syntax["string"], s.theme.syntax["foo"]),
-            (bundled["string"], 1)
+        let s = Settings::parse(Some(
+            "[themes.default.syntax]\nkeyword = { fg = 0xff0000 }\nfoo = { fg = 1, italic = true }",
+        ))
+        .unwrap();
+        assert_eq!(s.theme.syntax["keyword"].fg, Some(0xff0000));
+        assert_eq!(s.theme.syntax["string"], bundled.syntax["string"]);
+        assert!(s.theme.syntax["foo"].italic);
+    }
+
+    #[test]
+    fn the_theme_key_picks_a_table_merged_over_default() {
+        let s = Settings::parse(Some(
+            "theme = \"mine\"\n[themes.mine.faces]\ndefault = { bg = 1 }",
+        ))
+        .unwrap();
+        let bundled = Settings::default().theme;
+        assert_eq!(s.theme.background(), 1);
+        assert_eq!(s.theme.foreground(), bundled.foreground());
+        assert_eq!(s.theme.ansi, bundled.ansi);
+        let name = FaceName::SessionBlock;
+        assert_eq!(s.theme.face(name), bundled.face(name));
+    }
+
+    #[test]
+    fn every_face_is_bundled_and_read_by_name() {
+        let names = [
+            "default",
+            "cursor",
+            "echo",
+            "separator",
+            "mode-line",
+            "mode-line-inactive",
+            "mode-line-dim",
+            "workspace-bar",
+            "workspace-current",
+            "divider",
+            "line-number",
+            "line-number-current",
+            "hl-line",
+            "region",
+            "match",
+            "match-current",
+            "completion-match",
+            "completion-selected",
+            "annotation",
+            "prompt",
+            "directory",
+            "grep-file",
+            "grep-line-number",
+            "vcs-branch",
+            "status-modified",
+            "status-waiting",
+            "status-running",
+            "status-failed",
+            "status-info",
+            "session-user",
+            "session-thought",
+            "session-block",
+            "session-code",
+            "diff-added",
+            "diff-removed",
+            "diff-hunk",
+            "key-hint",
+            "permission",
+            "link",
+            "attachment",
+            "message-at-point",
+        ];
+        let theme = Settings::default().theme;
+        assert_eq!(theme.faces.len(), names.len());
+        // A theme can't unset what it inherits, and inline code sits on whatever is under it.
+        assert_eq!(theme.face(FaceName::SessionCode).bg, None);
+        for name in names {
+            let parsed = toml::Value::String(name.into()).try_into().unwrap();
+            assert!(theme.faces.contains_key(&parsed), "{name}");
+        }
+    }
+
+    #[test]
+    fn faces_stack_with_unset_attributes_taking_what_is_under() {
+        let s = Settings::parse(Some(
+            "[themes.default.faces]\nstatus-failed = { fg = 7 }\nmode-line = { fg = 8, bg = 9 }",
+        ))
+        .unwrap();
+        let (bar, failed) = (
+            FaceRef::Face(FaceName::ModeLine),
+            FaceRef::Face(FaceName::StatusFailed),
         );
+        let face = s.theme.resolve(&[bar, failed, FaceRef::Bold]);
+        assert_eq!((face.fg, face.bg, face.bold), (Some(7), Some(9), true));
     }
 
     #[test]
@@ -206,7 +403,15 @@ mod tests {
         for (user, needle) in [
             ("font_size = \"big\"", "font_size"),
             ("font_sise = 16", "font_sise"),
-            ("[theme]\nbackgrund = 1", "backgrund"),
+            ("theme = \"nope\"", "nope"),
+            ("[theme]\nbackground = 1", "theme"),
+            ("[themes.other.faces]\nmode-lin = { fg = 1 }", "mode-lin"),
+            (
+                "[themes.other.faces]\nregion = { background = 1 }",
+                "background",
+            ),
+            ("[themes.other.syntax]\nkeyword = 1", "themes.other"),
+            ("[themes.other]\nbackground = 1", "background"),
             ("font_size = 0", "outside"),
             ("font_size = ", ""),
             ("max_watched_files = -1", "max_watched_files"),
