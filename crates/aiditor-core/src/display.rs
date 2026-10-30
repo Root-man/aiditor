@@ -1,7 +1,7 @@
 //! The display model: what the core shows for a window, for the frontend to draw.
 
 use crate::buffer::{Buffer, Decoration, Face, Prop};
-use crate::settings::Settings;
+use crate::settings::{FaceName, Settings};
 use std::ops::Range;
 
 #[derive(Debug, PartialEq)]
@@ -345,23 +345,21 @@ pub fn build(
             continue;
         }
         let i = syntax.partition_point(|(range, _)| range.end < pos);
-        let mut face = Face {
-            fg: (syntax.get(i)).and_then(|(range, color)| (range.start < pos).then_some(*color)),
-            ..Face::default()
-        };
+        let mut face = (syntax.get(i))
+            .filter(|(range, _)| range.start < pos)
+            .map_or(Face::default(), |(_, face)| *face);
         for (range, prop) in &props {
-            if let Prop::Face(f) = prop
-                && range.contains(&(pos - 1))
-            {
-                face.fg = f.fg.or(face.fg);
-                face.bg = f.bg.or(face.bg);
-                face.bold |= f.bold;
-                face.italic |= f.italic;
-                face.underline |= f.underline;
+            if !range.contains(&(pos - 1)) {
+                continue;
+            }
+            match prop {
+                Prop::Face(f) => face = f.over(face),
+                Prop::Named(refs) => face = settings.theme.resolve(refs).over(face),
+                _ => {}
             }
         }
         if region.as_ref().is_some_and(|r| r.contains(&(pos - 1))) {
-            face.bg = Some(settings.theme.region);
+            face = settings.theme.face(FaceName::Region).over(face);
         }
         match line.spans.last_mut() {
             Some(span) if span.face == face && !span.fold => span.text.push(c),
@@ -373,10 +371,7 @@ pub fn build(
         }
     }
     if let Some(wrap) = wrap {
-        let marker = Face {
-            fg: settings.theme.syntax.get("comment").copied(),
-            ..Face::default()
-        };
+        let marker = crate::syntax::face(&settings.theme.syntax, "comment").unwrap_or_default();
         lines = wrap_lines(lines, &mut cursor, rows, wrap, marker);
     }
     let (l, c) = buffer.line_col(point).unwrap_or_default();
@@ -478,6 +473,7 @@ fn wrap_lines(
 mod tests {
     use crate::buffer::{Decoration, Face, Prop};
     use crate::harness::Harness;
+    use crate::settings::{FaceName, Settings};
 
     const RED: Face = Face {
         fg: Some(0xff0000),
@@ -565,7 +561,11 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.keys("a RET b RET c RET d RET e");
         prop(&mut h, 3..7, Prop::Invisible("…".into()));
-        prop(&mut h, 6..7, Prop::Line(Decoration::Rule(0x888888)));
+        prop(
+            &mut h,
+            6..7,
+            Prop::Line(Decoration::Rule(FaceName::SessionThought)),
+        );
         insta::assert_debug_snapshot!(h.display(5));
     }
 
@@ -621,8 +621,16 @@ mod tests {
     fn decorations_cover_the_lines_they_touch() {
         let mut h = Harness::new(&[]);
         h.keys("a RET b RET c RET d");
-        prop(&mut h, 2..5, Prop::Line(Decoration::Background(0x222222)));
-        prop(&mut h, 6..7, Prop::Line(Decoration::Rule(0x888888)));
+        prop(
+            &mut h,
+            2..5,
+            Prop::Line(Decoration::Background(FaceName::SessionBlock)),
+        );
+        prop(
+            &mut h,
+            6..7,
+            Prop::Line(Decoration::Rule(FaceName::SessionThought)),
+        );
         let decorations: Vec<_> = h
             .display(4)
             .lines
@@ -633,9 +641,9 @@ mod tests {
             decorations,
             [
                 vec![],
-                vec![Decoration::Background(0x222222)],
-                vec![Decoration::Background(0x222222)],
-                vec![Decoration::Rule(0x888888)],
+                vec![Decoration::Background(FaceName::SessionBlock)],
+                vec![Decoration::Background(FaceName::SessionBlock)],
+                vec![Decoration::Rule(FaceName::SessionThought)],
             ]
         );
     }
@@ -644,7 +652,7 @@ mod tests {
     fn region_between_point_and_mark() {
         let mut h = Harness::new(&[]);
         h.keys("hello <left> <left>");
-        let region = Some(h.core.settings().theme.region);
+        let region = h.core.settings().theme.face(FaceName::Region).bg;
         let spans = |h: &mut Harness| {
             let line = h.display(1).lines.remove(0);
             line.spans
@@ -674,6 +682,16 @@ mod tests {
         insta::assert_debug_snapshot!(h.display(1).lines);
     }
 
+    #[test]
+    fn syntax_entries_are_whole_faces() {
+        let mut h = Harness::new(&[("a.js", "// x")]);
+        let settings = "[themes.default.syntax]\ncomment = { fg = 7, italic = true }";
+        h.core.settings = Settings::parse(Some(settings)).unwrap();
+        h.open("a.js");
+        let face = h.display(1).lines.remove(0).spans[0].face;
+        assert_eq!((face.fg, face.italic), (Some(7), true));
+    }
+
     /// Each span of the first `rows` lines, as (text, foreground).
     fn colors(h: &mut Harness, rows: usize) -> Vec<(String, Option<u32>)> {
         (h.display(rows).lines.into_iter())
@@ -687,7 +705,7 @@ mod tests {
         let mut h = Harness::new(&[("a.js", "if (x) f(1);")]);
         h.open("a.js");
         let syntax = h.core.settings().theme.syntax.clone();
-        let c = |name: &str| Some(syntax[name]);
+        let c = |name: &str| syntax[name].fg;
         let code = vec![
             ("if".into(), c("keyword")),
             (" (".into(), None),
@@ -720,8 +738,8 @@ mod tests {
         let theme = h.core.settings().theme.clone();
         let spans = h.display(1).lines.remove(0).spans;
         let faces: Vec<_> = spans.iter().map(|s| (s.face.fg, s.face.bg)).collect();
-        let keyword = Some(theme.syntax["keyword"]);
-        assert_eq!(faces[0], (keyword, Some(theme.region)));
+        let keyword = theme.syntax["keyword"].fg;
+        assert_eq!(faces[0], (keyword, theme.face(FaceName::Region).bg));
     }
 
     #[test]
@@ -731,7 +749,7 @@ mod tests {
         h.open("a.js").keys("M->");
         assert_eq!(h.display(3).lines[0].number, 998);
         let syntax = &h.core.settings().theme.syntax;
-        let (keyword, variable) = (Some(syntax["keyword"]), Some(syntax["variable"]));
+        let (keyword, variable) = (syntax["keyword"].fg, syntax["variable"].fg);
         let line = [
             ("let".into(), keyword),
             (" ".into(), None),
@@ -789,7 +807,7 @@ mod tests {
         let text = format!("let s = \"{}\"; let t;", "x".repeat(1000));
         let mut h = Harness::new(&[("a.js", &text)]);
         h.open("a.js");
-        let string = Some(h.core.settings().theme.syntax["string"]);
+        let string = h.core.settings().theme.syntax["string"].fg;
         let d = super::build(
             h.core.current(),
             0,

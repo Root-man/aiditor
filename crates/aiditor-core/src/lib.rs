@@ -707,10 +707,7 @@ impl Ctx<'_> {
             }
             Msg::SettingsLoaded(text) => {
                 match text.and_then(|text| Settings::parse(text.as_deref())) {
-                    Ok(settings) => {
-                        self.core.retheme_sessions(&settings.theme);
-                        self.core.settings = settings;
-                    }
+                    Ok(settings) => self.core.settings = settings,
                     Err(err) => self.core.report(format!("settings: {err}")),
                 }
             }

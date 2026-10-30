@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
+use aiditor_core::settings::FaceName;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
 use aiditor_services::{
     agents, configuration, environment, files, grep, recovery, terminal, watcher,
@@ -290,6 +291,10 @@ impl Render for Editor {
         let frame = self.core.frame();
         let settings = self.core.settings();
         let theme = &settings.theme;
+        let cursor_fg = theme
+            .face(FaceName::Cursor)
+            .fg
+            .unwrap_or(theme.background());
         let line_height = px(settings.line_height());
         window.set_window_title(&frame.title);
         let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
@@ -328,18 +333,22 @@ impl Render for Editor {
                     .left(x)
                     .w(width)
                     .h(line_height)
-                    .bg(rgb(theme.cursor))
-                    .text_color(rgb(theme.background))
+                    .bg(rgb(theme.cursor()))
+                    .text_color(rgb(cursor_fg))
                     .child(under.to_string());
                 let prompt = line().relative().child(text).child(cursor);
                 let padding = (mb.candidates.len()..mb.rows).map(|_| line());
+                let selected = theme
+                    .face(FaceName::CompletionSelected)
+                    .bg
+                    .unwrap_or(theme.background());
                 let rows = mb.candidates.into_iter().zip(mb.annotations).enumerate();
                 let candidates = rows.map(|(i, (c, note))| {
                     let note =
                         (!note.is_empty()).then(|| div().ml(cell * 2.).opacity(0.6).child(note));
                     let row = line().flex().child(c).children(note);
                     match Some(i) == mb.selected {
-                        true => row.bg(rgb(theme.region)),
+                        true => row.bg(rgb(selected)),
                         false => row,
                     }
                 });
@@ -347,6 +356,11 @@ impl Render for Editor {
             }
             None => div().child(line().child(message)),
         };
+        let bar = theme.face(FaceName::WorkspaceBar);
+        let separator = theme
+            .face(FaceName::Separator)
+            .fg
+            .unwrap_or(theme.foreground());
         let root = div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -357,8 +371,8 @@ impl Render for Editor {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(rgb(theme.background))
-            .text_color(rgb(theme.foreground))
+            .bg(rgb(theme.background()))
+            .text_color(rgb(theme.foreground()))
             .font_family(font.family.clone())
             .text_size(px(settings.font_size))
             .children(stats.map(|s| line().child(s)))
@@ -370,9 +384,10 @@ impl Render for Editor {
                     .mx(px(-8.))
                     .px(px(8.))
                     .debug_selector(|| "workspace-modeline".into())
-                    .bg(rgb(theme.mode_line_inactive))
+                    .bg(rgb(bar.bg.unwrap_or(theme.background())))
+                    .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
                     .child(div().font_weight(FontWeight::BOLD).child(frame.project))
-                    .child(div().text_color(rgb(theme.dim)).child(" › "))
+                    .child(div().text_color(rgb(separator)).child(" › "))
                     .child(frame.workspace),
             )
             .child(div().flex_1().flex().overflow_hidden().child(FrameElement {
