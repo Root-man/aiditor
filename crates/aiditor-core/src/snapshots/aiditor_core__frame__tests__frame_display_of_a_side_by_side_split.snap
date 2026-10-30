@@ -63,6 +63,7 @@ FrameDisplay {
                 mode_line: "-- a.txt  2:0 [unwatched]",
                 terminal: None,
             },
+            gutter: None,
         },
         FrameWindow {
             id: WindowId(
@@ -123,6 +124,7 @@ FrameDisplay {
                 mode_line: "-- a.txt  1:0 [unwatched]",
                 terminal: None,
             },
+            gutter: None,
         },
     ],
     message: None,

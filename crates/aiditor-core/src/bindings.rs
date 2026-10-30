@@ -122,7 +122,6 @@ mod tests {
     use crate::harness::MS;
     use crate::harness::bind_mode;
     use crate::harness::buffer;
-    use crate::settings::Settings;
 
     #[test]
     fn c_x_then_another_key_does_nothing() {
@@ -213,10 +212,11 @@ mod tests {
     #[test]
     fn unreadable_settings_file_is_reported() {
         let mut h = Harness::new(&[]);
+        let before = h.core.settings().clone();
         h.core
             .handle(h.now, Msg::SettingsLoaded(Err("permission denied".into())));
         assert_eq!(h.core.message(), Some("settings: permission denied"));
-        assert_eq!(h.core.settings(), &Settings::default());
+        assert_eq!(h.core.settings(), &before);
     }
 
     /// Registers `one`, `two` and `three`, which each fail with their name so it shows on the

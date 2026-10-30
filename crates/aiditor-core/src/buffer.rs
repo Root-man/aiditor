@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use ropey::Rope;
 use serde::Deserialize;
 
-use crate::settings::FaceName;
+use crate::settings::{FaceName, LineNumbers};
 use crate::syntax::{self, Syntax};
 use crate::terminal::{ShellCommand, Terminal};
 use crate::workspace::WorkspaceId;
@@ -122,6 +122,7 @@ impl Buffers {
             conflict_asked: false,
             read_only: false,
             truncate_lines: false,
+            line_numbers: None,
             unkillable: false,
             modified: false,
             tick: 0,
@@ -278,6 +279,8 @@ pub struct Buffer {
     pub read_only: bool,
     /// Long lines are cut at the window edge instead of wrapping, as Emacs's `truncate-lines`.
     pub truncate_lines: bool,
+    /// `display-line-numbers-mode`'s choice for this buffer; `None` follows the setting.
+    pub line_numbers: Option<bool>,
     /// `kill-buffer` refuses it; killing its workspace still kills it.
     pub unkillable: bool,
     modified: bool,
@@ -403,6 +406,15 @@ impl Buffer {
         // The minibuffer is one line, so it always truncates.
         let truncate = self.truncate_lines || self.major_mode == "minibuffer-mode";
         (!truncate && cols >= 2).then(|| (cols - 1, word))
+    }
+
+    /// How this buffer's lines are numbered under the `line_numbers` setting; only files are.
+    pub(crate) fn line_numbers(&self, setting: LineNumbers) -> LineNumbers {
+        match (self.file.is_some(), self.line_numbers, setting) {
+            (false, _, _) | (_, Some(false), _) => LineNumbers::Off,
+            (_, Some(true), LineNumbers::Off) => LineNumbers::Absolute,
+            _ => setting,
+        }
     }
 
     pub fn text(&self) -> &Rope {

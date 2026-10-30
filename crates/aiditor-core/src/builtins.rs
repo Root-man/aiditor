@@ -3,6 +3,7 @@
 use crate::Core;
 use crate::command::{ArgSpec, Args, Command, Prefix, Preview};
 use crate::key::{Key, KeyCode};
+use crate::settings::LineNumbers;
 
 /// Completes the first prompt over the projects' names and leaves the others free.
 fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
@@ -204,6 +205,24 @@ pub(crate) fn builtins() -> Vec<Command> {
                     "disabled"
                 };
                 ctx.core.echo(format!("Truncate long lines {state}"));
+                Ok(())
+            },
+        },
+        Command {
+            name: "display-line-numbers-mode",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| {
+                let setting = ctx.core.settings().line_numbers;
+                let buffer = ctx.core.current_mut();
+                if buffer.file.is_none() {
+                    return Err("Line numbers need a file buffer".into());
+                }
+                let hidden = buffer.line_numbers(setting) == LineNumbers::Off;
+                buffer.line_numbers = Some(hidden);
+                let state = if hidden { "enabled" } else { "disabled" };
+                ctx.core.echo(format!(
+                    "Display-Line-Numbers mode {state} in current buffer"
+                ));
                 Ok(())
             },
         },

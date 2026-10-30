@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
-use aiditor_core::display::{CursorShape, FrameWindow, Line, Rect, Terminal};
+use aiditor_core::display::{CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, Terminal};
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
@@ -17,6 +17,8 @@ use crate::editor::Editor;
 pub(crate) struct Painted {
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) selected: bool,
+    /// Where its text starts, past the gutter, from the window's left.
+    pub(crate) text_x: Pixels,
     pub(crate) rows: Vec<Row>,
     /// A terminal's runs, each placed on its grid column.
     pub(crate) cells: Vec<Cells>,
@@ -40,6 +42,8 @@ pub(crate) struct Row {
     pub(crate) top: Pixels,
     pub(crate) height: Pixels,
     decorations: Vec<Decoration>,
+    /// Its label in the gutter, if the window has one, and the label's x from the window's left.
+    pub(crate) number: Option<(Pixels, ShapedLine)>,
     pub(crate) text: ShapedLine,
 }
 
@@ -117,6 +121,7 @@ impl Element for FrameElement {
             let line_height = px(settings.line_height());
             let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
                 let bounds = to_bounds(w.rect, bounds.origin);
+                let text_x = px(w.gutter.as_ref().map_or(0., |g| g.width));
                 let mut top = px(0.);
                 let mut cursor = None;
                 let mut cursor_char = None;
@@ -129,7 +134,7 @@ impl Element for FrameElement {
                     let text = shape(text, &runs);
                     if at.is_some() {
                         let (x, width, under) = block(&text, byte, cell);
-                        let origin = bounds.origin + point(x, top);
+                        let origin = bounds.origin + point(text_x + x, top);
                         cursor = Some(Bounds::new(origin, gpui::size(width, height)));
                         let face = Face {
                             fg: settings.theme.face(FaceName::Cursor).fg,
@@ -138,10 +143,17 @@ impl Element for FrameElement {
                         let run = text_run(under.len(), face, false, &font, &settings.theme);
                         cursor_char = Some(shape(under.to_string(), &[run]));
                     }
+                    let number = w.gutter.as_ref().map(|g| {
+                        let (label, face) = &g.rows[i];
+                        let run = text_run(label.len(), *face, false, &font, &settings.theme);
+                        let label = shape(label.clone(), &[run]);
+                        (text_x - px(GUTTER_RIGHT) - label.width, label)
+                    });
                     let row = Row {
                         top,
                         height,
                         decorations: line.decorations.clone(),
+                        number,
                         text,
                     };
                     top += height;
@@ -226,6 +238,7 @@ impl Element for FrameElement {
                 Painted {
                     bounds,
                     selected: w.selected,
+                    text_x,
                     rows,
                     mode_line: shape(w.display.mode_line, &[run]),
                     cells,
@@ -277,6 +290,12 @@ impl Element for FrameElement {
                             window.paint_quad(fill(bounds, rgb(color)));
                         }
                     }
+                    if let Some((x, number)) = &row.number {
+                        let at = origin + point(*x, px(0.));
+                        number.paint_background(at, row.height, window, cx).ok();
+                        number.paint(at, row.height, window, cx).ok();
+                    }
+                    let origin = origin + point(p.text_x, px(0.));
                     row.text
                         .paint_background(origin, row.height, window, cx)
                         .ok();

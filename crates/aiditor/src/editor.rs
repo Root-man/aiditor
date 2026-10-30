@@ -1126,13 +1126,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_line_number_ends_before_the_text_and_the_toggle_takes_it_away(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "a\nb");
+        let gutter = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |e, _| {
+                let p = &e.painted[0];
+                let number = p.rows[0].number.as_ref();
+                let right = number.map(|(x, n)| *x + n.width);
+                let number = number.map(|(_, n)| n.text.to_string());
+                let cursor = p.cursor.unwrap().left() - p.bounds.left();
+                (number, right, p.text_x, cursor)
+            })
+        };
+        let (number, right, text_x, cursor) = gutter(cx);
+        assert_eq!(number.as_deref(), Some("1"));
+        assert!(text_x > px(22.), "10 px, a digit and 12 px");
+        assert_eq!(right, Some(text_x - px(12.)), "12 px before the text");
+        assert_eq!(cursor, text_x, "the cursor sits on the text");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("display-line-numbers-mode");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (number, _, text_x, cursor) = gutter(cx);
+        assert_eq!((number, text_x, cursor), (None, px(0.), px(0.)));
+    }
+
+    #[gpui::test]
     fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "hello world");
         let cursor = |cx: &mut VisualTestContext| {
             let (bounds, rows) = painted(&editor, cx, 0);
-            let x = editor.read_with(cx, |e, _| e.painted[0].cursor.unwrap().left());
-            (rows[0].clone(), x - bounds.left())
+            let (x, text_x) = editor.read_with(cx, |e, _| {
+                let p = &e.painted[0];
+                (p.cursor.unwrap().left(), p.text_x)
+            });
+            (rows[0].clone(), x - bounds.left() - text_x)
         };
         for col in [0, 3, 7] {
             cx.simulate_keystrokes(&format!("ctrl-a ctrl-u {col} ctrl-f"));

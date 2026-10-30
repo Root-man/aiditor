@@ -1,7 +1,7 @@
 //! The display model: what the core shows for a window, for the frontend to draw.
 
 use crate::buffer::{Buffer, Decoration, Face, Prop};
-use crate::settings::{FaceName, Settings};
+use crate::settings::{FaceName, LineNumbers, Settings, Theme};
 use std::ops::Range;
 
 #[derive(Debug, PartialEq)]
@@ -102,6 +102,16 @@ pub struct FrameWindow {
     pub rect: Rect,
     pub selected: bool,
     pub display: WindowDisplay,
+    pub gutter: Option<Gutter>,
+}
+
+/// A window's line numbers, drawn in the width its text leaves.
+#[derive(Debug, PartialEq)]
+pub struct Gutter {
+    /// In px; the text starts after it.
+    pub width: f32,
+    /// A label and its face for each of the window's display lines.
+    pub rows: Vec<(String, Face)>,
 }
 
 /// The which-key hint shown while a prefix waits: the pending keys and what can follow them.
@@ -138,6 +148,44 @@ pub struct Wrap {
     pub width: usize,
     pub word: bool,
     pub from: usize,
+}
+
+/// The px between a gutter's left edge and its digits, and between them and the text.
+const GUTTER_LEFT: f32 = 10.;
+pub const GUTTER_RIGHT: f32 = 12.;
+
+/// The width of a gutter for a buffer of `lines` lines in `cell` px cells.
+pub(crate) fn gutter_width(lines: usize, cell: f32) -> f32 {
+    GUTTER_LEFT + lines.to_string().len() as f32 * cell + GUTTER_RIGHT
+}
+
+/// The gutter of `lines` with point on buffer line `point`. Rows of a wrapped line share its
+/// number, and `continued` says the first row is not its line's first.
+pub(crate) fn gutter(
+    lines: &[Line],
+    style: LineNumbers,
+    width: f32,
+    point: usize,
+    continued: bool,
+    theme: &Theme,
+) -> Gutter {
+    let mut previous = lines.first().filter(|_| continued).map(|l| l.number);
+    let rows = (lines.iter())
+        .map(|line| {
+            let n = line.number;
+            let (label, face) = if previous.replace(n) == Some(n) {
+                ("↪".to_string(), FaceName::LineNumber)
+            } else if n == point {
+                ((n + 1).to_string(), FaceName::LineNumberCurrent)
+            } else if style == LineNumbers::Relative {
+                (n.abs_diff(point).to_string(), FaceName::LineNumber)
+            } else {
+                ((n + 1).to_string(), FaceName::LineNumber)
+            };
+            (label, theme.face(face))
+        })
+        .collect();
+    Gutter { width, rows }
 }
 
 /// Where each visual row of a line of `len` chars starts, `width` chars to a row. At words a row

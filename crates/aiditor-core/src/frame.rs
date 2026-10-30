@@ -1,7 +1,7 @@
 //! Windows and the frame's display model.
 
 use crate::buffer::{BufferId, Buffers};
-use crate::settings::Settings;
+use crate::settings::{LineNumbers, Settings};
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx, display};
 
@@ -122,9 +122,22 @@ impl Core {
                         .get_mut(&id)
                         .expect("tree windows are live"),
                 };
-                let cols = (rect.width / cell_width) as usize;
                 let (buffers, settings) = (&mut self.buffers, &self.settings);
+                let buffer = buffers.get(window.buffer()).expect("window buffer is live");
+                let style = buffer.line_numbers(settings.line_numbers);
+                let width = display::gutter_width(buffer.len_lines(), cell_width);
+                // A window too narrow for it keeps its one column of text.
+                let numbered = style != LineNumbers::Off && rect.width - width > cell_width;
+                let text = rect.width - if numbered { width } else { 0. };
+                let cols = (text / cell_width) as usize;
                 let mut display = window_display(window, buffers, settings, rect.height, cols);
+                let gutter = numbered.then(|| {
+                    let buffer = buffers.get(window.buffer()).expect("window buffer is live");
+                    let (point, _) = buffer.line_col(window.point(buffers)).unwrap_or_default();
+                    let continued = window.top_row() > 0;
+                    let lines = &display.lines;
+                    display::gutter(lines, style, width, point, continued, &settings.theme)
+                });
                 if unwatched
                     && buffers
                         .get(window.buffer())
@@ -137,6 +150,7 @@ impl Core {
                     rect,
                     selected,
                     display,
+                    gutter,
                 }
             })
             .collect();
@@ -269,11 +283,13 @@ fn fit_names(project: &str, workspace: &str, cols: usize) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    use crate::Msg;
     use crate::display::FrameDisplay;
     use crate::display::FrameWindow;
     use crate::harness::Harness;
     use crate::harness::ask;
     use crate::harness::on;
+    use crate::settings::{FaceName, Settings};
 
     /// Each window's (id, point), in tree order, and the selected id.
     fn windows(h: &Harness) -> (Vec<(usize, usize)>, usize) {
@@ -735,5 +751,144 @@ mod tests {
         };
         assert_eq!(heights(&mut h, 10.), [5., 5.]);
         assert_eq!(heights(&mut h, 7.2), [4., 3.2]);
+    }
+
+    /// `files` with `line_numbers` set to `style`.
+    fn numbered(files: &[(&str, &str)], style: &str) -> Harness {
+        let mut h = Harness::new(files);
+        let settings = format!("line_numbers = \"{style}\"");
+        h.core.settings = Settings::parse(Some(&settings)).unwrap();
+        h
+    }
+
+    /// The first window's gutter labels in a frame `width` px wide, the current line's starred.
+    fn labels(h: &mut Harness, width: f32) -> Vec<String> {
+        let current = h.core.settings().theme.face(FaceName::LineNumberCurrent);
+        let window = h.frame(width, 600.).windows.remove(0);
+        (window.gutter.map_or(Vec::new(), |g| g.rows).into_iter())
+            .map(|(label, face)| match face == current {
+                true => format!("{label}*"),
+                false => label,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_gutter_numbers_a_files_lines_from_one() {
+        let mut h = numbered(&[("a.txt", "a\nb\nc")], "absolute");
+        h.open("a.txt").keys("C-n");
+        assert_eq!(labels(&mut h, 800.), ["1", "2*", "3"]);
+    }
+
+    #[test]
+    fn relative_numbers_count_from_points_line_which_keeps_its_own() {
+        let mut h = numbered(&[("a.txt", "a\nb\nc\nd\ne")], "relative");
+        h.open("a.txt").keys("C-n C-n");
+        assert_eq!(labels(&mut h, 800.), ["2", "1", "3*", "1", "2"]);
+    }
+
+    #[test]
+    fn only_file_buffers_have_a_gutter_and_off_turns_it_off() {
+        let mut h = numbered(&[("a.txt", "a")], "absolute");
+        assert_eq!(labels(&mut h, 800.), [] as [String; 0], "*scratch*");
+        let mut h = numbered(&[("a.txt", "a")], "off");
+        h.open("a.txt");
+        assert_eq!(labels(&mut h, 800.), [] as [String; 0]);
+    }
+
+    #[test]
+    fn the_command_toggles_one_buffer_over_the_setting() {
+        let mut h = numbered(&[("a.txt", "a"), ("b.txt", "b")], "absolute");
+        h.open("b.txt").open("a.txt");
+        h.keys("M-x display-line-numbers-mode RET");
+        let off = "Display-Line-Numbers mode disabled in current buffer";
+        assert_eq!(h.core.message(), Some(off));
+        assert!(labels(&mut h, 800.).is_empty());
+        h.open("b.txt");
+        assert_eq!(
+            labels(&mut h, 800.),
+            ["1*"],
+            "the other buffer keeps its own"
+        );
+
+        let mut h = numbered(&[("a.txt", "a\nb")], "off");
+        h.open("a.txt").keys("M-x display-line-numbers-mode RET");
+        let on = "Display-Line-Numbers mode enabled in current buffer";
+        assert_eq!(h.core.message(), Some(on));
+        assert_eq!(labels(&mut h, 800.), ["1*", "2"], "absolute over off");
+
+        let mut h = numbered(&[("a.txt", "a\nb")], "relative");
+        h.open("a.txt");
+        h.keys("M-x display-line-numbers-mode RET M-x display-line-numbers-mode RET");
+        assert_eq!(
+            labels(&mut h, 800.),
+            ["1*", "1"],
+            "toggling back keeps the style"
+        );
+
+        h.keys("C-x b *scratch* RET M-x display-line-numbers-mode RET");
+        assert_eq!(h.core.message(), Some("Line numbers need a file buffer"));
+    }
+
+    #[test]
+    fn the_setting_reaches_buffers_that_were_not_toggled() {
+        let mut h = numbered(&[("a.txt", "a\nb")], "absolute");
+        h.open("a.txt").keys("C-n");
+        let settings = "line_numbers = \"relative\"".to_string();
+        h.send(Msg::SettingsLoaded(Ok(Some(settings))));
+        assert_eq!(labels(&mut h, 800.), ["1", "2*"]);
+    }
+
+    #[test]
+    fn wrapped_rows_show_a_marker_and_text_wraps_beside_the_gutter() {
+        let mut h = numbered(&[("a.rs", "abcdefghijklmn\nb")], "absolute");
+        // 30 px of gutter leaves 10 of 110 px's columns, 9 chars to a row.
+        h.open("a.rs");
+        assert_eq!(labels(&mut h, 110.), ["1*", "↪", "2"]);
+        let frame = h.frame(110., 600.);
+        let (window, gutter) = (&frame.windows[0], frame.windows[0].gutter.as_ref());
+        assert_eq!(gutter.unwrap().width, 30.);
+        assert_eq!(window.display.lines[0].spans[0].text, "abcdefghi");
+        assert_eq!(window.display.lines[1].spans[0].text, "jklmn");
+        h.keys("C-n");
+        assert_eq!(
+            labels(&mut h, 110.),
+            ["1*", "↪", "2"],
+            "point on the second row"
+        );
+    }
+
+    #[test]
+    fn a_window_starting_inside_a_line_starts_with_the_marker() {
+        // More rows than the window shows, with point on the last.
+        let text = "x".repeat(9 * 45);
+        let mut h = numbered(&[("a.rs", &text)], "absolute");
+        h.open("a.rs").keys("C-e");
+        let rows = labels(&mut h, 110.);
+        assert!(rows.len() > 1 && rows.iter().all(|l| l == "↪"), "{rows:?}");
+    }
+
+    #[test]
+    fn the_gutter_grows_with_the_line_count() {
+        let mut h = numbered(&[("a.txt", &"\n".repeat(8))], "absolute");
+        h.open("a.txt");
+        let width = |h: &mut Harness| {
+            h.frame(800., 600.).windows[0]
+                .gutter
+                .as_ref()
+                .unwrap()
+                .width
+        };
+        assert_eq!(width(&mut h), 30.);
+        h.keys("RET");
+        assert_eq!(width(&mut h), 38.);
+    }
+
+    #[test]
+    fn a_window_too_narrow_for_it_has_no_gutter() {
+        let mut h = numbered(&[("a.txt", "a")], "absolute");
+        h.open("a.txt");
+        assert!(labels(&mut h, 38.).is_empty(), "one cell left");
+        assert_eq!(labels(&mut h, 39.), ["1*"]);
     }
 }
