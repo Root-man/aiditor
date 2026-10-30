@@ -10,6 +10,27 @@ The spec is [docs/editor.md](docs/editor.md): goals, architecture, data model, s
 
 aiditor leans on the GPUI crate and is partially inspired by Zed. When you need to know how GPUI works, read its source instead of guessing. Zed's code is at `~/Repos/zed`, and GPUI 0.2.2 (the version aiditor uses) is at `~/Repos/zed/crates/gpui`.
 
+## Visual design
+
+The approved designs are on the [aiditor visual direction canvas](https://claude.ai/artifact/VyRd2AK1RfiVhuBx6nA1KP). Follow them for any visual work (epic #343). Frames:
+
+- **1 · Editor:** a file buffer with the line number gutter, point's line, the workspace modeline, the mode line and the echo line.
+- **2 · Splits:** three windows, with active and inactive mode lines and the 1px divider.
+- **3 · Project grep:** hits grouped by file, match highlighting in the previewed buffer, the fixed-width count and the searching state.
+- **4 · find-file:** the `*/16` count, directories in their own face, and annotations for mode bits, size and age.
+- **5 · Terminal:** test output, with the exit status and input mode in the mode line.
+- **6 · Agent session, monospace:** the interactive session buffer: messages, timings, tool-call blocks, the permission request, file chips and the growing prompt.
+- **6b · Session prompt:** `@` references, `/` commands, `agent-attach-file` and folded pastes.
+- **6c · File chips:** the chip's kinds and states, and file links in agent prose.
+- **7 · Agent session, rich:** the M7 direction, with proportional prose and cards.
+- **8 · Welcome dashboard:** the dashboard, also M7.
+- **9 · Mode line study:** the workspace modeline and every buffer type's mode line, where each segment lives, and the rules.
+- **10 · Gruvbox light:** the light theme, with swiper.
+- **11 · Narrow frame:** truncation and the `↪` continuation marker at 900×600.
+- **12 · Faces and spacing:** every named face in both themes, the spacing scale and type sizes.
+
+Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those.
+
 ## GitHub
 
 Use GitHub CLI (gh) to work with git and GitHub.
