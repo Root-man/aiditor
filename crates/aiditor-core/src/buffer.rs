@@ -408,9 +408,15 @@ impl Buffer {
         (!truncate && cols >= 2).then(|| (cols - 1, word))
     }
 
-    /// How this buffer's lines are numbered under the `line_numbers` setting; only files are.
+    /// Whether it can show line numbers: a file, `*scratch*` or `*Messages*`, the only unkillable
+    /// buffers; the design draws no gutter in sessions, terminals or grep.
+    pub(crate) fn numbered(&self) -> bool {
+        self.file.is_some() || self.unkillable
+    }
+
+    /// How this buffer's lines are numbered under the `line_numbers` setting.
     pub(crate) fn line_numbers(&self, setting: LineNumbers) -> LineNumbers {
-        match (self.file.is_some(), self.line_numbers, setting) {
+        match (self.numbered(), self.line_numbers, setting) {
             (false, _, _) | (_, Some(false), _) => LineNumbers::Off,
             (_, Some(true), LineNumbers::Off) => LineNumbers::Absolute,
             _ => setting,

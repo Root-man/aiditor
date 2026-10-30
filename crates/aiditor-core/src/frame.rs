@@ -788,9 +788,13 @@ mod tests {
     }
 
     #[test]
-    fn only_file_buffers_have_a_gutter_and_off_turns_it_off() {
+    fn files_scratch_and_messages_have_a_gutter_and_off_turns_it_off() {
         let mut h = numbered(&[("a.txt", "a")], "absolute");
-        assert_eq!(labels(&mut h, 800.), [] as [String; 0], "*scratch*");
+        assert_eq!(labels(&mut h, 800.), ["1*"], "*scratch*");
+        h.keys("M-x toggle-truncate-lines RET C-x b *Messages* RET");
+        assert!(!labels(&mut h, 800.).is_empty(), "*Messages*");
+        h.keys("C-x b other RET");
+        assert_eq!(labels(&mut h, 800.), [] as [String; 0], "another buffer");
         let mut h = numbered(&[("a.txt", "a")], "off");
         h.open("a.txt");
         assert_eq!(labels(&mut h, 800.), [] as [String; 0]);
@@ -826,8 +830,12 @@ mod tests {
             "toggling back keeps the style"
         );
 
-        h.keys("C-x b *scratch* RET M-x display-line-numbers-mode RET");
-        assert_eq!(h.core.message(), Some("Line numbers need a file buffer"));
+        h.keys("C-x b other RET M-x display-line-numbers-mode RET");
+        assert_eq!(h.core.message(), Some("No line numbers in this buffer"));
+
+        let mut h = numbered(&[], "absolute");
+        h.keys("M-x display-line-numbers-mode RET");
+        assert!(labels(&mut h, 800.).is_empty(), "*scratch* toggles too");
     }
 
     #[test]

@@ -214,8 +214,8 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| {
                 let setting = ctx.core.settings().line_numbers;
                 let buffer = ctx.core.current_mut();
-                if buffer.file.is_none() {
-                    return Err("Line numbers need a file buffer".into());
+                if !buffer.numbered() {
+                    return Err("No line numbers in this buffer".into());
                 }
                 let hidden = buffer.line_numbers(setting) == LineNumbers::Off;
                 buffer.line_numbers = Some(hidden);

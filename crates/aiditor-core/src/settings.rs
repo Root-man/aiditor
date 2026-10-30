@@ -52,7 +52,7 @@ pub struct Settings {
     pub font_size: f32,
     /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
     pub option_as_meta: bool,
-    /// How file buffers number their lines, until a buffer toggles it.
+    /// How files, `*scratch*` and `*Messages*` number their lines, until one toggles it.
     pub line_numbers: LineNumbers,
     pub max_watched_files: usize,
     /// Files project grep searches at once.

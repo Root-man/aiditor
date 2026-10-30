@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Shows line numbers in a gutter beside the text of file buffers, as Emacs's `display-line-numbers-mode`, so a line can be found and named at a glance.
+Shows line numbers in a gutter beside the text of file buffers, `*scratch*` and `*Messages*`, as Emacs's `display-line-numbers-mode`, so a line can be found and named at a glance.
 
 ## ADDED Requirements
 
 ### Requirement: The setting picks the default
-The `line_numbers` setting SHALL be `off`, `absolute` or `relative`, bundled as `absolute`, and SHALL apply to every file buffer that has not been toggled, a reloaded value included. Any other value SHALL be rejected as an invalid setting. Buffers that visit no file SHALL show no gutter.
+The `line_numbers` setting SHALL be `off`, `absolute` or `relative`, bundled as `absolute`, and SHALL apply to every file buffer, `*scratch*` and `*Messages*` that has not been toggled, a reloaded value included. Any other value SHALL be rejected as an invalid setting. All other buffers SHALL show no gutter.
 
 #### Scenario: A file buffer by default
 - **WHEN** a file is opened with no user settings
@@ -17,8 +17,12 @@ The `line_numbers` setting SHALL be `off`, `absolute` or `relative`, bundled as 
 - **WHEN** `line_numbers = "off"` is loaded
 - **THEN** file windows have no gutter
 
-#### Scenario: A buffer with no file
-- **WHEN** `*scratch*` is shown
+#### Scenario: Scratch and Messages
+- **WHEN** `*scratch*` or `*Messages*` is shown with no user settings
+- **THEN** its window has a gutter of absolute numbers
+
+#### Scenario: Another buffer
+- **WHEN** a buffer that visits no file, made with `C-x b`, is shown
 - **THEN** its window has no gutter
 
 #### Scenario: A bad value
@@ -26,7 +30,7 @@ The `line_numbers` setting SHALL be `off`, `absolute` or `relative`, bundled as 
 - **THEN** an error is shown and the previous settings stay in effect
 
 ### Requirement: The command toggles the gutter per buffer
-`display-line-numbers-mode` SHALL hide a shown gutter and show a hidden one for the current file buffer only, echoing `Display-Line-Numbers mode enabled in current buffer` or `disabled`. Shown over `line_numbers = "off"` the numbers SHALL be absolute; otherwise in the setting's style. In a buffer visiting no file it SHALL fail with `Line numbers need a file buffer`.
+`display-line-numbers-mode` SHALL hide a shown gutter and show a hidden one for the current buffer only, if it is one of those, echoing `Display-Line-Numbers mode enabled in current buffer` or `disabled`. Shown over `line_numbers = "off"` the numbers SHALL be absolute; otherwise in the setting's style. In any other buffer it SHALL fail with `No line numbers in this buffer`.
 
 #### Scenario: Toggling one buffer
 - **WHEN** two files are open and the command runs in the first
@@ -40,9 +44,9 @@ The `line_numbers` setting SHALL be `off`, `absolute` or `relative`, bundled as 
 - **WHEN** `line_numbers` is `relative` and the command runs twice
 - **THEN** the buffer shows relative numbers
 
-#### Scenario: Not a file buffer
-- **WHEN** the command runs in `*scratch*`
-- **THEN** it fails with `Line numbers need a file buffer`
+#### Scenario: A buffer that takes no numbers
+- **WHEN** the command runs in a terminal
+- **THEN** it fails with `No line numbers in this buffer`
 
 ### Requirement: Numbers name each line
 In `absolute` style each line SHALL show its number from 1. In `relative` style each line SHALL show its distance in buffer lines from point's line, and point's line its absolute number. A window that shows point's line SHALL draw that number in `line-number-current` and the others in `line-number`, right-aligned in the gutter.
