@@ -361,6 +361,10 @@ The faces are frame 12's 30, with `annotation` raised to `#928374` in dark and `
 | `session-code` | `#8ec07c` | `#427b58` | inline code in sessions |
 | `diff-hunk` | `#83a598` | `#076678` | hunk headers |
 
+**Themes and fonts** (decided in [#345](https://github.com/Root-man/aiditor/issues/345)). Themes are named tables in `settings.toml`, the way agents are: `theme = "gruvbox-dark"` picks one of the `[themes.<name>]` tables, and a name with no table rejects the file like other settings errors. The bundled `themes.default` defines every face and any theme is merged over it, so a theme lists only what it changes. There are no theme files and no `load-theme`: change `theme` and press `C-x C-r`. Only `default` is bundled, and Gruvbox dark and light stay in the user's own `settings.toml`, as above. A theme holds its 16 `ansi` colours, `[themes.<name>.faces]` and `[themes.<name>.syntax]`. A face is an inline table of `fg`, `bg`, `bold`, `italic` and `underline`, `mode-line = { fg = 0xebdbb2, bg = 0x3c3836 }`, so the usual merge lets a user override one attribute of one face. Syntax entries are faces too, with no bare-colour form, because a bare colour replacing a table would silently drop its `italic`: `comment = { fg = 0x928374, italic = true }`. As frame 12 says, Gruvbox has italic comments and no bold in syntax. Session buffers store face names rather than colours, so a theme change can't confuse two faces that share a colour.
+
+Fonts belong to the frame, not the theme: top-level `font_family`, `font_size`, `line_height` (a multiple of the font size, 1.4, which gives 21 at 15) and `workspace_font_size` (13). Mode lines and the echo line are the line height plus 5px, and the workspace modeline is its own line height plus 4px, rounded, which gives the design's 26 and 22. Ligatures are always off, with no setting: the frames draw none, and a code font's `calt` ligatures hide which characters are really there. A font per face stays out until `Decide: rich session and dashboard direction` settles what M7 needs.
+
 **Runtime.** Tokio for the async services, on background threads. The core runs on GPUI's main thread; see below.
 
 ## Core thread and output floods
@@ -401,7 +405,7 @@ The emulator sits behind a terminal interface so it can move later. If typing la
 
 **Projects and workspaces**
 
-- Settings per language and per project (indent width, `.editorconfig`), themes and fonts. (Decided so far: a project file overrides any global setting or binding, VS Code style, [#194](https://github.com/Root-man/aiditor/issues/194).)
+- Settings per language and per project (indent width, `.editorconfig`). (Decided so far: a project file overrides any global setting or binding, VS Code style, [#194](https://github.com/Root-man/aiditor/issues/194).)
 
 ## Testing
 

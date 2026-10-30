@@ -1386,7 +1386,7 @@ milestones:
           - key: m5-ts-font-styles
             title: "Bold and italic syntax faces"
             body: |
-              Let `theme.syntax` entries carry bold and italic as well as a colour, in the form the theme decision chose, and draw them in the display builder.
+              Make each theme's `syntax` entries faces, `comment = { fg = 0x928374, italic = true }`, with no bare-colour form, and draw their bold and italic in the display builder. Update the bundled theme and the user's themes to the new form.
             acceptance:
               - "A theme can make comments italic and keywords bold, and settings.toml can override either"
             blocked_by: [m5-decide-theme]
@@ -1526,19 +1526,23 @@ milestones:
           - key: m5-named-faces
             title: "Named faces in the theme"
             body: |
-              Replace the theme's fixed colour keys with the named faces the approved design lists (the canvas's Faces board): `default`, `cursor`, `echo`, `separator`, `mode-line`, `mode-line-inactive`, `mode-line-dim`, `workspace-bar`, `workspace-current`, `divider`, `line-number`, `line-number-current`, `hl-line`, `region`, `match`, `match-current`, `completion-match`, `completion-selected`, `annotation`, `prompt`, `directory`, `grep-file`, `grep-line-number`, `vcs-branch`, `status-modified`, `status-waiting`, `status-running`, `status-failed`, `status-info`, `session-user`, `session-thought`, `session-block`, `session-code`, `diff-added`, `diff-removed`, `diff-hunk`, `key-hint`, `permission`, `link`, `attachment` and `message-at-point`. Each face has a foreground, a background, bold, italic and underline, in the format the theme decision chose, and an attribute left unset takes what is underneath, so `status-failed` keeps its bar's background in any bar. `dim` becomes `session-thought` and `code_block` becomes `session-block`. The bundled settings define every face, and the code reads faces by name instead of the old keys.
+              Replace the theme's fixed colour keys with the named faces the approved design lists (the canvas's Faces board): `default`, `cursor`, `echo`, `separator`, `mode-line`, `mode-line-inactive`, `mode-line-dim`, `workspace-bar`, `workspace-current`, `divider`, `line-number`, `line-number-current`, `hl-line`, `region`, `match`, `match-current`, `completion-match`, `completion-selected`, `annotation`, `prompt`, `directory`, `grep-file`, `grep-line-number`, `vcs-branch`, `status-modified`, `status-waiting`, `status-running`, `status-failed`, `status-info`, `session-user`, `session-thought`, `session-block`, `session-code`, `diff-added`, `diff-removed`, `diff-hunk`, `key-hint`, `permission`, `link`, `attachment` and `message-at-point`. Each face is an inline table of `fg`, `bg`, `bold`, `italic` and `underline` under `[themes.<name>.faces]`, and an attribute left unset takes what is underneath, so `status-failed` keeps its bar's background in any bar. `dim` becomes `session-thought` and `code_block` becomes `session-block`. The bundled `themes.default` defines every face, and the code reads faces by name instead of the old keys. A `theme` key picks a `[themes.<name>]` table, merged over `default`, so changing it and pressing `C-x C-r` switches themes; there is no `load-theme`. Session buffers store face names instead of colours, replacing the colour remap on reload. The old `[theme]` table is now rejected, so move the Gruvbox block in the user's `settings.toml` to `[themes.gruvbox-dark]` and add `[themes.gruvbox-light]`.
             acceptance:
               - "Every face above is defined in the bundled settings and read by name"
               - "A user file overrides one attribute of one face, and `C-x C-r` applies it"
+              - "Changing `theme` and pressing `C-x C-r` switches themes, session buffers included"
+              - "A `theme` that names no table rejects the settings file like other settings errors"
               - "An unknown face or attribute rejects the settings file like other settings errors"
               - "Spec updated in docs/editor.md"
             blocked_by: [m5-decide-theme]
           - key: m5-frame-chrome
             title: "Frame chrome from the visual design"
             body: |
-              The frame's spacing as the approved design draws it: 12px between text and the frame edge, a 1px `divider` between side-by-side windows and no other borders, 26px mode lines and echo line, and inactive windows' mode lines in `mode-line-inactive` with a 1px rule on top.
+              The frame's spacing as the approved design draws it: 12px between text and the frame edge, a 1px `divider` between side-by-side windows and no other borders, 26px mode lines and echo line, and inactive windows' mode lines in `mode-line-inactive` with a 1px rule on top. Add the `line_height` setting (a multiple of the font size, 1.4) and `workspace_font_size` (13): mode lines and the echo line are the line height plus 5px, the workspace modeline its own line height plus 4px, rounded. Turn ligatures off everywhere with `FontFeatures::disable_ligatures()`, with no setting.
             acceptance:
               - "Display tests cover the edge padding, the divider and the inactive mode line"
+              - "`line_height` and `workspace_font_size` apply on `C-x C-r`, and values out of range reject the settings file"
+              - "`->` and `!=` draw as separate characters in Cascadia Code"
               - "Checked by hand against the design in Gruvbox dark and light"
               - "Spec updated in docs/editor.md"
             blocked_by: [m5-named-faces]
