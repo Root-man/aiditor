@@ -8,6 +8,9 @@ font_size = 14.0
 # macOS: Option as Meta, or false to type special characters and dead keys with it.
 option_as_meta = true
 
+# Line numbers in files, *scratch* and *Messages*: "off", "absolute" or "relative" to point's line.
+line_numbers = "absolute"
+
 # Maximum kept files and directories per watched project; project files can override it.
 max_watched_files = 10000
 

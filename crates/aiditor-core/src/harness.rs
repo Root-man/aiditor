@@ -58,6 +58,8 @@ impl Harness {
         // Named the same whatever `$HOME` is, so scratch names, titles and snapshots don't vary.
         core.rename_workspace("main").unwrap();
         core.projects[0].project.name = "home".into();
+        // Tests count a window's columns; those of the gutter turn it on.
+        core.settings.line_numbers = crate::settings::LineNumbers::Off;
         let mut harness = Harness {
             core,
             dir,

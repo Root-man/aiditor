@@ -52,6 +52,8 @@ pub struct Settings {
     pub font_size: f32,
     /// Option is Meta on macOS; false leaves it for characters and dead keys. Linux's Alt is always Meta.
     pub option_as_meta: bool,
+    /// How files, `*scratch*` and `*Messages*` number their lines, until one toggles it.
+    pub line_numbers: LineNumbers,
     pub max_watched_files: usize,
     /// Files project grep searches at once.
     pub grep_workers: NonZeroUsize,
@@ -65,6 +67,16 @@ pub struct Settings {
     pub theme: Theme,
     /// The agents sessions can start, by name.
     pub agents: BTreeMap<String, Agent>,
+}
+
+/// How a window numbers its lines, as Emacs's `display-line-numbers`.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LineNumbers {
+    Off,
+    Absolute,
+    /// Each line's distance from point's line, which keeps its own number.
+    Relative,
 }
 
 /// How to start an agent: its ACP adapter's command line and environment.
@@ -250,6 +262,7 @@ mod tests {
         assert_eq!(s.font_size, 14.0);
         assert_eq!(s.theme.cursor(), 0xffcc00);
         assert!(s.option_as_meta);
+        assert_eq!(s.line_numbers, LineNumbers::Absolute);
         assert_eq!(s.max_watched_files, 10000);
         assert_eq!(s.grep_workers.get(), 1);
         let s = Settings::parse(Some("grep_workers = 8")).unwrap();
@@ -412,6 +425,7 @@ mod tests {
             ),
             ("[themes.other.syntax]\nkeyword = 1", "themes.other"),
             ("[themes.other]\nbackground = 1", "background"),
+            ("line_numbers = \"sometimes\"", "sometimes"),
             ("font_size = 0", "outside"),
             ("font_size = ", ""),
             ("max_watched_files = -1", "max_watched_files"),

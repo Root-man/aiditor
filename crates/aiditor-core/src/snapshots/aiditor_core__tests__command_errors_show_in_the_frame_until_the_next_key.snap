@@ -33,6 +33,7 @@ FrameDisplay {
                 mode_line: "-- a.txt  1:0 [unwatched]",
                 terminal: None,
             },
+            gutter: None,
         },
     ],
     message: Some(
