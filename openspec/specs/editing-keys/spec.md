@@ -21,7 +21,7 @@ A printable key without Ctrl or Meta that no keymap binds SHALL run `self-insert
 - **THEN** the text is four newlines and point is 4
 
 #### Scenario: Negative count
-- **WHEN** `C-- a` is pressed in an empty buffer
+- **WHEN** `M-- a` is pressed in an empty buffer
 - **THEN** the text is empty and the message is `Negative repetition argument -1`
 
 ### Requirement: DEL deletes the character before point
@@ -72,7 +72,7 @@ Without a prefix argument, `delete-backward-char` and `delete-char` SHALL delete
 - **THEN** the text is `bc` and point is 0
 
 #### Scenario: Negative count deletes back
-- **WHEN** in `abc` with point at 3, `C-- 2 C-d` is pressed
+- **WHEN** in `abc` with point at 3, `M-- 2 C-d` is pressed
 - **THEN** the text is `a` and point is 1
 
 #### Scenario: Past the end
