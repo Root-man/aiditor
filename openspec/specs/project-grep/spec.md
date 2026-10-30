@@ -181,3 +181,10 @@ A search SHALL search files on at most the worker count it carries, at least one
 #### Scenario: Limit with workers
 - **WHEN** a search with limit 3 and 4 workers runs over files holding many matching lines
 - **THEN** the core gets exactly the first 3 hits in order and one done message
+
+### Requirement: Streamed hits leave the list in place
+A batch of hits added to the running search SHALL leave the selected hit and the shown rows as they were. Only the new search's first answer SHALL return the selection to the first hit.
+
+#### Scenario: A batch arrives after the selection moved
+- **WHEN** the running search has listed hits, `C-n` is typed and another batch arrives
+- **THEN** the same hit stays selected and the same rows are shown
