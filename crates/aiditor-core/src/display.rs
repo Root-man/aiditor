@@ -73,6 +73,9 @@ pub struct FrameDisplay {
     /// The frame's title: the current buffer's name, with ` *` when it is modified, then
     /// ` | <workspace> | <project>` for the current workspace.
     pub title: String,
+    /// The workspace modeline's project and workspace names, cut to fit the frame's width.
+    pub project: String,
+    pub workspace: String,
 }
 
 /// The open minibuffer: its prompt and one line, the one holding point.
