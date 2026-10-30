@@ -5,6 +5,10 @@ theme = "default"
 
 # font_family = "Menlo"  # unset: Menlo on macOS, Noto Sans Mono on Linux
 font_size = 14.0
+# Line height as a multiple of font_size, 1 to 3.
+line_height = 1.4
+# The workspace modeline's size, 6 to 72. The text-scale commands move it with font_size.
+workspace_font_size = 13.0
 # macOS: Option as Meta, or false to type special characters and dead keys with it.
 option_as_meta = true
 

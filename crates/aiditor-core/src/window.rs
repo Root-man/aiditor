@@ -5,6 +5,8 @@ use crate::display::{self, Rect};
 
 /// How many marks the ring keeps, Emacs's `mark-ring-max`.
 const MARK_RING_MAX: usize = 16;
+/// The px between side-by-side windows.
+const DIVIDER: f32 = 1.;
 
 pub struct Window {
     buffer: BufferId,
@@ -320,8 +322,9 @@ impl Tree {
     }
 
     /// Each leaf's part of `rect`, in `leaves` order, split edges snapped to whole `cell`s
-    /// (width, height); a zero cell side is not snapped.
-    pub fn layout(&self, rect: Rect, cell: (f32, f32)) -> Vec<(WindowId, Rect)> {
+    /// (width, height) with a stacked part's `chrome` px left out of its whole lines, and a
+    /// divider between side-by-side parts; a zero cell side is not snapped.
+    pub fn layout(&self, rect: Rect, cell: (f32, f32), chrome: f32) -> Vec<(WindowId, Rect)> {
         let snap = |v: f32, cell: f32| {
             if cell > 0. {
                 (v / cell).round() * cell
@@ -340,14 +343,18 @@ impl Tree {
                 let (mut a, mut b) = (rect, rect);
                 if *side_by_side {
                     a.width = snap(rect.width * ratio, cell.0);
-                    b.x += a.width;
-                    b.width -= a.width;
+                    b.x += a.width + DIVIDER;
+                    b.width = (b.width - a.width - DIVIDER).max(0.);
                 } else {
-                    a.height = snap(rect.height * ratio, cell.1);
+                    a.height = snap((rect.height * ratio - chrome).max(0.), cell.1) + chrome;
                     b.y += a.height;
-                    b.height -= a.height;
+                    b.height = (b.height - a.height).max(0.);
                 }
-                [first.layout(a, cell), second.layout(b, cell)].concat()
+                [
+                    first.layout(a, cell, chrome),
+                    second.layout(b, cell, chrome),
+                ]
+                .concat()
             }
         }
     }
@@ -373,7 +380,7 @@ mod tests {
         // A frame 10 cells high: halves round to whole cells.
         let cell = (10., 10.);
         let heights: Vec<_> = tree
-            .layout(frame, cell)
+            .layout(frame, cell, 0.)
             .iter()
             .map(|(id, r)| (*id, r.y, r.height))
             .collect();
@@ -382,14 +389,22 @@ mod tests {
             [(w(0), 0., 30.), (w(2), 30., 20.), (w(1), 50., 50.)]
         );
         tree.split(w(1), w(3), true);
-        let lower: Vec<_> = tree.layout(frame, cell)[2..]
+        let lower: Vec<_> = tree.layout(frame, cell, 0.)[2..]
             .iter()
             .map(|(_, r)| (r.x, r.width))
             .collect();
-        assert_eq!(lower, [(0., 40.), (40., 40.)]);
+        assert_eq!(lower, [(0., 40.), (41., 39.)], "1 px for the divider");
         assert_eq!(tree.remove(w(0)), Some(w(2)));
         assert_eq!(tree.leaves(), [w(2), w(1), w(3)]);
-        assert_eq!(tree.layout(frame, cell)[0].1.height, 50.);
+        assert_eq!(tree.layout(frame, cell, 0.)[0].1.height, 50.);
+        let chrome: Vec<_> = (tree.layout(frame, cell, 3.).iter())
+            .map(|(_, r)| (r.y, r.height))
+            .collect();
+        assert_eq!(
+            chrome,
+            [(0., 53.), (53., 47.), (53., 47.)],
+            "whole lines over 3 px"
+        );
         assert_eq!(tree.remove(w(1)), Some(w(3)));
         assert_eq!(tree.remove(w(2)), Some(w(3)));
         assert_eq!(tree.leaves(), [w(3)]);

@@ -17,7 +17,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape as Shape, NamedColor, Pro
 use alacritty_terminal::vte::{Params, Parser, Perform};
 
 use crate::buffer::{Buffer, BufferId, Face, Prop};
-use crate::display::{self, CursorShape, Run};
+use crate::display::{self, CursorShape, Run, TEXT_INSET};
 use crate::key::{Key, KeyCode};
 use crate::settings::Theme;
 use crate::window::WindowId;
@@ -793,16 +793,15 @@ impl Core {
         (self
             .windows
             .tree
-            .layout(frame, (cell_width, line))
+            .layout(frame, (cell_width, line), self.settings.window_chrome())
             .into_iter())
         .map(|(id, rect)| {
             let window = match id == self.windows.selected {
                 true => &self.windows.window,
                 false => &self.windows.others[&id],
             };
-            // Less the mode line, as `window_display` counts.
-            let rows = ((rect.height / line) as u16).saturating_sub(1).max(1);
-            let cols = ((rect.width / cell_width) as u16).max(1);
+            let rows = self.settings.text_rows(rect.height) as u16;
+            let cols = (((rect.width - 2. * TEXT_INSET) / cell_width) as u16).max(1);
             (id, window.buffer(), rows, cols)
         })
         .collect()
@@ -1689,8 +1688,9 @@ mod tests {
         fn the_terminal_follows_its_smallest_window() {
             let mut h = work();
             let line = h.core.settings().line_height();
-            // 80 cells by 25.5 lines: 24 rows under the mode line.
-            h.frame(640., 25.5 * line);
+            // 80 cells between the insets, 24.5 lines under the top padding and over the mode line.
+            let chrome = h.core.settings().window_chrome();
+            h.frame(664., 24.5 * line + chrome);
             h.keys("M-x vterm RET");
             let app = h.path("app");
             assert_eq!(ops(&mut h), [format!("spawn 0 {} 24x80", app.display())]);
@@ -1705,12 +1705,12 @@ mod tests {
                     .size()
             };
             assert_eq!(size(&h), (24, 80));
-            // 13 and 12.5 lines; the lower window's 11 rows win.
+            // The chrome leaves 11 rows in each.
             h.keys("C-x 2");
             assert_eq!(ops(&mut h), ["resize 0 11x80"]);
-            h.frame(320., 25.5 * line);
+            h.frame(344., 24.5 * line + chrome);
             assert_eq!(ops(&mut h), ["resize 0 11x40"]);
-            h.frame(320., 25.5 * line);
+            h.frame(344., 24.5 * line + chrome);
             assert!(ops(&mut h).is_empty());
             assert_eq!(size(&h), (11, 40));
             h.keys("C-x 1");

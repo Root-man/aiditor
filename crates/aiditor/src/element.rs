@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
-use aiditor_core::display::{CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, Terminal};
+use aiditor_core::display::{
+    CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, TEXT_INSET, Terminal, WINDOW_TOP,
+};
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
@@ -22,7 +24,9 @@ pub(crate) struct Painted {
     pub(crate) rows: Vec<Row>,
     /// A terminal's runs, each placed on its grid column.
     pub(crate) cells: Vec<Cells>,
-    mode_line: ShapedLine,
+    /// Its mode line's background and an inactive one's rule, each with its colour.
+    pub(crate) mode_line_fill: Vec<(Bounds<Pixels>, u32)>,
+    pub(crate) mode_line: ShapedLine,
     pub(crate) cursor: Option<Bounds<Pixels>>,
     /// The char under the cursor, shaped in the background color to show through the block.
     cursor_char: Option<ShapedLine>,
@@ -121,8 +125,8 @@ impl Element for FrameElement {
             let line_height = px(settings.line_height());
             let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
                 let bounds = to_bounds(w.rect, bounds.origin);
-                let text_x = px(w.gutter.as_ref().map_or(0., |g| g.width));
-                let mut top = px(0.);
+                let text_x = px(w.gutter.as_ref().map_or(TEXT_INSET, |g| g.width));
+                let mut top = px(WINDOW_TOP);
                 let mut cursor = None;
                 let mut cursor_char = None;
                 let rows = (w.display.lines.iter().enumerate()).map(|(i, line)| {
@@ -164,7 +168,8 @@ impl Element for FrameElement {
                 let mut hollow = false;
                 if let Some(terminal) = &w.display.terminal {
                     let grid = |row: u16, col: u16| {
-                        bounds.origin + point(cell * col as f32, line_height * row as f32)
+                        let text = point(text_x, px(WINDOW_TOP));
+                        bounds.origin + text + point(cell * col as f32, line_height * row as f32)
                     };
                     for (row, runs) in terminal.rows.iter().enumerate() {
                         for r in runs {
@@ -235,11 +240,29 @@ impl Element for FrameElement {
                     &font,
                     &settings.theme,
                 );
+                let height = px(settings.mode_line_height());
+                let bar = Bounds::new(
+                    point(bounds.left(), bounds.bottom() - height),
+                    gpui::size(bounds.size.width, height),
+                );
+                let bar_fill = settings.theme.face(line_face).bg.map(|bg| (bar, bg));
+                let rule = gpui::size(bounds.size.width, px(1.));
+                let rule = Bounds::new(bar.origin, rule);
+                let rule_fill = (!w.selected)
+                    .then(|| {
+                        settings
+                            .theme
+                            .face(FaceName::ModeLine)
+                            .bg
+                            .map(|bg| (rule, bg))
+                    })
+                    .flatten();
                 Painted {
                     bounds,
                     selected: w.selected,
                     text_x,
                     rows,
+                    mode_line_fill: bar_fill.into_iter().chain(rule_fill).collect(),
                     mode_line: shape(w.display.mode_line, &[run]),
                     cells,
                     cursor,
@@ -269,12 +292,18 @@ impl Element for FrameElement {
         let focus = editor.focus.clone();
         let theme = editor.core.settings().theme.clone();
         let line_height = px(editor.core.settings().line_height());
+        let mode_line_height = px(editor.core.settings().mode_line_height());
         window.handle_input(
             &focus,
             ElementInputHandler::new(bounds, self.editor.clone()),
             cx,
         );
+        // Windows tile the area, so the gaps between them are the only divider left showing.
+        if let Some(divider) = theme.face(FaceName::Divider).bg {
+            window.paint_quad(fill(bounds, rgb(divider)));
+        }
         for p in painted.iter() {
+            window.paint_quad(fill(p.bounds, rgb(theme.background())));
             let mask = ContentMask { bounds: p.bounds };
             window.with_content_mask(Some(mask), |window| {
                 let width = p.bounds.size.width;
@@ -319,16 +348,12 @@ impl Element for FrameElement {
                             .ok();
                     }
                 }
-                let origin = point(p.bounds.left(), p.bounds.bottom() - line_height);
-                let face = match p.selected {
-                    true => FaceName::ModeLine,
-                    false => FaceName::ModeLineInactive,
-                };
-                let bounds = Bounds::new(origin, size(width, line_height));
-                if let Some(color) = theme.face(face).bg {
-                    window.paint_quad(fill(bounds, rgb(color)));
+                for (bounds, color) in &p.mode_line_fill {
+                    window.paint_quad(fill(*bounds, rgb(*color)));
                 }
-                p.mode_line.paint(origin, line_height, window, cx).ok();
+                let x = p.bounds.left() + px(TEXT_INSET);
+                let origin = point(x, p.bounds.bottom() - mode_line_height);
+                p.mode_line.paint(origin, mode_line_height, window, cx).ok();
             });
         }
         let painted = std::mem::take(painted);

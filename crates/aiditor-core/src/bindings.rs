@@ -133,6 +133,24 @@ mod tests {
     }
 
     #[test]
+    fn c_x_c_r_applies_the_line_height_and_workspace_font_size() {
+        let text = "line_height = 2\nworkspace_font_size = 12";
+        let mut h = Harness::new(&[("settings.toml", text)]);
+        h.keys("C-x C-r");
+        assert_eq!(h.core.settings().line_height(), 28.);
+        assert_eq!(h.core.settings().workspace_font_size(), 12.);
+        h.read_reply("settings.toml", Some("line_height = 9".as_ref()));
+        h.keys("C-x C-r");
+        assert!(
+            h.core
+                .message()
+                .unwrap()
+                .contains("line_height 9 is outside")
+        );
+        assert_eq!(h.core.settings().line_height(), 28.);
+    }
+
+    #[test]
     fn c_x_c_r_reloads_settings_and_keeps_them_on_error() {
         let mut h = Harness::new(&[("settings.toml", "font_size = 18")]);
         assert_eq!(h.core.settings().font_size, 14.0);
