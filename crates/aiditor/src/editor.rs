@@ -10,8 +10,8 @@ use aiditor_services::{
     agents, configuration, environment, files, grep, recovery, terminal, watcher,
 };
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Font, KeyDownEvent, Pixels, Task, Window, div, font,
-    prelude::*, px, rgb,
+    ClipboardItem, Context, FocusHandle, Font, FontWeight, KeyDownEvent, Pixels, Task, Window, div,
+    font, prelude::*, px, rgb,
 };
 use tokio::sync::mpsc;
 
@@ -362,6 +362,19 @@ impl Render for Editor {
             .font_family(font.family.clone())
             .text_size(px(settings.font_size))
             .children(stats.map(|s| line().child(s)))
+            .child(
+                line()
+                    .flex()
+                    .flex_none()
+                    // Edge to edge across the frame's gap, its text still in line with the windows'.
+                    .mx(px(-8.))
+                    .px(px(8.))
+                    .debug_selector(|| "workspace-modeline".into())
+                    .bg(rgb(theme.mode_line_inactive))
+                    .child(div().font_weight(FontWeight::BOLD).child(frame.project))
+                    .child(div().text_color(rgb(theme.dim)).child(" › "))
+                    .child(frame.workspace),
+            )
             .child(div().flex_1().flex().overflow_hidden().child(FrameElement {
                 editor: cx.entity(),
                 windows: frame.windows,
@@ -517,6 +530,37 @@ mod tests {
         cx.run_until_parked();
         let shown = cx.window_title();
         assert_eq!(shown.as_deref(), Some("*scratch*<w2> | w2 | other"));
+    }
+
+    #[gpui::test]
+    fn the_workspace_modeline_sits_above_the_windows(cx: &mut TestAppContext) {
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_keystrokes("ctrl-x 3");
+        let (tops, line) = editor.read_with(cx, |e, _| {
+            let tops: Vec<_> = e.painted.iter().map(|p| p.bounds.origin.y).collect();
+            (tops, px(e.core.settings().line_height()))
+        });
+        assert_eq!(tops.len(), 2);
+        for top in tops {
+            // Layout rounds to device pixels.
+            assert!(
+                (top - line).abs() < px(1.),
+                "windows start at {top:?}, a line is {line:?}"
+            );
+        }
+        let bar = cx.debug_bounds("workspace-modeline").unwrap();
+        let width = cx.update(|window, _| window.viewport_size().width);
+        assert_eq!(
+            (bar.origin.x, bar.size.width),
+            (px(0.), width),
+            "no side gap"
+        );
+        let frame = editor.update(cx, |e, _| e.core.frame());
+        let title = format!("t.txt | {} | {}", frame.workspace, frame.project);
+        assert_eq!(
+            frame.title, title,
+            "the bar names the title's workspace and project"
+        );
     }
 
     #[gpui::test]

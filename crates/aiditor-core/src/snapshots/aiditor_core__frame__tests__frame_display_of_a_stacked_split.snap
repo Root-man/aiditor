@@ -129,4 +129,6 @@ FrameDisplay {
     minibuffer: None,
     hint: None,
     title: "a.txt | main | home",
+    project: "home",
+    workspace: "main",
 }

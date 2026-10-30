@@ -149,12 +149,19 @@ impl Core {
             workspace.name,
             self.project_name(workspace.project)
         );
+        let (project, workspace) = fit_names(
+            self.project_name(workspace.project),
+            &workspace.name,
+            (width / cell_width) as usize,
+        );
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
             minibuffer: self.minibuffer(),
             hint: self.hint(),
             title,
+            project,
+            workspace,
         }
     }
 
@@ -233,6 +240,31 @@ pub(crate) fn window_display(
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }
     display
+}
+
+/// Cuts the workspace modeline's names so `<project> › <workspace>` fits in `cols`: a name
+/// that fits in half the room stays whole and the other takes the rest, else each takes half.
+fn fit_names(project: &str, workspace: &str, cols: usize) -> (String, String) {
+    let (p, w) = (project.chars().count(), workspace.chars().count());
+    let room = cols.saturating_sub(" › ".chars().count());
+    if p + w <= room {
+        return (project.to_string(), workspace.to_string());
+    }
+    let half = room / 2;
+    let (p_room, w_room) = if p <= half {
+        (p, room - p)
+    } else if w <= room - half {
+        (room - w, w)
+    } else {
+        (half, room - half)
+    };
+    let cut = |name: &str, len: usize, keep: usize| match keep >= len {
+        true => name.to_string(),
+        false => (name.chars().take(keep.saturating_sub(1)))
+            .chain((keep > 0).then_some('…'))
+            .collect(),
+    };
+    (cut(project, p, p_room), cut(workspace, w, w_room))
 }
 
 #[cfg(test)]
@@ -411,6 +443,61 @@ mod tests {
         assert_eq!(h.frame(80., 100.).title, "*scratch*<w3> | w3 | other");
         h.core.switch_workspace(main).unwrap();
         assert_eq!(h.frame(80., 100.).title, "t.txt * | main | home");
+    }
+
+    #[test]
+    fn the_workspace_modeline_names_the_current_project_and_workspace() {
+        let mut h = Harness::new(&[("t.txt", "")]);
+        let names = |h: &mut Harness| {
+            let frame = h.frame(800., 600.);
+            (frame.project, frame.workspace)
+        };
+        let main = h.core.workspace();
+        let home = || ("home".to_string(), "main".to_string());
+        assert_eq!(names(&mut h), home());
+        h.keys("C-x 3 C-x o");
+        h.open("t.txt");
+        assert_eq!(names(&mut h), home());
+        h.keys("C-x C-f");
+        assert!(h.core.minibuffer().is_some());
+        assert_eq!(names(&mut h), home());
+        h.keys("C-g");
+        h.new_workspace("w2", "other");
+        h.core.rename_workspace("w3").unwrap();
+        assert_eq!(names(&mut h), ("other".into(), "w3".into()));
+        h.core.switch_workspace(main).unwrap();
+        assert_eq!(names(&mut h), home());
+    }
+
+    #[test]
+    fn the_workspace_modeline_names_are_cut_to_the_frame_width() {
+        let fit = |p: &str, w: &str, cols| super::fit_names(p, w, cols);
+        let s = |p: &str, w: &str| (p.to_string(), w.to_string());
+        assert_eq!(
+            fit("aiditor", "watcher-fix", 40),
+            s("aiditor", "watcher-fix")
+        );
+        assert_eq!(
+            fit("aiditor", "watcher-fix", 21),
+            s("aiditor", "watcher-fix")
+        );
+        assert_eq!(
+            fit("aiditor", "watcher-fix", 20),
+            s("aiditor", "watcher-f…")
+        );
+        let long = "x".repeat(60);
+        let (p, w) = fit("Legacy crap", &long, 40);
+        assert_eq!((p.as_str(), w.chars().count()), ("Legacy crap", 26));
+        assert!(w.ends_with('…'));
+        let (p, w) = fit(&long, "short", 40);
+        assert_eq!((p.chars().count(), w.as_str()), (32, "short"));
+        let (p, w) = fit(&"p".repeat(30), &"w".repeat(30), 23);
+        assert_eq!(
+            (p, w),
+            (format!("{}…", "p".repeat(9)), format!("{}…", "w".repeat(9)))
+        );
+        assert_eq!(fit("abc", "def", 5), s("…", "…"));
+        assert_eq!(fit("abc", "def", 2), s("", ""));
     }
 
     #[test]
