@@ -216,7 +216,7 @@ mod tests {
                 opening.push(start.elapsed());
                 assert_eq!(
                     core.frame().minibuffer.unwrap().count,
-                    format!("1/{lines} ")
+                    format!("{:>6} ", format!("1/{lines}"))
                 );
                 let mut previous = 0;
                 for (i, query) in queries.iter().enumerate() {
@@ -234,7 +234,7 @@ mod tests {
                     if i == 0 {
                         assert_eq!(
                             core.frame().minibuffer.unwrap().count,
-                            format!("1/{lines} ")
+                            format!("{:>6} ", format!("1/{lines}"))
                         );
                     }
                 }
@@ -334,7 +334,10 @@ mod tests {
         h.keys("C-n C-s");
         let (candidates, count) = listed(&mut h);
         assert_eq!(candidates, ["1 apple", "2 banana", "3 cherry"]);
-        assert_eq!((selected(&h), count.as_str()), ("2 banana".into(), "2/3 "));
+        assert_eq!(
+            (selected(&h), count.as_str()),
+            ("2 banana".into(), "   2/3 ")
+        );
     }
 
     #[test]
@@ -390,7 +393,7 @@ mod tests {
         h.keys("C-n C-n C-s a");
         assert_eq!(selected(&h), "1 a", "no match after it selects the last");
         h.keys("z");
-        assert_eq!(listed(&mut h).1, "0/0 ");
+        assert_eq!(listed(&mut h).1, "   0/0 ");
         h.keys("DEL");
         assert_eq!(selected(&h), "1 a", "kept while nothing matches");
     }
@@ -494,7 +497,7 @@ mod tests {
     fn an_empty_buffer_lists_nothing() {
         let mut h = on("");
         h.keys("C-s");
-        assert_eq!(listed(&mut h), (vec![], "0/0 ".into()));
+        assert_eq!(listed(&mut h), (vec![], "   0/0 ".into()));
         h.keys("1 RET");
         assert_eq!(h.core.message(), Some("Match required"));
     }

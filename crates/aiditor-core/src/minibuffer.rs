@@ -22,6 +22,9 @@ const HISTORY_MAX: usize = 100;
 /// How many candidates the completion list shows, Vertico's `vertico-count`.
 const COMPLETION_ROWS: usize = 10;
 
+/// The narrowest the count before the prompt is padded to, as `  3/48 `.
+const COUNT_WIDTH: usize = 6;
+
 /// How long the core waits for the matcher before trying again on a timer.
 const REPOLL: Duration = Duration::from_millis(16);
 
@@ -66,6 +69,8 @@ struct Completion {
     top: usize,
     /// The most rows shown since the minibuffer opened, Emacs's `grow-only` mini-window.
     rows: usize,
+    /// The widest count shown since the minibuffer opened, so the prompt never moves back.
+    count_width: usize,
     /// For file names, the text through its last `/`: the directory listed or awaited.
     dir: Option<String>,
     /// The listing request for `dir` not yet answered; any other answer is dropped.
@@ -314,6 +319,7 @@ impl Ctx<'_> {
                 selected: 0,
                 top: 0,
                 rows: 0,
+                count_width: COUNT_WIDTH,
                 // Nothing listed yet; `poll_completion` asks for the start directory.
                 dir: files.then(String::new),
                 awaiting: None,
@@ -627,7 +633,9 @@ impl Core {
             };
             let number = (matched > 0).then(|| completion.selected.min(matched - 1));
             selected = number.map(|n| n - rows.start);
-            count = format!("{}/{matched} ", number.map_or(0, |n| n + 1));
+            count = format!("{}/{matched}", number.map_or(0, |n| n + 1));
+            completion.count_width = completion.count_width.max(count.len());
+            count = format!("{count:>width$} ", width = completion.count_width);
             completion.rows = completion.rows.max(rows.len());
             shown = completion.rows;
         }
@@ -900,6 +908,7 @@ mod tests {
     use crate::Msg;
     use crate::command::ArgSpec;
     use crate::command::Args;
+    use crate::command::Filter;
     use crate::command::Preview;
     use crate::harness::Harness;
     use crate::harness::ask;
@@ -1258,7 +1267,7 @@ mod tests {
         h.keys("C-c p C-u 12 C-n");
         let mb = h.frame(800., 600.).minibuffer.unwrap();
         assert_eq!((mb.candidates.len(), mb.selected), (10, Some(9)));
-        assert_eq!(mb.count, "13/15 ");
+        assert_eq!(mb.count, " 13/15 ");
         insta::assert_debug_snapshot!((mb.candidates, mb.selected));
         h.keys("C-u 9 C-p");
         assert_eq!(
@@ -1267,6 +1276,35 @@ mod tests {
             "scrolls up only as far as needed"
         );
         assert_eq!(listed(&mut h).0[0], "item 4");
+    }
+
+    #[test]
+    fn the_count_keeps_its_width_until_the_minibuffer_closes() {
+        let mut h = on("");
+        test_cmd(
+            &mut h,
+            ArgSpec {
+                prompts: &["Pick: "],
+                completion: Some(|_, _| (0..10_000).map(|i| format!("item {i}")).collect()),
+                filter: Some(Filter::Items(|text, items| {
+                    let shown = if text.is_empty() { items.len() } else { 9 };
+                    (0..shown).collect()
+                })),
+                ..ArgSpec::default()
+            },
+        );
+        bind_mode(&mut h, "global", "C-c p", "test-cmd");
+        let count = |h: &mut Harness| h.core.minibuffer().unwrap().count;
+        h.keys("C-c p");
+        assert_eq!(count(&mut h), "1/10000 ");
+        h.keys("x");
+        assert_eq!(count(&mut h), "    1/9 ", "never narrows");
+        h.keys("C-g C-c p x");
+        assert_eq!(count(&mut h), "   1/9 ", "the next minibuffer starts over");
+        h.keys("C-g");
+        ask(&mut h, &["Text: "]);
+        h.keys("C-c p");
+        assert_eq!(count(&mut h), "", "no count without completion");
     }
 
     #[test]
