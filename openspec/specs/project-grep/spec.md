@@ -139,12 +139,17 @@ A search SHALL start once the text has at least 3 chars and 200 ms have passed s
 - **THEN** after 200 ms the list is empty
 
 ### Requirement: Hits are listed as they arrive
-Each hit SHALL be listed as `<root name>/<path relative to the root>:<1-based line>:<line text>`, root names as `project-find-file` gives them, in batch-arrival order without matching them against the text again. The list SHALL keep the previous search's hits until the new search's first answer replaces them, and later answers SHALL append to it. Completion SHALL retain this order without sorting or replacing already listed hits. An invalid pattern SHALL show its error in the echo area and empty the list.
+Each hit SHALL be listed under its file's separator row as its 1-based line number and line text, without matching it against the input again. A file SHALL have one group, identified by its searched root and relative path. Groups SHALL follow first-seen file order, with hits in per-file arrival order; later hits SHALL join their existing group. The separator SHALL show the relative file path, prefixed with its unique finder root name when the search covers multiple roots, on a rule across the available width. File labels SHALL use `grep-file`, rules `separator`, and hit line numbers `grep-line-number`. The list SHALL keep the previous search's hits until the new search's first answer replaces them. Completion SHALL retain the grouping order. An invalid pattern SHALL show its error in the echo area and empty the list.
 
 #### Scenario: Listed
-- **GIVEN** root `app` has `src/a.rs` with `let needle = 1;` on line 3
-- **WHEN** `needle` is searched
-- **THEN** the list holds `app/src/a.rs:3:let needle = 1;`
+- **GIVEN** root `app` has `src/a.rs` with `let needle = 1;` on line 3 and root `lib` has `src/a.rs` with `needle` on line 1
+- **WHEN** `needle` is searched across both roots
+- **THEN** headers show `app/src/a.rs` and `lib/src/a.rs`, with hits showing `3: let needle = 1;` and `1: needle`
+
+#### Scenario: Single root
+- **GIVEN** the search covers only root `app`
+- **WHEN** a hit arrives for `src/a.rs`
+- **THEN** its header shows `src/a.rs` without a root prefix
 
 #### Scenario: Old hits stay until new ones arrive
 - **GIVEN** hits for `needle` are listed
@@ -152,9 +157,9 @@ Each hit SHALL be listed as `<root name>/<path relative to the root>:<1-based li
 - **THEN** those hits stay listed until the search for `needles` answers
 
 #### Scenario: Completion preserves arrival order
-- **GIVEN** the search has listed a hit in `b.rs` before a hit in `a.rs`
-- **WHEN** the search completes
-- **THEN** the list still shows the `b.rs` hit before the `a.rs` hit
+- **GIVEN** hits arrive for file `b.rs`, file `a.rs`, then `b.rs` again
+- **WHEN** the list is displayed and the search completes
+- **THEN** one `b.rs` group holds both its hits before the `a.rs` group
 
 #### Scenario: Invalid pattern
 - **GIVEN** the project grep prompt is open
@@ -230,19 +235,20 @@ A search SHALL search files on at most the worker count it carries, at least one
 - **THEN** the core gets exactly those three hits and one done message, and workers terminate cooperatively
 
 ### Requirement: Streamed hits leave the list in place
-A batch of hits added to the running search SHALL leave the selected hit, its preview and the shown rows as they were. Completion SHALL also preserve that selection and order. Only the new search's first answer SHALL return the selection to the first hit.
+A batch of hits added to the running search SHALL retain the selected hit and its preview. The viewport SHALL retain its top hit when possible, shifting only as needed to keep selection visible after regrouping. Completion SHALL also preserve selection and grouping order. Only the new search's first answer SHALL return the selection to the first hit.
 
 #### Scenario: A batch arrives after the selection moved
-- **GIVEN** the running search has listed hits and `C-n` selected another hit
-- **WHEN** another batch arrives
-- **THEN** the same hit stays selected, its preview remains current and the same rows are shown
+- **GIVEN** a running search lists hits in files `a.rs` and `b.rs` and the user selected the hit in `b.rs`
+- **WHEN** another batch adds a hit to `a.rs`
+- **THEN** the same `b.rs` hit stays selected and previewed even though its displayed index changes
 
 #### Scenario: Search completes after selection moved
-- **GIVEN** arrival-order hits are listed and the user selected a hit that is not first
+- **GIVEN** grouped hits are listed and the user selected a hit that is not first
 - **WHEN** the final batch arrives
-- **THEN** new hits append and the selected hit, preview and displayed ordering are preserved
+- **THEN** new hits join their file groups and the same hit stays selected and previewed
+
 ### Requirement: The prompt shows the current search state
-The project grep prompt SHALL include `[searching]` from the start of the current query's search until it finishes. The existing count SHALL grow as batches arrive. A successful search that finishes with zero hits SHALL show `[no matches]` instead. A successful search with hits and a failed search SHALL show the ordinary prompt, with regexp errors still reported in the echo area. Opening the prompt, changing the input, shortening it below the minimum and closing the prompt SHALL clear the previous query's status. No status SHALL be shown during the input debounce. Replies from a cancelled or superseded search SHALL leave the current prompt status unchanged. Status SHALL be display-only, preserving prompt history and typed text.
+The project grep echo row SHALL show `[searching]` at its right inset, separate from the prompt and input, from the start of the current query's search until it finishes. The existing count SHALL grow as batches arrive. A successful search that finishes with zero hits SHALL show `[no matches]` instead. A successful search with hits and a failed search SHALL show the ordinary prompt, with regexp errors still reported in the echo area. Opening the prompt, changing the input, shortening it below the minimum and closing the prompt SHALL clear the previous query's status. No status SHALL be shown during the input debounce. Replies from a cancelled or superseded search SHALL leave the current prompt status unchanged. Status SHALL be display-only, preserving prompt history and typed text.
 
 #### Scenario: Running and streaming
 - **GIVEN** the grep prompt has an eligible query
@@ -289,6 +295,13 @@ The project grep prompt SHALL include `[searching]` from the start of the curren
 - **WHEN** the prompt is cancelled, reopened and history recalled
 - **THEN** the typed query is restored with the same prompt history as before status indicators were added
 
+The input area SHALL reserve the longest status label plus two columns throughout each query prompt, including debounce and completed states, so showing, replacing or clearing a label SHALL retain the prompt/input origin, cursor position and horizontal scroll for unchanged text and count. Root picking and other prompts SHALL retain their ordinary input width.
+
+#### Scenario: Status transitions preserve input position
+- **GIVEN** a query is typed, including one long enough to scroll horizontally
+- **WHEN** status changes from absent to `[searching]`, then to `[no matches]` or clears on completion
+- **THEN** status is right-aligned, the prompt remains `Grep in <project>: `, and the same input text and cursor stay at the same positions
+
 ### Requirement: Prefix selects one root
 With a prefix argument, `project-grep` SHALL first prompt `Grep root: ` with completion over the project's root names, using the same unique names as the file finder. Accepting a root SHALL open `Grep in <root name>: ` and search only that root with the project's ignore patterns and the usual query history, debounce, status, preview and jump behavior. Root-picker text SHALL NOT start a grep. Cancelling either prompt SHALL return to the original buffer without starting further work.
 
@@ -334,3 +347,21 @@ While a selected hit is actually previewed, its window SHALL draw every visible 
 - **GIVEN** a preview has scrolled vertically or horizontally, or wraps a matching line
 - **WHEN** its visible text is built
 - **THEN** visible portions of matches retain their corresponding match faces and regexp anchors refer to buffer lines
+
+### Requirement: File separators are display-only
+Next and previous completion motion SHALL select hits only, including across file boundaries, and the count SHALL count hits only. The viewport SHALL show at most ten physical rows including headers, keep the selected hit visible, and show the current file header when starting within its group. Every visible header SHALL have at least one visible hit. The minibuffer SHALL retain its grow-only height until closed.
+
+#### Scenario: Moving across files
+- **GIVEN** the list has two files, with one hit in each
+- **WHEN** next completion then previous completion are invoked
+- **THEN** selection moves to the second hit and back to the first, the count changes from `1/2` to `2/2` and back, and accepting selects the hit rather than a header
+
+#### Scenario: Scrolling through groups
+- **GIVEN** more grouped hits than fit in ten physical rows
+- **WHEN** completion motion selects a hit beyond the initial viewport
+- **THEN** the selected hit is visible with its file header, the viewport has at most ten rows, and every shown header has a shown hit
+
+#### Scenario: Results shrink
+- **GIVEN** the prompt has shown ten physical rows
+- **WHEN** replacement results contain one file and one hit
+- **THEN** the header and hit are shown and the remaining eight rows stay empty until the prompt closes

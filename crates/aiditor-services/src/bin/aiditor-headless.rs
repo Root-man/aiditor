@@ -110,7 +110,7 @@ mod tests {
                 .unwrap()
                 .candidates
                 .iter()
-                .any(|s| s.ends_with("a.txt:1:xneedle"))
+                .any(|s| s == "  1: xneedle")
         );
         for key in parse_keys("RET").unwrap() {
             send(&mut core, &mut service, Msg::Key(key));

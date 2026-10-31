@@ -216,6 +216,7 @@ pub struct Minibuffer {
     /// The selected match's number and how many match, as vertico's `1/100 `; empty without completion.
     pub count: String,
     pub prompt: String,
+    pub status: Option<&'static str>,
     pub display: WindowDisplay,
     /// The completion list's shown rows, best match first; empty without completion.
     pub candidates: Vec<String>,
@@ -223,6 +224,8 @@ pub struct Minibuffer {
     pub highlights: Vec<Vec<Range<usize>>>,
     /// Each of `candidates`' annotation, empty for none.
     pub annotations: Vec<String>,
+    /// Project grep file headers, each before the candidate at its index.
+    pub groups: Vec<(usize, String)>,
     /// Which of `candidates` is selected.
     pub selected: Option<usize>,
     /// How many rows the completion list takes, the most shown since the minibuffer opened;
