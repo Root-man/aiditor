@@ -291,12 +291,9 @@ pub(crate) fn walker(dir: &Path, root: &Path, patterns: &Patterns) -> WalkBuilde
     walk
 }
 
-pub(crate) fn grep_walker(roots: &[PathBuf], patterns: &Patterns, workers: usize) -> WalkBuilder {
-    let mut walk = WalkBuilder::new(&roots[0]);
-    for root in &roots[1..] {
-        walk.add(root);
-    }
-    configure_walker(&mut walk, roots.to_vec(), patterns);
+pub(crate) fn grep_walker(root: &Path, patterns: &Patterns, workers: usize) -> WalkBuilder {
+    let mut walk = WalkBuilder::new(root);
+    configure_walker(&mut walk, vec![root.to_path_buf()], patterns);
     walk.threads(workers);
     walk
 }

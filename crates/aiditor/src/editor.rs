@@ -543,6 +543,10 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, _| {
+            let path = e.core.current().file.clone().unwrap();
+            e.core.launch(&path, path.parent().unwrap());
+        });
         let (maps, _) = keymap::parse(&keymap::BUNDLED, None, |_| Some("any")).unwrap();
         let mut script = Vec::new();
         for map in maps.values() {
@@ -1063,6 +1067,117 @@ mod tests {
         });
         let text = "   0/0 M-x abc [M-z is undefined]".to_string();
         assert_eq!(line, (text, "   0/0 M-x a".len()));
+    }
+
+    #[gpui::test]
+    fn multi_root_grep_prioritizes_the_current_file_and_prefix_selects_one_root(
+        cx: &mut TestAppContext,
+    ) {
+        let _native = crate::native::lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        for name in ["app", "lib", "docs"] {
+            std::fs::create_dir(base.join(name)).unwrap();
+            std::fs::write(base.join(name).join("a"), format!("needle {name}\n")).unwrap();
+        }
+        let project = aiditor_core::project::Project::parse(&format!(
+            "name = 'multi'\n[primary]\npath = '{}'\n[[roots]]\npath = '{}'\n[[roots]]\npath = '{}'\n",
+            base.join("app").display(), base.join("lib").display(), base.join("docs").display()
+        )).unwrap();
+        let mut core = Core::default();
+        core.handle(
+            Instant::now(),
+            Msg::ProjectsLoaded {
+                dir: None,
+                projects: vec![Ok(aiditor_core::project::Loaded {
+                    project,
+                    file: None,
+                })],
+            },
+        );
+        core.new_workspace("multi", core.project_id("multi").unwrap());
+        let file = base.join("lib/a");
+        core.open(&file, files::read(&file).unwrap());
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            Editor::new(
+                core,
+                Args::default(),
+                aiditor_services::channel(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.focus(&editor.read(cx).focus));
+        let wait = |cx: &mut VisualTestContext, count| {
+            for _ in 0..1000 {
+                cx.executor().advance_clock(Duration::from_millis(20));
+                cx.run_until_parked();
+                if editor.update(cx, |e, cx| {
+                    e.handle(Msg::Tick, cx);
+                    e.core.frame().minibuffer.is_some_and(|mb| {
+                        mb.candidates.len() == count && !mb.prompt.contains("[searching]")
+                    })
+                }) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!(
+                "grep did not finish: {:?}",
+                editor.update(cx, |e, _| e.core.frame())
+            );
+        };
+        let candidates = |cx: &mut VisualTestContext| {
+            editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().candidates)
+        };
+        cx.simulate_keystrokes("ctrl-x p g");
+        cx.simulate_input("needle");
+        wait(cx, 3);
+        assert_eq!(
+            candidates(cx),
+            [
+                "lib/a:1:needle lib",
+                "app/a:1:needle app",
+                "docs/a:1:needle docs"
+            ]
+        );
+        cx.simulate_keystrokes("ctrl-g ctrl-u ctrl-x p g");
+        wait(cx, 3);
+        assert_eq!(candidates(cx), ["app", "lib", "docs"]);
+        assert_eq!(
+            editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().prompt),
+            "Grep root: "
+        );
+        cx.simulate_input("dc");
+        wait(cx, 1);
+        assert_eq!(candidates(cx), ["docs"]);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("needle");
+        wait(cx, 1);
+        assert_eq!(candidates(cx), ["docs/a:1:needle docs"]);
+        assert_eq!(
+            editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().prompt),
+            "Grep in docs: "
+        );
+        cx.simulate_keystrokes("enter");
+        for _ in 0..1000 {
+            cx.run_until_parked();
+            if editor.read_with(cx, |e, _| {
+                e.core.current().file.as_ref() == Some(&base.join("docs/a"))
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            editor.read_with(cx, |e, _| (e.core.current().file.clone(), e.core.point())),
+            (Some(base.join("docs/a")), 0)
+        );
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]

@@ -551,7 +551,7 @@ pub enum GrepOp {
 }
 
 /// Search the files the index lists under `roots`, with the project's `ignore` patterns, for the
-/// regexp `pattern`, smart case, until `limit` hits, searching up to `workers` files at once;
+/// regexp `pattern`, smart case, until `limit` hits, roots in order and up to `workers` files at once;
 /// numbered `id`, from 1.
 pub struct GrepSearch {
     pub id: u64,

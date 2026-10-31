@@ -32,8 +32,9 @@ pub(crate) struct ProjectGrep {
     running: bool,
     answered: bool,
     no_matches: bool,
-    /// The project's roots with their names, the primary first.
+    /// The searched roots with their finder names, in search order.
     roots: Vec<(PathBuf, String)>,
+    choosing_root: bool,
     /// The project's ignore patterns.
     ignore: Vec<String>,
     /// The listed hits with their labels, kept after the prompt closes for its handler.
@@ -87,6 +88,9 @@ impl Core {
             if std::mem::take(&mut self.grep.running) {
                 effects.push(Effect::Grep(GrepOp::Cancel));
             }
+            return;
+        }
+        if self.grep.choosing_root {
             return;
         }
         let text = self.text();
@@ -167,7 +171,25 @@ impl Core {
 impl Ctx<'_> {
     /// Asks for a regexp and lists its hits in every root of the current workspace's project as
     /// it is typed; given a listed hit, visits its file at the match.
-    pub(crate) fn project_grep(&mut self, args: Args) -> Result<(), String> {
+    pub(crate) fn project_grep(&mut self, mut args: Args) -> Result<(), String> {
+        let command = self.core.commands["project-grep"];
+        if self.core.grep.choosing_root
+            && let Some(name) = args.strings.first()
+        {
+            let root = self
+                .core
+                .grep
+                .roots
+                .iter()
+                .find(|(_, n)| n == name)
+                .cloned()
+                .ok_or("No root selected")?;
+            let prompt = format!("Grep in {}: ", root.1);
+            self.core.grep.roots = vec![root];
+            self.core.grep.choosing_root = false;
+            args.strings.clear();
+            return self.read_string(command, args, prompt, None);
+        }
         if let Some(label) = args.strings.first() {
             let hit = self.core.grep.hit(label).ok_or("No match")?;
             let (path, line, col) = (hit.root.join(&hit.path), hit.line, hit.col);
@@ -195,14 +217,39 @@ impl Ctx<'_> {
         let roots: Vec<PathBuf> = loaded.all_roots().map(|root| root.path.clone()).collect();
         let ignore = loaded.ignore.clone();
         let names = root_names(roots.iter().map(PathBuf::as_path));
+        let mut roots: Vec<_> = roots.into_iter().zip(names).collect();
+        let prompt = format!("Grep in {}: ", loaded.name);
+        if args.prefix.is_none()
+            && let Some(file) = &self.core.current().file
+            && let Some(at) = roots
+                .iter()
+                .enumerate()
+                .filter(|(_, (root, _))| file.starts_with(root))
+                .max_by_key(|(_, (root, _))| root.components().count())
+                .map(|(at, _)| at)
+        {
+            let root = roots.remove(at);
+            roots.insert(0, root);
+        }
         self.core.grep = ProjectGrep {
             searches: self.core.grep.searches,
-            roots: roots.into_iter().zip(names).collect(),
+            roots,
+            choosing_root: args.prefix.is_some(),
             ignore,
             ..ProjectGrep::default()
         };
-        let command = self.core.commands["project-grep"];
-        self.read_string(command, args, format!("Grep in {}: ", loaded.name), None)
+        if self.core.grep.choosing_root {
+            let names: Vec<_> = self
+                .core
+                .grep
+                .roots
+                .iter()
+                .map(|(_, n)| n.clone())
+                .collect();
+            let choices: Vec<_> = names.iter().map(String::as_str).collect();
+            return self.read_string(command, args, "Grep root: ".into(), Some(&choices));
+        }
+        self.read_string(command, args, prompt, None)
     }
 }
 
@@ -250,6 +297,125 @@ mod tests {
     ];
 
     const FILES: &[(&str, &str)] = &[("app/a.rs", "needle\n"), ("app/b.rs", "x\n  needle\n")];
+
+    fn search(h: &mut Harness) -> crate::GrepSearch {
+        h.collect_effects = true;
+        h.keys("needle").advance(WAIT);
+        std::mem::take(&mut h.effects)
+            .into_iter()
+            .find_map(|e| match e {
+                crate::Effect::Grep(crate::GrepOp::Search(op)) => Some(op),
+                _ => None,
+            })
+            .expect("a search starts")
+    }
+
+    #[test]
+    fn current_root_precedes_remaining_roots_in_project_order() {
+        for (file, expected) in [
+            (None, vec!["app", "lib", "docs"]),
+            (Some("elsewhere/a"), vec!["app", "lib", "docs"]),
+            (Some("app/a"), vec!["app", "lib", "docs"]),
+            (Some("lib/a"), vec!["lib", "app", "docs"]),
+            (Some("docs/a"), vec!["docs", "app", "lib"]),
+        ] {
+            let mut h = grepping(&[], &[]);
+            let docs = h.path("docs");
+            h.core.projects[0].project.roots.push(Root {
+                path: docs,
+                role: String::new(),
+            });
+            h.core.current_mut().file = file.map(|p| h.path(p));
+            h.keys("C-x p g");
+            let op = search(&mut h);
+            assert_eq!(
+                op.roots,
+                expected.iter().map(|p| h.path(p)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn most_specific_root_is_first_and_duplicate_finder_names_stay_stable() {
+        let mut h = grepping(&[], &[]);
+        let nested = h.path("app/lib");
+        h.core.projects[0].project.roots.push(Root {
+            path: nested.clone(),
+            role: String::new(),
+        });
+        h.core.current_mut().file = Some(nested.join("a"));
+        h.keys("C-x p g");
+        assert_eq!(
+            search(&mut h).roots,
+            [nested.clone(), h.path("app"), h.path("lib")]
+        );
+        let hit = Hit {
+            root: nested,
+            path: "a".into(),
+            line: 0,
+            col: 0,
+            text: "needle".into(),
+        };
+        assert_eq!(h.core.grep.label(&hit), "lib<2>/a:1:needle");
+    }
+
+    #[test]
+    fn prefix_completes_a_single_root_then_searches_previews_and_jumps() {
+        let mut h = grepping(&[("lib/a.rs", "top\n  needle\n")], &[]);
+        h.keys("C-u C-x p g");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep root: ");
+        assert_eq!(listed(&mut h), ["app", "lib"]);
+        h.keys("lb").advance(WAIT);
+        assert_eq!(listed(&mut h), ["lib"]);
+        assert_eq!(h.greps.len(), 0);
+        h.keys("RET");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in lib: ");
+        let op = search(&mut h);
+        assert_eq!(op.roots, [h.path("lib")]);
+        h.collect_effects = false;
+        h.send(Msg::Grepped {
+            search: op.id,
+            hits: Ok(vec![Hit {
+                root: h.path("lib"),
+                path: "a.rs".into(),
+                line: 1,
+                col: 2,
+                text: "  needle".into(),
+            }]),
+            done: true,
+        });
+        assert_eq!(listed(&mut h), ["lib/a.rs:2:  needle"]);
+        h.keys("RET");
+        assert_eq!(h.core.current().file, Some(h.path("lib/a.rs")));
+        assert_eq!(h.point(), line_start(&h, 1) + 2);
+        h.keys("C-u C-x p g lib RET M-p");
+        assert_eq!(h.text(), "needle");
+    }
+
+    #[test]
+    fn root_selection_keeps_duplicate_names_ignores_and_cancellation() {
+        let mut h = grepping(&[], &[]);
+        let other = h.path("other/lib");
+        let project = &mut h.core.projects[0].project;
+        project.roots.push(Root {
+            path: other.clone(),
+            role: String::new(),
+        });
+        project.ignore = vec!["target/".into()];
+        let origin = h.core.windows.window.buffer();
+        h.keys("C-u C-x p g lib").advance(WAIT).keys("C-g");
+        assert_eq!(h.core.windows.window.buffer(), origin);
+        assert_eq!(h.greps.len(), 0);
+        h.keys("C-u C-x p g lib<2> RET");
+        let op = search(&mut h);
+        assert_eq!(op.roots, [other]);
+        assert_eq!(op.ignore, ["target/"]);
+        h.keys("C-g C-x p g");
+        assert_eq!(
+            search(&mut h).roots,
+            [h.path("app"), h.path("lib"), h.path("other/lib")]
+        );
+    }
 
     #[test]
     fn deferred_grep_destination_belongs_to_its_visit_and_uses_character_columns() {
