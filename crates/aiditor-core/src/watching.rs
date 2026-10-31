@@ -187,6 +187,7 @@ mod tests {
     use crate::command::Args;
     use crate::harness::{Harness, name};
     use crate::project::{Loaded, Project, Root};
+    use crate::settings::FaceName;
     use crate::{Disk, Effect, FileOp, Msg};
 
     /// Delivers prepared check/revert replies with a synthetic watcher report.
@@ -214,7 +215,7 @@ mod tests {
     }
 
     fn mode_line(h: &mut Harness) -> String {
-        h.display(5).mode_line
+        h.display(5).mode_line.text()
     }
 
     #[test]
@@ -246,7 +247,8 @@ mod tests {
         h.open("a.txt");
         h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
-        assert_eq!(mode_line(&mut h), "-- a.txt [deleted]  1:0");
+        assert_eq!(mode_line(&mut h), "-- a.txt │ [deleted]  1:0");
+        assert_eq!(h.display(5).mode_line.left[1][0].1, FaceName::StatusFailed);
         assert_eq!(h.text(), "a\n");
         let buffer = h.core.current();
         assert!(!buffer.modified() && buffer.disk.is_none());
@@ -345,7 +347,8 @@ mod tests {
     fn a_modified_buffer_is_conflicted_not_reverted() {
         let mut h = conflicted();
         assert_eq!(h.text(), "xa\n");
-        assert_eq!(mode_line(&mut h), "** a.txt [conflict]  1:1");
+        assert_eq!(mode_line(&mut h), "** a.txt │ [conflict]  1:1");
+        assert_eq!(h.display(5).mode_line.left[1][0].1, FaceName::StatusFailed);
         assert_eq!(prompt(&mut h), None, "already focused, so not asked");
         h.keys("C-x C-s");
         assert_eq!(prompt(&mut h), Some(asked(&mut h)));
@@ -446,7 +449,7 @@ mod tests {
         report(&mut h, &["a.txt"]);
         h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
-        assert_eq!(mode_line(&mut h), "** a.txt [deleted]  1:1");
+        assert_eq!(mode_line(&mut h), "** a.txt │ [deleted]  1:1");
         h.save_reply("xa\n");
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a.txt"), "xa\n");
@@ -653,7 +656,8 @@ mod tests {
             h.frame(800., 600.).windows[0]
                 .display
                 .mode_line
-                .ends_with("[unwatched]")
+                .text()
+                .contains("[unwatched]")
         );
         h.send(Msg::SettingsLoaded(Ok(Some(
             "max_watched_files = 2".into(),
@@ -757,6 +761,7 @@ mod tests {
                 !h.frame(800., 600.).windows[0]
                     .display
                     .mode_line
+                    .text()
                     .contains("[unwatched]")
             );
             h.run(effects);

@@ -65,6 +65,27 @@ WindowDisplay {
             2,
         ),
     ),
-    mode_line: "-- a.txt  2:2",
+    mode_line: ModeLine {
+        left: [
+            [
+                (
+                    "--",
+                    ModeLine,
+                ),
+                (
+                    " a.txt",
+                    ModeLine,
+                ),
+            ],
+        ],
+        right: [
+            [
+                (
+                    "2:2",
+                    ModeLine,
+                ),
+            ],
+        ],
+    },
     terminal: None,
 }

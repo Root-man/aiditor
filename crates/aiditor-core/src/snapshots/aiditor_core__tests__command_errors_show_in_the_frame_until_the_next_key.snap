@@ -34,10 +34,118 @@ FrameDisplay {
                         0,
                     ),
                 ),
-                mode_line: "-- a.txt  1:0 [unwatched]",
+                mode_line: ModeLine {
+                    left: [
+                        [
+                            (
+                                "--",
+                                ModeLine,
+                            ),
+                            (
+                                " a.txt",
+                                ModeLine,
+                            ),
+                        ],
+                    ],
+                    right: [
+                        [
+                            (
+                                "[unwatched]",
+                                ModeLineDim,
+                            ),
+                        ],
+                        [
+                            (
+                                "1:0",
+                                ModeLine,
+                            ),
+                        ],
+                    ],
+                },
                 terminal: None,
             },
             gutter: None,
+            mode_line: ModeBar {
+                left: [
+                    Span {
+                        text: "--",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: " a.txt",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                ],
+                right: [
+                    Span {
+                        text: "[unwatched]",
+                        face: Face {
+                            fg: Some(
+                                8421504,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "  │  ",
+                        face: Face {
+                            fg: Some(
+                                8421504,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "1:0",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                ],
+            },
         },
     ],
     message: Some(

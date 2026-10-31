@@ -3,7 +3,7 @@ use std::time::Instant;
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face};
 use aiditor_core::display::{
-    CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, TEXT_INSET, Terminal,
+    CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, Span, TEXT_INSET, Terminal,
 };
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
@@ -27,11 +27,19 @@ pub(crate) struct Painted {
     /// Its mode line's background and an inactive one's rule, each with its colour.
     pub(crate) mode_line_fill: Vec<(Bounds<Pixels>, u32)>,
     pub(crate) mode_line: ShapedLine,
+    pub(crate) mode_line_right: ShapedLine,
     pub(crate) cursor: Option<Bounds<Pixels>>,
     /// The char under the cursor, shaped in the background color to show through the block.
     cursor_char: Option<ShapedLine>,
     /// A terminal cursor in a window that isn't selected, drawn as an outline.
     pub(crate) hollow: bool,
+}
+
+impl Painted {
+    /// Where the mode line's right group starts, so that it ends at the window's right inset.
+    pub(crate) fn mode_line_right_x(&self) -> Pixels {
+        self.bounds.right() - px(TEXT_INSET) - self.mode_line_right.width
+    }
 }
 
 /// A terminal run as painted: where, its cells' background and its text.
@@ -233,13 +241,12 @@ impl Element for FrameElement {
                     true => FaceName::ModeLine,
                     false => FaceName::ModeLineInactive,
                 };
-                let run = text_run(
-                    w.display.mode_line.len(),
-                    settings.theme.face(line_face),
-                    false,
-                    &font,
-                    &settings.theme,
-                );
+                let group = |spans: &[Span]| {
+                    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                    let run =
+                        |s: &Span| text_run(s.text.len(), s.face, false, &font, &settings.theme);
+                    shape(text, &spans.iter().map(run).collect::<Vec<_>>())
+                };
                 let height = px(settings.mode_line_height());
                 let bar = Bounds::new(
                     point(bounds.left(), bounds.bottom() - height),
@@ -263,7 +270,8 @@ impl Element for FrameElement {
                     text_x,
                     rows,
                     mode_line_fill: bar_fill.into_iter().chain(rule_fill).collect(),
-                    mode_line: shape(w.display.mode_line, &[run]),
+                    mode_line: group(&w.mode_line.left),
+                    mode_line_right: group(&w.mode_line.right),
                     cells,
                     cursor,
                     cursor_char,
@@ -354,6 +362,10 @@ impl Element for FrameElement {
                 let x = p.bounds.left() + px(TEXT_INSET);
                 let origin = point(x, p.bounds.bottom() - mode_line_height);
                 p.mode_line.paint(origin, mode_line_height, window, cx).ok();
+                let right = point(p.mode_line_right_x(), origin.y);
+                (p.mode_line_right)
+                    .paint(right, mode_line_height, window, cx)
+                    .ok();
             });
         }
         let painted = std::mem::take(painted);

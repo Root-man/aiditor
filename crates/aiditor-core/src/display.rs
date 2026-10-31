@@ -9,9 +9,114 @@ pub struct WindowDisplay {
     pub lines: Vec<Line>,
     /// Point as (index into `lines`, char column in that line's text), if it is shown.
     pub cursor: Option<(usize, usize)>,
-    pub mode_line: String,
+    pub mode_line: ModeLine,
     /// A terminal buffer's screen, drawn instead of `lines` and `cursor`.
     pub terminal: Option<Terminal>,
+}
+
+/// A mode line part shown only when it applies: pieces of text, each in a face over the bar's.
+pub type Segment = Vec<(String, FaceName)>;
+
+/// A window's mode line: what the buffer is, then where point is and what is running.
+#[derive(Debug, PartialEq)]
+pub struct ModeLine {
+    pub left: Vec<Segment>,
+    pub right: Vec<Segment>,
+}
+
+/// A mode line as drawn: its groups with their separators and faces, cut to the window's width.
+#[derive(Debug, PartialEq)]
+pub struct ModeBar {
+    pub left: Vec<Span>,
+    pub right: Vec<Span>,
+}
+
+impl ModeLine {
+    /// The uncut segments as one line for tests, ` │ ` between them and two spaces between the groups.
+    pub fn text(&self) -> String {
+        let group = |segments: &[Segment]| {
+            let text = |s: &Segment| s.iter().map(|(t, _)| t.as_str()).collect::<String>();
+            segments.iter().map(text).collect::<Vec<_>>().join(" │ ")
+        };
+        format!("{}  {}", group(&self.left), group(&self.right))
+    }
+
+    /// The bar `cols` chars wide; a window that isn't selected shows it all in the inactive face.
+    pub(crate) fn draw(&self, cols: usize, selected: bool, theme: &Theme) -> ModeBar {
+        let bar = match selected {
+            true => theme.face(FaceName::ModeLine),
+            false => theme.face(FaceName::ModeLineInactive),
+        };
+        let span = |text: &str, name: FaceName| Span {
+            text: text.to_string(),
+            face: if selected {
+                theme.face(name).over(bar)
+            } else {
+                bar
+            },
+            fold: false,
+        };
+        let group = |segments: &[Segment]| {
+            let mut spans = Vec::new();
+            for (i, segment) in segments.iter().enumerate() {
+                if i > 0 {
+                    spans.push(span("  │  ", FaceName::Separator));
+                }
+                spans.extend(segment.iter().map(|(text, name)| span(text, *name)));
+            }
+            spans
+        };
+        let (left, right) = (group(&self.left), group(&self.right));
+        // shortcut: a wide char counts as one column, so a CJK name can run under the right group; measure widths when the display does.
+        let (l, r) = (chars(&left), chars(&right));
+        let (l_room, r_room) = share_room(l, r, cols.saturating_sub(GROUP_GAP));
+        ModeBar {
+            left: cut(left, l_room),
+            right: cut(right, r_room),
+        }
+    }
+}
+
+/// The columns kept between the groups of a mode line.
+const GROUP_GAP: usize = 2;
+
+fn chars(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.text.chars().count()).sum()
+}
+
+/// How much of `room` two texts of `a` and `b` chars get: one that fits in half stays whole and
+/// the other takes the rest, else each takes half, the second getting the odd column.
+pub(crate) fn share_room(a: usize, b: usize, room: usize) -> (usize, usize) {
+    let half = room / 2;
+    if a + b <= room {
+        (a, b)
+    } else if a <= half {
+        (a, room - a)
+    } else if b <= room - half {
+        (room - b, b)
+    } else {
+        (half, room - half)
+    }
+}
+
+/// `spans` cut to `keep` chars, the last being `…`.
+fn cut(spans: Vec<Span>, keep: usize) -> Vec<Span> {
+    if keep >= chars(&spans) {
+        return spans;
+    }
+    let mut out = Vec::new();
+    let mut room = keep.saturating_sub(1);
+    for mut span in spans.into_iter().take_while(|_| keep > 0) {
+        let len = span.text.chars().count();
+        if len > room {
+            span.text = span.text.chars().take(room).chain(['…']).collect();
+            out.push(span);
+            break;
+        }
+        room -= len;
+        out.push(span);
+    }
+    out
 }
 
 /// A terminal's live screen: its rows' runs and its cursor.
@@ -103,6 +208,7 @@ pub struct FrameWindow {
     pub selected: bool,
     pub display: WindowDisplay,
     pub gutter: Option<Gutter>,
+    pub mode_line: ModeBar,
 }
 
 /// A window's line numbers, drawn in the width its text leaves.
@@ -435,36 +541,51 @@ pub fn build(
         lines = wrap_lines(lines, &mut cursor, rows, wrap, marker);
     }
     let (l, c) = buffer.line_col(point).unwrap_or_default();
-    let state = match (buffer.read_only, buffer.modified()) {
-        (true, _) => "%%",
-        (_, true) => "**",
-        _ => "--",
-    };
-    let dos = if buffer.crlf { " (DOS)" } else { "" };
-    let disk = match (buffer.deleted, buffer.conflict) {
-        (true, _) => " [deleted]",
-        (_, Some(_)) => " [conflict]",
-        _ => "",
-    };
-    let position = format!("  {}:{c}", l + 1);
-    // A terminal in char mode has no point to show.
-    let (mode, position) = match buffer.terminal() {
-        Some(_) if buffer.copy_mode() => (" [copy]", position),
-        Some(_) => (" [char]", String::new()),
-        None => ("", position),
-    };
-    let agent = buffer.agent_mode.as_ref().map(|m| format!(" [{m}]"));
     WindowDisplay {
         lines,
         cursor,
-        // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
-        mode_line: format!(
-            "{state} {}{dos}{disk}{mode}{}{position}",
-            buffer.name.replace('\n', "^J"),
-            agent.unwrap_or_default(),
-        ),
+        mode_line: mode_line(buffer, l + 1, c),
         terminal: None,
     }
+}
+
+/// `buffer`'s mode line with point at `line`:`col`, each buffer type adding its segments.
+fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
+    let segment = |text: &str, face| vec![(text.to_string(), face)];
+    let (state, state_face) = match (buffer.read_only, buffer.modified()) {
+        (true, _) => ("%%", FaceName::StatusFailed),
+        (_, true) => ("**", FaceName::StatusModified),
+        _ => ("--", FaceName::ModeLine),
+    };
+    // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
+    let name = format!(" {}", buffer.name.replace('\n', "^J"));
+    let mut left = vec![vec![
+        (state.to_string(), state_face),
+        (name, FaceName::ModeLine),
+    ]];
+    let disk = match (buffer.deleted, buffer.conflict) {
+        (true, _) => Some("[deleted]"),
+        (_, Some(_)) => Some("[conflict]"),
+        _ => None,
+    };
+    left.extend(disk.map(|disk| segment(disk, FaceName::StatusFailed)));
+    let agent = buffer.agent_mode.as_ref().map(|m| format!("[{m}]"));
+    left.extend(agent.map(|mode| segment(&mode, FaceName::ModeLine)));
+    let mut right = Vec::new();
+    if buffer.crlf {
+        right.push(segment("(DOS)", FaceName::StatusWaiting));
+    }
+    let position = segment(&format!("{line}:{col}"), FaceName::ModeLine);
+    // A terminal in char mode has no point to show.
+    match buffer.terminal() {
+        Some(_) if buffer.copy_mode() => {
+            right.push(segment("[copy]", FaceName::StatusInfo));
+            right.push(position);
+        }
+        Some(_) => right.push(segment("[char]", FaceName::StatusWaiting)),
+        None => right.push(position),
+    }
+    ModeLine { left, right }
 }
 
 /// Splits each of `lines` into its rows, ending each row but the last with a `\` in `marker`
@@ -531,6 +652,7 @@ fn wrap_lines(
 
 #[cfg(test)]
 mod tests {
+    use super::{ModeLine, Span};
     use crate::buffer::{Decoration, Face, Prop};
     use crate::harness::Harness;
     use crate::settings::{FaceName, Settings};
@@ -917,19 +1039,44 @@ mod tests {
         assert_eq!(spans, [("xxxxxxxxxx", string)]);
     }
 
+    /// A mode line of a `left` and a `right` segment drawn `cols` wide, as its groups' text.
+    fn fitted(left: &str, right: &str, cols: usize) -> (String, String) {
+        let segment = |text: &str| vec![vec![(text.to_string(), FaceName::ModeLine)]];
+        let line = ModeLine {
+            left: segment(left),
+            right: segment(right),
+        };
+        let bar = line.draw(cols, true, &Settings::default().theme);
+        let text = |spans: &[Span]| spans.iter().map(|s| s.text.as_str()).collect();
+        (text(&bar.left), text(&bar.right))
+    }
+
+    #[test]
+    fn a_long_mode_line_shares_its_room() {
+        let fit = |l: &str, r: &str| (l.to_string(), r.to_string());
+        assert_eq!(fitted("-- name", "1:0", 12), fit("-- name", "1:0"));
+        assert_eq!(fitted("-- a-long-name", "1:0", 12), fit("-- a-l…", "1:0"));
+        assert_eq!(fitted("-- a", "a-long-position", 12), fit("-- a", "a-lon…"));
+        assert_eq!(
+            fitted("left-group", "right-group", 13),
+            fit("left…", "right…")
+        );
+        assert_eq!(fitted("left", "right", 2), fit("", ""));
+    }
+
     #[test]
     fn mode_line_shows_state_name_and_position() {
         let mut h = Harness::new(&[("a.txt", "one\ntwo\nthree")]);
         h.open("a.txt");
-        assert_eq!(h.display(5).mode_line, "-- a.txt  1:0");
+        assert_eq!(h.display(5).mode_line.text(), "-- a.txt  1:0");
         h.keys("<down> <down> <right> x");
-        assert_eq!(h.display(5).mode_line, "** a.txt  3:2");
+        assert_eq!(h.display(5).mode_line.text(), "** a.txt  3:2");
     }
 
     #[test]
     fn mode_line_shows_newlines_in_a_buffer_name_as_caret_j() {
         let mut h = Harness::new(&[]);
         h.keys("C-x b a C-o RET");
-        assert_eq!(h.display(5).mode_line, "-- a^J  1:0");
+        assert_eq!(h.display(5).mode_line.text(), "-- a^J  1:0");
     }
 }

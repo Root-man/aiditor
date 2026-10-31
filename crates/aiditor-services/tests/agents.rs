@@ -710,7 +710,7 @@ async fn a_session_starts_in_its_default_mode() {
     live.send(Msg::SettingsLoaded(Ok(Some(settings))));
     live.start().await;
     (live.pump(Some(|m| matches!(m, Msg::AgentConfigured { .. })))).await;
-    let mode_line = live.core.frame().windows[0].display.mode_line.clone();
+    let mode_line = live.core.frame().windows[0].display.mode_line.text();
     assert!(mode_line.contains(" [plan]"), "{mode_line}");
     live.call("kill-buffer", &[&live.core.current().name.clone(), "yes"]);
     live.gone().await;
@@ -724,7 +724,7 @@ async fn s_tab_cycles_the_mode() {
     for mode in ["plan", "auto"] {
         live.keys("S-TAB");
         (live.pump(Some(|m| matches!(m, Msg::AgentConfigured { .. })))).await;
-        let mode_line = live.core.frame().windows[0].display.mode_line.clone();
+        let mode_line = live.core.frame().windows[0].display.mode_line.text();
         assert!(mode_line.contains(&format!(" [{mode}]")), "{mode_line}");
     }
     live.call("kill-buffer", &[&live.core.current().name.clone(), "yes"]);

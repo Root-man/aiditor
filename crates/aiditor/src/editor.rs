@@ -770,7 +770,11 @@ mod tests {
         );
         release.send(()).unwrap();
         wait(cx, "latest finder preview", |core| {
-            core.frame().windows[0].display.mode_line.contains(" c ")
+            core.frame().windows[0]
+                .display
+                .mode_line
+                .text()
+                .contains(" c ")
         });
         cx.simulate_keystrokes("enter");
         wait(cx, "ordinary visit", |core| {
@@ -1267,6 +1271,23 @@ mod tests {
             upper.bottom(),
             "stacked windows have no divider"
         );
+    }
+
+    #[gpui::test]
+    fn a_mode_lines_right_group_ends_at_the_right_inset(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        cx.run_until_parked();
+        let (x, width, right) = editor.read_with(cx, |e, _| {
+            let p = &e.painted[0];
+            (
+                p.mode_line_right_x(),
+                p.mode_line_right.width,
+                p.bounds.right(),
+            )
+        });
+        assert!(width > px(0.));
+        assert_eq!(x + width, right - px(TEXT_INSET));
     }
 
     #[gpui::test]

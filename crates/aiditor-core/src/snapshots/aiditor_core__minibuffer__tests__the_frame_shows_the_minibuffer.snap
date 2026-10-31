@@ -33,7 +33,28 @@ Some(
                     2,
                 ),
             ),
-            mode_line: "**  *Minibuf-1*  1:2",
+            mode_line: ModeLine {
+                left: [
+                    [
+                        (
+                            "**",
+                            StatusModified,
+                        ),
+                        (
+                            "  *Minibuf-1*",
+                            ModeLine,
+                        ),
+                    ],
+                ],
+                right: [
+                    [
+                        (
+                            "1:2",
+                            ModeLine,
+                        ),
+                    ],
+                ],
+            },
             terminal: None,
         },
         candidates: [],

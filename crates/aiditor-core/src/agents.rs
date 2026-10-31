@@ -2590,12 +2590,12 @@ mod tests {
     fn the_mode_line_shows_the_current_mode() {
         let mut h = work();
         h.keys("M-x agent-start RET claude RET");
-        assert!(!h.display(5).mode_line.contains('['));
+        assert!(!h.display(5).mode_line.text().contains('['));
         ready(&mut h, 0);
-        assert!(h.display(5).mode_line.contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains(" [auto]"));
         let options = ConfigOptionUpdate::new(options("plan"));
         update(&mut h, 0, SessionUpdate::ConfigOptionUpdate(options));
-        let line = h.display(5).mode_line;
+        let line = h.display(5).mode_line.text();
         assert!(line.contains(" [plan]") && !line.contains("auto"), "{line}");
     }
 
@@ -2612,18 +2612,18 @@ mod tests {
         ops(&mut h);
         ready(&mut h, 0);
         assert_eq!(ops(&mut h), ["set 0 s mode=plan"]);
-        assert!(h.display(5).mode_line.contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains(" [auto]"));
         h.send(Msg::AgentConfigured {
             id: AgentId(0),
             result: Ok(options("plan")),
         });
-        assert!(h.display(5).mode_line.contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains(" [plan]"));
         h.send(Msg::AgentConfigured {
             id: AgentId(0),
             result: Err("no".into()),
         });
         assert!(messages(&h).contains("claude could not set mode plan: no\n"));
-        assert!(h.display(5).mode_line.contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains(" [plan]"));
     }
 
     #[test]
@@ -2651,15 +2651,15 @@ mod tests {
         assert!(ops(&mut h).is_empty());
         let note = "claude session ready (modes: none)\nclaude has no mode plan\n";
         assert!(messages(&h).contains(note));
-        assert!(!h.display(5).mode_line.contains('['));
+        assert!(!h.display(5).mode_line.text().contains('['));
         // An answer or update without a mode option clears the mode.
         ready(&mut h, 0);
-        assert!(h.display(5).mode_line.contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains(" [auto]"));
         h.send(Msg::AgentConfigured {
             id: AgentId(0),
             result: Ok(options),
         });
-        assert!(!h.display(5).mode_line.contains('['));
+        assert!(!h.display(5).mode_line.text().contains('['));
     }
 
     #[test]
@@ -2689,7 +2689,7 @@ mod tests {
             messages(&h)
                 .contains("claude session ready (modes: auto, plan)\nclaude has no mode nope\n")
         );
-        assert!(h.display(5).mode_line.contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains(" [auto]"));
         assert_eq!(messages(&h).matches("has no mode").count(), 1);
     }
 
@@ -2708,11 +2708,11 @@ mod tests {
         h.keys("S-TAB");
         assert_eq!(ops(&mut h), ["set 0 s mode=plan"]);
         configured(&mut h, Ok(options("plan")));
-        assert!(h.display(5).mode_line.contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains(" [plan]"));
         h.keys("S-TAB");
         assert_eq!(ops(&mut h), ["set 0 s mode=auto"]);
         configured(&mut h, Ok(options("auto")));
-        assert!(h.display(5).mode_line.contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains(" [auto]"));
         // The agent's own change is where the next cycle starts.
         let plan = ConfigOptionUpdate::new(options("plan"));
         update(&mut h, 0, SessionUpdate::ConfigOptionUpdate(plan));
@@ -2720,7 +2720,7 @@ mod tests {
         assert_eq!(ops(&mut h), ["set 0 s mode=auto"]);
         configured(&mut h, Err("no".into()));
         assert!(messages(&h).contains("claude could not set mode auto: no\n"));
-        assert!(h.display(5).mode_line.contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains(" [plan]"));
     }
 
     #[test]
