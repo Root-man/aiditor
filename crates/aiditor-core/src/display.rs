@@ -691,7 +691,12 @@ fn file_mode_line(
         _ => None,
     };
     left.extend(disk.map(|disk| segment(disk, FaceName::StatusFailed)));
-    left.push(segment(buffer.language(), FaceName::ModeLineDim));
+    let mut language = buffer.language().to_string();
+    if let Some(version) = &buffer.language_version {
+        language.push(' ');
+        language.push_str(version);
+    }
+    left.push(segment(&language, FaceName::ModeLineDim));
     let mut right = Vec::new();
     if let Some(region) = region {
         right.push(segment(&region_size(buffer, region), FaceName::ModeLineDim));
@@ -1258,6 +1263,45 @@ mod tests {
         h.open("web/b.rs");
         let text = h.display(5).mode_line.text();
         assert_eq!(text, "web/b.rs │ Rust  1:0 │ All", "a file at its root");
+    }
+
+    #[test]
+    fn a_pinned_language_uses_the_shared_mode_line_faces_and_fitting() {
+        let mut h = Harness::new(&[("a.rs", ""), (".tool-versions", "rust 1.99.0")]);
+        h.core.projects[0].project.primary.path = h.path("");
+        h.open("a.rs");
+        h.send(crate::Msg::Tick);
+        let line = h.display(5).mode_line;
+        assert_eq!(line.text(), "a.rs │ Rust 1.99.0  1:0 │ All");
+        assert_eq!(
+            line.left[1],
+            [("Rust 1.99.0".into(), FaceName::ModeLineDim)]
+        );
+        let theme = &Settings::default().theme;
+        let inactive = line.draw(80, false, theme);
+        assert_eq!(
+            inactive
+                .left
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "a.rs │ Rust 1.99.0"
+        );
+        assert!(
+            inactive
+                .left
+                .iter()
+                .all(|s| s.face == theme.face(FaceName::ModeLineInactive))
+        );
+        let narrow = line.draw(22, true, theme);
+        assert_eq!(
+            narrow
+                .left
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "a.rs │ Rus…"
+        );
     }
 
     #[test]

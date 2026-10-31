@@ -317,6 +317,27 @@ impl Harness {
                                 .map(|path| (path.clone(), self.heads.get(path).cloned()))
                                 .collect(),
                         )),
+                        FileOp::LanguageVersion {
+                            buffer,
+                            request,
+                            path,
+                            language,
+                        } => {
+                            let version = crate::language_version::candidates(path, language)
+                                .into_iter()
+                                .find_map(|candidate| {
+                                    let (bytes, _) =
+                                        self.reads.get(&candidate)?.as_ref().ok()?.as_ref()?;
+                                    let text = std::str::from_utf8(bytes).ok()?;
+                                    crate::language_version::parse(&candidate, language, text)
+                                })
+                                .filter(|s| !s.is_empty());
+                            Some(Msg::LanguageVersion {
+                                buffer: *buffer,
+                                request: *request,
+                                version,
+                            })
+                        }
                         FileOp::Check(paths) => paths
                             .iter()
                             .map(|path| self.checks.get(path).map(|hash| (path.clone(), *hash)))

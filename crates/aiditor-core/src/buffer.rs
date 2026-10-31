@@ -122,6 +122,9 @@ impl Buffers {
             conflict_asked: false,
             head: None,
             head_asked: false,
+            language_version: None,
+            version_asked: false,
+            version_request: 0,
             read_only: false,
             truncate_lines: false,
             line_numbers: None,
@@ -281,6 +284,9 @@ pub struct Buffer {
     pub head: Option<crate::Head>,
     /// `head` was asked for since it last may have changed.
     pub head_asked: bool,
+    pub(crate) language_version: Option<String>,
+    pub(crate) version_asked: bool,
+    pub(crate) version_request: u64,
     pub read_only: bool,
     /// Long lines are cut at the window edge instead of wrapping, as Emacs's `truncate-lines`.
     pub truncate_lines: bool,
