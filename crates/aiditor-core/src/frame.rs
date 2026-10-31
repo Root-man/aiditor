@@ -194,21 +194,17 @@ impl Core {
             workspace.name,
             self.project_name(workspace.project)
         );
-        let (project, workspace) = fit_names(
-            self.project_name(workspace.project),
-            &workspace.name,
-            // A monospace advance is linear in the font size.
-            ((width - 2. * TEXT_INSET) * self.settings.font_size
-                / (cell_width * self.settings.workspace_font_size())) as usize,
-        );
+        // A monospace advance is linear in the font size.
+        let cols = ((width - 2. * TEXT_INSET) * self.settings.font_size
+            / (cell_width * self.settings.workspace_font_size())) as usize;
+        let workspaces = self.workspace_modeline(cols.saturating_sub(7));
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
             minibuffer: self.minibuffer(),
             hint: self.hint(),
             title,
-            project,
-            workspace,
+            workspaces,
         }
     }
 
@@ -291,7 +287,7 @@ pub(crate) fn window_display(
 }
 
 /// Cuts the workspace modeline's names so `<project> › <workspace>` fits in `cols`.
-fn fit_names(project: &str, workspace: &str, cols: usize) -> (String, String) {
+pub(crate) fn fit_names(project: &str, workspace: &str, cols: usize) -> (String, String) {
     let (p, w) = (project.chars().count(), workspace.chars().count());
     let room = cols.saturating_sub(" › ".chars().count());
     let (p_room, w_room) = display::share_room(p, w, room);
@@ -560,27 +556,50 @@ mod tests {
     }
 
     #[test]
-    fn the_workspace_modeline_names_the_current_project_and_workspace() {
+    fn the_workspace_modeline_names_every_workspace_in_creation_order() {
         let mut h = Harness::new(&[("t.txt", "")]);
         let names = |h: &mut Harness| {
-            let frame = h.frame(800., 600.);
-            (frame.project, frame.workspace)
+            h.frame(800., 600.)
+                .workspaces
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
         };
         let main = h.core.workspace();
-        let home = || ("home".to_string(), "main".to_string());
-        assert_eq!(names(&mut h), home());
+        assert_eq!(names(&mut h), "home › main");
         h.keys("C-x 3 C-x o");
         h.open("t.txt");
-        assert_eq!(names(&mut h), home());
         h.keys("C-x C-f");
-        assert!(h.core.minibuffer().is_some());
-        assert_eq!(names(&mut h), home());
+        assert_eq!(names(&mut h), "home › main");
         h.keys("C-g");
         h.new_workspace("w2", "other");
         h.core.rename_workspace("w3").unwrap();
-        assert_eq!(names(&mut h), ("other".into(), "w3".into()));
+        assert_eq!(names(&mut h), "home › main │ other › w3");
+        let spans = h.frame(800., 600.).workspaces;
+        assert_eq!(
+            spans[0].face.fg,
+            h.core.settings().theme.face(FaceName::ModeLineDim).fg
+        );
+        assert_eq!(
+            spans[6].face.fg,
+            h.core.settings().theme.face(FaceName::WorkspaceCurrent).fg
+        );
         h.core.switch_workspace(main).unwrap();
-        assert_eq!(names(&mut h), home());
+        assert_eq!(names(&mut h), "home › main │ other › w3");
+        let spans = h.frame(800., 600.).workspaces;
+        assert!(spans[0].face.bold);
+        assert_eq!(
+            spans[2].face.fg,
+            h.core.settings().theme.face(FaceName::WorkspaceCurrent).fg
+        );
+        assert_eq!(
+            spans[3].face.fg,
+            h.core.settings().theme.face(FaceName::Separator).fg
+        );
+        assert_eq!(
+            spans[6].face.fg,
+            h.core.settings().theme.face(FaceName::ModeLineDim).fg
+        );
     }
 
     #[test]

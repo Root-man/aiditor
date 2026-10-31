@@ -501,6 +501,51 @@ FrameDisplay {
     minibuffer: None,
     hint: None,
     title: "a.txt | main | home",
-    project: "home",
-    workspace: "main",
+    workspaces: [
+        Span {
+            text: "home",
+            face: Face {
+                fg: Some(
+                    13948116,
+                ),
+                bg: Some(
+                    2631720,
+                ),
+                bold: true,
+                italic: false,
+                underline: false,
+            },
+            fold: false,
+        },
+        Span {
+            text: " › ",
+            face: Face {
+                fg: Some(
+                    8421504,
+                ),
+                bg: Some(
+                    2631720,
+                ),
+                bold: false,
+                italic: false,
+                underline: false,
+            },
+            fold: false,
+        },
+        Span {
+            text: "main",
+            face: Face {
+                fg: Some(
+                    16763904,
+                ),
+                bg: Some(
+                    2631720,
+                ),
+                bold: false,
+                italic: false,
+                underline: false,
+            },
+            fold: false,
+        },
+    ],
 }
