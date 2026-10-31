@@ -272,6 +272,8 @@ fn concurrent_workspace_saves_keep_the_losing_buffers_edits() {
         .open(&file, aiditor_services::files::read(&file).unwrap());
     d.keys("second SPC");
     d.call("save-buffer", &[]);
+    d.files
+        .retain(|op| matches!(op, aiditor_core::FileOp::Save { .. }));
     let barrier = std::sync::Barrier::new(2);
     let replies = std::thread::scope(|scope| {
         let handles: Vec<_> = d

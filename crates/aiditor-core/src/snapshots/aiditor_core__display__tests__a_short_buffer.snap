@@ -69,12 +69,18 @@ WindowDisplay {
         left: [
             [
                 (
-                    "--",
-                    ModeLine,
+                    "/aiditor-test/",
+                    ModeLineDim,
                 ),
                 (
-                    " a.txt",
-                    ModeLine,
+                    "a.txt",
+                    ModeLineBufferId,
+                ),
+            ],
+            [
+                (
+                    "Fundamental",
+                    ModeLineDim,
                 ),
             ],
         ],
@@ -83,6 +89,12 @@ WindowDisplay {
                 (
                     "2:2",
                     ModeLine,
+                ),
+            ],
+            [
+                (
+                    "All",
+                    ModeLineDim,
                 ),
             ],
         ],

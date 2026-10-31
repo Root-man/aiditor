@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::command::Args;
 use crate::file_index::scope;
 use crate::project::{Entry, ProjectId};
-use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, WatchSet};
+use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, Head, WatchSet};
 
 impl Core {
     /// A project with `watch = true`: its kept files and directories, as a walk of its current
@@ -27,7 +27,7 @@ impl Core {
     }
 
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
-    /// file a buffer visits.
+    /// file a buffer visits with the git files that show its repository's state.
     pub fn watch_set(&self) -> WatchSet {
         let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
@@ -39,7 +39,12 @@ impl Core {
         roots.sort();
         roots.dedup();
         let mut files: Vec<PathBuf> = (self.buffers.recent())
-            .filter_map(|(_, b)| b.file.clone())
+            .flat_map(|(_, b)| {
+                b.file
+                    .iter()
+                    .cloned()
+                    .chain(b.head.iter().flat_map(Head::watched))
+            })
             .collect();
         files.sort();
         files.dedup();
@@ -101,6 +106,30 @@ impl Ctx<'_> {
         }
     }
 
+    /// Asks for the repository of each visited file not yet asked about.
+    // shortcut: a repository created after the visit isn't seen until a rescan or the next visit; watch the file's ancestors for `.git` if that bites.
+    pub(crate) fn ask_heads(&mut self) {
+        let mut files = Vec::new();
+        for (_, buffer) in self.core.buffers.iter_mut() {
+            if !std::mem::replace(&mut buffer.head_asked, true) {
+                files.extend(buffer.file.clone());
+            }
+        }
+        if !files.is_empty() {
+            self.effects.push(Effect::File(FileOp::Head(files)));
+        }
+    }
+
+    /// Takes the file service's answer to `FileOp::Head`.
+    pub(crate) fn on_heads(&mut self, files: Vec<(PathBuf, Option<Head>)>) {
+        for (path, head) in files {
+            let visiting = self.core.buffers.iter_mut();
+            for (_, buffer) in visiting.filter(|(_, b)| b.file.as_ref() == Some(&path)) {
+                buffer.head.clone_from(&head);
+            }
+        }
+    }
+
     /// Takes the file service's answer to `FileOp::Check`: a gone file puts every buffer
     /// visiting it in the deleted state, and a present one takes them out of it, reverts the
     /// unmodified ones whose hash differs and marks the modified ones conflicted. An equal
@@ -146,7 +175,7 @@ impl Ctx<'_> {
 
     /// Checks the files visited at or under a reported path, every one on a rescan, and
     /// re-walks the indexes a create or delete made stale.
-    pub(crate) fn on_files_changed(&mut self, paths: Vec<(PathBuf, Disk)>, rescan: bool) {
+    pub(crate) fn on_files_changed(&mut self, mut paths: Vec<(PathBuf, Disk)>, rescan: bool) {
         let mut check: Vec<PathBuf> = (self.core.buffers.recent())
             .filter_map(|(_, b)| b.file.clone())
             .filter(|file| rescan || paths.iter().any(|(path, _)| file.starts_with(path)))
@@ -156,6 +185,18 @@ impl Ctx<'_> {
         if !check.is_empty() {
             self.effects.push(Effect::File(FileOp::Check(check)));
         }
+        let reported = |path: &PathBuf| paths.iter().any(|(p, _)| p == path);
+        let mut git = std::collections::BTreeSet::new();
+        for (_, buffer) in self.core.buffers.iter_mut() {
+            let watched: Vec<_> = buffer.head.iter().flat_map(Head::watched).collect();
+            let stale = rescan
+                || buffer.file.as_ref().is_some_and(reported)
+                || watched.iter().any(reported);
+            buffer.head_asked &= !stale;
+            git.extend(watched);
+        }
+        // Git's files are watched for the mode line; they say nothing about the index.
+        paths.retain(|(path, _)| !git.contains(path));
         let watched: std::collections::BTreeSet<_> = self
             .core
             .projects
@@ -219,6 +260,101 @@ mod tests {
     }
 
     #[test]
+    fn the_branch_follows_a_checkout_and_a_rescan() {
+        let mut h = Harness::new(&[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let (a, head) = (h.path("a.txt"), h.path(".git/HEAD"));
+        let on = |branch: &str| crate::Head {
+            path: head.clone(),
+            branch: branch.into(),
+            changed: false,
+        };
+        h.heads.insert(a.clone(), on("main"));
+        h.open("a.txt");
+        h.send(Msg::Tick);
+        assert!(mode_line(&mut h).contains("⎇ main"));
+        assert!(h.core.watch_set().files.contains(&head), "watched");
+        h.heads.insert(a.clone(), on("side"));
+        h.send(Msg::FilesChanged {
+            paths: vec![(h.path("b.txt"), Disk::File)],
+            rescan: false,
+        });
+        assert!(mode_line(&mut h).contains("⎇ main"), "another path");
+        h.send(Msg::FilesChanged {
+            paths: vec![(head.clone(), Disk::File)],
+            rescan: false,
+        });
+        assert!(mode_line(&mut h).contains("⎇ side"));
+        h.heads.remove(&a);
+        h.send(Msg::FilesChanged {
+            paths: Vec::new(),
+            rescan: true,
+        });
+        assert!(!mode_line(&mut h).contains('⎇'), "out of the repository");
+        h.heads.insert(a.clone(), on("main"));
+        h.send(Msg::FilesChanged {
+            paths: Vec::new(),
+            rescan: true,
+        });
+        // A file's status goes with its index entry and its text.
+        let index = h.path(".git/index");
+        assert!(h.core.watch_set().files.contains(&index));
+        let changed = crate::Head {
+            changed: true,
+            ..on("main")
+        };
+        for path in [index, a.clone()] {
+            h.heads.insert(a.clone(), changed.clone());
+            h.send(Msg::FilesChanged {
+                paths: vec![(path, Disk::File)],
+                rescan: false,
+            });
+            assert!(mode_line(&mut h).contains("⎇ main ±"));
+            h.heads.insert(a.clone(), on("main"));
+            h.core.current_mut().head_asked = true;
+            h.core.current_mut().head = Some(on("main"));
+        }
+        h.heads.remove(&a);
+        h.send(Msg::FilesChanged {
+            paths: Vec::new(),
+            rescan: true,
+        });
+        assert!(!h.core.watch_set().files.contains(&head));
+    }
+
+    #[test]
+    fn a_reported_head_does_not_walk_the_index() {
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.core.projects[0].project.watch = true;
+        h.core.projects[0].project.primary.path = h.path("");
+        h.index_reply("", &["a.txt"], &[""]);
+        let head = h.path(".git/HEAD");
+        let found = crate::Head {
+            path: head.clone(),
+            branch: "main".into(),
+            changed: false,
+        };
+        h.heads.insert(h.path("a.txt"), found);
+        h.open("a.txt");
+        h.send(Msg::Tick);
+        // Unanswered, a walk stays among the effects.
+        h.indexes.clear();
+        h.effects.clear();
+        let walked = |h: &Harness| {
+            let index = |e: &Effect| matches!(e, Effect::File(FileOp::Index { .. }));
+            h.effects.iter().any(index)
+        };
+        let reported = |path| Msg::FilesChanged {
+            paths: vec![(path, Disk::File)],
+            rescan: false,
+        };
+        h.send(reported(head));
+        h.send(reported(h.path(".git/index")));
+        assert!(!walked(&h));
+        h.send(reported(h.path("new.txt")));
+        assert!(walked(&h), "a file the index lacks still does");
+    }
+
+    #[test]
     fn watcher_status_reaches_echo_and_messages() {
         let mut h = Harness::new(&[]);
         for message in [
@@ -247,7 +383,10 @@ mod tests {
         h.open("a.txt");
         h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
-        assert_eq!(mode_line(&mut h), "-- a.txt │ [deleted]  1:0");
+        assert_eq!(
+            mode_line(&mut h),
+            "/aiditor-test/a.txt │ [deleted] │ Fundamental  1:0 │ All"
+        );
         assert_eq!(h.display(5).mode_line.left[1][0].1, FaceName::StatusFailed);
         assert_eq!(h.text(), "a\n");
         let buffer = h.core.current();
@@ -255,7 +394,10 @@ mod tests {
         h.read_reply("a.txt", Some("back\n".as_ref()));
         report(&mut h, &["a.txt"]);
         // A clean buffer reverts to the file that came back, taking its hash.
-        assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
+        assert_eq!(
+            mode_line(&mut h),
+            "/aiditor-test/a.txt │ Fundamental  1:0 │ All"
+        );
         assert_eq!(h.text(), "back\n");
         h.save_reply("xback\n");
         h.keys("x C-x C-s");
@@ -306,7 +448,10 @@ mod tests {
         h.read_reply("a.txt", Some("new\na\nb\nc\n".as_ref()));
         report(&mut h, &["a.txt"]);
         assert_eq!(h.text(), "new\na\nb\nc\n");
-        assert_eq!(mode_line(&mut h), "-- a.txt  4:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "/aiditor-test/a.txt │ Fundamental  4:1 │ All"
+        );
         assert_eq!(h.core.message(), None);
         assert!(!h.core.current().modified());
         h.keys("C-/");
@@ -347,7 +492,10 @@ mod tests {
     fn a_modified_buffer_is_conflicted_not_reverted() {
         let mut h = conflicted();
         assert_eq!(h.text(), "xa\n");
-        assert_eq!(mode_line(&mut h), "** a.txt │ [conflict]  1:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "● /aiditor-test/a.txt │ [conflict] │ Fundamental  1:1 │ All"
+        );
         assert_eq!(h.display(5).mode_line.left[1][0].1, FaceName::StatusFailed);
         assert_eq!(prompt(&mut h), None, "already focused, so not asked");
         h.keys("C-x C-s");
@@ -365,7 +513,10 @@ mod tests {
         h.save_reply("xa\n");
         h.keys("C-x C-s Keep SPC mine RET");
         assert_eq!(h.submitted("a.txt"), "xa\n");
-        assert_eq!(mode_line(&mut h), "-- a.txt  1:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "/aiditor-test/a.txt │ Fundamental  1:1 │ All"
+        );
     }
 
     #[test]
@@ -373,7 +524,10 @@ mod tests {
         let mut h = conflicted();
         h.keys("M-x resolve-conflict RET Keep SPC mine RET");
         assert_eq!(h.core.current().disk, Some(hash(b"other\n")));
-        assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "● /aiditor-test/a.txt │ Fundamental  1:1 │ All"
+        );
         h.save_reply("xa\n");
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a.txt"), "xa\n");
@@ -395,7 +549,10 @@ mod tests {
         let mut h = conflicted();
         h.keys("M-x resolve-conflict RET Take SPC disk RET");
         assert_eq!(h.text(), "other\n");
-        assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
+        assert_eq!(
+            mode_line(&mut h),
+            "/aiditor-test/a.txt │ Fundamental  1:0 │ All"
+        );
         h.keys("C-/");
         assert_eq!(h.text(), "xa\n");
     }
@@ -433,7 +590,10 @@ mod tests {
         h.keys("C-x b RET C-x b RET");
         assert_eq!(prompt(&mut h), Some(asked(&mut h)));
         h.keys("Keep SPC mine RET");
-        assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "● /aiditor-test/a.txt │ Fundamental  1:1 │ All"
+        );
         h.save_reply("xa\n");
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a.txt"), "xa\n");
@@ -444,12 +604,18 @@ mod tests {
         let mut h = conflicted();
         h.read_reply("a.txt", Some("a\n".as_ref()));
         report(&mut h, &["a.txt"]);
-        assert_eq!(mode_line(&mut h), "** a.txt  1:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "● /aiditor-test/a.txt │ Fundamental  1:1 │ All"
+        );
         h.read_reply("a.txt", Some("other\n".as_ref()));
         report(&mut h, &["a.txt"]);
         h.read_reply("a.txt", None);
         report(&mut h, &["a.txt"]);
-        assert_eq!(mode_line(&mut h), "** a.txt │ [deleted]  1:1");
+        assert_eq!(
+            mode_line(&mut h),
+            "● /aiditor-test/a.txt │ [deleted] │ Fundamental  1:1 │ All"
+        );
         h.save_reply("xa\n");
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a.txt"), "xa\n");
@@ -534,7 +700,10 @@ mod tests {
         h.save_reply("a\n");
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a.txt"), "a\n");
-        assert_eq!(mode_line(&mut h), "-- a.txt  1:0");
+        assert_eq!(
+            mode_line(&mut h),
+            "/aiditor-test/a.txt │ Fundamental  1:0 │ All"
+        );
         h.keys("C-x C-s");
         assert_eq!(h.core.message(), Some("(No changes need to be saved)"));
         // A delete the watcher missed: the save writes the file back too.
