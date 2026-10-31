@@ -120,6 +120,8 @@ impl Buffers {
             deleted: false,
             conflict: None,
             conflict_asked: false,
+            head: None,
+            head_asked: false,
             read_only: false,
             truncate_lines: false,
             line_numbers: None,
@@ -276,6 +278,10 @@ pub struct Buffer {
     pub conflict: Option<u64>,
     /// Focusing it already asked about `conflict`; a save still asks.
     pub conflict_asked: bool,
+    /// The repository of the visited file, if it is in one.
+    pub head: Option<crate::Head>,
+    /// `head` was asked for since it last may have changed.
+    pub head_asked: bool,
     pub read_only: bool,
     /// Long lines are cut at the window edge instead of wrapping, as Emacs's `truncate-lines`.
     pub truncate_lines: bool,
@@ -794,6 +800,11 @@ impl Buffer {
         if let (Some(syntax), Content::Text(rope)) = (&mut self.syntax, &self.content) {
             syntax.reparse(rope);
         }
+    }
+
+    /// The name of the language its file is in, for the mode line.
+    pub(crate) fn language(&self) -> &'static str {
+        self.syntax.as_ref().map_or("Fundamental", |s| s.name)
     }
 
     /// Whether it has a syntax tree to colour its text with.

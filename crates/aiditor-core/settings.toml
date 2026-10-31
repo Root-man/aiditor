@@ -48,6 +48,7 @@ separator = { fg = 0x808080 }
 mode-line = { fg = 0xd4d4d4, bg = 0x3c3c3c }
 mode-line-inactive = { fg = 0xd4d4d4, bg = 0x282828 }
 mode-line-dim = { fg = 0x808080 }
+mode-line-buffer-id = { bold = true }
 workspace-bar = { fg = 0xd4d4d4, bg = 0x282828 }
 workspace-current = { fg = 0xffcc00 }
 divider = { bg = 0x3c3c3c }

@@ -68,12 +68,18 @@ FrameDisplay {
                     left: [
                         [
                             (
-                                "--",
-                                ModeLine,
+                                "/aiditor-test/",
+                                ModeLineDim,
                             ),
                             (
-                                " a.txt",
-                                ModeLine,
+                                "a.txt",
+                                ModeLineBufferId,
+                            ),
+                        ],
+                        [
+                            (
+                                "Fundamental",
+                                ModeLineDim,
                             ),
                         ],
                     ],
@@ -90,6 +96,12 @@ FrameDisplay {
                                 ModeLine,
                             ),
                         ],
+                        [
+                            (
+                                "All",
+                                ModeLineDim,
+                            ),
+                        ],
                     ],
                 },
                 terminal: None,
@@ -98,10 +110,10 @@ FrameDisplay {
             mode_line: ModeBar {
                 left: [
                     Span {
-                        text: "--",
+                        text: "/aiditor-test/",
                         face: Face {
                             fg: Some(
-                                13948116,
+                                8421504,
                             ),
                             bg: Some(
                                 3947580,
@@ -113,10 +125,25 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: " a.txt",
+                        text: "a.txt",
                         face: Face {
                             fg: Some(
                                 13948116,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: true,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "  …",
+                        face: Face {
+                            fg: Some(
+                                8421504,
                             ),
                             bg: Some(
                                 3947580,
@@ -164,6 +191,21 @@ FrameDisplay {
                         face: Face {
                             fg: Some(
                                 13948116,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "  │…",
+                        face: Face {
+                            fg: Some(
+                                8421504,
                             ),
                             bg: Some(
                                 3947580,
@@ -237,12 +279,18 @@ FrameDisplay {
                     left: [
                         [
                             (
-                                "--",
-                                ModeLine,
+                                "/aiditor-test/",
+                                ModeLineDim,
                             ),
                             (
-                                " a.txt",
-                                ModeLine,
+                                "a.txt",
+                                ModeLineBufferId,
+                            ),
+                        ],
+                        [
+                            (
+                                "Fundamental",
+                                ModeLineDim,
                             ),
                         ],
                     ],
@@ -259,6 +307,12 @@ FrameDisplay {
                                 ModeLine,
                             ),
                         ],
+                        [
+                            (
+                                "All",
+                                ModeLineDim,
+                            ),
+                        ],
                     ],
                 },
                 terminal: None,
@@ -267,7 +321,7 @@ FrameDisplay {
             mode_line: ModeBar {
                 left: [
                     Span {
-                        text: "--",
+                        text: "/aiditor-test/",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -282,7 +336,22 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: " a.txt",
+                        text: "a.txt",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                2631720,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "  …",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -330,6 +399,21 @@ FrameDisplay {
                     },
                     Span {
                         text: "1:0",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                2631720,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "  …",
                         face: Face {
                             fg: Some(
                                 13948116,

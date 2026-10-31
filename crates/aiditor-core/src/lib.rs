@@ -146,6 +146,8 @@ pub enum Msg {
     },
     /// The file service's answer to `FileOp::Check`: each readable file's hash, `None` when gone.
     Checked(Vec<(PathBuf, Option<u64>)>),
+    /// The file service's answer to `FileOp::Head`: each file's repository, if it is in one.
+    Heads(Vec<(PathBuf, Option<Head>)>),
     /// A watch registration failure or recovery, shown in the echo area and Messages.
     WatchStatus(String),
     /// The grep service's hits for search `search`, in batches as they are found, or why the
@@ -286,6 +288,9 @@ pub struct Recovered {
     pub disk: Option<(Vec<u8>, u64)>,
 }
 
+/// A repository's `HEAD` file and the branch it names.
+pub type Head = (PathBuf, String);
+
 /// What a path the watcher reports is on disk now.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Disk {
@@ -398,6 +403,8 @@ pub enum FileOp {
     Preview(PreviewRequest),
     /// Hash each file and send `Msg::Checked`.
     Check(Vec<PathBuf>),
+    /// Find each file's repository and send `Msg::Heads`.
+    Head(Vec<PathBuf>),
     /// Walk every root of `project`, leaving out what its `ignore` patterns match, and send
     /// `Msg::Indexed` with `walk`.
     Index {
@@ -749,6 +756,7 @@ impl Ctx<'_> {
             Msg::Grepped { search, hits, done } => self.core.on_grepped(search, hits, done),
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
+            Msg::Heads(files) => self.on_heads(files),
             Msg::WatchStatus(message) => self.core.report(message),
             Msg::Hint => {
                 self.core.hint_timer = None;
@@ -1082,6 +1090,7 @@ impl Core {
             }
         }
         ctx.ensure_watch_indexes();
+        ctx.ask_heads();
         ctx.ensure_environments();
         ctx.ask_on_focus();
         let mut effects = ctx.effects;

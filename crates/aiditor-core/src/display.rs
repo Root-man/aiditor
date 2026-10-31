@@ -3,6 +3,7 @@
 use crate::buffer::{Buffer, Decoration, Face, Prop};
 use crate::settings::{FaceName, LineNumbers, Settings, Theme};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq)]
 pub struct WindowDisplay {
@@ -345,6 +346,7 @@ pub fn build(
     settings: &Settings,
     shown: Range<usize>,
     wrap: Option<Wrap>,
+    roots: &[PathBuf],
 ) -> WindowDisplay {
     let text = buffer.text();
     let (top_line, end_line) = (
@@ -536,15 +538,27 @@ pub fn build(
             }),
         }
     }
+    let mut bottom = pos == text.len_chars();
     if let Some(wrap) = wrap {
         let marker = crate::syntax::face(&settings.theme.syntax, "comment").unwrap_or_default();
         lines = wrap_lines(lines, &mut cursor, rows, wrap, marker);
+        bottom &= lines.len() <= rows;
+        lines.truncate(rows);
     }
     let (l, c) = buffer.line_col(point).unwrap_or_default();
+    let position = match (first == 0, bottom) {
+        (true, true) => "All".to_string(),
+        (true, false) => "Top".to_string(),
+        (false, true) => "Bot".to_string(),
+        (false, false) => format!("{}%", first * 100 / text.len_chars()),
+    };
     WindowDisplay {
         lines,
         cursor,
-        mode_line: mode_line(buffer, l + 1, c),
+        mode_line: match &buffer.file {
+            Some(file) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
+            None => mode_line(buffer, l + 1, c),
+        },
         terminal: None,
     }
 }
@@ -563,18 +577,9 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
         (state.to_string(), state_face),
         (name, FaceName::ModeLine),
     ]];
-    let disk = match (buffer.deleted, buffer.conflict) {
-        (true, _) => Some("[deleted]"),
-        (_, Some(_)) => Some("[conflict]"),
-        _ => None,
-    };
-    left.extend(disk.map(|disk| segment(disk, FaceName::StatusFailed)));
     let agent = buffer.agent_mode.as_ref().map(|m| format!("[{m}]"));
     left.extend(agent.map(|mode| segment(&mode, FaceName::ModeLine)));
     let mut right = Vec::new();
-    if buffer.crlf {
-        right.push(segment("(DOS)", FaceName::StatusWaiting));
-    }
     let position = segment(&format!("{line}:{col}"), FaceName::ModeLine);
     // A terminal in char mode has no point to show.
     match buffer.terminal() {
@@ -588,8 +593,70 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     ModeLine { left, right }
 }
 
+/// The mode line of `buffer`, which visits `file`, with the current project's `roots`, the active
+/// `region`, point at `at` and the window's `position` in the buffer.
+fn file_mode_line(
+    buffer: &Buffer,
+    file: &Path,
+    roots: &[PathBuf],
+    region: Option<Range<usize>>,
+    (line, col): (usize, usize),
+    position: &str,
+) -> ModeLine {
+    let segment = |text: &str, face| vec![(text.to_string(), face)];
+    let mut name = Vec::new();
+    if buffer.modified() {
+        name.push(("● ".to_string(), FaceName::StatusModified));
+    }
+    if buffer.read_only {
+        name.push(("⊘ ".to_string(), FaceName::StatusFailed));
+    }
+    let shown = |path: &Path| path.to_string_lossy().replace('\n', "^J");
+    let dir = file.parent().unwrap_or(Path::new(""));
+    let dir = (roots.iter().find_map(|root| dir.strip_prefix(root).ok())).unwrap_or(dir);
+    let dir = shown(&dir.join(""));
+    if !dir.is_empty() {
+        name.push((dir, FaceName::ModeLineDim));
+    }
+    let base = file.file_name().map_or(file, Path::new);
+    name.push((shown(base), FaceName::ModeLineBufferId));
+    let mut left = vec![name];
+    let disk = match (buffer.deleted, buffer.conflict) {
+        (true, _) => Some("[deleted]"),
+        (_, Some(_)) => Some("[conflict]"),
+        _ => None,
+    };
+    left.extend(disk.map(|disk| segment(disk, FaceName::StatusFailed)));
+    left.push(segment(buffer.language(), FaceName::ModeLineDim));
+    let mut right = Vec::new();
+    if let Some(region) = region {
+        right.push(segment(&region_size(buffer, region), FaceName::ModeLineDim));
+    }
+    if buffer.crlf {
+        // Other encodings join it with #155.
+        right.push(segment("UTF-8 CRLF", FaceName::StatusWaiting));
+    }
+    if let Some((_, branch)) = &buffer.head {
+        right.push(segment(&format!("⎇ {branch}"), FaceName::VcsBranch));
+    }
+    right.push(segment(&format!("{line}:{col}"), FaceName::ModeLine));
+    right.push(segment(position, FaceName::ModeLineDim));
+    ModeLine { left, right }
+}
+
+/// `3 lines, 84 chars`, counting lines as Emacs's `count-lines`: a last line the region only
+/// reaches the start of is not one.
+fn region_size(buffer: &Buffer, region: Range<usize>) -> String {
+    let text = buffer.text();
+    let last = text.char_to_line(region.end);
+    let partial = !region.is_empty() && text.line_to_char(last) != region.end;
+    let lines = last - text.char_to_line(region.start) + usize::from(partial);
+    let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    format!("{}, {}", count(lines, "line"), count(region.len(), "char"))
+}
+
 /// Splits each of `lines` into its rows, ending each row but the last with a `\` in `marker`
-/// when not breaking at words, and keeps the first `rows` of them, the cursor moving along.
+/// when not breaking at words, the cursor moving along if it stays in the first `rows`.
 fn wrap_lines(
     lines: Vec<Line>,
     cursor: &mut Option<(usize, usize)>,
@@ -646,7 +713,6 @@ fn wrap_lines(
         }
     }
     *cursor = moved.filter(|&(r, _)| r < rows);
-    out.truncate(rows);
     out
 }
 
@@ -989,6 +1055,7 @@ mod tests {
             h.core.settings(),
             shown,
             None,
+            &[],
         );
         let texts = (d.lines.iter())
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
@@ -1032,6 +1099,7 @@ mod tests {
             h.core.settings(),
             495..505,
             None,
+            &[],
         );
         let spans: Vec<_> = (d.lines[0].spans.iter())
             .map(|s| (s.text.as_str(), s.face.fg))
@@ -1067,10 +1135,145 @@ mod tests {
     #[test]
     fn mode_line_shows_state_name_and_position() {
         let mut h = Harness::new(&[("a.txt", "one\ntwo\nthree")]);
+        h.core.projects[0].project.primary.path = h.path("");
         h.open("a.txt");
-        assert_eq!(h.display(5).mode_line.text(), "-- a.txt  1:0");
+        assert_eq!(
+            h.display(5).mode_line.text(),
+            "a.txt │ Fundamental  1:0 │ All"
+        );
         h.keys("<down> <down> <right> x");
-        assert_eq!(h.display(5).mode_line.text(), "** a.txt  3:2");
+        assert_eq!(
+            h.display(5).mode_line.text(),
+            "● a.txt │ Fundamental  3:2 │ All"
+        );
+    }
+
+    #[test]
+    fn a_buffer_without_a_file_keeps_its_mode_line() {
+        let mut h = Harness::new(&[]);
+        h.keys("x RET y");
+        let name = h.core.current().name.clone();
+        assert_eq!(h.display(5).mode_line.text(), format!("** {name}  2:1"));
+    }
+
+    #[test]
+    fn a_file_shows_its_path_from_its_root_and_its_language() {
+        let mut h = Harness::new(&[("src/a.rs", ""), ("b.txt", "")]);
+        h.core.projects[0].project.primary.path = h.path("");
+        h.open("src/a.rs");
+        let line = h.display(5).mode_line;
+        assert_eq!(line.text(), "src/a.rs │ Rust  1:0 │ All");
+        assert_eq!(line.left[0][0], ("src/".into(), FaceName::ModeLineDim));
+        assert_eq!(line.left[0][1], ("a.rs".into(), FaceName::ModeLineBufferId));
+        assert_eq!(line.left[1][0].1, FaceName::ModeLineDim);
+        assert_eq!(line.right[1][0].1, FaceName::ModeLineDim);
+        // Under no root, the whole directory shows.
+        h.core.projects[0].project.primary.path = "/elsewhere".into();
+        let text = h.display(5).mode_line.text();
+        assert_eq!(text, "/aiditor-test/src/a.rs │ Rust  1:0 │ All");
+    }
+
+    #[test]
+    fn read_only_and_modified_each_show_a_mark() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        h.open("a.txt");
+        h.core.current_mut().read_only = true;
+        let line = h.display(5).mode_line;
+        assert_eq!(line.left[0][0], ("⊘ ".into(), FaceName::StatusFailed));
+        h.core.current_mut().read_only = false;
+        h.keys("x");
+        h.core.current_mut().read_only = true;
+        let text = h.display(5).mode_line.text();
+        assert!(text.starts_with("● ⊘ /aiditor-test/a.txt"), "{text}");
+    }
+
+    /// A file of `lines` lines of ten chars each, shown from its first line.
+    fn long_file(lines: usize) -> Harness {
+        let text = "123456789\n".repeat(lines);
+        let mut h = Harness::new(&[("a.txt", &text)]);
+        h.open("a.txt");
+        h
+    }
+
+    fn position(h: &mut Harness, rows: usize) -> String {
+        let line = h.display(rows).mode_line;
+        line.right.last().unwrap()[0].0.clone()
+    }
+
+    #[test]
+    fn the_position_says_which_ends_of_the_file_show() {
+        let mut h = long_file(100);
+        assert_eq!(position(&mut h, 10), "Top");
+        assert_eq!(position(&mut h, 200), "All");
+        h.keys("M->");
+        assert_eq!(position(&mut h, 10), "Bot");
+        // Lines 41 to 50 of 100, with the end of the file below them.
+        let mut h = long_file(100);
+        h.keys(&"C-n ".repeat(45));
+        h.core.windows.window.set_top(40);
+        assert_eq!(position(&mut h, 10), "40%");
+    }
+
+    #[test]
+    fn the_last_newline_counts_as_the_end() {
+        let mut h = long_file(3);
+        // Three lines fill the window; the empty line after the newline is below it.
+        assert_eq!(position(&mut h, 3), "All");
+        assert_eq!(position(&mut h, 2), "Top");
+    }
+
+    #[test]
+    fn rows_wrapped_past_the_window_hide_the_end() {
+        let mut h = Harness::new(&[("a.txt", &"word ".repeat(40))]);
+        h.open("a.txt");
+        h.frame(100., 100.);
+        let frame = h.frame(100., 100.);
+        let line = &frame.windows[0].display;
+        assert!(line.lines.len() > 1, "wrapped");
+        assert_eq!(line.mode_line.right.last().unwrap()[0].0, "Top");
+    }
+
+    #[test]
+    fn an_active_region_shows_its_size() {
+        let mut h = Harness::new(&[("a.txt", "one\ntwo\nthree\n")]);
+        h.open("a.txt");
+        let size = |h: &mut Harness| h.display(5).mode_line.right[0][0].0.clone();
+        assert_eq!(size(&mut h), "1:0", "no region");
+        h.keys("C-SPC");
+        assert_eq!(size(&mut h), "0 lines, 0 chars");
+        h.keys("<right>");
+        assert_eq!(size(&mut h), "1 line, 1 char");
+        h.keys("<left> <down> <down>");
+        assert_eq!(size(&mut h), "2 lines, 8 chars", "ending at a line's start");
+        h.keys("<right> <right>");
+        assert_eq!(size(&mut h), "3 lines, 10 chars");
+        h.keys("C-g");
+        assert_eq!(size(&mut h), "3:2", "deactivated");
+    }
+
+    #[test]
+    fn a_modified_file_and_a_region_over_lines_read_as_the_design_draws_them() {
+        let mut h = Harness::new(&[("src/a.rs", "one two\ntwo\nthree\n")]);
+        h.core.projects[0].project.primary.path = h.path("");
+        h.open("src/a.rs");
+        h.keys("C-SPC <down> <down> <right> <right>");
+        let text = h.display(5).mode_line.text();
+        assert_eq!(text, "src/a.rs │ Rust  3 lines, 14 chars │ 3:2 │ All");
+        h.keys("C-g x");
+        let text = h.display(5).mode_line.text();
+        assert_eq!(text, "● src/a.rs │ Rust  3:3 │ All");
+    }
+
+    #[test]
+    fn a_file_in_a_repository_shows_its_branch_before_point() {
+        let mut h = Harness::new(&[("a.txt", "")]);
+        let head = (h.path(".git/HEAD"), "main".to_string());
+        h.heads.insert(h.path("a.txt"), head);
+        h.open("a.txt");
+        h.send(crate::Msg::Tick);
+        let line = h.display(5).mode_line;
+        assert_eq!(line.right[0], [("⎇ main".to_string(), FaceName::VcsBranch)]);
+        assert_eq!(line.right[1][0].0, "1:0");
     }
 
     #[test]

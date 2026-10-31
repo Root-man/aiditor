@@ -254,6 +254,12 @@ impl State {
 
     /// Whether a change at `path` is reported: one in a kept or extra directory, or of a kept one.
     fn keep(&self, path: &Path) -> bool {
+        // Git rewrites its own directory on every command; only a watched `HEAD` there matters.
+        if path.components().any(|c| c.as_os_str() == ".git")
+            && !self.files.iter().any(|f| f == path)
+        {
+            return false;
+        }
         (is_ignore(path) && self.roots.iter().any(|r| path.starts_with(&r.path)))
             || self.kept(path)
             || (path.parent()).is_some_and(|dir| self.kept(dir) || self.extra.contains(dir))

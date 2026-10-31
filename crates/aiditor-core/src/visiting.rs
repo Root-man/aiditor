@@ -769,7 +769,7 @@ mod tests {
         let mut h = reverting();
         revert(&mut h, &LINES.replace('\n', "\r\n"));
         assert_eq!(h.text(), LINES);
-        assert!(h.display(5).mode_line.text().contains("(DOS)"));
+        assert!(h.display(5).mode_line.text().contains("UTF-8 CRLF"));
     }
 
     #[test]
@@ -999,7 +999,10 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "\u{feff}a\r\nb\r\n")]);
         h.open("a.txt");
         assert_eq!(h.text(), "a\nb\n");
-        assert_eq!(h.display(5).mode_line.text(), "-- a.txt  (DOS) │ 1:0");
+        assert_eq!(
+            h.display(5).mode_line.text(),
+            "/aiditor-test/a.txt │ Fundamental  UTF-8 CRLF │ 1:0 │ All"
+        );
         h.save_reply("\u{feff}xa\r\nb\r\n");
         h.keys("x C-x C-s");
         assert_eq!(
@@ -1042,7 +1045,11 @@ mod tests {
             h.open(name);
             assert_eq!(h.text(), "");
             assert!(h.core.message().unwrap().contains(", opened read-only"));
-            assert_eq!(h.display(5).mode_line.text(), format!("%% {name}  1:0"));
+            let text = h.display(5).mode_line.text();
+            assert_eq!(
+                text,
+                format!("⊘ /aiditor-test/{name} │ Fundamental  1:0 │ All")
+            );
             h.keys("x");
             assert_eq!(h.core.message(), Some("Buffer is read-only"));
             h.keys("C-x C-s");

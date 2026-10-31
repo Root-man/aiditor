@@ -86,6 +86,8 @@ static TOML: LazyLock<Grammar> = LazyLock::new(|| {
 /// A buffer's syntax tree, kept in step with its text.
 // shortcut: parses on the core thread, so a huge file stalls visiting and big edits; move it to the syntax service when that shows.
 pub(crate) struct Syntax {
+    /// The language's name, for the mode line.
+    pub(crate) name: &'static str,
     grammar: &'static Grammar,
     parser: Parser,
     tree: Tree,
@@ -135,22 +137,23 @@ impl Syntax {
         if ext == "eex" {
             ext = Path::new(path.file_stem()?).extension()?.to_str()?;
         }
-        let grammar: &'static Grammar = match ext {
-            "js" | "mjs" | "cjs" | "jsx" => &JAVASCRIPT,
-            "ts" | "mts" | "cts" => &TYPESCRIPT,
-            "tsx" => &TSX,
-            "rs" => &RUST,
-            "ex" | "exs" => &ELIXIR,
-            "heex" => &HEEX,
-            "yml" | "yaml" => &YAML,
-            "md" | "markdown" => &MARKDOWN,
-            "toml" => &TOML,
+        let (name, grammar): (_, &'static Grammar) = match ext {
+            "js" | "mjs" | "cjs" | "jsx" => ("JavaScript", &JAVASCRIPT),
+            "ts" | "mts" | "cts" => ("TypeScript", &TYPESCRIPT),
+            "tsx" => ("TSX", &TSX),
+            "rs" => ("Rust", &RUST),
+            "ex" | "exs" => ("Elixir", &ELIXIR),
+            "heex" => ("HEEx", &HEEX),
+            "yml" | "yaml" => ("YAML", &YAML),
+            "md" | "markdown" => ("Markdown", &MARKDOWN),
+            "toml" => ("TOML", &TOML),
             _ => return None,
         };
         let mut parser = Parser::new();
         (parser.set_language(&grammar.language)).expect("bundled grammars suit this tree-sitter");
         let tree = parse(&mut parser, text, None);
         Some(Syntax {
+            name,
             grammar,
             parser,
             tree,

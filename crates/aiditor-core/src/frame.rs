@@ -5,6 +5,7 @@ use crate::display::TEXT_INSET;
 use crate::settings::{FaceName, LineNumbers, Settings};
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx, display};
+use std::path::PathBuf;
 
 impl Ctx<'_> {
     /// Splits the selected window in two, the new one below or right of it.
@@ -87,9 +88,18 @@ impl Core {
     /// It has no width, so point's line never scrolls sideways.
     #[cfg(test)]
     pub fn display(&mut self, rows: usize) -> display::WindowDisplay {
+        let roots = self.roots();
         let window = &mut self.windows.window;
         let (buffers, settings) = (&mut self.buffers, &self.settings);
-        window_display(window, buffers, settings, rows, rows, usize::MAX)
+        window_display(window, buffers, settings, rows, rows, usize::MAX, &roots)
+    }
+
+    /// The roots of the current workspace's project.
+    fn roots(&self) -> Vec<PathBuf> {
+        let project = self.current_workspace().project;
+        (self.projects.iter().find(|p| p.id == project)).map_or(Vec::new(), |p| {
+            p.project.all_roots().map(|r| r.path.clone()).collect()
+        })
     }
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
@@ -99,6 +109,7 @@ impl Core {
             .projects
             .iter()
             .any(|p| p.id == self.current_workspace().project && !self.project_watched(p));
+        let roots = self.roots();
         let (width, height, cell_width) = self.frame_size;
         let cell = (cell_width, self.settings.line_height());
         let frame = display::Rect {
@@ -135,7 +146,8 @@ impl Core {
                     ((room - if numbered { width } else { TEXT_INSET }) / cell_width) as usize;
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
-                let mut display = window_display(window, buffers, settings, rows, drawn, cols);
+                let mut display =
+                    window_display(window, buffers, settings, rows, drawn, cols, &roots);
                 if highlighted {
                     display::highlight_line(&mut display);
                 }
@@ -225,6 +237,7 @@ pub(crate) fn window_display(
     rows: usize,
     drawn: usize,
     cols: usize,
+    roots: &[PathBuf],
 ) -> display::WindowDisplay {
     window.set_cols(cols);
     // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
@@ -261,7 +274,9 @@ pub(crate) fn window_display(
         Some(_) => 0..(drawn + 1).saturating_mul(cols),
         None => left..left.saturating_add(width),
     };
-    let mut display = display::build(buffer, top, drawn, point, mark, settings, shown, wrap);
+    let mut display = display::build(
+        buffer, top, drawn, point, mark, settings, shown, wrap, roots,
+    );
     if let Some(terminal) = buffer.terminal().filter(|_| !buffer.copy_mode()) {
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }
@@ -393,7 +408,10 @@ mod tests {
                 .collect();
             assert_eq!(
                 names,
-                ["-- a.txt  [unwatched] │ 1:0", "** *scratch*<main>  1:1"]
+                [
+                    "/aiditor-test/a.txt │ Fundamental  [unwatched] │ 1:0 │ All",
+                    "** *scratch*<main>  1:1"
+                ]
             );
             h.keys("C-x o");
         }
@@ -425,6 +443,7 @@ mod tests {
         h.index_reply("", &["other/x"], &["", "other"]);
         h.core.projects[0].project.primary.path = h.path("");
         h.open("other/x");
+        let unwatched = "other/x │ Fundamental  [unwatched] │ 1:0 │ All";
         let lines = |h: &mut Harness| {
             h.frame(800., 600.)
                 .windows
@@ -432,20 +451,20 @@ mod tests {
                 .map(|w| w.display.mode_line.text())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(lines(&mut h), ["-- x  [unwatched] │ 1:0"]);
+        assert_eq!(lines(&mut h), [unwatched]);
         h.keys("C-x p w home RET C-p RET");
-        assert_eq!(lines(&mut h), ["-- x  1:0"]);
+        assert_eq!(lines(&mut h), ["other/x │ Fundamental  1:0 │ All"]);
         h.keys("C-x p w home RET C-n RET M-x");
-        assert_eq!(lines(&mut h), ["-- x  [unwatched] │ 1:0"]);
+        assert_eq!(lines(&mut h), [unwatched]);
         h.keys("C-g");
         h.core
             .add_project(crate::project::Loaded::ad_hoc("other", &h.path("other")));
         h.new_workspace("other", "other");
         h.open("other/x");
         h.send(crate::Msg::Tick);
-        assert_eq!(lines(&mut h), ["-- x<2>  1:0"]);
+        assert_eq!(lines(&mut h), ["x │ Fundamental  1:0 │ All"]);
         h.keys("C-x p p home RET");
-        assert_eq!(lines(&mut h), ["-- x  [unwatched] │ 1:0"]);
+        assert_eq!(lines(&mut h), [unwatched]);
     }
 
     #[test]
@@ -477,11 +496,11 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "x\r\n"), ("b.txt", "x\n")]);
         h.open("b.txt");
         let (left, right, _) = bar(&mut h, 800., 0);
-        assert_eq!(left, "-- b.txt");
-        assert_eq!(right, "[unwatched]  │  1:0");
+        assert_eq!(left, "/aiditor-test/b.txt  │  Fundamental");
+        assert_eq!(right, "[unwatched]  │  1:0  │  All");
         h.open("a.txt");
         let (_, right, line) = bar(&mut h, 800., 0);
-        assert_eq!(right, "[unwatched]  │  (DOS)  │  1:0");
+        assert_eq!(right, "[unwatched]  │  UTF-8 CRLF  │  1:0  │  All");
         let theme = &h.core.settings().theme;
         let over = |name| theme.face(name).over(theme.face(FaceName::ModeLine));
         assert_eq!(line.right[0].face, over(FaceName::ModeLineDim));
@@ -497,9 +516,12 @@ mod tests {
         let (_, _, line) = bar(&mut h, 800., 0);
         let theme = &h.core.settings().theme;
         let over = |name| theme.face(name).over(theme.face(FaceName::ModeLine));
-        assert_eq!(line.left[0].text, "**");
+        assert_eq!(line.left[0].text, "● ");
         assert_eq!(line.left[0].face, over(FaceName::StatusModified));
-        assert_eq!(line.left[1].face, over(FaceName::ModeLine));
+        assert_eq!(line.left[1].face, over(FaceName::ModeLineDim));
+        assert_eq!(line.left[2].text, "a.txt");
+        assert!(line.left[2].face.bold);
+        assert_eq!(line.left[2].face.fg, theme.face(FaceName::ModeLine).fg);
     }
 
     #[test]
@@ -511,6 +533,7 @@ mod tests {
         assert_eq!((left, right), (other_left, other_right));
         assert_ne!(selected.left[0].face, inactive.left[0].face);
         let face = h.core.settings().theme.face(FaceName::ModeLineInactive);
+        assert!(!face.bold);
         assert!((inactive.left.iter().chain(&inactive.right)).all(|s| s.face == face));
     }
 
@@ -522,7 +545,7 @@ mod tests {
         let (left, right, _) = bar(&mut h, 200., 0);
         assert_eq!(
             (left.as_str(), right.as_str()),
-            ("-- a-very…", "[unwatche…")
+            ("/aiditor-…", "[unwatche…")
         );
         // Shorter than a gap, nothing is left.
         let (left, right, _) = bar(&mut h, 24., 0);

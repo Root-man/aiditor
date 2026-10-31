@@ -431,6 +431,8 @@ mod tests {
             std::fs::write(&path, text).unwrap();
             let mut core = Core::default();
             core.open(&path, files::read(&path).unwrap());
+            // The fixture has no Tokio runtime for the file's repository lookup.
+            core.handle(Instant::now(), Msg::Tick);
             cx.on_release(move |_, _| drop(dir)).detach();
             Editor::new(
                 core,
@@ -774,7 +776,7 @@ mod tests {
                 .display
                 .mode_line
                 .text()
-                .contains(" c ")
+                .contains("sub/c ")
         });
         cx.simulate_keystrokes("enter");
         wait(cx, "ordinary visit", |core| {
@@ -888,6 +890,8 @@ mod tests {
         let path = source.path().join("t.txt");
         std::fs::write(&path, "").unwrap();
         core.open(&path, files::read(&path).unwrap());
+        // No Tokio runtime here for the file's repository lookup.
+        core.handle(Instant::now(), Msg::Tick);
         let (editor, cx) =
             cx.add_window_view(|window, cx| Editor::new(core, args, channel, window, cx));
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));

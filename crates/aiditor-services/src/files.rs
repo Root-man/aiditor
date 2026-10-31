@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
-use aiditor_core::{FileOp, Msg};
+use aiditor_core::{FileOp, Head, Msg};
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
@@ -99,6 +99,14 @@ pub fn run(op: FileOp) -> Msg {
                 .collect();
             Msg::Checked(files)
         }
+        FileOp::Head(paths) => Msg::Heads(
+            (paths.into_iter())
+                .map(|path| {
+                    let head = head(&path);
+                    (path, head)
+                })
+                .collect(),
+        ),
         FileOp::Index {
             project,
             walk,
@@ -134,6 +142,34 @@ pub fn run(op: FileOp) -> Msg {
             result: crate::projects::write(&path, old.as_deref(), text),
         },
     }
+}
+
+/// The `HEAD` of the repository holding `path` and the branch it names, a detached head's being
+/// its short hash; a `.git` file, as a linked worktree or submodule has, says where the repository
+/// is. `None` outside a repository.
+// shortcut: reftable repositories keep a placeholder in `HEAD`, shown as the branch `.invalid`; read their tables if one is used.
+pub fn head(path: &Path) -> Option<Head> {
+    let git = (path.ancestors().skip(1))
+        .map(|dir| dir.join(".git"))
+        .find(|git| git.exists())?;
+    let dir = match git.is_file() {
+        true => {
+            let text = fs::read_to_string(&git).ok()?;
+            git.parent()?.join(text.strip_prefix("gitdir:")?.trim())
+        }
+        false => git,
+    };
+    let head = dir.join("HEAD");
+    let text = fs::read_to_string(&head).ok()?;
+    let text = text.lines().next()?.trim();
+    let branch = match text.strip_prefix("ref:") {
+        Some(name) => {
+            let name = name.trim();
+            name.strip_prefix("refs/heads/").unwrap_or(name).to_string()
+        }
+        None => text.chars().take(7).collect(),
+    };
+    Some((head, branch))
 }
 
 /// The file's bytes and their hash, or `None` when there is no file.
@@ -818,6 +854,56 @@ mod tests {
             hash(b"back")
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), "back");
+    }
+
+    #[test]
+    fn finds_the_branch_of_a_file_in_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        let file = dir.path().join("src/a.rs");
+        fs::create_dir(&git).unwrap();
+        let branch = |text: &str| {
+            fs::write(git.join("HEAD"), text).unwrap();
+            head(&file)
+        };
+        let found = |name: &str| Some((git.join("HEAD"), name.to_string()));
+        assert_eq!(branch("ref: refs/heads/main\n"), found("main"));
+        assert_eq!(
+            branch("ref: refs/heads/fix/watcher\n"),
+            found("fix/watcher")
+        );
+        assert_eq!(branch("ref: refs/tags/v1\n"), found("refs/tags/v1"));
+        assert_eq!(
+            branch(&format!("{}\n", "abcdef0".repeat(5))),
+            found("abcdef0")
+        );
+    }
+
+    #[test]
+    fn follows_a_git_file_to_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        let repo = dir.path().join("main/.git/worktrees/tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("HEAD"), "ref: refs/heads/side\n").unwrap();
+        for gitdir in [
+            repo.display().to_string(),
+            "../main/.git/worktrees/tree".into(),
+        ] {
+            fs::write(tree.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
+            let (path, branch) = head(&tree.join("a.rs")).unwrap();
+            assert_eq!(branch, "side");
+            assert!(path.ends_with("worktrees/tree/HEAD"));
+        }
+    }
+
+    #[test]
+    fn a_file_outside_a_repository_has_no_head() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(head(&dir.path().join("a.rs")), None, "no HEAD");
+        assert_eq!(head(Path::new("/nonexistent-root/a.rs")), None);
     }
 
     #[test]

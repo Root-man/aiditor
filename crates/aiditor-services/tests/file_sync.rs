@@ -312,6 +312,24 @@ fn an_own_save_updates_the_other_workspace_and_preserves_its_own_undo() {
 }
 
 #[test]
+fn a_checkout_outside_the_editor_moves_the_branch_and_the_rest_of_git_stays_quiet() {
+    let _native = native::lock();
+    let head = (".git/HEAD", "ref: refs/heads/main\n");
+    let mut editor = Editor::new(&[("a.txt", "a\n"), head], "");
+    let git = editor.root.join(".git");
+    let branch = |core: &Core| (core.current().head.clone()).map(|(_, branch)| branch);
+    assert_eq!(branch(&editor.core).as_deref(), Some("main"));
+    assert!(editor.core.watch_set().files.contains(&git.join("HEAD")));
+    // Git replaces `HEAD` through a lock file.
+    fs::write(git.join("index"), "x").unwrap();
+    fs::write(git.join("HEAD.lock"), "ref: refs/heads/side\n").unwrap();
+    fs::rename(git.join("HEAD.lock"), git.join("HEAD")).unwrap();
+    editor.wait_for("the new branch", |core| {
+        branch(core).as_deref() == Some("side")
+    });
+}
+
+#[test]
 fn visited_files_still_follow_the_disk_without_project_root_watches() {
     let _native = native::lock();
     for settings in ["watch = false", "max_watched_files = 0"] {
@@ -422,6 +440,9 @@ fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() 
     editor.open("a.txt");
     editor.keys("second SPC C-x C-s");
     let operations = std::mem::take(&mut editor.operations);
+    let operations: Vec<_> = (operations.into_iter())
+        .filter(|op| !matches!(op, FileOp::Head(_)))
+        .collect();
     assert_eq!(operations.len(), 2);
     assert!(
         operations

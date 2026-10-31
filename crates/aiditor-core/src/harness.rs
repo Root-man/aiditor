@@ -35,6 +35,8 @@ pub struct Harness {
     pub indexes: HashMap<PathBuf, Result<Vec<PathBuf>, String>>,
     pub directories: HashMap<PathBuf, Vec<PathBuf>>,
     pub checks: HashMap<PathBuf, Option<u64>>,
+    /// Each file's answer to `FileOp::Head`; none is outside a repository.
+    pub heads: HashMap<PathBuf, crate::Head>,
     pub saves: std::collections::VecDeque<Result<u64, String>>,
     pub writes: Vec<(PathBuf, String)>,
     pub reverts: HashMap<BufferId, Result<crate::buffer::Revert, String>>,
@@ -74,6 +76,7 @@ impl Harness {
             indexes: HashMap::new(),
             directories: HashMap::new(),
             checks: HashMap::new(),
+            heads: HashMap::new(),
             saves: std::collections::VecDeque::new(),
             writes: Vec::new(),
             reverts: HashMap::new(),
@@ -309,6 +312,11 @@ impl Harness {
                                     }),
                                 })
                         }
+                        FileOp::Head(paths) => Some(Msg::Heads(
+                            (paths.iter())
+                                .map(|path| (path.clone(), self.heads.get(path).cloned()))
+                                .collect(),
+                        )),
                         FileOp::Check(paths) => paths
                             .iter()
                             .map(|path| self.checks.get(path).map(|hash| (path.clone(), *hash)))
