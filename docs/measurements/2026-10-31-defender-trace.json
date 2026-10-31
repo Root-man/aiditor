@@ -1,0 +1,606 @@
+{
+  "record_size": 51,
+  "complete_records": 3260576,
+  "trailing_incomplete_bytes": 32,
+  "last_relative_timestamp_ns": 13665711583,
+  "validated": [
+    "ordered timestamps",
+    "known event codes",
+    "known threads",
+    "all string references"
+  ],
+  "fixture_request_starts": 45710,
+  "completed_fixture_requests": 45706,
+  "incomplete_fixture_requests": 4,
+  "probe_pids": [
+    76609
+  ],
+  "distinct_fixture_files": 2048,
+  "ack_flags": {
+    "6": 45706
+  },
+  "reported_latency": {
+    "count": 45706,
+    "mean_us": 74.2616552093817,
+    "p50_us": 69.166,
+    "p95_us": 100.375,
+    "p99_us": 169.375,
+    "max_us": 796.166
+  },
+  "send_to_reply_span": {
+    "count": 45706,
+    "mean_us": 69.09327637509298,
+    "p50_us": 63.792,
+    "p95_us": 94.583,
+    "p99_us": 166.083,
+    "max_us": 799.666
+  },
+  "stage_spans": {
+    "MDE_TRACE_KERNEL_MSG_PRE_FILTER": {
+      "count": 45706,
+      "mean_us": 0.38183433247276066,
+      "p50_us": 0.334,
+      "p95_us": 0.459,
+      "p99_us": 0.833,
+      "max_us": 32.167
+    },
+    "MDE_TRACE_CHECK_EXCLUSION": {
+      "count": 45706,
+      "mean_us": 0.21286292828075087,
+      "p50_us": 0.208,
+      "p95_us": 0.25,
+      "p99_us": 0.417,
+      "max_us": 23.459
+    },
+    "MDE_TRACE_HANDLE_MESSAGE": {
+      "count": 45706,
+      "mean_us": 2.724796306830613,
+      "p50_us": 2.459,
+      "p95_us": 3.917,
+      "p99_us": 7.208,
+      "max_us": 73.083
+    },
+    "MDE_TRACE_CREATE_FILEOP_MSG": {
+      "count": 45706,
+      "mean_us": 0.12704745547630508,
+      "p50_us": 0.125,
+      "p95_us": 0.167,
+      "p99_us": 0.25,
+      "max_us": 21.125
+    },
+    "MDE_TRACE_TP_UPGRADE_HANDLER": {
+      "count": 45706,
+      "mean_us": 0.2124734389358071,
+      "p50_us": 0.167,
+      "p95_us": 0.292,
+      "p99_us": 0.459,
+      "max_us": 28.125
+    },
+    "MDE_TRACE_TP_EVALUATE_PROTECTED_OPERATION": {
+      "count": 45706,
+      "mean_us": 0.8386057191615981,
+      "p50_us": 0.708,
+      "p95_us": 1.167,
+      "p99_us": 3.083,
+      "max_us": 125.083
+    },
+    "MDE_TRACE_TP_IS_VNODE_OP_PROTECTED": {
+      "count": 45706,
+      "mean_us": 1.2142498796656893,
+      "p50_us": 1.042,
+      "p95_us": 1.667,
+      "p99_us": 4.5,
+      "max_us": 131.458
+    },
+    "MDE_TRACE_TP_IS_AV_PATH_PROTECTED": {
+      "count": 45706,
+      "mean_us": 0.2322522644729357,
+      "p50_us": 0.208,
+      "p95_us": 0.292,
+      "p99_us": 0.625,
+      "max_us": 24.209
+    },
+    "MDE_TRACE_TP_IS_DLP_PATH_PROTECTED": {
+      "count": 45706,
+      "mean_us": 0.46705452238218176,
+      "p50_us": 0.375,
+      "p95_us": 0.584,
+      "p99_us": 1.459,
+      "max_us": 195.042
+    },
+    "MDE_TRACE_TP_REQUEST_HANDLER": {
+      "count": 45706,
+      "mean_us": 3.059527917560058,
+      "p50_us": 2.667,
+      "p95_us": 4.166,
+      "p99_us": 10.041,
+      "max_us": 323.291
+    },
+    "MDE_TRACE_DC_REQUEST_HANDLER": {
+      "count": 45706,
+      "mean_us": 0.280815363409618,
+      "p50_us": 0.25,
+      "p95_us": 0.375,
+      "p99_us": 0.959,
+      "max_us": 27.083
+    },
+    "MDE_TRACE_DMG_REQUEST_HANDLER": {
+      "count": 45706,
+      "mean_us": 0.1915411980921542,
+      "p50_us": 0.167,
+      "p95_us": 0.25,
+      "p99_us": 0.459,
+      "max_us": 25.0
+    },
+    "MDE_TRACE_CONVERT_OPEN_REQUEST_TO_MESSAGE": {
+      "count": 45706,
+      "mean_us": 0.8415528595807991,
+      "p50_us": 0.708,
+      "p95_us": 1.167,
+      "p99_us": 3.5,
+      "max_us": 127.75
+    },
+    "MDE_TRACE_ARCHIVE_UTILITY_HANDLER": {
+      "count": 45706,
+      "mean_us": 0.20823767120290554,
+      "p50_us": 0.167,
+      "p95_us": 0.292,
+      "p99_us": 0.5,
+      "max_us": 22.708
+    },
+    "MDE_TRACE_AV_REQUEST_HANDLER_CONVERT": {
+      "count": 45706,
+      "mean_us": 0.7123297597689581,
+      "p50_us": 0.666,
+      "p95_us": 1.0,
+      "p99_us": 2.0,
+      "max_us": 63.459
+    },
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND": {
+      "count": 45706,
+      "mean_us": 13.54643580711504,
+      "p50_us": 12.458,
+      "p95_us": 19.542,
+      "p99_us": 41.083,
+      "max_us": 339.333
+    },
+    "MDE_TRACE_SEND_REPLY": {
+      "count": 91342,
+      "mean_us": 4.455672954391189,
+      "p50_us": 3.416,
+      "p95_us": 10.792,
+      "p99_us": 20.083,
+      "max_us": 81.875
+    },
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK_HOLD": {
+      "count": 45636,
+      "mean_us": 5.3936632044876855,
+      "p50_us": 3.833,
+      "p95_us": 13.25,
+      "p99_us": 22.917,
+      "max_us": 82.5
+    },
+    "MDE_TRACE_AV_REQUEST_HANDLER_TRANSFORM": {
+      "count": 45706,
+      "mean_us": 3.4199350194722795,
+      "p50_us": 2.667,
+      "p95_us": 7.583,
+      "p99_us": 16.084,
+      "max_us": 57.166
+    },
+    "MDE_TRACE_AV_REQUEST_HANDLER_SEND": {
+      "count": 45706,
+      "mean_us": 26.284528967750404,
+      "p50_us": 24.292,
+      "p95_us": 42.917,
+      "p99_us": 62.209,
+      "max_us": 271.917
+    },
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_RETURN": {
+      "count": 45706,
+      "mean_us": 18.08709801776572,
+      "p50_us": 17.209,
+      "p95_us": 33.083,
+      "p99_us": 47.042,
+      "max_us": 260.208
+    },
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK": {
+      "count": 45706,
+      "mean_us": 4.195735723974971,
+      "p50_us": 3.583,
+      "p95_us": 8.0,
+      "p99_us": 17.792,
+      "max_us": 68.0
+    }
+  },
+  "av_request_handler_thread_paired": {
+    "count": 45706,
+    "mean_us": 6.323689143657288,
+    "p50_us": 5.75,
+    "p95_us": 9.334,
+    "p99_us": 21.333,
+    "max_us": 122.541
+  },
+  "fixture_av_filter_spans": {
+    "count": 45711,
+    "mean_us": 0.17656428430793464,
+    "p50_us": 0.125,
+    "p95_us": 0.208,
+    "p99_us": 0.625,
+    "max_us": 29.875
+  },
+  "probe_pid_bm_rtp_request_spans": {
+    "count": 45714,
+    "mean_us": 7.278705035656473,
+    "p50_us": 5.459,
+    "p95_us": 14.917,
+    "p99_us": 27.417,
+    "max_us": 983.959
+  },
+  "stage_event_counts": {
+    "MDE_TRACE_RECV_MESSAGE:0": 45706,
+    "MDE_TRACE_HANDLE_MESSAGE:1": 45706,
+    "MDE_TRACE_KERNEL_MSG_PRE_FILTER:1": 45706,
+    "MDE_TRACE_KERNEL_MSG_PRE_FILTER:2": 45706,
+    "MDE_TRACE_CHECK_EXCLUSION:1": 45706,
+    "MDE_TRACE_CHECK_EXCLUSION:2": 45706,
+    "MDE_TRACE_HANDLE_MESSAGE:2": 45706,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND:1": 45706,
+    "MDE_TRACE_CREATE_FILEOP_MSG:1": 45706,
+    "MDE_TRACE_CREATE_FILEOP_MSG:2": 45706,
+    "MDE_TRACE_TP_REQUEST_HANDLER:1": 45706,
+    "MDE_TRACE_TP_UPGRADE_HANDLER:1": 45706,
+    "MDE_TRACE_TP_UPGRADE_HANDLER:2": 45706,
+    "MDE_TRACE_TP_IS_VNODE_OP_PROTECTED:1": 45706,
+    "MDE_TRACE_TP_EVALUATE_PROTECTED_OPERATION:1": 45706,
+    "MDE_TRACE_TP_EVALUATE_PROTECTED_OPERATION:2": 45706,
+    "MDE_TRACE_TP_IS_VNODE_OP_PROTECTED:2": 45706,
+    "MDE_TRACE_TP_IS_AV_PATH_PROTECTED:1": 45706,
+    "MDE_TRACE_TP_IS_AV_PATH_PROTECTED:2": 45706,
+    "MDE_TRACE_TP_IS_DLP_PATH_PROTECTED:1": 45706,
+    "MDE_TRACE_TP_IS_DLP_PATH_PROTECTED:2": 45706,
+    "MDE_TRACE_CONVERT_OPEN_REQUEST_TO_MESSAGE:1": 45706,
+    "MDE_TRACE_TP_REQUEST_HANDLER:2": 45706,
+    "MDE_TRACE_DC_REQUEST_HANDLER:1": 45706,
+    "MDE_TRACE_DC_REQUEST_HANDLER:2": 45706,
+    "MDE_TRACE_DMG_REQUEST_HANDLER:1": 45706,
+    "MDE_TRACE_DMG_REQUEST_HANDLER:2": 45706,
+    "MDE_TRACE_ARCHIVE_UTILITY_HANDLER:1": 45706,
+    "MDE_TRACE_CONVERT_OPEN_REQUEST_TO_MESSAGE:2": 45706,
+    "MDE_TRACE_ARCHIVE_UTILITY_HANDLER:2": 45706,
+    "MDE_TRACE_AV_REQUEST_HANDLER_CONVERT:1": 45706,
+    "MDE_TRACE_AV_REQUEST_HANDLER_CONVERT:2": 45706,
+    "MDE_TRACE_AV_REQUEST_HANDLER_SEND:1": 45706,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND:2": 45706,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK_HOLD:1": 45636,
+    "MDE_TRACE_SEND_REPLY:1": 91342,
+    "MDE_TRACE_SEND_REPLY:2": 91342,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK_HOLD:2": 45636,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_RETURN:1": 45706,
+    "MDE_TRACE_AV_REQUEST_HANDLER_TRANSFORM:1": 45706,
+    "MDE_TRACE_AV_REQUEST_HANDLER_TRANSFORM:2": 45706,
+    "MDE_TRACE_AV_REQUEST_HANDLER_SEND:2": 45706,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_RETURN:2": 45706,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK:1": 45706,
+    "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK:2": 45706
+  },
+  "unmatched_stage_ends": {},
+  "unmatched_stage_starts": 0,
+  "scan_events_referencing_fixture_files": {},
+  "global_scan_events": {
+    "MDE_TRACE_BM_REQUEST_RTP_SCAN:1": 48257,
+    "MDE_TRACE_BM_REQUEST_RTP_SCAN:2": 48257,
+    "MDE_TRACE_AV_FILE_SCAN:1": 414,
+    "MDE_TRACE_UNPRIV_SCAN_FILE:1": 332,
+    "MDE_TRACE_UNPRIV_STREAM_BUFFER_SCAN:1": 332,
+    "MDE_TRACE_UNPRIV_STREAM_BUFFER_SCAN:2": 332,
+    "MDE_TRACE_UNPRIV_SCAN_FILE:2": 332,
+    "MDE_TRACE_AV_FILE_SCAN:2": 414
+  },
+  "representative_packet": 62861973,
+  "representative_timeline": [
+    {
+      "offset_us": 5.041,
+      "event": "MDE_TRACE_RECV_MESSAGE",
+      "phase": 0,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 5.375,
+      "event": "MDE_TRACE_HANDLE_MESSAGE",
+      "phase": 1,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 5.583,
+      "event": "MDE_TRACE_KERNEL_MSG_PRE_FILTER",
+      "phase": 1,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 5.958,
+      "event": "MDE_TRACE_KERNEL_MSG_PRE_FILTER",
+      "phase": 2,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 6.083,
+      "event": "MDE_TRACE_CHECK_EXCLUSION",
+      "phase": 1,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 6.291,
+      "event": "MDE_TRACE_CHECK_EXCLUSION",
+      "phase": 2,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 7.75,
+      "event": "MDE_TRACE_HANDLE_MESSAGE",
+      "phase": 2,
+      "thread_index": 1
+    },
+    {
+      "offset_us": 10.25,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 10.833,
+      "event": "MDE_TRACE_CREATE_FILEOP_MSG",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 11.0,
+      "event": "MDE_TRACE_CREATE_FILEOP_MSG",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 13.333,
+      "event": "MDE_TRACE_TP_REQUEST_HANDLER",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 13.666,
+      "event": "MDE_TRACE_TP_UPGRADE_HANDLER",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 13.916,
+      "event": "MDE_TRACE_TP_UPGRADE_HANDLER",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 14.083,
+      "event": "MDE_TRACE_TP_IS_VNODE_OP_PROTECTED",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 14.291,
+      "event": "MDE_TRACE_TP_EVALUATE_PROTECTED_OPERATION",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 14.916,
+      "event": "MDE_TRACE_TP_EVALUATE_PROTECTED_OPERATION",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 15.083,
+      "event": "MDE_TRACE_TP_IS_VNODE_OP_PROTECTED",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 15.208,
+      "event": "MDE_TRACE_TP_IS_AV_PATH_PROTECTED",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 15.375,
+      "event": "MDE_TRACE_TP_IS_AV_PATH_PROTECTED",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 15.5,
+      "event": "MDE_TRACE_TP_IS_DLP_PATH_PROTECTED",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 15.875,
+      "event": "MDE_TRACE_TP_IS_DLP_PATH_PROTECTED",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 16.0,
+      "event": "MDE_TRACE_TP_REQUEST_HANDLER",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 16.125,
+      "event": "MDE_TRACE_DC_REQUEST_HANDLER",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 16.333,
+      "event": "MDE_TRACE_DC_REQUEST_HANDLER",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 16.458,
+      "event": "MDE_TRACE_DMG_REQUEST_HANDLER",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 17.458,
+      "event": "MDE_TRACE_CONVERT_OPEN_REQUEST_TO_MESSAGE",
+      "phase": 1,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 17.708,
+      "event": "MDE_TRACE_DMG_REQUEST_HANDLER",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 17.958,
+      "event": "MDE_TRACE_ARCHIVE_UTILITY_HANDLER",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 18.041,
+      "event": "MDE_TRACE_CONVERT_OPEN_REQUEST_TO_MESSAGE",
+      "phase": 2,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 18.083,
+      "event": "MDE_TRACE_ARCHIVE_UTILITY_HANDLER",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 18.458,
+      "event": "MDE_TRACE_AV_REQUEST_HANDLER_CONVERT",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 19.125,
+      "event": "MDE_TRACE_AV_REQUEST_HANDLER_CONVERT",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 19.25,
+      "event": "MDE_TRACE_AV_REQUEST_HANDLER_SEND",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 23.791,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 23.916,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK_HOLD",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 24.041,
+      "event": "MDE_TRACE_SEND_REPLY",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 27.416,
+      "event": "MDE_TRACE_SEND_REPLY",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 27.541,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK_HOLD",
+      "phase": 2,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 27.666,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_RETURN",
+      "phase": 1,
+      "thread_index": 6
+    },
+    {
+      "offset_us": 37.0,
+      "event": "MDE_TRACE_AV_REQUEST_HANDLER_TRANSFORM",
+      "phase": 1,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 41.416,
+      "event": "MDE_TRACE_AV_REQUEST_HANDLER_TRANSFORM",
+      "phase": 2,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 41.541,
+      "event": "MDE_TRACE_AV_REQUEST_HANDLER_SEND",
+      "phase": 2,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 43.666,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_RETURN",
+      "phase": 2,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 43.75,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK",
+      "phase": 1,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 43.916,
+      "event": "MDE_TRACE_SEND_REPLY",
+      "phase": 1,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 48.416,
+      "event": "MDE_TRACE_SEND_REPLY",
+      "phase": 2,
+      "thread_index": 22
+    },
+    {
+      "offset_us": 48.541,
+      "event": "MDE_TRACE_HANDLE_SYNC_MESSAGE_SEND_ACK",
+      "phase": 2,
+      "thread_index": 22
+    }
+  ],
+  "archive": "mde_trace_8ddb05d2-dec6-4123-964c-cd446b69ef5d.zip",
+  "metadata": {
+    "version": "101.26082.0012",
+    "build_branch": "refs/heads/release/2608-2",
+    "git_commit_id": "d002ab0e8e",
+    "datetime": "Sat Oct 31 11:29:45 2026",
+    "start time": "1793438968400097",
+    "end time": "0",
+    "duration": "18444950634741151519\u00b5s",
+    "total event": "3265015",
+    "eps event": "512370",
+    "mde event": "2752645",
+    "peak throughput": "326635t/s"
+  },
+  "limitations": [
+    "Capture-specific inferred layout, not a documented stable vendor format.",
+    "Incomplete final record and requests are counted and excluded from latency statistics.",
+    "Header end/duration fields are invalid in this capture; use complete event pairs.",
+    "Stage spans overlap; they are not additive CPU durations.",
+    "These are instrumented Defender timings, not simultaneous total open or Elastic timings."
+  ]
+}
