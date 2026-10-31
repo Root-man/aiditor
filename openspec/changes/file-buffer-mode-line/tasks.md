@@ -22,6 +22,12 @@
 
 - [x] 4.1 Update `docs/editor.md`: line endings, the mode line segments, the `mode-line-buffer-id` face and the branch, and verify no `(DOS)` is left in it
 
+## 5. Review: git status marker
+
+- [x] 5.1 Add `changed` to `Head` from `git status` in `files::head`, verified by a test against a real repository for untracked, committed, ignored, unstaged, staged, a pattern-like name and an untouched index
+- [x] 5.2 Watch `.git/index`, re-ask on it and on the file, verified by harness tests
+- [x] 5.3 Show ` ±` in the branch segment, verified by a display test, and update `docs/editor.md`
+
 ## Workflow follow-up
 
 - Archive after review.

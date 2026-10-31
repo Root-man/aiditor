@@ -27,7 +27,7 @@ impl Core {
     }
 
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
-    /// file a buffer visits with its repository's `HEAD`.
+    /// file a buffer visits with the git files that show its repository's state.
     pub fn watch_set(&self) -> WatchSet {
         let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
@@ -39,8 +39,12 @@ impl Core {
         roots.sort();
         roots.dedup();
         let mut files: Vec<PathBuf> = (self.buffers.recent())
-            .flat_map(|(_, b)| [b.file.clone(), b.head.as_ref().map(|(h, _)| h.clone())])
-            .flatten()
+            .flat_map(|(_, b)| {
+                b.file
+                    .iter()
+                    .cloned()
+                    .chain(b.head.iter().flat_map(Head::watched))
+            })
             .collect();
         files.sort();
         files.dedup();
@@ -182,14 +186,17 @@ impl Ctx<'_> {
             self.effects.push(Effect::File(FileOp::Check(check)));
         }
         let reported = |path: &PathBuf| paths.iter().any(|(p, _)| p == path);
-        let mut heads = std::collections::BTreeSet::new();
+        let mut git = std::collections::BTreeSet::new();
         for (_, buffer) in self.core.buffers.iter_mut() {
-            let head = buffer.head.as_ref().map(|(head, _)| head);
-            buffer.head_asked &= !rescan && !head.is_some_and(reported);
-            heads.extend(head.cloned());
+            let watched: Vec<_> = buffer.head.iter().flat_map(Head::watched).collect();
+            let stale = rescan
+                || buffer.file.as_ref().is_some_and(reported)
+                || watched.iter().any(reported);
+            buffer.head_asked &= !stale;
+            git.extend(watched);
         }
-        // A `HEAD` is watched for its branch; it says nothing about the index.
-        paths.retain(|(path, _)| !heads.contains(path));
+        // Git's files are watched for the mode line; they say nothing about the index.
+        paths.retain(|(path, _)| !git.contains(path));
         let watched: std::collections::BTreeSet<_> = self
             .core
             .projects
@@ -256,12 +263,17 @@ mod tests {
     fn the_branch_follows_a_checkout_and_a_rescan() {
         let mut h = Harness::new(&[("a.txt", "a\n"), ("b.txt", "b\n")]);
         let (a, head) = (h.path("a.txt"), h.path(".git/HEAD"));
-        h.heads.insert(a.clone(), (head.clone(), "main".into()));
+        let on = |branch: &str| crate::Head {
+            path: head.clone(),
+            branch: branch.into(),
+            changed: false,
+        };
+        h.heads.insert(a.clone(), on("main"));
         h.open("a.txt");
         h.send(Msg::Tick);
         assert!(mode_line(&mut h).contains("⎇ main"));
         assert!(h.core.watch_set().files.contains(&head), "watched");
-        h.heads.insert(a.clone(), (head.clone(), "side".into()));
+        h.heads.insert(a.clone(), on("side"));
         h.send(Msg::FilesChanged {
             paths: vec![(h.path("b.txt"), Disk::File)],
             rescan: false,
@@ -278,6 +290,34 @@ mod tests {
             rescan: true,
         });
         assert!(!mode_line(&mut h).contains('⎇'), "out of the repository");
+        h.heads.insert(a.clone(), on("main"));
+        h.send(Msg::FilesChanged {
+            paths: Vec::new(),
+            rescan: true,
+        });
+        // A file's status goes with its index entry and its text.
+        let index = h.path(".git/index");
+        assert!(h.core.watch_set().files.contains(&index));
+        let changed = crate::Head {
+            changed: true,
+            ..on("main")
+        };
+        for path in [index, a.clone()] {
+            h.heads.insert(a.clone(), changed.clone());
+            h.send(Msg::FilesChanged {
+                paths: vec![(path, Disk::File)],
+                rescan: false,
+            });
+            assert!(mode_line(&mut h).contains("⎇ main ±"));
+            h.heads.insert(a.clone(), on("main"));
+            h.core.current_mut().head_asked = true;
+            h.core.current_mut().head = Some(on("main"));
+        }
+        h.heads.remove(&a);
+        h.send(Msg::FilesChanged {
+            paths: Vec::new(),
+            rescan: true,
+        });
         assert!(!h.core.watch_set().files.contains(&head));
     }
 
@@ -288,7 +328,12 @@ mod tests {
         h.core.projects[0].project.primary.path = h.path("");
         h.index_reply("", &["a.txt"], &[""]);
         let head = h.path(".git/HEAD");
-        (h.heads).insert(h.path("a.txt"), (head.clone(), "main".into()));
+        let found = crate::Head {
+            path: head.clone(),
+            branch: "main".into(),
+            changed: false,
+        };
+        h.heads.insert(h.path("a.txt"), found);
         h.open("a.txt");
         h.send(Msg::Tick);
         // Unanswered, a walk stays among the effects.
@@ -303,6 +348,7 @@ mod tests {
             rescan: false,
         };
         h.send(reported(head));
+        h.send(reported(h.path(".git/index")));
         assert!(!walked(&h));
         h.send(reported(h.path("new.txt")));
         assert!(walked(&h), "a file the index lacks still does");

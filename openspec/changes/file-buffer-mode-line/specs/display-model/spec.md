@@ -96,6 +96,10 @@ The display SHALL end each window with a mode line of two groups of segments, a 
 - **WHEN** a file in a repository on `main` is shown
 - **THEN** the right group has `⎇ main` before `line:col`
 
+#### Scenario: A file with a diff
+- **WHEN** a file git reports as changed, on `main`, is shown
+- **THEN** that segment reads `⎇ main ±`
+
 #### Scenario: A buffer with no file
 - **WHEN** `*scratch*` is shown modified with point on line 3, column 2
 - **THEN** the left group is `** *scratch*` and the right group `3:2`
@@ -112,7 +116,7 @@ The frame display SHALL give each window its mode line's left and right groups a
 - **THEN** its right group reads `1:0  │  All`, with no separator before `1:0`
 
 ### Requirement: Mode line segments use colour only for state
-In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `[char]` in `status-waiting`; `[copy]` in `status-info`; the branch in `vcs-branch`; a file's directory, major mode, region size, position and `[unwatched]` in `mode-line-dim`; a file's name in `mode-line-buffer-id`. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.
+In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `[char]` in `status-waiting`; `[copy]` in `status-info`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's directory, major mode, region size, position and `[unwatched]` in `mode-line-dim`; a file's name in `mode-line-buffer-id`. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.
 
 #### Scenario: A modified file in the selected window
 - **WHEN** the selected window's buffer is modified

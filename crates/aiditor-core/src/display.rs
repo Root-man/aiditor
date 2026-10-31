@@ -636,8 +636,12 @@ fn file_mode_line(
         // Other encodings join it with #155.
         right.push(segment("UTF-8 CRLF", FaceName::StatusWaiting));
     }
-    if let Some((_, branch)) = &buffer.head {
-        right.push(segment(&format!("⎇ {branch}"), FaceName::VcsBranch));
+    if let Some(head) = &buffer.head {
+        let mut vcs = segment(&format!("⎇ {}", head.branch), FaceName::VcsBranch);
+        if head.changed {
+            vcs.push((" ±".to_string(), FaceName::StatusModified));
+        }
+        right.push(vcs);
     }
     right.push(segment(&format!("{line}:{col}"), FaceName::ModeLine));
     right.push(segment(position, FaceName::ModeLineDim));
@@ -1267,13 +1271,22 @@ mod tests {
     #[test]
     fn a_file_in_a_repository_shows_its_branch_before_point() {
         let mut h = Harness::new(&[("a.txt", "")]);
-        let head = (h.path(".git/HEAD"), "main".to_string());
-        h.heads.insert(h.path("a.txt"), head);
+        let mut head = crate::Head {
+            path: h.path(".git/HEAD"),
+            branch: "main".into(),
+            changed: false,
+        };
+        h.heads.insert(h.path("a.txt"), head.clone());
         h.open("a.txt");
         h.send(crate::Msg::Tick);
         let line = h.display(5).mode_line;
         assert_eq!(line.right[0], [("⎇ main".to_string(), FaceName::VcsBranch)]);
         assert_eq!(line.right[1][0].0, "1:0");
+        head.changed = true;
+        h.core.current_mut().head = Some(head);
+        let line = h.display(5).mode_line;
+        assert_eq!(line.right[0][1], (" ±".into(), FaceName::StatusModified));
+        assert!(line.text().ends_with("⎇ main ± │ 1:0 │ All"));
     }
 
     #[test]

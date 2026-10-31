@@ -288,8 +288,22 @@ pub struct Recovered {
     pub disk: Option<(Vec<u8>, u64)>,
 }
 
-/// A repository's `HEAD` file and the branch it names.
-pub type Head = (PathBuf, String);
+/// The repository of a visited file, as the mode line shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Head {
+    /// The repository's `HEAD` file.
+    pub path: PathBuf,
+    pub branch: String,
+    /// Git reports a change to the file, staged or not, or the file is untracked.
+    pub changed: bool,
+}
+
+impl Head {
+    /// The repository's files whose changes can change this.
+    pub(crate) fn watched(&self) -> [PathBuf; 2] {
+        [self.path.clone(), self.path.with_file_name("index")]
+    }
+}
 
 /// What a path the watcher reports is on disk now.
 #[derive(Clone, Copy, Debug, PartialEq)]

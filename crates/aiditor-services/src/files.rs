@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -144,9 +145,9 @@ pub fn run(op: FileOp) -> Msg {
     }
 }
 
-/// The `HEAD` of the repository holding `path` and the branch it names, a detached head's being
-/// its short hash; a `.git` file, as a linked worktree or submodule has, says where the repository
-/// is. `None` outside a repository.
+/// The repository holding `path`, with the branch `HEAD` names, a detached head's being its short
+/// hash; a `.git` file, as a linked worktree or submodule has, says where the repository is.
+/// `None` outside a repository.
 // shortcut: reftable repositories keep a placeholder in `HEAD`, shown as the branch `.invalid`; read their tables if one is used.
 pub fn head(path: &Path) -> Option<Head> {
     let git = (path.ancestors().skip(1))
@@ -169,7 +170,29 @@ pub fn head(path: &Path) -> Option<Head> {
         }
         None => text.chars().take(7).collect(),
     };
-    Some((head, branch))
+    Some(Head {
+        path: head,
+        branch,
+        changed: changed(path),
+    })
+}
+
+/// Whether git reports `path` as changed or untracked; no if git can't say.
+// shortcut: one process per file, so a commit with many buffers open runs many; ask once per repository if that shows.
+fn changed(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    // Without `--no-optional-locks` status rewrites the index, whose report would run it again.
+    // A repository's `core.fsmonitor` is a command, and opening a file mustn't run it.
+    let status = Command::new("git")
+        .args(["--no-optional-locks", "--literal-pathspecs"])
+        .args(["-c", "core.fsmonitor=false", "status", "--porcelain", "--"])
+        .arg(name)
+        .current_dir(dir)
+        .stderr(Stdio::null())
+        .output();
+    status.is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// The file's bytes and their hash, or `None` when there is no file.
@@ -866,7 +889,13 @@ mod tests {
             fs::write(git.join("HEAD"), text).unwrap();
             head(&file)
         };
-        let found = |name: &str| Some((git.join("HEAD"), name.to_string()));
+        let found = |name: &str| {
+            Some(Head {
+                path: git.join("HEAD"),
+                branch: name.to_string(),
+                changed: false,
+            })
+        };
         assert_eq!(branch("ref: refs/heads/main\n"), found("main"));
         assert_eq!(
             branch("ref: refs/heads/fix/watcher\n"),
@@ -892,10 +921,50 @@ mod tests {
             "../main/.git/worktrees/tree".into(),
         ] {
             fs::write(tree.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
-            let (path, branch) = head(&tree.join("a.rs")).unwrap();
-            assert_eq!(branch, "side");
-            assert!(path.ends_with("worktrees/tree/HEAD"));
+            let found = head(&tree.join("a.rs")).unwrap();
+            assert_eq!(found.branch, "side");
+            assert!(found.path.ends_with("worktrees/tree/HEAD"));
         }
+    }
+
+    #[test]
+    fn says_whether_git_reports_a_file_as_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let mut command = Command::new("git");
+            let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+            let status = command.args(identity).args(args).current_dir(dir.path());
+            assert!(status.status().unwrap().success(), "{args:?}");
+        };
+        let file = dir.path().join("a b*.txt");
+        let changed = |file: &Path| head(file).unwrap().changed;
+        fs::write(&file, "one\n").unwrap();
+        fs::write(dir.path().join("a b1.txt"), "other\n").unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored\n").unwrap();
+        git(&["init", "-q"]);
+        assert!(changed(&file), "untracked");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        assert!(!changed(&file), "committed");
+        // Stale stat data with the same text is what status would refresh in the index.
+        let index = fs::read(dir.path().join(".git/index")).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        (OpenOptions::new().write(true).open(&file).unwrap())
+            .set_modified(later)
+            .unwrap();
+        assert!(!changed(&file), "touched");
+        assert_eq!(fs::read(dir.path().join(".git/index")).unwrap(), index);
+        fs::write(dir.path().join("ignored"), "").unwrap();
+        assert!(!changed(&dir.path().join("ignored")));
+        fs::write(dir.path().join("a b1.txt"), "edit\n").unwrap();
+        assert!(
+            !changed(&file),
+            "another file, which the pattern's `*` would match"
+        );
+        fs::write(&file, "two\n").unwrap();
+        assert!(changed(&file), "unstaged");
+        git(&["add", "."]);
+        assert!(changed(&file), "staged");
     }
 
     #[test]
