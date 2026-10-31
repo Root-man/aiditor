@@ -623,12 +623,12 @@ impl Core {
     /// The open minibuffer's prompt and the line holding its point.
     pub(crate) fn minibuffer(&mut self) -> Option<display::Minibuffer> {
         let mb = self.prompts.minibuffer.as_mut()?;
-        let prompt = match (mb.command, self.grep.status()) {
-            ("project-grep", Some(status)) => format!("{status} {}", mb.prompt),
-            _ => mb.prompt.to_string(),
-        };
+        let prompt = mb.prompt.to_string();
+        let grep = mb.command == "project-grep" && !self.grep.choosing_root();
+        let status = if grep { self.grep.status() } else { None };
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
         let mut highlights = Vec::new();
+        let mut groups = Vec::new();
         let (mut count, mut shown) = (String::new(), 0);
         if let Some(completion) = &mut mb.completion {
             let range = |matched: usize| {
@@ -636,11 +636,49 @@ impl Core {
             };
             let (matched, rows) = match (&completion.filtered, self.prompts.matcher.as_mut()) {
                 (Some(f), _) => {
-                    let rows = range(f.matched.len());
+                    let mut rows = range(f.matched.len());
+                    if mb.command == "project-grep" && !self.grep.choosing_root() {
+                        let end = |top| {
+                            let mut used = 0;
+                            let mut previous = None;
+                            let mut end = top;
+                            for &i in &f.matched[top..] {
+                                let hit = self.grep.hit(&f.items[i]).expect("listed grep hit");
+                                let file = (&hit.root, &hit.path);
+                                let cost = 1 + usize::from(previous != Some(file));
+                                if used + cost > COMPLETION_ROWS {
+                                    break;
+                                }
+                                used += cost;
+                                previous = Some(file);
+                                end += 1;
+                            }
+                            end
+                        };
+                        let selected = completion.selected.min(f.matched.len().saturating_sub(1));
+                        while rows.start < selected && end(rows.start) <= selected {
+                            rows.start += 1;
+                        }
+                        completion.top = rows.start;
+                        rows.end = end(rows.start);
+                    }
                     let items = f.matched[rows.clone()].iter();
                     (candidates, annotations) = items
                         .map(|&i| (f.candidate(i), f.notes.get(i).cloned().unwrap_or_default()))
                         .unzip();
+                    if mb.command == "project-grep" && !self.grep.choosing_root() {
+                        let mut previous = None;
+                        let number_width = self.grep.line_number_width();
+                        for (i, candidate) in candidates.iter_mut().enumerate() {
+                            let hit = self.grep.hit(candidate).expect("listed grep hit");
+                            let file = (&hit.root, &hit.path);
+                            if previous != Some(file) {
+                                groups.push((i, self.grep.file_label(hit)));
+                            }
+                            previous = Some(file);
+                            *candidate = format!("{:>number_width$}: {}", hit.line + 1, hit.text);
+                        }
+                    }
                     highlights.resize_with(candidates.len(), Vec::new);
                     (f.matched.len(), rows)
                 }
@@ -699,22 +737,25 @@ impl Core {
             count = format!("{}/{matched}", number.map_or(0, |n| n + 1));
             completion.count_width = completion.count_width.max(count.len());
             count = format!("{count:>width$} ", width = completion.count_width);
-            completion.rows = completion.rows.max(rows.len());
+            completion.rows = completion.rows.max(rows.len() + groups.len());
             shown = completion.rows;
         }
         // The minibuffer is selected while open.
         let (width, _, cell_width) = self.frame_size;
-        let cols = (((width - 2. * TEXT_INSET) / cell_width) as usize)
-            .saturating_sub(count.len() + prompt.chars().count());
+        let cols = (((width - 2. * TEXT_INSET) / cell_width) as usize).saturating_sub(
+            count.len() + prompt.chars().count() + if grep { crate::grep::STATUS_COLS } else { 0 },
+        );
         let (window, buffers) = (&mut self.windows.window, &mut self.buffers);
         let display = window_display(window, buffers, &self.settings, 1, 1, cols, &[], None);
         Some(display::Minibuffer {
             count,
             prompt,
+            status,
             display,
             candidates,
             highlights,
             annotations,
+            groups,
             selected,
             rows: shown,
         })
@@ -872,8 +913,7 @@ impl Core {
         }
     }
 
-    /// Replaces the items of the filtering prompt `command` opened, or adds to them, every item
-    /// listed; a replaced list selects its first.
+    /// Replaces a filtering prompt's items, retaining selection and scroll unless reset.
     pub(crate) fn set_items(&mut self, command: &str, items: Vec<String>, replace: bool) {
         let completion = (self.prompts.minibuffer.as_mut())
             .filter(|mb| mb.command == command)
@@ -881,17 +921,20 @@ impl Core {
         let Some(completion) = completion.filter(|c| c.filtered.is_some()) else {
             return;
         };
-        if replace {
-            completion.select(0);
-        }
         let f = completion.filtered.as_mut().expect("checked above");
-        if replace {
-            f.items.clear();
-            f.notes.clear();
-        }
-        f.notes.extend(items.iter().map(|_| String::new()));
-        f.items.extend(items);
+        let retained = |at: usize| {
+            (!replace)
+                .then(|| f.matched.get(at).and_then(|&i| f.items.get(i)))
+                .flatten()
+                .and_then(|label| items.iter().position(|item| item == label))
+                .unwrap_or(0)
+        };
+        let (selected, top) = (retained(completion.selected), retained(completion.top));
+        f.notes = vec![String::new(); items.len()];
+        f.items = items;
         f.matched = (0..f.items.len()).collect();
+        completion.top = top;
+        completion.select(selected);
     }
 
     /// Shows point at `p` of buffer `id` in the window the minibuffer was opened from, standing

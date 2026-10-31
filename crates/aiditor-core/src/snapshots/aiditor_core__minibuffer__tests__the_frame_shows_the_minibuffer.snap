@@ -6,6 +6,7 @@ Some(
     Minibuffer {
         count: "",
         prompt: "Text: ",
+        status: None,
         display: WindowDisplay {
             lines: [
                 Line {
@@ -61,6 +62,7 @@ Some(
         candidates: [],
         highlights: [],
         annotations: [],
+        groups: [],
         selected: None,
         rows: 0,
     },

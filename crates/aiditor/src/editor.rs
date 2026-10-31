@@ -17,7 +17,9 @@ use gpui::{
 };
 use tokio::sync::mpsc;
 
-use crate::element::{FrameElement, Painted, block, completion_runs, echo_line, text_run};
+use crate::element::{
+    FrameElement, Painted, block, completion_runs, echo_line, grep_runs, text_run,
+};
 use crate::input::to_key;
 use crate::{Args, FONT};
 
@@ -368,6 +370,7 @@ impl Render for Editor {
                 );
                 let (x, width, under) = block(&shaped, byte, cell);
                 let cursor = div()
+                    .debug_selector(|| "minibuffer-cursor".into())
                     .absolute()
                     .top_0()
                     .left(x)
@@ -376,29 +379,102 @@ impl Render for Editor {
                     .bg(rgb(theme.cursor()))
                     .text_color(rgb(cursor_fg))
                     .child(under.to_string());
-                let prompt = row(mode_line_height).relative().child(text).child(cursor);
+                let status = mb.status.map(|status| {
+                    div()
+                        .debug_selector(|| "grep-status".into())
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bg(rgb(theme.background()))
+                        .text_color(rgb(theme
+                            .face(FaceName::Annotation)
+                            .fg
+                            .unwrap_or(theme.foreground())))
+                        .child(status)
+                });
+                let prompt = row(mode_line_height)
+                    .debug_selector(|| "minibuffer-prompt".into())
+                    .relative()
+                    .child(text)
+                    .child(cursor)
+                    .children(status);
                 let prompt = div().px(inset).child(prompt);
-                let padding = (mb.candidates.len()..mb.rows).map(|_| line());
+                let padding = (mb.candidates.len() + mb.groups.len()..mb.rows).map(|_| line());
                 let selected = theme
                     .face(FaceName::CompletionSelected)
                     .bg
                     .unwrap_or(theme.background());
+                let grep = !mb.groups.is_empty();
+                let mut groups = mb.groups.into_iter().peekable();
                 let rows = mb
                     .candidates
                     .into_iter()
                     .zip(mb.highlights)
                     .zip(mb.annotations)
                     .enumerate();
-                let candidates = rows.map(|(i, ((c, highlights), note))| {
-                    let runs = completion_runs(c.len(), &highlights, &font, theme);
+                let candidates = rows.flat_map(|(i, ((c, highlights), note))| {
+                    let header = if groups.peek().is_some_and(|(at, _)| *at == i) {
+                        let (_, label) = groups.next().unwrap();
+                        let rule = || {
+                            div().h(px(1.)).bg(rgb(theme
+                                .face(FaceName::Separator)
+                                .fg
+                                .unwrap_or(theme.foreground())))
+                        };
+                        let run = text_run(
+                            label.len(),
+                            theme.face(FaceName::GrepFile),
+                            false,
+                            &font,
+                            theme,
+                        );
+                        Some(
+                            line()
+                                .debug_selector(|| format!("grep-header-{i}"))
+                                .flex()
+                                .items_center()
+                                .gap(cell)
+                                .px(inset)
+                                .child(
+                                    rule()
+                                        .w(cell * 2.)
+                                        .flex_shrink_0()
+                                        .debug_selector(|| format!("grep-rule-before-{i}")),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(StyledText::new(label).with_runs(vec![run])),
+                                )
+                                .child(
+                                    rule()
+                                        .flex_1()
+                                        .debug_selector(|| format!("grep-rule-after-{i}")),
+                                ),
+                        )
+                    } else {
+                        None
+                    };
+                    let runs = if grep {
+                        grep_runs(&c, &font, theme)
+                    } else {
+                        completion_runs(c.len(), &highlights, &font, theme)
+                    };
                     let text = StyledText::new(c).with_runs(runs);
                     let note =
                         (!note.is_empty()).then(|| div().ml(cell * 2.).opacity(0.6).child(note));
-                    let candidate = line().flex().px(inset).child(text).children(note);
-                    match Some(i) == mb.selected {
+                    let candidate = line()
+                        .debug_selector(|| format!("completion-{i}"))
+                        .flex()
+                        .px(inset)
+                        .child(text)
+                        .children(note);
+                    let candidate = match Some(i) == mb.selected {
                         true => candidate.bg(rgb(selected)),
                         false => candidate,
-                    }
+                    };
+                    header.into_iter().chain(Some(candidate))
                 });
                 div().child(prompt).children(candidates).children(padding)
             }
@@ -974,7 +1050,7 @@ mod tests {
                     .unwrap()
                     .candidates
                     .iter()
-                    .position(|row| row.ends_with("sub/c:1:needle c"))
+                    .position(|row| row == "  1: needle c")
             })
             .unwrap();
         for _ in 0..target {
@@ -1174,7 +1250,7 @@ mod tests {
                 if editor.update(cx, |e, cx| {
                     e.handle(Msg::Tick, cx);
                     e.core.frame().minibuffer.is_some_and(|mb| {
-                        mb.candidates.len() == count && !mb.prompt.contains("[searching]")
+                        mb.candidates.len() == count && mb.status != Some("[searching]")
                     })
                 }) {
                     return;
@@ -1194,12 +1270,50 @@ mod tests {
         wait(cx, 3);
         assert_eq!(
             candidates(cx),
-            [
-                "lib/a:1:needle lib",
-                "app/a:1:needle app",
-                "docs/a:1:needle docs"
-            ]
+            ["  1: needle lib", "  1: needle app", "  1: needle docs"]
         );
+        editor.update_in(cx, |e, window, _| {
+            let mb = e.core.frame().minibuffer.unwrap();
+            assert_eq!(
+                mb.groups,
+                [
+                    (0, "lib/a".into()),
+                    (1, "app/a".into()),
+                    (2, "docs/a".into())
+                ]
+            );
+            assert_eq!((mb.rows, mb.count.trim()), (6, "1/3"));
+            let font = e.font(window).0;
+            let theme = &e.core.settings().theme;
+            let runs = grep_runs(&mb.candidates[0], &font, theme);
+            assert_eq!(runs[0].len, 3);
+            assert_eq!(
+                runs[0].color,
+                rgb(theme.face(FaceName::GrepLineNumber).fg.unwrap()).into()
+            );
+            assert_eq!(runs[1].color, rgb(theme.foreground()).into());
+            assert_eq!(
+                runs.iter().map(|r| r.len).sum::<usize>(),
+                mb.candidates[0].len()
+            );
+        });
+        cx.run_until_parked();
+        let header = cx.debug_bounds("grep-header-0").unwrap();
+        let hit = cx.debug_bounds("completion-0").unwrap();
+        let next = cx.debug_bounds("grep-header-1").unwrap();
+        assert_eq!(header.bottom(), hit.top());
+        assert_eq!(hit.bottom(), next.top());
+        for selector in ["grep-rule-before-0", "grep-rule-after-0"] {
+            let rule = cx.debug_bounds(selector).unwrap();
+            assert_eq!(rule.size.height, px(1.));
+            assert!(rule.size.width > px(0.));
+        }
+        cx.simulate_keystrokes("ctrl-n");
+        editor.update(cx, |e, _| {
+            let mb = e.core.frame().minibuffer.unwrap();
+            assert_eq!((mb.selected, mb.count.trim()), (Some(1), "2/3"));
+        });
+        cx.simulate_keystrokes("ctrl-p");
         for _ in 0..1000 {
             let ready = editor.update(cx, |e, _| {
                 let line = e.core.frame().windows.remove(0).display.lines.remove(0);
@@ -1235,7 +1349,11 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.simulate_input("needle");
         wait(cx, 1);
-        assert_eq!(candidates(cx), ["docs/a:1:needle docs"]);
+        assert_eq!(candidates(cx), ["  1: needle docs"]);
+        assert_eq!(
+            editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().groups),
+            [(0, "a".into())]
+        );
         assert_eq!(
             editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().prompt),
             "Grep in docs: "
@@ -1265,6 +1383,15 @@ mod tests {
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x p g");
         cx.simulate_input("needle");
+        cx.run_until_parked();
+        let line = |cx: &mut VisualTestContext| {
+            editor.update(cx, |e, _| {
+                let mb = e.core.frame().minibuffer.unwrap();
+                echo_line(&mb, "")
+            })
+        };
+        let before = line(cx);
+        let cursor = cx.debug_bounds("minibuffer-cursor").unwrap();
         let now = Instant::now() + Duration::from_secs(1);
         let search = editor.update(cx, |e, cx| {
             let search = e
@@ -1280,15 +1407,25 @@ mod tests {
             search
         });
         cx.run_until_parked();
-        let line = |cx: &mut VisualTestContext| {
-            editor.update(cx, |e, _| {
-                let mb = e.core.frame().minibuffer.unwrap();
-                echo_line(&mb, "")
-            })
-        };
         let project = editor.read_with(cx, |e, _| e.core.projects()[0].name.clone());
-        let running = format!("   0/0 [searching] Grep in {project}: needle");
-        assert_eq!(line(cx), (running.clone(), running.len()));
+        let input = format!("   0/0 Grep in {project}: needle");
+        assert_eq!(before, (input.clone(), input.len()));
+        assert_eq!(line(cx), before);
+        let check = |cx: &mut VisualTestContext, status| {
+            assert_eq!(
+                editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().status),
+                Some(status)
+            );
+            let prompt = cx.debug_bounds("minibuffer-prompt").unwrap();
+            let label = cx.debug_bounds("grep-status").unwrap();
+            assert_eq!(label.right(), prompt.right());
+            assert_eq!(
+                cx.debug_bounds("minibuffer-cursor").unwrap().origin.x,
+                cursor.origin.x
+            );
+            assert!(label.left() > cursor.right());
+        };
+        check(cx, "[searching]");
         editor.update(cx, |e, cx| {
             e.core.handle(
                 now,
@@ -1301,10 +1438,10 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let empty = format!("   0/0 [no matches] Grep in {project}: needle");
-        assert_eq!(line(cx), (empty.clone(), empty.len()));
+        assert_eq!(line(cx), before);
+        check(cx, "[no matches]");
         cx.simulate_keystrokes("ctrl-b");
-        assert_eq!(line(cx), (empty.clone(), empty.len() - 1));
+        assert_eq!(line(cx), (input.clone(), input.len() - 1));
         cx.simulate_keystrokes("ctrl-g ctrl-x p g");
         let fresh = format!("   0/0 Grep in {project}: ");
         assert_eq!(line(cx), (fresh.clone(), fresh.len()));

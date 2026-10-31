@@ -1,5 +1,6 @@
 //! Project grep: the grep service's hits listed live in the minibuffer, as consult-ripgrep.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,8 @@ const MIN_INPUT: usize = 3;
 
 /// The most hits a search lists.
 const LIMIT: usize = 10_000;
+
+pub(crate) const STATUS_COLS: usize = "[no matches]".len() + 2;
 
 /// The open grep prompt's search and its hits.
 #[derive(Default)]
@@ -62,6 +65,10 @@ impl crate::display::Search for ProjectGrep {
 }
 
 impl ProjectGrep {
+    pub(crate) fn choosing_root(&self) -> bool {
+        self.choosing_root
+    }
+
     pub(crate) fn status(&self) -> Option<&'static str> {
         if self.deadline.is_some() {
             None
@@ -74,11 +81,29 @@ impl ProjectGrep {
         }
     }
 
-    fn hit(&self, label: &str) -> Option<&Hit> {
+    pub(crate) fn hit(&self, label: &str) -> Option<&Hit> {
         self.hits
             .iter()
             .find(|(l, _)| l == label)
             .map(|(_, hit)| hit)
+    }
+
+    pub(crate) fn file_label(&self, hit: &Hit) -> String {
+        if self.roots.len() == 1 {
+            hit.path.display().to_string()
+        } else {
+            let name = self.roots.iter().find(|(path, _)| *path == hit.root);
+            format!("{}/{}", name.map_or("", |(_, n)| n), hit.path.display())
+        }
+    }
+
+    pub(crate) fn line_number_width(&self) -> usize {
+        self.hits
+            .iter()
+            .map(|(_, h)| (h.line + 1).to_string().len())
+            .max()
+            .unwrap_or(0)
+            .max(3)
     }
 
     /// `<root name>/<path>:<1-based line>:<text>`.
@@ -169,19 +194,32 @@ impl Core {
             grep.hits.clear();
             grep.pattern = grep.pending_pattern.take();
         }
-        let labels = match hits {
+        match hits {
             Ok(hits) => {
                 let labels: Vec<String> = hits.iter().map(|hit| grep.label(hit)).collect();
-                grep.hits.extend(labels.iter().cloned().zip(hits));
+                grep.hits.extend(labels.into_iter().zip(hits));
+                let mut files = HashMap::new();
+                for (_, hit) in &grep.hits {
+                    let next = files.len();
+                    files
+                        .entry((hit.root.clone(), hit.path.clone()))
+                        .or_insert(next);
+                }
+                grep.hits
+                    .sort_by_cached_key(|(_, hit)| files[&(hit.root.clone(), hit.path.clone())]);
                 grep.no_matches = done && grep.hits.is_empty();
-                labels
             }
             Err(err) => {
                 // A regexp error spans lines, the last saying what is wrong.
                 self.echo(err.lines().last().unwrap_or_default().to_string());
-                Vec::new()
             }
-        };
+        }
+        let labels = self
+            .grep
+            .hits
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect();
         self.set_items("project-grep", labels, replace);
     }
 
@@ -559,7 +597,8 @@ mod tests {
             }]),
             done: true,
         });
-        assert_eq!(listed(&mut h), ["lib/a.rs:2:  needle"]);
+        assert_eq!(listed(&mut h), ["  2:   needle"]);
+        assert_eq!(h.core.minibuffer().unwrap().groups, [(0, "a.rs".into())]);
         h.keys("RET");
         assert_eq!(h.core.current().file, Some(h.path("lib/a.rs")));
         assert_eq!(h.point(), line_start(&h, 1) + 2);
@@ -660,8 +699,8 @@ mod tests {
         h.advance(WAIT);
         let mb = h.core.minibuffer().unwrap();
         assert_eq!(
-            (mb.prompt.as_str(), mb.count.as_str()),
-            ("[searching] Grep in home: ", "   0/0 ")
+            (mb.prompt.as_str(), mb.status, mb.count.as_str()),
+            ("Grep in home: ", Some("[searching]"), "   0/0 ")
         );
         let search = h.core.grep.searches;
         for line in 0..2 {
@@ -677,7 +716,8 @@ mod tests {
                 done: false,
             });
             let mb = h.core.minibuffer().unwrap();
-            assert_eq!(mb.prompt, "[searching] Grep in home: ");
+            assert_eq!(mb.prompt, "Grep in home: ");
+            assert_eq!(mb.status, Some("[searching]"));
             assert_eq!(mb.count, format!("   1/{} ", line + 1));
         }
         h.send(Msg::Grepped {
@@ -693,22 +733,58 @@ mod tests {
     }
 
     #[test]
+    fn status_transitions_keep_short_and_scrolled_input_in_place() {
+        for query in ["needle".into(), "needle".repeat(40)] {
+            for outcome in 0..3 {
+                let mut h = grepping(&[], &[]);
+                h.hits.clear();
+                h.keys("C-x p g").keys(&query);
+                let before = h.frame(400., 600.).minibuffer.unwrap();
+                assert_eq!(before.status, None);
+                h.advance(WAIT);
+                let running = h.frame(400., 600.).minibuffer.unwrap();
+                assert_eq!(running.status, Some("[searching]"));
+                assert_eq!(running.prompt, before.prompt);
+                assert_eq!(running.display, before.display);
+                let hits = match outcome {
+                    0 => Ok(Vec::new()),
+                    1 => Ok(vec![Hit {
+                        root: h.path("app"),
+                        path: "a.rs".into(),
+                        line: 0,
+                        col: 0,
+                        text: query.clone(),
+                    }]),
+                    _ => Err("error: invalid pattern".into()),
+                };
+                h.send(Msg::Grepped {
+                    search: h.core.grep.searches,
+                    hits,
+                    done: true,
+                });
+                let after = h.frame(400., 600.).minibuffer.unwrap();
+                assert_eq!(after.status, (outcome == 0).then_some("[no matches]"));
+                assert_eq!(after.prompt, before.prompt);
+                assert_eq!(after.display, before.display);
+                assert_eq!(h.text(), query);
+            }
+        }
+    }
+
+    #[test]
     fn empty_completion_clears_on_edit_and_keeps_history() {
         let mut h = grepping(FILES, &[]);
         h.keys("C-x p g needle").advance(WAIT);
         let mb = h.core.minibuffer().unwrap();
         assert_eq!(
-            (mb.prompt.as_str(), mb.count.as_str()),
-            ("[no matches] Grep in home: ", "   0/0 ")
+            (mb.prompt.as_str(), mb.status, mb.count.as_str()),
+            ("Grep in home: ", Some("[no matches]"), "   0/0 ")
         );
         h.keys("C-g C-x p g M-p");
         assert_eq!(h.text(), "needle");
         assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
         h.advance(WAIT);
-        assert_eq!(
-            h.core.minibuffer().unwrap().prompt,
-            "[searching] Grep in home: "
-        );
+        assert_eq!(h.core.minibuffer().unwrap().status, Some("[searching]"));
         let search = h.core.grep.searches;
         h.keys("DEL DEL DEL DEL");
         assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
@@ -740,10 +816,7 @@ mod tests {
                 hits,
                 done: true,
             });
-            assert_eq!(
-                h.core.minibuffer().unwrap().prompt,
-                "[searching] Grep in home: "
-            );
+            assert_eq!(h.core.minibuffer().unwrap().status, Some("[searching]"));
         }
         let cancelled = h.core.grep.searches;
         h.keys("C-g C-x p g");
@@ -816,10 +889,155 @@ mod tests {
             ],
         );
         h.keys("C-x p g needle").advance(WAIT);
+        assert_eq!(listed(&mut h), ["  3: let needle = 1;", "  1: Needle"]);
         assert_eq!(
-            listed(&mut h),
-            ["app/src/a.rs:3:let needle = 1;", "lib/n:1:Needle"]
+            h.core.minibuffer().unwrap().groups,
+            [(0, "app/src/a.rs".into()), (1, "lib/n".into())]
         );
+    }
+
+    #[test]
+    fn interleaved_hits_join_existing_groups_and_keep_the_selected_hit() {
+        let mut h = grepping(
+            &[
+                ("app/same:名.rs", "needle a\nneedle later"),
+                ("lib/same:名.rs", "needle b"),
+            ],
+            &[],
+        );
+        h.hits.clear();
+        h.keys("C-x p g needle").advance(WAIT);
+        let search = h.core.grep.searches;
+        let a = Hit {
+            root: h.path("app"),
+            path: "same:名.rs".into(),
+            line: 0,
+            col: 0,
+            text: "needle a".into(),
+        };
+        let b = Hit {
+            root: h.path("lib"),
+            text: "needle b".into(),
+            ..a.clone()
+        };
+        h.send(Msg::Grepped {
+            search,
+            hits: Ok(vec![a.clone(), b]),
+            done: false,
+        });
+        h.keys("C-n");
+        assert_eq!(origin(&h), (Some(h.path("lib/same:名.rs")), 0));
+        h.send(Msg::Grepped {
+            search,
+            hits: Ok(vec![Hit {
+                line: 1,
+                text: "needle later".into(),
+                ..a
+            }]),
+            done: true,
+        });
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(
+            mb.candidates,
+            ["  1: needle a", "  2: needle later", "  1: needle b"]
+        );
+        assert_eq!(
+            mb.groups,
+            [(0, "app/same:名.rs".into()), (2, "lib/same:名.rs".into())]
+        );
+        assert_eq!(
+            (mb.count.as_str(), mb.selected, mb.rows),
+            ("   3/3 ", Some(2), 5)
+        );
+        assert_eq!(origin(&h), (Some(h.path("lib/same:名.rs")), 0));
+        h.keys("C-p");
+        assert_eq!(h.core.minibuffer().unwrap().count, "   2/3 ");
+        assert_eq!(origin(&h), (Some(h.path("app/same:名.rs")), 9));
+        h.keys("C-n RET");
+        assert_eq!(h.core.current().file, Some(h.path("lib/same:名.rs")));
+    }
+
+    #[test]
+    fn grouped_viewport_counts_headers_keeps_selection_and_grows_only() {
+        let mut h = grepping(&[], &[]);
+        h.hits.clear();
+        h.keys("C-x p g needle").advance(WAIT);
+        let search = h.core.grep.searches;
+        let hits = (0..12)
+            .map(|n| Hit {
+                root: h.path(if n < 6 { "app" } else { "lib" }),
+                path: format!("{n}.rs").into(),
+                line: n,
+                col: 0,
+                text: format!("needle {n}"),
+            })
+            .collect();
+        h.send(Msg::Grepped {
+            search,
+            hits: Ok(hits),
+            done: false,
+        });
+        for n in 0..12 {
+            let mb = h.core.minibuffer().unwrap();
+            let selected = mb.selected.unwrap();
+            assert_eq!(mb.candidates[selected], format!("{:>3}: needle {n}", n + 1));
+            assert_eq!(mb.candidates.len() + mb.groups.len(), 10);
+            assert_eq!(mb.groups.len(), 5);
+            assert_eq!(mb.groups[0].0, 0);
+            assert_eq!(mb.rows, 10);
+            assert_eq!(mb.count.trim(), format!("{}/12", n + 1));
+            h.keys("C-n");
+        }
+        h.keys("C-u 11 C-p");
+        assert_eq!(h.core.minibuffer().unwrap().selected, Some(0));
+        h.keys("s").advance(WAIT);
+        h.send(Msg::Grepped {
+            search: h.core.grep.searches,
+            hits: Ok(vec![Hit {
+                root: h.path("lib"),
+                path: "only.rs".into(),
+                line: 0,
+                col: 0,
+                text: "needles".into(),
+            }]),
+            done: true,
+        });
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.groups, [(0, "lib/only.rs".into())]);
+        assert_eq!(mb.candidates, ["  1: needles"]);
+        assert_eq!(
+            (mb.rows, mb.selected, mb.count.trim()),
+            (10, Some(0), "1/1")
+        );
+        h.keys("C-g C-x p g");
+        assert_eq!(h.core.minibuffer().unwrap().rows, 0);
+    }
+
+    #[test]
+    fn scrolling_within_a_file_repeats_its_header() {
+        let mut h = grepping(&[], &[]);
+        h.hits.clear();
+        h.keys("C-x p g needle").advance(WAIT);
+        h.send(Msg::Grepped {
+            search: h.core.grep.searches,
+            hits: Ok((0..20)
+                .map(|line| Hit {
+                    root: h.path("app"),
+                    path: "a.rs".into(),
+                    line,
+                    col: 0,
+                    text: "needle".into(),
+                })
+                .collect()),
+            done: true,
+        });
+        h.keys("C-u 19 C-n");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.groups, [(0, "app/a.rs".into())]);
+        assert_eq!(mb.candidates.len(), 9);
+        assert_eq!(mb.candidates[0], " 12: needle");
+        assert_eq!(mb.candidates[mb.selected.unwrap()], " 20: needle");
+        assert_eq!(mb.count.trim(), "20/20");
     }
 
     #[test]
@@ -850,13 +1068,13 @@ mod tests {
             hits: Ok(vec![hit.clone()]),
             done: false,
         });
-        assert_eq!(listed(&mut h), ["app/a.rs:1:needles"]);
+        assert_eq!(listed(&mut h), ["  1: needles"]);
         h.send(Msg::Grepped {
             search,
             hits: Ok(vec![Hit { line: 1, ..hit }]),
             done: true,
         });
-        assert_eq!(listed(&mut h), ["app/a.rs:1:needles", "app/a.rs:2:needles"]);
+        assert_eq!(listed(&mut h), ["  1: needles", "  2: needles"]);
     }
 
     #[test]
@@ -899,7 +1117,12 @@ mod tests {
         assert_eq!(selected, Some(2));
         let (count, grown, selected) = send(&mut h, search, batch(100..10_000));
         assert_eq!(count, "3/10000 ", "a wider count widens the field");
-        assert_eq!((grown, selected), (rows, Some(2)), "the list stays put");
+        assert_eq!(
+            grown.iter().map(|s| s.trim_start()).collect::<Vec<_>>(),
+            rows.iter().map(|s| s.trim_start()).collect::<Vec<_>>(),
+            "the same hits stay visible"
+        );
+        assert_eq!(selected, Some(2));
 
         h.keys("s").advance(WAIT);
         let search = h.core.grep.searches;
@@ -938,10 +1161,7 @@ mod tests {
             });
         }
         assert_eq!(h.core.minibuffer().unwrap().count, "   1/2 ");
-        assert_eq!(
-            h.core.minibuffer().unwrap().prompt,
-            "[searching] Grep in home: "
-        );
+        assert_eq!(h.core.minibuffer().unwrap().status, Some("[searching]"));
         h.keys("C-n");
         let selected = origin(&h);
         assert_eq!(selected, (Some(h.path("app/a.rs")), 0));
@@ -962,7 +1182,7 @@ mod tests {
         assert_eq!(mb.prompt, "Grep in home: ");
         assert_eq!(mb.selected, Some(1));
         assert_eq!(&mb.candidates[..2], rows);
-        assert_eq!(mb.candidates[2], "app/c.rs:1:needle");
+        assert_eq!(mb.candidates[2], "  1: needle");
         assert_eq!(origin(&h), selected);
     }
 

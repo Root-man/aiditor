@@ -476,6 +476,20 @@ pub(crate) fn completion_runs(
     runs
 }
 
+pub(crate) fn grep_runs(text: &str, font: &Font, theme: &Theme) -> Vec<TextRun> {
+    let number = text.find(':').expect("grep line number");
+    vec![
+        text_run(
+            number,
+            theme.face(FaceName::GrepLineNumber),
+            false,
+            font,
+            theme,
+        ),
+        text_run(text.len() - number, Face::default(), false, font, theme),
+    ]
+}
+
 /// The echo line at a prompt: the match count, the prompt, the minibuffer's line and any `message` in brackets,
 /// with the byte offset of point in it.
 pub(crate) fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -> (String, usize) {

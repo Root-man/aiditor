@@ -402,7 +402,7 @@ mod tests {
                 if !first_seen && total > 0 {
                     let prompt = core.frame().minibuffer.unwrap();
                     assert_eq!(prompt.count, "   1/1 ");
-                    assert!(prompt.prompt.starts_with("[searching]"));
+                    assert_eq!(prompt.status, Some("[searching]"));
                     first_seen = true;
                 }
             },
@@ -410,7 +410,8 @@ mod tests {
         assert_eq!((total, done, first_seen), (10_000, 1, true));
         let prompt = core.frame().minibuffer.unwrap();
         assert_eq!(prompt.count, "1/10000 ");
-        assert!(prompt.candidates[0].ends_with("a:1:needle"));
+        assert_eq!(prompt.candidates[0].trim_start(), "1: needle");
+        assert_eq!(prompt.groups, [(0, "a".into())]);
     }
 
     /// Each message as its hit count and whether it is done.
