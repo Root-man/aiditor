@@ -17,6 +17,7 @@ The core constructs language segments from buffer syntax. The file service perfo
 - Map the currently highlighted runtime languages: Rust to rust, Elixir/HEEx to elixir, JavaScript/TypeScript/TSX to nodejs (`node` also accepted in mise). Configuration and prose modes have no tool version.
 - Support mise string, first array item, and table `version`; rustup `toolchain.channel`; and the first whitespace-delimited asdf version, with comments stripped. Show literal values only. An explicit `system`, empty/unsafe value or template stops inheritance but supplies no displayed suffix. A malformed file or absent tool entry allows fallback.
 - Watch candidate filenames in every ancestor, including missing files. This notices new nearer pins and deletion fallback even with `watch = false`. Reuse directory watches instead of polling or watching only the selected existing pin.
+- Use dedicated `mode-line-<language>` faces for Elixir/HEEx, JavaScript, TypeScript/TSX, Rust, YAML, Markdown and TOML. Color the whole language segment, including an available version; keep Fundamental dim. Reuse the shared inactive-face and fitting logic. User review explicitly overrides the prior state-only colour rule.
 - Tag each buffer lookup with a monotonically increasing request number; accept a reply only for that live buffer's latest request. Watcher events invalidate affected candidates or descendants, and rescans invalidate all versions.
 
 ## Risks / Trade-offs

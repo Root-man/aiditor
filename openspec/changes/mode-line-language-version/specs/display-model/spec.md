@@ -38,6 +38,29 @@ The major mode SHALL be the name of the language the file is highlighted in, and
 - **WHEN** its file is shown
 - **THEN** that entry supplies no displayed version
 
+### Requirement: Mode line segments use colour only for state
+In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `char` in `status-waiting`; `copy` in `status-info`; a running command in `status-running`; `exit <n>` in `status-failed`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's or shell's directory, region size, position and `[unwatched]` in `mode-line-dim`; a file's name and a terminal's name in `mode-line-buffer-id`. A session model and effort SHALL use `mode-line-dim`, its title `mode-line-buffer-id`, context usage `mode-line-dim`, and mode and lifecycle status their specified risk and status faces. The file's language name and version SHALL use an overridable `mode-line-<language>` face: Elixir and HEEx purple/rose (`mode-line-elixir`), JavaScript green (`mode-line-javascript`), TypeScript and TSX blue (`mode-line-typescript`), Rust rusty red (`mode-line-rust`), YAML yellow (`mode-line-yaml`), Markdown aqua (`mode-line-markdown`), and TOML orange (`mode-line-toml`). Fundamental SHALL retain `mode-line-dim`. This language coding is an exception to the state-only colour rule. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it. Inactive windows SHALL retain their shared inactive face.
+
+#### Scenario: A modified file in the selected window
+- **GIVEN** the selected window shows a file
+- **WHEN** its buffer is modified
+- **THEN** `●` has the `status-modified` foreground and the file's name is bold in the `mode-line` foreground
+
+#### Scenario: Every supported language has a color
+- **GIVEN** files in every supported highlighted language, with or without a pin
+- **WHEN** each file is shown in the selected window
+- **THEN** its entire language segment uses its language family's face, including any displayed version
+
+#### Scenario: Inactive language colors
+- **GIVEN** a file with a colored language segment
+- **WHEN** its window becomes inactive
+- **THEN** the language name and version use the shared `mode-line-inactive` face
+
+#### Scenario: Theme override
+- **GIVEN** settings override a language face's foreground
+- **WHEN** settings are reloaded
+- **THEN** the file's language name and version use the new foreground
+
 ## ADDED Requirements
 
 ### Requirement: Language versions follow disk changes

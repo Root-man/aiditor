@@ -316,7 +316,7 @@ mod tests {
         });
         assert_eq!(
             h.display(5).mode_line.left[1],
-            [("Rust".into(), FaceName::ModeLineDim)]
+            [("Rust".into(), FaceName::ModeLineRust)]
         );
         h.keys("C-x k RET");
         h.keys("C-x t 0");

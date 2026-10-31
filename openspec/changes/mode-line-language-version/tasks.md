@@ -11,6 +11,8 @@
 - [x] 2.2 Add candidate paths to the watch set and refresh on matching reports/rescans; native watcher tests verify edits, atomic replacement, creation and deletion across workspaces with project watching disabled.
 - [x] 2.3 Document the behavior and defaults in docs/editor.md; use a GPUI test to verify the version reaches painted mode-line text.
 
+- [x] 2.4 Color every supported language family through named theme faces; verify name/version styling, inactive windows, theme overrides and bundled face completeness with tests.
+
 ## 3. Verification
 
 - [x] 3.1 Pass cargo fmt, workspace Clippy/tests, the CI dependency/profile checks and benchmark reporting tests; validate the OpenSpec change.
