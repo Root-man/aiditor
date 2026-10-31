@@ -17,7 +17,7 @@ use gpui::{
 };
 use tokio::sync::mpsc;
 
-use crate::element::{FrameElement, Painted, block, echo_line, text_run};
+use crate::element::{FrameElement, Painted, block, completion_runs, echo_line, text_run};
 use crate::input::to_key;
 use crate::{Args, FONT};
 
@@ -383,11 +383,18 @@ impl Render for Editor {
                     .face(FaceName::CompletionSelected)
                     .bg
                     .unwrap_or(theme.background());
-                let rows = mb.candidates.into_iter().zip(mb.annotations).enumerate();
-                let candidates = rows.map(|(i, (c, note))| {
+                let rows = mb
+                    .candidates
+                    .into_iter()
+                    .zip(mb.highlights)
+                    .zip(mb.annotations)
+                    .enumerate();
+                let candidates = rows.map(|(i, ((c, highlights), note))| {
+                    let runs = completion_runs(c.len(), &highlights, &font, theme);
+                    let text = StyledText::new(c).with_runs(runs);
                     let note =
                         (!note.is_empty()).then(|| div().ml(cell * 2.).opacity(0.6).child(note));
-                    let candidate = line().flex().px(inset).child(c).children(note);
+                    let candidate = line().flex().px(inset).child(text).children(note);
                     match Some(i) == mb.selected {
                         true => candidate.bg(rgb(selected)),
                         false => candidate,
@@ -1243,6 +1250,83 @@ mod tests {
         cx.simulate_keystrokes("enter");
         let last = editor.read_with(cx, |e, _| e.core.last_command());
         assert_eq!(last, Some("forward-char"));
+    }
+
+    #[gpui::test]
+    fn fuzzy_completion_input_uses_the_themes_match_face(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("pff");
+        for _ in 0..100 {
+            let ready = editor.update(cx, |e, _| {
+                e.core
+                    .frame()
+                    .minibuffer
+                    .unwrap()
+                    .candidates
+                    .contains(&"project-find-file".into())
+            });
+            if ready {
+                break;
+            }
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        let check = |cx: &mut VisualTestContext, color, bold| {
+            editor.update_in(cx, |e, window, _| {
+                let mb = e.core.frame().minibuffer.unwrap();
+                let i = mb
+                    .candidates
+                    .iter()
+                    .position(|c| c == "project-find-file")
+                    .unwrap();
+                assert_eq!(mb.selected, Some(i));
+                assert_eq!(mb.annotations[i], "C-x p f");
+                let font = e.font(window).0;
+                let theme = &e.core.settings().theme;
+                let runs = completion_runs(mb.candidates[i].len(), &mb.highlights[i], &font, theme);
+                assert_eq!(
+                    runs.iter().map(|r| r.len).collect::<Vec<_>>(),
+                    [1, 7, 1, 4, 1, 3]
+                );
+                for (i, run) in runs.iter().enumerate() {
+                    let matched = i % 2 == 0;
+                    assert_eq!(
+                        run.color,
+                        rgb(if matched { color } else { theme.foreground() }).into()
+                    );
+                    assert_eq!(
+                        run.font.weight,
+                        if matched && bold {
+                            gpui::FontWeight::BOLD
+                        } else {
+                            font.weight
+                        }
+                    );
+                }
+                let shaped = window.text_system().shape_line(
+                    mb.candidates[i].clone().into(),
+                    px(e.core.settings().font_size),
+                    &runs,
+                    None,
+                );
+                assert_eq!(shaped.text.as_ref(), "project-find-file");
+            });
+        };
+        check(cx, 0x569cd6, true);
+        editor.update(cx, |e, cx| {
+            e.handle(
+                Msg::SettingsLoaded(Ok(Some(
+                    "[themes.default.faces]\ncompletion-match = { fg = 0x123456, bold = false }"
+                        .into(),
+                ))),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        check(cx, 0x123456, false);
+        cx.simulate_keystrokes("ctrl-g");
     }
 
     #[gpui::test]

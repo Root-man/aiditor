@@ -214,6 +214,8 @@ pub struct Minibuffer {
     pub display: WindowDisplay,
     /// The completion list's shown rows, best match first; empty without completion.
     pub candidates: Vec<String>,
+    /// Matched graphemes' UTF-8 byte ranges in each candidate; empty for custom filters.
+    pub highlights: Vec<Vec<Range<usize>>>,
     /// Each of `candidates`' annotation, empty for none.
     pub annotations: Vec<String>,
     /// Which of `candidates` is selected.

@@ -59,6 +59,7 @@ Some(
             terminal: None,
         },
         candidates: [],
+        highlights: [],
         annotations: [],
         selected: None,
         rows: 0,

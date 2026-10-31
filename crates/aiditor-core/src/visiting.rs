@@ -1365,6 +1365,20 @@ mod tests {
     }
 
     #[test]
+    fn file_completion_highlights_only_the_basename_pattern() {
+        let mut h = in_dir();
+        h.keys("C-x C-f at");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["a.txt"]);
+        assert_eq!(mb.highlights, [vec![0..1, 2..3]]);
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/sub/c");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["c.txt"]);
+        assert_eq!(mb.highlights, [vec![0..1]]);
+    }
+
+    #[test]
     fn find_file_starts_at_the_buffer_directory_and_lists_it() {
         let mut h = in_dir();
         h.keys("C-x C-f");

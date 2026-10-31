@@ -1150,6 +1150,15 @@ mod tests {
     }
 
     #[test]
+    fn project_file_completion_highlights_the_root_and_path() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f bx");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["b/x"]);
+        assert_eq!(mb.highlights, [vec![0..1, 2..3]]);
+    }
+
+    #[test]
     fn finds_files_in_the_primary_and_an_additional_root() {
         let mut h = findable(&[]);
         h.keys("C-x p f");
