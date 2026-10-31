@@ -77,6 +77,13 @@ use timer::{TimerId, Timers};
 use window::{Tree, Window, WindowId};
 use workspace::{Windows, Workspace, WorkspaceId};
 
+/// One filesystem completion candidate and its metadata snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileEntry {
+    pub name: String,
+    pub annotation: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
     Key(Key),
@@ -118,7 +125,7 @@ pub enum Msg {
     /// why it couldn't be listed.
     Listed {
         request: u64,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<FileEntry>, String>,
     },
     /// The file service's answer to `FileOp::Open`: the file's bytes and hash, `None` when there
     /// is no file, or why it couldn't be read.

@@ -66,7 +66,7 @@ struct Completion {
     /// The text the matcher's pattern was last set from.
     pattern: String,
     /// The selected match, best first.
-    selected: usize,
+    selected: Option<usize>,
     /// The first match shown, so the shown rows hold the selection.
     top: usize,
     /// The most rows shown since the minibuffer opened, Emacs's `grow-only` mini-window.
@@ -208,11 +208,11 @@ impl Prompts {
         let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
         if let Some(f) = &completion.filtered {
             let last = f.matched.len().checked_sub(1)?;
-            return Some(f.candidate(f.matched[completion.selected.min(last)]));
+            return Some(f.candidate(f.matched[completion.selected?.min(last)]));
         }
         let snapshot = self.matcher.as_ref()?.snapshot();
         let last = snapshot.matched_item_count().checked_sub(1)?;
-        let item = snapshot.get_matched_item((completion.selected as u32).min(last))?;
+        let item = snapshot.get_matched_item((completion.selected? as u32).min(last))?;
         let name = &item.data.0;
         Some(match &completion.dir {
             Some(dir) => format!("{dir}{name}"),
@@ -224,7 +224,7 @@ impl Prompts {
 impl Completion {
     /// Selects match `selected`, scrolling the shown rows only as far as needed.
     fn select(&mut self, selected: usize) {
-        self.selected = selected;
+        self.selected = Some(selected);
         self.top = self
             .top
             .min(selected)
@@ -234,7 +234,11 @@ impl Completion {
 
 impl Ctx<'_> {
     /// Adds `dir`'s listing to the completion that awaits it, or shows why it failed.
-    pub(crate) fn on_listed(&mut self, request: u64, result: Result<Vec<String>, String>) {
+    pub(crate) fn on_listed(
+        &mut self,
+        request: u64,
+        result: Result<Vec<crate::FileEntry>, String>,
+    ) {
         let core = &mut *self.core;
         let awaited = (core.prompts.minibuffer.as_mut())
             .and_then(|mb| mb.completion.as_mut())
@@ -253,12 +257,15 @@ impl Ctx<'_> {
                     .expect("completing has a matcher");
                 let injector = matcher.injector();
                 // A directory prompt offers the listed directory itself first, as `./`.
-                let here = directories.then(|| "./".to_string());
+                let here = directories.then(|| crate::FileEntry {
+                    name: "./".to_string(),
+                    annotation: String::new(),
+                });
                 let names = names
                     .into_iter()
-                    .filter(|n| !directories || n.ends_with('/'));
-                for name in here.into_iter().chain(names) {
-                    injector.push((name, String::new(), None), |(c, _, _), cols| {
+                    .filter(|entry| !directories || entry.name.ends_with('/'));
+                for entry in here.into_iter().chain(names) {
+                    injector.push((entry.name, entry.annotation, None), |(c, _, _), cols| {
                         cols[0] = c.as_str().into()
                     });
                 }
@@ -337,7 +344,7 @@ impl Ctx<'_> {
         let completion = (matching || filtered.is_some()).then(|| {
             let mut completion = Completion {
                 pattern: String::new(),
-                selected: 0,
+                selected: Some(0),
                 top: 0,
                 rows: 0,
                 count_width: COUNT_WIDTH,
@@ -408,7 +415,7 @@ impl Ctx<'_> {
                 let snapshot = core.prompts.matcher.as_ref()?.snapshot();
                 let last = snapshot.matched_item_count().checked_sub(1)?;
                 snapshot
-                    .get_matched_item((completion?.selected as u32).min(last))?
+                    .get_matched_item((completion?.selected? as u32).min(last))?
                     .data
                     .2
             });
@@ -498,9 +505,30 @@ impl Ctx<'_> {
         if count == 0 {
             return Err("No match".into());
         }
-        let target = (completion.selected as i64).saturating_add(n);
+        if n == 0 {
+            return Ok(());
+        }
+        let start = completion
+            .selected
+            .map_or_else(|| if n > 0 { -1 } else { count as i64 }, |i| i as i64);
+        let target = start.saturating_add(n);
         completion.select(target.clamp(0, count as i64 - 1) as usize);
         Ok(())
+    }
+
+    pub(crate) fn complete(&mut self) -> Result<(), String> {
+        let completion = self
+            .core
+            .prompts
+            .minibuffer
+            .as_mut()
+            .and_then(|mb| mb.completion.as_mut())
+            .ok_or("Not completing")?;
+        if completion.selected.is_none() {
+            completion.select(0);
+        }
+        let text = self.core.prompts.selected_candidate().ok_or("No match")?;
+        self.set_text(&text)
     }
 
     /// Fails with `err` while the minibuffer is selected.
@@ -537,7 +565,7 @@ impl Core {
         if let Some(f) = &mut completion.filtered {
             if completion.pattern != text {
                 if let Some(last) = f.matched.len().checked_sub(1) {
-                    f.anchor = f.matched[completion.selected.min(last)];
+                    f.anchor = f.matched[completion.selected.unwrap_or(0).min(last)];
                 }
                 f.matched = match (&mut f.swiper, self.commands[mb.command].spec.filter) {
                     (Some(search), _) => search.filter(&text),
@@ -587,6 +615,9 @@ impl Core {
             );
             completion.pattern = pattern.to_string();
             completion.select(0);
+            if mb.command == "find-file" && pattern.is_empty() {
+                completion.selected = None;
+            }
         }
         if let Some(id) = self.prompts.repoll.take() {
             self.timers.cancel(id);
@@ -655,7 +686,10 @@ impl Core {
                             }
                             end
                         };
-                        let selected = completion.selected.min(f.matched.len().saturating_sub(1));
+                        let selected = completion
+                            .selected
+                            .unwrap_or(0)
+                            .min(f.matched.len().saturating_sub(1));
                         while rows.start < selected && end(rows.start) <= selected {
                             rows.start += 1;
                         }
@@ -732,9 +766,19 @@ impl Core {
                 }
                 (None, None) => (0, 0..0),
             };
-            let number = (matched > 0).then(|| completion.selected.min(matched - 1));
+            let number = completion
+                .selected
+                .filter(|_| matched > 0)
+                .map(|n| n.min(matched - 1));
             selected = number.map(|n| n - rows.start);
-            count = format!("{}/{matched}", number.map_or(0, |n| n + 1));
+            let number = number.map(|n| (n + 1).to_string()).unwrap_or_else(|| {
+                if mb.command == "find-file" {
+                    "*".into()
+                } else {
+                    "0".into()
+                }
+            });
+            count = format!("{number}/{matched}");
             completion.count_width = completion.count_width.max(count.len());
             count = format!("{count:>width$} ", width = completion.count_width);
             completion.rows = completion.rows.max(rows.len() + groups.len());
@@ -752,6 +796,7 @@ impl Core {
             prompt,
             status,
             display,
+            files: mb.completion.as_ref().is_some_and(|c| c.dir.is_some()),
             candidates,
             highlights,
             annotations,
@@ -929,7 +974,10 @@ impl Core {
                 .and_then(|label| items.iter().position(|item| item == label))
                 .unwrap_or(0)
         };
-        let (selected, top) = (retained(completion.selected), retained(completion.top));
+        let (selected, top) = (
+            retained(completion.selected.unwrap_or(0)),
+            retained(completion.top),
+        );
         f.notes = vec![String::new(); items.len()];
         f.items = items;
         f.matched = (0..f.items.len()).collect();

@@ -31,7 +31,7 @@ pub struct Harness {
     /// Each grep search's pattern, and `None` for each cancel, in order.
     pub greps: Vec<Option<String>>,
     pub reads: HashMap<PathBuf, ReadReply>,
-    pub listings: HashMap<PathBuf, Result<Vec<String>, String>>,
+    pub listings: HashMap<PathBuf, Result<Vec<crate::FileEntry>, String>>,
     pub indexes: HashMap<PathBuf, Result<Vec<PathBuf>, String>>,
     pub directories: HashMap<PathBuf, Vec<PathBuf>>,
     pub checks: HashMap<PathBuf, Option<u64>>,
@@ -104,7 +104,13 @@ impl Harness {
     pub fn listing(&mut self, dir: &str, names: &[&str]) {
         self.listings.insert(
             self.path(dir),
-            Ok(names.iter().map(|s| s.to_string()).collect()),
+            Ok(names
+                .iter()
+                .map(|s| crate::FileEntry {
+                    name: s.to_string(),
+                    annotation: String::new(),
+                })
+                .collect()),
         );
     }
 
