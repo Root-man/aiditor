@@ -1,0 +1,551 @@
+{
+  "date": "2026-10-31",
+  "commit": "aeca08faca5c0047369bda68d8362a6d1b5b67a1",
+  "query": "INVALID_SITE",
+  "project": "Legacy crap",
+  "roots": 11,
+  "files": 8705,
+  "hits": 48,
+  "comparisons": [
+    {
+      "event": "same_file_set",
+      "files": 8705
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-parallel-4",
+      "first_ms": 26.859417,
+      "total_ms": 360.42524999999995,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-parallel-8",
+      "first_ms": 23.810875,
+      "total_ms": 340.062959,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-1",
+      "first_ms": 747.127792,
+      "total_ms": 862.628125,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-4",
+      "first_ms": 400.07270900000003,
+      "total_ms": 462.19075,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-8",
+      "first_ms": 410.787375,
+      "total_ms": 473.671042,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-16",
+      "first_ms": 419.432584,
+      "total_ms": 479.76416700000004,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "aiditor-4-reordered",
+      "first_ms": 19.031792,
+      "total_ms": 457.525333,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "rg-default",
+      "first_ms": 39.08975003287196,
+      "total_ms": 325.1811250229366,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "rg-4",
+      "first_ms": 36.025416979100555,
+      "total_ms": 362.160041986499,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "rg-sorted",
+      "first_ms": 996.1894159787335,
+      "total_ms": 1148.90445797937,
+      "hits": 48
+    },
+    {
+      "rep": 0,
+      "tool": "grep-same-files",
+      "first_ms": 1031.036000000313,
+      "total_ms": 1155.6659580091946,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-parallel-4",
+      "first_ms": 29.797542,
+      "total_ms": 359.22837499999997,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-parallel-8",
+      "first_ms": 23.163667,
+      "total_ms": 347.238542,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-1",
+      "first_ms": 749.459125,
+      "total_ms": 866.462833,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-4",
+      "first_ms": 396.0415,
+      "total_ms": 457.390666,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-8",
+      "first_ms": 416.17725,
+      "total_ms": 475.585417,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-16",
+      "first_ms": 419.715625,
+      "total_ms": 482.966417,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "aiditor-4-reordered",
+      "first_ms": 18.442208,
+      "total_ms": 467.913208,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "rg-default",
+      "first_ms": 38.961625017691404,
+      "total_ms": 350.9582090191543,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "rg-4",
+      "first_ms": 33.68679201230407,
+      "total_ms": 375.366166990716,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "rg-sorted",
+      "first_ms": 954.5401249779388,
+      "total_ms": 1102.7529999846593,
+      "hits": 48
+    },
+    {
+      "rep": 1,
+      "tool": "grep-same-files",
+      "first_ms": 1046.316082996782,
+      "total_ms": 1171.7663329909556,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-parallel-4",
+      "first_ms": 25.617667,
+      "total_ms": 354.018,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-parallel-8",
+      "first_ms": 25.500875,
+      "total_ms": 362.058125,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-1",
+      "first_ms": 747.673625,
+      "total_ms": 865.197,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-4",
+      "first_ms": 402.837042,
+      "total_ms": 468.105292,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-8",
+      "first_ms": 416.381833,
+      "total_ms": 477.257083,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-16",
+      "first_ms": 409.844916,
+      "total_ms": 470.243333,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "aiditor-4-reordered",
+      "first_ms": 19.922833,
+      "total_ms": 450.66575,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "rg-default",
+      "first_ms": 37.88795799482614,
+      "total_ms": 324.5348749915138,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "rg-4",
+      "first_ms": 34.85358302714303,
+      "total_ms": 356.7757499986328,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "rg-sorted",
+      "first_ms": 988.3168750093319,
+      "total_ms": 1139.8922500084154,
+      "hits": 48
+    },
+    {
+      "rep": 2,
+      "tool": "grep-same-files",
+      "first_ms": 1065.4192909714766,
+      "total_ms": 1191.2721249973401,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-parallel-4",
+      "first_ms": 28.616833,
+      "total_ms": 360.05350000000004,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-parallel-8",
+      "first_ms": 23.731375,
+      "total_ms": 346.468583,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-1",
+      "first_ms": 743.21325,
+      "total_ms": 859.311417,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-4",
+      "first_ms": 395.803166,
+      "total_ms": 457.718666,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-8",
+      "first_ms": 410.39112500000005,
+      "total_ms": 473.559959,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-16",
+      "first_ms": 430.936416,
+      "total_ms": 493.93037499999997,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "aiditor-4-reordered",
+      "first_ms": 17.126125,
+      "total_ms": 465.253208,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "rg-default",
+      "first_ms": 38.6233750032261,
+      "total_ms": 323.99837498087436,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "rg-4",
+      "first_ms": 34.66787503566593,
+      "total_ms": 363.17625001538545,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "rg-sorted",
+      "first_ms": 980.1906670327298,
+      "total_ms": 1135.4732920299284,
+      "hits": 48
+    },
+    {
+      "rep": 3,
+      "tool": "grep-same-files",
+      "first_ms": 1033.7434169487096,
+      "total_ms": 1162.9938749829307,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-parallel-4",
+      "first_ms": 27.869542,
+      "total_ms": 359.323042,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-parallel-8",
+      "first_ms": 22.740667,
+      "total_ms": 343.810917,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-1",
+      "first_ms": 740.048167,
+      "total_ms": 858.520625,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-4",
+      "first_ms": 399.212,
+      "total_ms": 458.75008299999996,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-8",
+      "first_ms": 454.368208,
+      "total_ms": 516.8932080000001,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-16",
+      "first_ms": 414.465792,
+      "total_ms": 476.421833,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "aiditor-4-reordered",
+      "first_ms": 22.178416,
+      "total_ms": 477.194875,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "rg-default",
+      "first_ms": 39.526292006485164,
+      "total_ms": 327.72850000765175,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "rg-4",
+      "first_ms": 39.22770801000297,
+      "total_ms": 381.3621249864809,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "rg-sorted",
+      "first_ms": 982.1497079683468,
+      "total_ms": 1129.202832991723,
+      "hits": 48
+    },
+    {
+      "rep": 4,
+      "tool": "grep-same-files",
+      "first_ms": 1034.4539580401033,
+      "total_ms": 1159.930833033286,
+      "hits": 48
+    }
+  ],
+  "io_runs": [
+    {
+      "files": 8705,
+      "ms": 885.2782930000001,
+      "open_ms": 806.0856100000001,
+      "read_ms": 21.792685,
+      "search_including_reads_ms": 29.03525,
+      "close_ms": 46.813915,
+      "bytes": 104928322,
+      "hits": 48,
+      "errors": 0
+    },
+    {
+      "files": 8705,
+      "ms": 847.713041,
+      "open_ms": 768.991736,
+      "read_ms": 22.016762,
+      "search_including_reads_ms": 29.148348,
+      "close_ms": 46.321832,
+      "bytes": 104928322,
+      "hits": 48,
+      "errors": 0
+    },
+    {
+      "files": 8705,
+      "ms": 852.459834,
+      "open_ms": 774.016383,
+      "read_ms": 21.885971,
+      "search_including_reads_ms": 28.982212,
+      "close_ms": 46.200635,
+      "bytes": 104928322,
+      "hits": 48,
+      "errors": 0
+    }
+  ],
+  "index_runs": [
+    317.10729100000003,
+    312.44545800000003,
+    322.63820799999996
+  ],
+  "synthetic_benchmark": [
+    "index/10k-files-two-roots-warm-cache\t22419250\t21588875\t23271042",
+    "grep/10k-hits-two-roots-complete-warm-cache\t964748875\t907142334\t1004732667.0000001",
+    "grep/first-batch-two-roots-warm-cache\t982959\t913459\t1053417",
+    "grep/10k-hits-two-roots-complete-warm-cache-4-workers\t362300625\t348364667\t418501375",
+    "grep/first-batch-two-roots-warm-cache-4-workers\t1145750\t1070209\t1603541"
+  ],
+  "core_trace": [
+    {
+      "event": "batch",
+      "ms": 411.63766699999996,
+      "hits": 1,
+      "total": 1,
+      "done": false
+    },
+    {
+      "event": "core",
+      "ms": 411.758625,
+      "handle_ms": 0.014584,
+      "frame_ms": 0.092084,
+      "count": "   1/1 ",
+      "candidates": 1,
+      "prompt": "[searching] Grep in Legacy crap: "
+    },
+    {
+      "event": "preview",
+      "ms": 422.598042,
+      "read_ms": 0.15062499999999998,
+      "handle_ms": 10.602333,
+      "frame_ms": 0.08325
+    },
+    {
+      "event": "batch",
+      "ms": 461.72575,
+      "hits": 45,
+      "total": 46,
+      "done": false
+    },
+    {
+      "event": "core",
+      "ms": 461.79987500000004,
+      "handle_ms": 0.039542,
+      "frame_ms": 0.02675,
+      "count": "  1/46 ",
+      "candidates": 10,
+      "prompt": "[searching] Grep in Legacy crap: "
+    },
+    {
+      "event": "batch",
+      "ms": 488.043833,
+      "hits": 2,
+      "total": 48,
+      "done": true
+    },
+    {
+      "event": "core",
+      "ms": 488.11262500000004,
+      "handle_ms": 0.02575,
+      "frame_ms": 0.033333,
+      "count": "  1/48 ",
+      "candidates": 10,
+      "prompt": "Grep in Legacy crap: "
+    },
+    {
+      "event": "returned",
+      "ms": 488.12175,
+      "total": 48
+    }
+  ],
+  "parallel_trace": [
+    {
+      "event": "batch",
+      "ms": 30.613625,
+      "hits": 1,
+      "total": 1,
+      "done": false
+    },
+    {
+      "event": "batch",
+      "ms": 80.66525,
+      "hits": 33,
+      "total": 34,
+      "done": false
+    },
+    {
+      "event": "batch",
+      "ms": 136.652,
+      "hits": 12,
+      "total": 46,
+      "done": false
+    },
+    {
+      "event": "batch",
+      "ms": 369.678875,
+      "hits": 1,
+      "total": 47,
+      "done": false
+    },
+    {
+      "event": "batch",
+      "ms": 374.876375,
+      "hits": 1,
+      "total": 48,
+      "done": true
+    },
+    {
+      "event": "returned",
+      "ms": 374.8965,
+      "total": 48
+    }
+  ]
+}

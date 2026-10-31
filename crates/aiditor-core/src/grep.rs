@@ -571,6 +571,61 @@ mod tests {
     }
 
     #[test]
+    fn completion_keeps_arrival_order_and_the_selected_preview() {
+        let mut h = grepping(
+            &[
+                ("app/a.rs", "needle\n"),
+                ("app/c.rs", "needle\n"),
+                ("lib/b.rs", "needle\n"),
+            ],
+            &[],
+        );
+        h.hits.clear();
+        h.keys("C-x p g needle").advance(WAIT);
+        let search = h.core.grep.searches;
+        for (root, path) in [("lib", "b.rs"), ("app", "a.rs")] {
+            h.send(Msg::Grepped {
+                search,
+                hits: Ok(vec![Hit {
+                    root: h.path(root),
+                    path: path.into(),
+                    line: 0,
+                    col: 0,
+                    text: "needle".into(),
+                }]),
+                done: false,
+            });
+        }
+        assert_eq!(h.core.minibuffer().unwrap().count, "   1/2 ");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "[searching] Grep in home: "
+        );
+        h.keys("C-n");
+        let selected = origin(&h);
+        assert_eq!(selected, (Some(h.path("app/a.rs")), 0));
+        let rows = listed(&mut h);
+        h.send(Msg::Grepped {
+            search,
+            hits: Ok(vec![Hit {
+                root: h.path("app"),
+                path: "c.rs".into(),
+                line: 0,
+                col: 0,
+                text: "needle".into(),
+            }]),
+            done: true,
+        });
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.count, "   2/3 ");
+        assert_eq!(mb.prompt, "Grep in home: ");
+        assert_eq!(mb.selected, Some(1));
+        assert_eq!(&mb.candidates[..2], rows);
+        assert_eq!(mb.candidates[2], "app/c.rs:1:needle");
+        assert_eq!(origin(&h), selected);
+    }
+
+    #[test]
     fn an_invalid_pattern_shows_its_error() {
         let mut h = grepping(FILES, HITS);
         h.hits

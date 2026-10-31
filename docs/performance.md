@@ -83,6 +83,39 @@ Medians (min–max) in ms, release build, warm cache, recorded 2026-10-30 at the
 
 Workers overlap file opens and searches, so they shorten complete searches; the first hit already arrives at once, so the first batch gains nothing and pays for starting the workers.
 
+### Sparse project grep investigation, 2026-10-31
+
+The saved **Legacy crap** project has 11 roots and 8,705 searchable files. `INVALID_SITE` occurs on 48 lines in two later roots; six preceding roots contain 7,225 match-free files. The release service was measured on Apple M5 Pro, macOS 27.0.1, Rust 1.99.0, with four configured workers and warm filesystem caches. These headless callback times exclude the prompt's 200 ms debounce and GUI painting. The full [project grep aggregate](measurements/2026-10-31-project-grep.json) retains the investigation's baseline runs and comparisons.
+
+| Release service, four workers | First callback, median ms | Complete, median ms |
+| --- | ---: | ---: |
+| Before: serial walk and ordered delivery, five runs | 399.2 | 458.8 |
+| After: parallel walk and arrival-order delivery, five runs | 36.5 | 408.9 |
+
+The new first callback is about 11 times earlier on this workload. A service-to-core run returned its first hit at 38.8 ms; core handling and frame construction then took 0.015 and 0.065 ms. Its first preview read and installation took 0.18 and 11.2 ms. These are core-side timings, not a GPUI paint measurement. The final service run returned the same 48 file/line locations as the saved baseline, though their arrival order changed. No GUI painting run was made.
+
+The one-worker repeat took about 1.04 s to first callback and 1.25 s to completion, slower than the earlier 747/863 ms baseline. The diagnostic parallel walk on the same current host took 1.04/1.25 s too. This points to changed host file-open costs between runs rather than an identified new application bottleneck; it does not establish a stable one-worker speedup or regression. The four-worker complete search improved by about 11% in the saved before/after runs, while first-hit scheduling changed much more. Repeat measurements on a stable host before treating smaller completion differences as durable.
+
+The [file-open aggregate](measurements/2026-10-31-file-open.json) records a roughly 81 µs mean for successful opens over 2,048 fixture files, with kernel stacks waiting for Endpoint Security authorization. The supplied [Defender trace aggregate](measurements/2026-10-31-defender-trace.json) contains 45,706 complete fixture `AUTH_OPEN` pairs and a 74.26 µs mean reported authorization latency. The separate captures do not split total open cost between Defender and the other active Endpoint Security client. No security setting was changed, and the application scheduling change does not remove host authorization latency. The supplied raw trace archive stays outside this repository.
+
+For repeatable synthetic workloads, run the supported service benchmark:
+
+```sh
+python3 scripts/bench_local.py --suite services
+cargo bench --locked -p aiditor-services --bench services
+```
+
+The suite now includes a sparse hit only in the second root, reporting first-callback and complete-search times separately for one and four workers. Its dense first-batch metric includes cancellation teardown. No CI timing threshold is imposed. The synthetic roots and cache behavior differ from the saved real project; neither headless benchmark measures GPUI painting.
+
+| Release service benchmark, warm cache | One worker, median ms | Four workers, median ms |
+| --- | ---: | ---: |
+| Dense 10k-hit complete search | 1108.6 | 390.5 |
+| Dense first batch, including cancellation teardown | 1.05 | 1.73 |
+| Sparse later-root first callback | 688.3 | 188.9 |
+| Sparse later-root complete search | 1075.7 | 356.4 |
+
+These 2026-10-31 synthetic runs have no matching sparse baseline in the previous benchmark definition. The real project table above supplies the before/after sparse comparison. Dense completion is about 15% slower with one worker and 8% slower with four than the earlier macOS values. The same current-host diagnostic walk tracked the new production service on the real project, so host file-open variation remains a plausible cause; the synthetic and real workloads do not isolate it.
+
 ## Sampling
 
 Reusable operations warm up by doubling the iteration count until a batch takes at least 10 ms, then measure 21 equal-sized batches. Revert application and terminal resize require fresh state: they use three warm-ups followed by 21 single-operation batches, with setup and teardown outside timing. First-batch grep also uses this single-operation sampling mode.

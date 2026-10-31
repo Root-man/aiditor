@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
 use aiditor_core::{FileOp, Head, Msg};
-use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{DirEntry, WalkBuilder};
 
 /// Carries out `op` and returns its reply for the core; the one place the app and headless share.
 pub fn run(op: FileOp) -> Msg {
@@ -267,7 +267,7 @@ pub(crate) fn inventory(
         };
         if kind.is_dir() {
             directories.push(entry.path().to_path_buf());
-        } else if kind.is_file() || kind.is_symlink() && entry.path().is_file() {
+        } else if searchable_file(&entry) {
             files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
         }
     }
@@ -276,34 +276,44 @@ pub(crate) fn inventory(
     Ok((files, directories))
 }
 
-/// The files under `root` that the index lists, as full paths in path order.
-pub(crate) fn walk(root: &Path, patterns: &Patterns) -> impl Iterator<Item = PathBuf> {
-    // Unreadable entries are skipped, as `rg` skips them.
-    (walker(root, root, patterns).build().flatten())
-        .filter(|e| {
-            e.file_type()
-                .is_some_and(|ft| ft.is_file() || ft.is_symlink() && e.path().is_file())
-        })
-        .map(ignore::DirEntry::into_path)
+pub(crate) fn searchable_file(entry: &DirEntry) -> bool {
+    entry
+        .file_type()
+        .is_some_and(|ft| ft.is_file() || ft.is_symlink() && entry.path().is_file())
 }
 
 /// The index's walk of `dir`, inside `root`: gitignored entries and those `patterns` match
 /// left out, hidden ones in, `.git` never, symlinked directories not followed, in path order.
 pub(crate) fn walker(dir: &Path, root: &Path, patterns: &Patterns) -> WalkBuilder {
-    // shortcut: one thread walks; switch to `build_parallel` if large repos index or grep slowly.
     let mut walk = WalkBuilder::new(dir);
-    let (root, patterns) = (root.to_path_buf(), patterns.clone());
+    configure_walker(&mut walk, vec![root.to_path_buf()], patterns);
+    walk.sort_by_file_name(|a, b| a.cmp(b));
+    walk
+}
+
+pub(crate) fn grep_walker(roots: &[PathBuf], patterns: &Patterns, workers: usize) -> WalkBuilder {
+    let mut walk = WalkBuilder::new(&roots[0]);
+    for root in &roots[1..] {
+        walk.add(root);
+    }
+    configure_walker(&mut walk, roots.to_vec(), patterns);
+    walk.threads(workers);
+    walk
+}
+
+fn configure_walker(walk: &mut WalkBuilder, roots: Vec<PathBuf>, patterns: &Patterns) {
+    let patterns = patterns.clone();
     walk.hidden(false)
         .require_git(false)
         .filter_entry(move |e| {
-            let ignored = (e.path().strip_prefix(&root)).is_ok_and(|rel| {
-                let dir = e.file_type().is_some_and(|t| t.is_dir());
-                patterns.ignored(rel, dir)
-            });
-            e.file_name() != ".git" && !ignored
-        })
-        .sort_by_file_name(|a, b| a.cmp(b));
-    walk
+            e.file_name() != ".git"
+                && !roots.iter().any(|root| {
+                    e.path().strip_prefix(root).is_ok_and(|rel| {
+                        let dir = e.file_type().is_some_and(|t| t.is_dir());
+                        patterns.ignored(rel, dir)
+                    })
+                })
+        });
 }
 
 /// One `ignore` pattern as its own matcher, so the patterns' order can be followed.

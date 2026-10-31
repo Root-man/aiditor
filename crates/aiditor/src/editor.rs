@@ -905,7 +905,21 @@ mod tests {
                 .minibuffer
                 .is_some_and(|m| m.candidates.len() == 3)
         });
-        cx.simulate_keystrokes("ctrl-n ctrl-n enter");
+        let target = editor
+            .update(cx, |e, _| {
+                e.core
+                    .frame()
+                    .minibuffer
+                    .unwrap()
+                    .candidates
+                    .iter()
+                    .position(|row| row.ends_with("sub/c:1:needle c"))
+            })
+            .unwrap();
+        for _ in 0..target {
+            cx.simulate_keystrokes("ctrl-n");
+        }
+        cx.simulate_keystrokes("enter");
         wait(cx, "accepted grep hit", |core| {
             core.current()
                 .file
