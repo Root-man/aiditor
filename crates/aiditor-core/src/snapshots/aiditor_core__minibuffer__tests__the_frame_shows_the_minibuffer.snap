@@ -59,6 +59,7 @@ Some(
             },
             terminal: None,
         },
+        files: false,
         candidates: [],
         highlights: [],
         annotations: [],

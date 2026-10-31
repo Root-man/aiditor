@@ -852,10 +852,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "minibuffer-complete",
             spec: ArgSpec::default(),
-            handler: |ctx, _| {
-                let text = ctx.core.prompts.selected_candidate().ok_or("No match")?;
-                ctx.set_text(&text)
-            },
+            handler: |ctx, _| ctx.complete(),
         },
         Command {
             name: "swiper",

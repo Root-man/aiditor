@@ -1379,6 +1379,71 @@ mod tests {
     }
 
     #[test]
+    fn find_file_empty_query_has_no_selection_until_navigated() {
+        let mut h = in_dir();
+        h.listing("d/", &["a.txt", "b.txt", "c", "d", "sub/"]);
+        h.keys("C-x C-f");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!((mb.count.trim(), mb.selected), ("*/5", None));
+        h.keys("C-n");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!((mb.count.trim(), mb.selected), ("1/5", Some(0)));
+        h.keys("C-p C-p");
+        assert_eq!(h.core.minibuffer().unwrap().selected, Some(0));
+        h.keys("b");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "1/2");
+        h.keys("DEL");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/5");
+        h.keys("C-p");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "5/5");
+        h.keys("RET");
+        assert_eq!(h.text(), typed(&h, "d/sub/"));
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/1");
+        h.keys("TAB");
+        assert_eq!(h.text(), typed(&h, "d/sub/c.txt"));
+    }
+
+    #[test]
+    fn find_file_ret_without_selection_visits_the_typed_path() {
+        let mut h = in_dir();
+        h.keys("C-x C-f RET");
+        assert_eq!(name(&h), "a.txt");
+        assert!(h.core.message().unwrap().starts_with(&typed(&h, "d/")));
+        assert!(h.core.message().unwrap().contains("directory"));
+        h.keys("C-x C-f C-a C-k");
+        h.listing("d/empty/", &[]);
+        type_path(&mut h, "d/empty/");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/0");
+    }
+
+    #[test]
+    fn file_annotations_travel_with_names_and_are_not_matched() {
+        let mut h = in_dir();
+        let note = "-rw-r--r--      41 B       5s ago";
+        h.listings.insert(
+            h.path("d/"),
+            Ok(vec![crate::FileEntry {
+                name: "a.txt".into(),
+                annotation: note.into(),
+            }]),
+        );
+        h.keys("C-x C-f");
+        let mb = h.core.minibuffer().unwrap();
+        assert!(mb.files);
+        assert_eq!(mb.annotations, [note]);
+        h.keys("at");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.annotations, [note]);
+        assert_eq!(mb.highlights, [vec![0..1, 2..3]]);
+        h.keys("C-a C-k");
+        type_path(&mut h, "d/41");
+        assert_eq!(
+            h.core.minibuffer().unwrap().candidates,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn find_file_starts_at_the_buffer_directory_and_lists_it() {
         let mut h = in_dir();
         h.keys("C-x C-f");
@@ -1408,6 +1473,7 @@ mod tests {
         assert_eq!(shown(&h), "hi");
         h.keys("C-a C-k");
         type_path(&mut h, "d/sub/");
+        h.keys("C-n");
         assert_eq!(shown(&h), "", "c.txt is empty");
         h.keys("C-a C-k");
         type_path(&mut h, "d/su");
@@ -1443,7 +1509,7 @@ mod tests {
         h.keys("RET");
         assert_eq!(h.text(), typed(&h, "d/sub/"));
         assert_eq!(listed(&mut h).0, ["c.txt"]);
-        h.keys("RET");
+        h.keys("C-n RET");
         assert_eq!(name(&h), "c.txt");
     }
 
@@ -1533,7 +1599,10 @@ mod tests {
         assert_eq!(listed(&mut h).0, Vec::<String>::new());
         h.send(Msg::Listed {
             request: 1,
-            result: Ok(vec!["stale".into()]),
+            result: Ok(vec![crate::FileEntry {
+                name: "stale".into(),
+                annotation: String::new(),
+            }]),
         });
         assert_eq!(listed(&mut h).0, Vec::<String>::new());
     }
@@ -1549,7 +1618,13 @@ mod tests {
     }
 
     fn deliver(h: &mut Harness, request: u64, names: &[&str]) {
-        let result = Ok(names.iter().map(|n| (*n).into()).collect());
+        let result = Ok(names
+            .iter()
+            .map(|n| crate::FileEntry {
+                name: (*n).into(),
+                annotation: String::new(),
+            })
+            .collect());
         h.send(Msg::Listed { request, result });
     }
 
@@ -1589,7 +1664,7 @@ mod tests {
         let mut h = in_dir();
         h.keys("C-x C-f C-a C-k sub/");
         assert_eq!(listed(&mut h).0, ["c.txt"]);
-        h.keys("RET");
+        h.keys("C-n RET");
         assert_eq!(h.core.current().file, Some(h.path("d/sub/c.txt")));
     }
 

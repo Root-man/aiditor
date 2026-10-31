@@ -459,14 +459,49 @@ impl Render for Editor {
                     let runs = if grep {
                         grep_runs(&c, &font, theme)
                     } else {
-                        completion_runs(c.len(), &highlights, &font, theme)
+                        completion_runs(
+                            c.len(),
+                            &highlights,
+                            if mb.files && c.ends_with('/') {
+                                theme.face(FaceName::Directory)
+                            } else {
+                                Face::default()
+                            },
+                            &font,
+                            theme,
+                        )
                     };
-                    let text = StyledText::new(c).with_runs(runs);
-                    let note =
-                        (!note.is_empty()).then(|| div().ml(cell * 2.).opacity(0.6).child(note));
+                    let text = div()
+                        .debug_selector(|| format!("completion-name-{i}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(StyledText::new(c).with_runs(runs));
+                    let text = if mb.files { text.flex_1() } else { text };
+                    let note = (!note.is_empty()).then(|| {
+                        let face = if mb.files {
+                            theme.face(FaceName::Annotation)
+                        } else {
+                            Face::default()
+                        };
+                        let run = text_run(note.len(), face, false, &font, theme);
+                        let note = div()
+                            .debug_selector(|| format!("completion-annotation-{i}"))
+                            .ml(cell * 2.)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .child(StyledText::new(note).with_runs(vec![run])),
+                            );
+                        if mb.files { note } else { note.opacity(0.6) }
+                    });
                     let candidate = line()
                         .debug_selector(|| format!("completion-{i}"))
                         .flex()
+                        .overflow_hidden()
                         .px(inset)
                         .child(text)
                         .children(note);
@@ -993,7 +1028,7 @@ mod tests {
                 .minibuffer
                 .is_some_and(|m| m.candidates.len() == 3)
         });
-        cx.simulate_keystrokes("ctrl-n ctrl-n");
+        cx.simulate_keystrokes("ctrl-n ctrl-n ctrl-n");
         assert_eq!(
             editor.update(cx, |e, _| e.core.frame().minibuffer.unwrap().selected),
             Some(2)
@@ -1022,7 +1057,7 @@ mod tests {
                 .minibuffer
                 .is_some_and(|m| m.candidates.len() == 3)
         });
-        cx.simulate_keystrokes("enter ctrl-x t o");
+        cx.simulate_keystrokes("ctrl-n enter ctrl-x t o");
         cx.simulate_input("other workspace");
         release.send(()).unwrap();
         runtime.block_on(runtime.spawn_blocking(|| {})).unwrap();
@@ -1462,6 +1497,198 @@ mod tests {
     }
 
     #[gpui::test]
+    fn find_file_draws_unselected_entries_and_aligned_metadata(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a-directory")).unwrap();
+        for name in [
+            "b.txt",
+            "c.txt",
+            "d.txt",
+            &format!("e{}.txt", "long".repeat(40)),
+        ] {
+            std::fs::write(dir.path().join(name), [b'x'; 41]).unwrap();
+        }
+        let (editor, cx) = editor(cx, "original");
+        editor.update(cx, |e, cx| {
+            let effects = aiditor_core::key::parse_keys("C-x C-f")
+                .unwrap()
+                .into_iter()
+                .flat_map(|key| e.core.handle(Instant::now(), Msg::Key(key)))
+                .collect::<Vec<_>>();
+            let request = effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::File(aiditor_core::FileOp::ListDir { request, .. }) => Some(request),
+                    _ => None,
+                })
+                .unwrap();
+            e.handle(
+                Msg::Listed {
+                    request,
+                    result: files::list(dir.path()).map_err(|err| err.to_string()),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        editor.update_in(cx, |e, window, _| {
+            let mb = e.core.frame().minibuffer.unwrap();
+            assert_eq!((mb.count.trim(), mb.selected), ("*/5", None));
+            assert_eq!(mb.candidates[0], "a-directory/");
+            assert_eq!(mb.annotations[1].split_whitespace().nth(1), Some("41"));
+            let theme = &e.core.settings().theme;
+            let font = e.font(window).0;
+            let directory = theme.face(FaceName::Directory);
+            let runs = completion_runs(mb.candidates[0].len(), &[], directory, &font, theme);
+            assert_eq!(runs[0].color, rgb(directory.fg.unwrap()).into());
+            let runs = completion_runs(3, &[0..1, 2..3], directory, &font, theme);
+            assert_eq!(
+                runs[0].color,
+                rgb(theme.face(FaceName::CompletionMatch).fg.unwrap()).into()
+            );
+            assert_eq!(runs[1].color, rgb(directory.fg.unwrap()).into());
+        });
+        for width in [1440., 900., 240.] {
+            cx.simulate_resize(gpui::size(px(width), px(600.)));
+            cx.run_until_parked();
+            let first = cx.debug_bounds("completion-annotation-0").unwrap();
+            let last = cx.debug_bounds("completion-annotation-4").unwrap();
+            let name = cx.debug_bounds("completion-name-4").unwrap();
+            assert_eq!(first.right(), px(width - TEXT_INSET));
+            assert_eq!(last.right(), first.right());
+            assert!(name.right() <= last.left());
+            assert!(last.left() >= px(TEXT_INSET));
+        }
+        cx.simulate_keystrokes("ctrl-n");
+        cx.run_until_parked();
+        assert_eq!(
+            editor.update(cx, |e, _| e
+                .core
+                .frame()
+                .minibuffer
+                .unwrap()
+                .count
+                .trim()
+                .to_string()),
+            "1/5"
+        );
+        cx.simulate_keystrokes("ctrl-g");
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn project_file_metadata_uses_the_file_columns_without_initial_preview(
+        cx: &mut TestAppContext,
+    ) {
+        let _native = crate::native::lock();
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", &format!("c{}.txt", "long".repeat(40))] {
+            std::fs::write(dir.path().join(name), [b'x'; 41]).unwrap();
+        }
+        let (editor, cx) = editor(cx, "original");
+        editor.update(cx, |e, cx| {
+            let loaded = aiditor_core::project::Loaded {
+                project: aiditor_core::project::Project::parse(&format!(
+                    "name = 'files'\nwatch = false\n[primary]\npath = {:?}",
+                    dir.path()
+                ))
+                .unwrap(),
+                file: None,
+            };
+            e.core.handle(
+                Instant::now(),
+                Msg::ProjectsLoaded {
+                    dir: None,
+                    projects: vec![Ok(loaded)],
+                },
+            );
+            let project = e.core.project_id("files").unwrap();
+            e.core.new_workspace("files", project);
+            let original = e.core.frame().windows[0].display.mode_line.text();
+            let effects = parse_keys("C-x p f")
+                .unwrap()
+                .into_iter()
+                .flat_map(|key| e.core.handle(Instant::now(), Msg::Key(key)))
+                .collect::<Vec<_>>();
+            let (project, walk) = effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::File(aiditor_core::FileOp::Index { project, walk, .. }) => {
+                        Some((project, walk))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let files = files::list(dir.path())
+                .unwrap()
+                .into_iter()
+                .map(|entry| PathBuf::from(entry.name))
+                .collect();
+            let mut effects = e.core.handle(
+                Instant::now(),
+                Msg::Indexed {
+                    project,
+                    walk,
+                    roots: vec![(dir.path().into(), Ok(files))],
+                    directories: vec![dir.path().into()],
+                },
+            );
+            for _ in 0..100 {
+                effects.extend(e.core.handle(Instant::now(), Msg::Tick));
+                if e.core
+                    .frame()
+                    .minibuffer
+                    .as_ref()
+                    .is_some_and(|mb| mb.candidates.len() == 3)
+                    && effects.iter().any(|effect| {
+                        matches!(effect, Effect::File(aiditor_core::FileOp::Annotate { .. }))
+                    })
+                {
+                    break;
+                }
+            }
+            for effect in effects {
+                if let Effect::File(op @ aiditor_core::FileOp::Annotate { .. }) = effect {
+                    e.core.handle(Instant::now(), files::run(op));
+                }
+            }
+            let mb = e.core.frame().minibuffer.unwrap();
+            assert_eq!(
+                (mb.count.trim(), mb.selected, mb.files),
+                ("*/3", None, true)
+            );
+            assert!(mb.annotations.iter().all(|note| note.contains("41 B")));
+            assert_eq!(e.core.frame().windows[0].display.mode_line.text(), original);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for width in [1440., 900., 240.] {
+            cx.simulate_resize(gpui::size(px(width), px(600.)));
+            cx.run_until_parked();
+            let first = cx.debug_bounds("completion-annotation-0").unwrap();
+            let last = cx.debug_bounds("completion-annotation-2").unwrap();
+            assert_eq!(first.right(), px(width - TEXT_INSET));
+            assert_eq!(last.right(), first.right());
+            assert!(cx.debug_bounds("completion-name-2").unwrap().right() <= last.left());
+        }
+        editor.update(cx, |e, cx| {
+            for key in parse_keys("C-n").unwrap() {
+                e.core.handle(Instant::now(), Msg::Key(key));
+            }
+            assert_eq!(e.core.frame().minibuffer.unwrap().count.trim(), "1/3");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-g");
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn fuzzy_completion_input_uses_the_themes_match_face(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
@@ -1494,7 +1721,13 @@ mod tests {
                 assert_eq!(mb.annotations[i], "C-x p f");
                 let font = e.font(window).0;
                 let theme = &e.core.settings().theme;
-                let runs = completion_runs(mb.candidates[i].len(), &mb.highlights[i], &font, theme);
+                let runs = completion_runs(
+                    mb.candidates[i].len(),
+                    &mb.highlights[i],
+                    Face::default(),
+                    &font,
+                    theme,
+                );
                 assert_eq!(
                     runs.iter().map(|r| r.len).collect::<Vec<_>>(),
                     [1, 7, 1, 4, 1, 3]

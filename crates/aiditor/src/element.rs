@@ -446,6 +446,7 @@ pub(crate) fn text_run(
 pub(crate) fn completion_runs(
     len: usize,
     highlights: &[std::ops::Range<usize>],
+    face: Face,
     font: &Font,
     theme: &Theme,
 ) -> Vec<TextRun> {
@@ -453,13 +454,7 @@ pub(crate) fn completion_runs(
     let mut start = 0;
     for range in highlights {
         if start < range.start {
-            runs.push(text_run(
-                range.start - start,
-                Face::default(),
-                false,
-                font,
-                theme,
-            ));
+            runs.push(text_run(range.start - start, face, false, font, theme));
         }
         runs.push(text_run(
             range.len(),
@@ -471,7 +466,7 @@ pub(crate) fn completion_runs(
         start = range.end;
     }
     if start < len {
-        runs.push(text_run(len - start, Face::default(), false, font, theme));
+        runs.push(text_run(len - start, face, false, font, theme));
     }
     runs
 }

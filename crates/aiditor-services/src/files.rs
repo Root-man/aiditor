@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
-use aiditor_core::{FileOp, Head, Msg};
+use aiditor_core::{FileEntry, FileOp, Head, Msg};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
 
@@ -70,6 +71,24 @@ pub fn run(op: FileOp) -> Msg {
         FileOp::ListDir { dir, request } => {
             let result = list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
             Msg::Listed { request, result }
+        }
+        FileOp::Annotate { session, files } => {
+            let now = SystemTime::now();
+            let entries = files
+                .into_iter()
+                .map(|(name, path)| {
+                    let metadata = fs::symlink_metadata(&path).ok();
+                    let directory = metadata.as_ref().is_some_and(|m| {
+                        m.is_dir()
+                            || m.is_symlink() && fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                    });
+                    FileEntry {
+                        name,
+                        annotation: file_annotation(metadata.as_ref(), directory, now),
+                    }
+                })
+                .collect();
+            Msg::Annotated { session, entries }
         }
         FileOp::Open { intent, path } => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
@@ -228,24 +247,104 @@ pub fn read(path: &Path) -> io::Result<Option<(Vec<u8>, u64)>> {
     }
 }
 
-/// The names in directory `dir`, sorted, each subdirectory's followed by `/`.
-pub fn list(dir: &Path) -> io::Result<Vec<String>> {
-    let mut names = Vec::new();
+/// Directory entries sorted by name, with subdirectories followed by `/`.
+pub fn list(dir: &Path) -> io::Result<Vec<FileEntry>> {
+    let now = SystemTime::now();
+    let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         // shortcut: non-UTF-8 names show lossily and can't be visited; keep OsStrings if one turns up.
         let mut name = entry.file_name().to_string_lossy().into_owned();
-        // Stats only symlinks, following them so a link to a directory lists as one.
-        let dir = entry.file_type().is_ok_and(|ft| {
-            ft.is_dir() || ft.is_symlink() && fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
+        let metadata = fs::symlink_metadata(entry.path()).ok();
+        let directory = entry.file_type().is_ok_and(|kind| {
+            kind.is_dir()
+                || kind.is_symlink() && fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
         });
-        if dir {
+        if directory {
             name.push('/');
         }
-        names.push(name);
+        entries.push(FileEntry {
+            name,
+            annotation: file_annotation(metadata.as_ref(), directory, now),
+        });
     }
-    names.sort();
-    Ok(names)
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
+}
+
+fn file_annotation(metadata: Option<&fs::Metadata>, directory: bool, now: SystemTime) -> String {
+    let mode = metadata.map_or_else(|| "—".into(), |m| mode_bits(m.mode()));
+    let size = metadata
+        .filter(|_| !directory)
+        .map_or_else(|| "—".into(), |m| file_size(m.len()));
+    let age = metadata.and_then(|m| m.modified().ok()).map_or_else(
+        || "—".into(),
+        |modified| file_age(now.duration_since(modified).unwrap_or_default().as_secs()),
+    );
+    format!("{mode:>10}  {size:>8}  {age:>12}")
+}
+
+fn mode_bits(mode: u32) -> String {
+    let kind = match mode & 0o170000 {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        0o010000 => 'p',
+        0o140000 => 's',
+        0o060000 => 'b',
+        0o020000 => 'c',
+        _ => '-',
+    };
+    let mut bits = String::from(kind);
+    for (shift, special) in [(6, 0o4000), (3, 0o2000), (0, 0o1000)] {
+        bits.push(if mode & (4 << shift) != 0 { 'r' } else { '-' });
+        bits.push(if mode & (2 << shift) != 0 { 'w' } else { '-' });
+        let executable = mode & (1 << shift) != 0;
+        let special = mode & special != 0;
+        bits.push(match (special, executable, shift) {
+            (true, true, 0) => 't',
+            (true, false, 0) => 'T',
+            (true, true, _) => 's',
+            (true, false, _) => 'S',
+            (false, true, _) => 'x',
+            (false, false, _) => '-',
+        });
+    }
+    bits
+}
+
+fn file_size(bytes: u64) -> String {
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64;
+    let mut unit = "B";
+    for next in ["kB", "MB", "GB", "TB", "PB", "EB"] {
+        if size < 999.95 {
+            break;
+        }
+        size /= 1000.;
+        unit = next;
+    }
+    let number = format!("{size:.1}");
+    format!("{} {unit}", number.trim_end_matches(".0"))
+}
+
+fn file_age(seconds: u64) -> String {
+    for (unit, suffix, next, next_suffix) in [
+        (86400, "d", 3600, "h"),
+        (3600, "h", 60, "m"),
+        (60, "m", 1, "s"),
+    ] {
+        if seconds >= unit {
+            let remainder = seconds % unit / next;
+            return if remainder == 0 {
+                format!("{}{suffix} ago", seconds / unit)
+            } else {
+                format!("{}{suffix}{remainder}{next_suffix} ago", seconds / unit)
+            };
+        }
+    }
+    format!("{seconds}s ago")
 }
 
 /// The files under `root`, relative to it and sorted: gitignored ones and those `patterns`
@@ -912,12 +1011,143 @@ mod tests {
     }
 
     #[test]
+    fn annotates_project_labels_and_preserves_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let large = dir.path().join("large");
+        fs::write(&small, [b'x'; 41]).unwrap();
+        fs::write(&large, [b'x'; 4100]).unwrap();
+        fs::set_permissions(&small, Permissions::from_mode(0o640)).unwrap();
+        let Msg::Annotated { session, entries } = run(FileOp::Annotate {
+            session: 7,
+            files: vec![
+                ("lib/file".into(), small),
+                ("lib<2>/file".into(), large),
+                ("lib/gone".into(), dir.path().join("gone")),
+            ],
+        }) else {
+            panic!("not annotated");
+        };
+        assert_eq!(session, 7);
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["lib/file", "lib<2>/file", "lib/gone"]
+        );
+        assert_eq!(
+            entries[0]
+                .annotation
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>(),
+            ["-rw-r-----", "41", "B"]
+        );
+        assert!(entries[1].annotation.contains("4.1 kB"));
+        assert_eq!(
+            entries[2].annotation.split_whitespace().collect::<Vec<_>>(),
+            ["—", "—", "—"]
+        );
+    }
+
+    #[test]
+    fn formats_filesystem_metadata() {
+        for (mode, expected) in [
+            (0o100644, "-rw-r--r--"),
+            (0o040755, "drwxr-xr-x"),
+            (0o120777, "lrwxrwxrwx"),
+            (0o104754, "-rwsr-xr--"),
+            (0o102644, "-rw-r-Sr--"),
+            (0o041777, "drwxrwxrwt"),
+            (0o041666, "drw-rw-rwT"),
+            (0o010600, "prw-------"),
+            (0o140600, "srw-------"),
+            (0o060600, "brw-------"),
+            (0o020600, "crw-------"),
+        ] {
+            assert_eq!(mode_bits(mode), expected);
+        }
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (41, "41 B"),
+            (999, "999 B"),
+            (1000, "1 kB"),
+            (4100, "4.1 kB"),
+            (48_200_000, "48.2 MB"),
+            (999_999, "1 MB"),
+            (1_000_000_000, "1 GB"),
+            (u64::MAX, "18.4 EB"),
+        ] {
+            assert_eq!(file_size(bytes), expected);
+        }
+        for (seconds, expected) in [
+            (0, "0s ago"),
+            (5, "5s ago"),
+            (59, "59s ago"),
+            (60, "1m ago"),
+            (61, "1m1s ago"),
+            (3600, "1h ago"),
+            (18720, "5h12m ago"),
+            (86400, "1d ago"),
+            (295200, "3d10h ago"),
+        ] {
+            assert_eq!(file_age(seconds), expected);
+        }
+        assert_eq!(
+            file_annotation(None, false, SystemTime::now())
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            ["—", "—", "—"]
+        );
+    }
+
+    #[test]
+    fn listing_includes_modes_sizes_ages_and_dangling_links() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, [b'x'; 41]).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o640)).unwrap();
+        let modified = SystemTime::now() - Duration::from_secs(295200);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+        let entries = list(dir.path()).unwrap();
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["dangling", "file", "sub/"]
+        );
+        assert!(entries[0].annotation.starts_with('l'));
+        assert_eq!(
+            entries[1].annotation.split_whitespace().collect::<Vec<_>>(),
+            ["-rw-r-----", "41", "B", "3d10h", "ago"]
+        );
+        assert_eq!(entries[2].annotation.split_whitespace().nth(1), Some("—"));
+        assert!(entries[2].annotation.starts_with('d'));
+        let metadata = fs::metadata(path).unwrap();
+        assert!(
+            file_annotation(Some(&metadata), false, modified - Duration::from_secs(5))
+                .ends_with("0s ago")
+        );
+    }
+
+    #[test]
     fn lists_sorted_with_directories_marked() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("b"), "").unwrap();
         fs::create_dir(dir.path().join("a")).unwrap();
         std::os::unix::fs::symlink(dir.path().join("a"), dir.path().join("c")).unwrap();
-        assert_eq!(list(dir.path()).unwrap(), ["a/", "b", "c/"]);
+        assert_eq!(
+            list(dir.path())
+                .unwrap()
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a/", "b", "c/"]
+        );
         assert!(list(&dir.path().join("b")).is_err());
     }
 

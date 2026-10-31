@@ -218,6 +218,8 @@ pub struct Minibuffer {
     pub prompt: String,
     pub status: Option<&'static str>,
     pub display: WindowDisplay,
+    /// Whether these candidates are filesystem entries.
+    pub files: bool,
     /// The completion list's shown rows, best match first; empty without completion.
     pub candidates: Vec<String>,
     /// Matched graphemes' UTF-8 byte ranges in each candidate; empty for custom filters.
