@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::{AgentRequest, Error, PromptRequest};
+use agent_client_protocol::schema::v1::{AgentRequest, Error, PromptRequest, SessionUpdate};
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
 use aiditor_services::agents::Agents;
@@ -333,6 +333,14 @@ impl Replay {
                 _ => {}
             }
             self.send(msg.clone());
+            if let Msg::AgentUpdate { update, .. } = &msg
+                && let SessionUpdate::UsageUpdate(usage) = &update.update
+            {
+                let frame = self.core.frame();
+                let line = &frame.windows[0].display.mode_line;
+                let percent = usage.used * 100 / usage.size;
+                assert_eq!(line.right.last().unwrap()[0].0, format!("ctx {percent}%"));
+            }
             if let Msg::AgentRequest { body, .. } = &msg
                 && matches!(*body.0, AgentRequest::RequestPermissionRequest(_))
             {
@@ -394,6 +402,14 @@ async fn committed_transcripts_replay_through_the_core() {
         let mut replay = Replay::new(&path);
         replay.run(&lines).await;
         let name = path.display();
+        let frame = replay.core.frame();
+        let model = &frame.windows[0].display.mode_line.left[0][0].0;
+        let expected = match path.file_stem().unwrap().to_str().unwrap() {
+            "claude" => "Opus 5.5 · Medium",
+            "codex" => "6.1 Sol · High",
+            other => panic!("unexpected transcript {other}"),
+        };
+        assert_eq!(model, expected, "{name}: model and effort display names");
         assert_eq!(replay.updates, updates, "{name}: typed updates");
         assert!(requests > 0, "{name} has a permission request");
         assert_eq!(replay.requests, requests, "{name}: agent requests");

@@ -1278,6 +1278,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_session_mode_line_paints_its_title_and_exit_status(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            let settings = "[agents.fake]\ncommand = 'unused'";
+            e.core.handle(
+                Instant::now(),
+                Msg::SettingsLoaded(Ok(Some(settings.into()))),
+            );
+            // Keep the spawn inside the fixture, without starting a service.
+            for key in parse_keys("M-x agent-start RET fake RET").unwrap() {
+                e.core.handle(Instant::now(), Msg::Key(key));
+            }
+            cx.notify();
+        });
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.message().map(str::to_owned)),
+            Some("fake is not ready".into())
+        );
+        editor.update(cx, |e, cx| {
+            e.core.handle(
+                Instant::now(),
+                Msg::AgentStarted {
+                    id: aiditor_core::AgentId(0),
+                    result: Err("fixture failure".into()),
+                },
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            let painted = &e.painted[0];
+            assert_eq!(painted.mode_line.text, "fake");
+            assert_eq!(painted.mode_line_right.text, "● exited");
+            assert_eq!(
+                painted.mode_line_right_x() + painted.mode_line_right.width,
+                painted.bounds.right() - px(TEXT_INSET)
+            );
+        });
+    }
+
+    #[gpui::test]
     fn a_mode_lines_right_group_ends_at_the_right_inset(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");

@@ -596,12 +596,10 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     };
     // A buffer name may hold newlines; the mode line is one line, so show them as Emacs does.
     let name = format!(" {}", buffer.name.replace('\n', "^J"));
-    let mut left = vec![vec![
+    let left = vec![vec![
         (state.to_string(), state_face),
         (name, FaceName::ModeLine),
     ]];
-    let agent = buffer.agent_mode.as_ref().map(|m| format!("[{m}]"));
-    left.extend(agent.map(|mode| segment(&mode, FaceName::ModeLine)));
     let right = vec![segment(&format!("{line}:{col}"), FaceName::ModeLine)];
     ModeLine {
         left,

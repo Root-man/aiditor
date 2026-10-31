@@ -91,7 +91,11 @@ impl Core {
         let roots = self.roots();
         let window = &mut self.windows.window;
         let (buffers, settings) = (&mut self.buffers, &self.settings);
-        window_display(window, buffers, settings, rows, rows, usize::MAX, &roots)
+        let mut display = window_display(window, buffers, settings, rows, rows, usize::MAX, &roots);
+        if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
+            display.mode_line = session.mode_line();
+        }
+        display
     }
 
     /// The roots of the current workspace's project.
@@ -148,6 +152,9 @@ impl Core {
                 let drawn = settings.drawn_rows(rect.height);
                 let mut display =
                     window_display(window, buffers, settings, rows, drawn, cols, &roots);
+                if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
+                    display.mode_line = session.mode_line();
+                }
                 if highlighted {
                     display::highlight_line(&mut display);
                 }

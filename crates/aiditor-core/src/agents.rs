@@ -18,6 +18,7 @@ use std::ops::Range;
 
 use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
 use crate::command::Args;
+use crate::display::ModeLine;
 use crate::markdown;
 use crate::project::{Project, ProjectId};
 use crate::settings::FaceName;
@@ -33,6 +34,8 @@ pub(crate) struct Session {
     agent: String,
     /// The workspace name it was started in; workspace renames don't change it.
     workspace: String,
+    title: String,
+    usage: Option<(u64, u64)>,
     /// The session buffer, the session's handle: killing it stops the agent.
     pub(crate) buffer: BufferId,
     /// Its stderr log.
@@ -83,22 +86,28 @@ fn preamble(project: &Project) -> Option<String> {
     Some(text)
 }
 
-fn session_name(agent: &str, workspace: &str, title: Option<&str>) -> String {
+fn session_title(title: Option<&str>) -> String {
     let title = title
         .unwrap_or_default()
         .lines()
         .next()
         .unwrap_or_default()
         .trim();
-    if title.is_empty() {
-        return format!("*{agent}*<{workspace}>");
-    }
     let mut chars = title.chars();
     let mut title: String = chars.by_ref().take(40).collect();
     if chars.next().is_some() {
         title.push('…');
     }
-    format!("*{agent}: {title}*<{workspace}>")
+    title
+}
+
+fn session_name(agent: &str, workspace: &str, title: Option<&str>) -> String {
+    let title = session_title(title);
+    if title.is_empty() {
+        format!("*{agent}*<{workspace}>")
+    } else {
+        format!("*{agent}: {title}*<{workspace}>")
+    }
 }
 
 /// The session's mode: the first config option of category `mode`, when it is a select.
@@ -113,11 +122,6 @@ fn mode_option(
     }
 }
 
-/// The mode option's current value, for the mode line.
-fn mode(options: &[SessionConfigOption]) -> Option<String> {
-    mode_option(options).map(|(_, select)| select.current_value.to_string())
-}
-
 /// A select's values, its groups flattened.
 fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
     match &select.options {
@@ -129,6 +133,86 @@ fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
             .map(|o| &o.value)
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+impl Session {
+    pub(crate) fn mode_line(&self) -> ModeLine {
+        let segment = |text: &str, face| vec![(text.replace(char::is_control, " "), face)];
+        let options = self
+            .session
+            .as_ref()
+            .and_then(|s| s.config_options.as_deref());
+        let options = options.unwrap_or_default();
+        let label = |category| {
+            let option = options.iter().find(|o| {
+                o.category.as_ref() == Some(&category)
+                    && matches!(o.kind, SessionConfigKind::Select(_))
+            })?;
+            let SessionConfigKind::Select(select) = &option.kind else {
+                return None;
+            };
+            let values: Vec<_> = match &select.options {
+                SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
+                SessionConfigSelectOptions::Grouped(groups) => {
+                    groups.iter().flat_map(|g| &g.options).collect()
+                }
+                _ => Vec::new(),
+            };
+            Some(
+                values
+                    .iter()
+                    .find(|v| v.value == select.current_value)
+                    .map_or_else(|| select.current_value.to_string(), |v| v.name.clone()),
+            )
+        };
+        let labels = [
+            label(SessionConfigOptionCategory::Model),
+            label(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        let model = labels.into_iter().flatten().collect::<Vec<_>>().join(" · ");
+        let mut left = Vec::new();
+        if !model.is_empty() {
+            left.push(segment(&model, FaceName::ModeLineDim));
+        }
+        if let Some((_, mode)) = mode_option(options) {
+            let face = match mode.current_value.0.as_ref() {
+                "plan" | "read-only" => FaceName::StatusInfo,
+                "acceptEdits" | "workspace-write" => FaceName::StatusWaiting,
+                "auto" | "agent" => FaceName::StatusRunning,
+                "bypassPermissions" | "agent-full-access" => FaceName::StatusFailed,
+                _ => FaceName::ModeLine,
+            };
+            left.push(segment(&format!("[{}]", mode.current_value), face));
+        }
+        let title = if self.title.is_empty() {
+            &self.agent
+        } else {
+            &self.title
+        };
+        left.push(segment(title, FaceName::ModeLineBufferId));
+        let mut right = Vec::new();
+        let status = if self.ended {
+            Some(("● exited", FaceName::StatusFailed))
+        } else if !self.asks.is_empty() {
+            Some(("● awaiting permission", FaceName::StatusWaiting))
+        } else if self.turn {
+            Some(("● working", FaceName::StatusRunning))
+        } else {
+            None
+        };
+        if let Some((text, face)) = status {
+            right.push(segment(text, face));
+        }
+        if let Some((used, size)) = self.usage.filter(|(_, size)| *size > 0) {
+            let percent = u128::from(used.min(size)) * 100 / u128::from(size);
+            right.push(segment(&format!("ctx {percent}%"), FaceName::ModeLineDim));
+        }
+        ModeLine {
+            left,
+            right,
+            path: None,
+        }
     }
 }
 
@@ -556,6 +640,7 @@ impl Ctx<'_> {
     ) -> Result<(), String> {
         let core = &mut *self.core;
         let (load, title) = load.unzip();
+        let session_title = session_title(title.flatten());
         let agent = (core.settings.agents.get(name))
             .ok_or_else(|| format!("{name:?} is not a registered agent"))?
             .clone();
@@ -603,6 +688,8 @@ impl Ctx<'_> {
         let session = Session {
             agent: name.into(),
             workspace,
+            title: session_title,
+            usage: None,
             buffer,
             log,
             project,
@@ -665,9 +752,6 @@ impl Ctx<'_> {
                         .collect::<Vec<_>>()
                         .join(", "),
                 };
-                if let Some(b) = core.buffers.get_mut(session.buffer) {
-                    b.agent_mode = mode(options);
-                }
                 // A loaded session keeps its own mode.
                 let default = (core.settings.agents.get(&agent))
                     .and_then(|a| a.default_mode.clone())
@@ -765,19 +849,20 @@ impl Ctx<'_> {
             SessionUpdate::Plan(plan) => Some(plan.clone()),
             _ => None,
         };
-        if let SessionUpdate::ConfigOptionUpdate(options) = &update.update {
-            if let Some(b) = core.buffers.get_mut(session.buffer) {
-                b.agent_mode = mode(&options.config_options);
-            }
-            if let Some(ready) = &mut session.session {
-                ready.config_options = Some(options.config_options.clone());
-            }
+        if let SessionUpdate::ConfigOptionUpdate(options) = &update.update
+            && let Some(ready) = &mut session.session
+        {
+            ready.config_options = Some(options.config_options.clone());
         }
         if let SessionUpdate::SessionInfoUpdate(info) = &update.update
             && let Some(title) = info.title.as_opt_deref()
         {
+            session.title = session_title(title);
             let name = session_name(&session.agent, &session.workspace, title);
             core.buffers.rename(session.buffer, &name);
+        }
+        if let SessionUpdate::UsageUpdate(usage) = &update.update {
+            session.usage = Some((usage.used, usage.size));
         }
         session.updates.push(update);
         if let Some(plan) = plan {
@@ -1053,9 +1138,6 @@ impl Ctx<'_> {
         };
         match result {
             Ok(options) => {
-                if let Some(b) = core.buffers.get_mut(session.buffer) {
-                    b.agent_mode = mode(&options);
-                }
                 if let Some(ready) = &mut session.session {
                     ready.config_options = Some(options);
                 }
@@ -2587,16 +2669,238 @@ mod tests {
     }
 
     #[test]
+    fn session_model_effort_and_title_follow_configuration() {
+        use agent_client_protocol_schema::v1::SessionConfigSelectGroup;
+        let mut h = session();
+        let model = SessionConfigOption::select(
+            "model",
+            "Model",
+            "opus",
+            vec![SessionConfigSelectOption::new("opus", "Opus 5.5")],
+        )
+        .category(SessionConfigOptionCategory::Model);
+        let effort = SessionConfigOption::select(
+            "effort",
+            "Effort",
+            "high",
+            vec![SessionConfigSelectGroup::new(
+                "levels",
+                "Levels",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )],
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel);
+        let mut config = options("plan");
+        config.push(
+            SessionConfigOption::boolean("model-flag", "Flag", true)
+                .category(SessionConfigOptionCategory::Model),
+        );
+        config.extend([model.clone(), effort.clone()]);
+        update(
+            &mut h,
+            0,
+            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(config)),
+        );
+        info(&mut h, 0, serde_json::json!({"title":" Fix it \nmore"}));
+        assert_eq!(
+            h.display(5).mode_line.text(),
+            "Opus 5.5 · High │ [plan] │ Fix it  "
+        );
+        let unknown = SessionConfigOption::select(
+            "model",
+            "Model",
+            "new-model",
+            Vec::<SessionConfigSelectOption>::new(),
+        )
+        .category(SessionConfigOptionCategory::Model);
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(vec![unknown, effort.clone()]),
+        });
+        assert_eq!(h.display(5).mode_line.text(), "new-model · High │ Fix it  ");
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(vec![effort]),
+        });
+        assert_eq!(h.display(5).mode_line.text(), "High │ Fix it  ");
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(vec![model]),
+        });
+        assert_eq!(h.display(5).mode_line.text(), "Opus 5.5 │ Fix it  ");
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(vec![]),
+        });
+        info(&mut h, 0, serde_json::json!({"title":null}));
+        assert_eq!(h.display(5).mode_line.text(), "claude  ");
+        info(&mut h, 0, serde_json::json!({"title":"é".repeat(41)}));
+        assert_eq!(
+            h.display(5).mode_line.text(),
+            format!("{}…  ", "é".repeat(40))
+        );
+    }
+
+    #[test]
+    fn every_adapter_mode_has_its_risk_face() {
+        let mut h = session();
+        for (mode, face) in [
+            ("plan", FaceName::StatusInfo),
+            ("read-only", FaceName::StatusInfo),
+            ("default", FaceName::ModeLine),
+            ("acceptEdits", FaceName::StatusWaiting),
+            ("workspace-write", FaceName::StatusWaiting),
+            ("auto", FaceName::StatusRunning),
+            ("agent", FaceName::StatusRunning),
+            ("bypassPermissions", FaceName::StatusFailed),
+            ("agent-full-access", FaceName::StatusFailed),
+            ("future-mode", FaceName::ModeLine),
+        ] {
+            h.send(Msg::AgentConfigured {
+                id: AgentId(0),
+                result: Ok(options(mode)),
+            });
+            assert_eq!(
+                h.display(5).mode_line.left[0],
+                vec![(format!("[{mode}]"), face)]
+            );
+        }
+    }
+
+    #[test]
+    fn session_status_follows_turns_permissions_and_exit() {
+        let mut h = session();
+        assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ");
+        h.keys("a RET");
+        assert_eq!(
+            h.display(5).mode_line.right[0],
+            vec![("● working".into(), FaceName::StatusRunning)]
+        );
+        ask(&mut h, 1, "one", Some("First"));
+        ask(&mut h, 2, "two", Some("Second"));
+        let waiting = vec![("● awaiting permission".into(), FaceName::StatusWaiting)];
+        assert_eq!(h.display(5).mode_line.right[0], waiting);
+        h.keys("C-c C-y");
+        assert_eq!(h.display(5).mode_line.right[0], waiting);
+        h.keys("C-c C-n");
+        assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ● working");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ");
+        h.keys("b RET");
+        ask(&mut h, 3, "three", Some("Third"));
+        h.keys("C-c C-c");
+        assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ● working");
+        prompted(&mut h, Ok(StopReason::Cancelled));
+        assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ");
+        h.keys("c RET");
+        ask(&mut h, 4, "four", Some("Fourth"));
+        exited(&mut h, 0, 1);
+        assert_eq!(
+            h.display(5).mode_line.right[0],
+            vec![("● exited".into(), FaceName::StatusFailed)]
+        );
+        h.keys("M-x agent-start RET claude RET");
+        assert_eq!(h.display(5).mode_line.text(), "claude  ");
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Err("failed".into()),
+        });
+        assert_eq!(h.display(5).mode_line.text(), "claude  ● exited");
+    }
+
+    #[test]
+    fn context_usage_is_bounded_and_keeps_the_latest_update() {
+        use agent_client_protocol_schema::v1::UsageUpdate;
+        let mut h = session();
+        for (used, size, expected) in [
+            (23613, 475000, "ctx 4%"),
+            (25499, 475000, "ctx 5%"),
+            (0, 100, "ctx 0%"),
+            (u64::MAX, u64::MAX, "ctx 100%"),
+            (u64::MAX, 1, "ctx 100%"),
+            (1, 0, ""),
+            (1, 100, "ctx 1%"),
+        ] {
+            update(
+                &mut h,
+                0,
+                SessionUpdate::UsageUpdate(UsageUpdate::new(used, size)),
+            );
+            assert_eq!(
+                h.display(5).mode_line.text(),
+                format!("[auto] │ claude  {expected}")
+            );
+        }
+        exited(&mut h, 0, 0);
+        update(
+            &mut h,
+            0,
+            SessionUpdate::UsageUpdate(UsageUpdate::new(99, 100)),
+        );
+        assert_eq!(
+            h.display(5).mode_line.text(),
+            "[auto] │ claude  ● exited │ ctx 1%"
+        );
+    }
+
+    #[test]
+    fn session_frame_spans_follow_active_inactive_and_narrow_windows() {
+        let mut h = session();
+        info(&mut h, 0, serde_json::json!({"title":"A session title"}));
+        h.keys("a RET C-x 3");
+        let frame = h.frame(1200., 300.);
+        let theme = &h.core.settings.theme;
+        for window in &frame.windows {
+            let bar = &window.mode_line;
+            let text = |spans: &[crate::display::Span]| {
+                spans.iter().map(|s| s.text.as_str()).collect::<String>()
+            };
+            assert_eq!(text(&bar.left), "[auto] │ A session title");
+            assert_eq!(text(&bar.right), "● working");
+            if window.selected {
+                let base = theme.face(FaceName::ModeLine);
+                assert_eq!(
+                    bar.left[0].face,
+                    theme.face(FaceName::StatusRunning).over(base)
+                );
+                assert_eq!(bar.left[1].face, theme.face(FaceName::Separator).over(base));
+                assert_eq!(
+                    bar.left[2].face,
+                    theme.face(FaceName::ModeLineBufferId).over(base)
+                );
+            } else {
+                assert!(
+                    bar.left
+                        .iter()
+                        .chain(&bar.right)
+                        .all(|s| s.face == theme.face(FaceName::ModeLineInactive))
+                );
+            }
+        }
+        let frame = h.frame(400., 300.);
+        for window in frame.windows {
+            let left = window
+                .mode_line
+                .left
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>();
+            assert!(left.ends_with('…'), "{left}");
+            assert_eq!(window.mode_line.right[0].text, "● working");
+        }
+    }
+
+    #[test]
     fn the_mode_line_shows_the_current_mode() {
         let mut h = work();
         h.keys("M-x agent-start RET claude RET");
         assert!(!h.display(5).mode_line.text().contains('['));
         ready(&mut h, 0);
-        assert!(h.display(5).mode_line.text().contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains("[auto]"));
         let options = ConfigOptionUpdate::new(options("plan"));
         update(&mut h, 0, SessionUpdate::ConfigOptionUpdate(options));
         let line = h.display(5).mode_line.text();
-        assert!(line.contains(" [plan]") && !line.contains("auto"), "{line}");
+        assert!(line.contains("[plan]") && !line.contains("auto"), "{line}");
     }
 
     #[test]
@@ -2612,18 +2916,18 @@ mod tests {
         ops(&mut h);
         ready(&mut h, 0);
         assert_eq!(ops(&mut h), ["set 0 s mode=plan"]);
-        assert!(h.display(5).mode_line.text().contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains("[auto]"));
         h.send(Msg::AgentConfigured {
             id: AgentId(0),
             result: Ok(options("plan")),
         });
-        assert!(h.display(5).mode_line.text().contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains("[plan]"));
         h.send(Msg::AgentConfigured {
             id: AgentId(0),
             result: Err("no".into()),
         });
         assert!(messages(&h).contains("claude could not set mode plan: no\n"));
-        assert!(h.display(5).mode_line.text().contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains("[plan]"));
     }
 
     #[test]
@@ -2654,7 +2958,7 @@ mod tests {
         assert!(!h.display(5).mode_line.text().contains('['));
         // An answer or update without a mode option clears the mode.
         ready(&mut h, 0);
-        assert!(h.display(5).mode_line.text().contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains("[auto]"));
         h.send(Msg::AgentConfigured {
             id: AgentId(0),
             result: Ok(options),
@@ -2689,7 +2993,7 @@ mod tests {
             messages(&h)
                 .contains("claude session ready (modes: auto, plan)\nclaude has no mode nope\n")
         );
-        assert!(h.display(5).mode_line.text().contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains("[auto]"));
         assert_eq!(messages(&h).matches("has no mode").count(), 1);
     }
 
@@ -2708,11 +3012,11 @@ mod tests {
         h.keys("S-TAB");
         assert_eq!(ops(&mut h), ["set 0 s mode=plan"]);
         configured(&mut h, Ok(options("plan")));
-        assert!(h.display(5).mode_line.text().contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains("[plan]"));
         h.keys("S-TAB");
         assert_eq!(ops(&mut h), ["set 0 s mode=auto"]);
         configured(&mut h, Ok(options("auto")));
-        assert!(h.display(5).mode_line.text().contains(" [auto]"));
+        assert!(h.display(5).mode_line.text().contains("[auto]"));
         // The agent's own change is where the next cycle starts.
         let plan = ConfigOptionUpdate::new(options("plan"));
         update(&mut h, 0, SessionUpdate::ConfigOptionUpdate(plan));
@@ -2720,7 +3024,7 @@ mod tests {
         assert_eq!(ops(&mut h), ["set 0 s mode=auto"]);
         configured(&mut h, Err("no".into()));
         assert!(messages(&h).contains("claude could not set mode auto: no\n"));
-        assert!(h.display(5).mode_line.text().contains(" [plan]"));
+        assert!(h.display(5).mode_line.text().contains("[plan]"));
     }
 
     #[test]
