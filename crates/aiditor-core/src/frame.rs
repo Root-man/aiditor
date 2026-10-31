@@ -108,6 +108,7 @@ impl Core {
             height,
         };
         let chrome = self.settings.mode_line_height();
+        let origin = self.prompts.minibuffer.as_ref().map(|mb| mb.from);
         let windows = (self.windows.tree.layout(frame, cell, chrome).into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;
@@ -122,6 +123,10 @@ impl Core {
                 let (buffers, settings) = (&mut self.buffers, &self.settings);
                 let buffer = buffers.get(window.buffer()).expect("window buffer is live");
                 let style = buffer.line_numbers(settings.line_numbers);
+                // The window a minibuffer was opened from still shows where point is, as swiper's preview.
+                let highlighted = settings.hl_line
+                    && (selected || origin == Some(id))
+                    && (buffer.numbered() || buffer.copy_mode());
                 let width = display::gutter_width(buffer.len_lines(), cell_width);
                 // A window too narrow for it keeps its one column of text.
                 let room = rect.width - TEXT_INSET;
@@ -131,6 +136,9 @@ impl Core {
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
                 let mut display = window_display(window, buffers, settings, rows, drawn, cols);
+                if highlighted {
+                    display::highlight_line(&mut display);
+                }
                 let gutter = numbered.then(|| {
                     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
                     let (point, _) = buffer.line_col(window.point(buffers)).unwrap_or_default();
@@ -284,6 +292,7 @@ fn fit_names(project: &str, workspace: &str, cols: usize) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use crate::Msg;
+    use crate::buffer::Decoration;
     use crate::display::FrameDisplay;
     use crate::display::FrameWindow;
     use crate::harness::Harness;
@@ -583,7 +592,11 @@ mod tests {
             (vec![long[9_981..].into(), "next".into()], Some((0, 19)))
         );
         let decorations = &frame.windows[0].display.lines[0].decorations;
-        assert_eq!(decorations.len(), 1, "a decoration in the cut-off tail");
+        assert_eq!(
+            decorations.len(),
+            2,
+            "hl-line and a decoration in the cut-off tail"
+        );
         h.keys("C-n");
         let frame = h.frame(184., 600.);
         assert_eq!(shown(&frame).0, [&long[..21], "next"]);
@@ -842,6 +855,71 @@ mod tests {
         let mut h = numbered(&[("a.txt", "a")], "off");
         h.open("a.txt");
         assert_eq!(labels(&mut h, 800.), [] as [String; 0]);
+    }
+
+    /// The text of each row of the first window with the `hl-line` background.
+    fn highlighted(h: &mut Harness, width: f32) -> Vec<String> {
+        let hl = Decoration::Background(FaceName::HlLine);
+        let window = h.frame(width, 600.).windows.remove(0);
+        (window.display.lines.iter())
+            .filter(|l| l.decorations.contains(&hl))
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn point_s_line_is_highlighted_in_files_only() {
+        let mut h = Harness::new(&[("a.txt", "one\ntwo\nthree")]);
+        h.open("a.txt").keys("C-n");
+        assert_eq!(highlighted(&mut h, 800.), ["two"]);
+        h.keys("C-x b other RET");
+        assert!(highlighted(&mut h, 800.).is_empty(), "another buffer");
+        h.keys("C-x b *scratch* RET");
+        assert_eq!(highlighted(&mut h, 800.), [""]);
+    }
+
+    #[test]
+    fn every_row_of_a_wrapped_line_is_highlighted() {
+        let text = format!("{}\nb", "a".repeat(100));
+        let mut h = Harness::new(&[("a.rs", &text)]);
+        h.open("a.rs");
+        let rows = highlighted(&mut h, 400.);
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(rows.iter().all(|r| !r.contains('b')));
+    }
+
+    #[test]
+    fn the_selected_window_alone_is_highlighted() {
+        let mut h = Harness::new(&[("a.txt", "one\ntwo")]);
+        h.open("a.txt").keys("C-x 2");
+        let hl = Decoration::Background(FaceName::HlLine);
+        let shown = |h: &mut Harness| {
+            (h.frame(800., 600.).windows.iter())
+                .map(|w| (w.display.lines[0].decorations.contains(&hl), w.selected))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&mut h), [(true, true), (false, false)]);
+        h.keys("C-x o");
+        assert_eq!(shown(&mut h), [(false, false), (true, true)]);
+    }
+
+    #[test]
+    fn a_preview_is_highlighted_in_the_window_it_came_from() {
+        let mut h = Harness::new(&[("a.txt", "one\ntwo\nthree")]);
+        h.open("a.txt").keys("C-s thr");
+        assert_eq!(highlighted(&mut h, 800.), ["three"]);
+        assert_eq!(
+            h.frame(800., 600.).minibuffer.unwrap().display.lines[0].decorations,
+            []
+        );
+    }
+
+    #[test]
+    fn the_setting_turns_the_highlight_off() {
+        let mut h = Harness::new(&[("a.txt", "one")]);
+        h.core.settings = Settings::parse(Some("hl_line = false")).unwrap();
+        h.open("a.txt");
+        assert!(highlighted(&mut h, 800.).is_empty());
     }
 
     #[test]

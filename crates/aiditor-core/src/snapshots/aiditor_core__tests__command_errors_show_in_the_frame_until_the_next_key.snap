@@ -21,7 +21,11 @@ FrameDisplay {
                         number: 0,
                         height: 19.6,
                         spans: [],
-                        decorations: [],
+                        decorations: [
+                            Background(
+                                HlLine,
+                            ),
+                        ],
                     },
                 ],
                 cursor: Some(

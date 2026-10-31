@@ -65,6 +65,8 @@ pub struct Settings {
     pub option_as_meta: bool,
     /// How files, `*scratch*` and `*Messages*` number their lines, until one toggles it.
     pub line_numbers: LineNumbers,
+    /// Whether point's line has the `hl-line` background.
+    pub hl_line: bool,
     pub max_watched_files: usize,
     /// Files project grep searches at once.
     pub grep_workers: NonZeroUsize,
@@ -321,6 +323,7 @@ mod tests {
         assert_eq!(s.theme.cursor(), 0xffcc00);
         assert!(s.option_as_meta);
         assert_eq!(s.line_numbers, LineNumbers::Absolute);
+        assert!(s.hl_line);
         assert_eq!(s.max_watched_files, 10000);
         assert_eq!(s.grep_workers.get(), 1);
         let s = Settings::parse(Some("grep_workers = 8")).unwrap();
@@ -507,6 +510,7 @@ mod tests {
             ("[themes.other.syntax]\nkeyword = 1", "themes.other"),
             ("[themes.other]\nbackground = 1", "background"),
             ("line_numbers = \"sometimes\"", "sometimes"),
+            ("hl_line = \"yes\"", "hl_line"),
             ("font_size = 0", "outside"),
             ("line_height = 0.5", "line_height 0.5 is outside"),
             ("line_height = 3.5", "line_height 3.5 is outside"),

@@ -14,6 +14,8 @@ option_as_meta = true
 
 # Line numbers in files, *scratch* and *Messages*: "off", "absolute" or "relative" to point's line.
 line_numbers = "absolute"
+# Point's line in the hl-line background, in the selected window; false turns it off.
+hl_line = true
 
 # Maximum kept files and directories per watched project; project files can override it.
 max_watched_files = 10000
