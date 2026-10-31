@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+
 use crate::command::{Args, Preview};
 use crate::project_commands::root_names;
 use crate::timer::TimerId;
@@ -39,6 +42,23 @@ pub(crate) struct ProjectGrep {
     ignore: Vec<String>,
     /// The listed hits with their labels, kept after the prompt closes for its handler.
     hits: Vec<(String, Hit)>,
+    pattern: Option<RegexMatcher>,
+    pending_pattern: Option<RegexMatcher>,
+}
+
+impl crate::display::Search for ProjectGrep {
+    fn matches(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+        if let Some(pattern) = &self.pattern {
+            let _ = pattern.find_iter(text.as_bytes(), |m| {
+                if !m.is_empty() {
+                    ranges.push(m.start()..m.end());
+                }
+                true
+            });
+        }
+        ranges
+    }
 }
 
 impl ProjectGrep {
@@ -115,11 +135,17 @@ impl Core {
                 effects.push(Effect::Grep(GrepOp::Cancel));
             }
             grep.hits.clear();
+            grep.pattern = None;
+            grep.pending_pattern = None;
             return self.set_items("project-grep", Vec::new(), true);
         }
         grep.searches += 1;
         (grep.running, grep.answered) = (true, false);
         grep.no_matches = false;
+        grep.pending_pattern = RegexMatcherBuilder::new()
+            .case_smart(true)
+            .build(&text)
+            .ok();
         effects.push(Effect::Grep(GrepOp::Search(GrepSearch {
             id: grep.searches,
             roots: grep.roots.iter().map(|(root, _)| root.clone()).collect(),
@@ -141,6 +167,7 @@ impl Core {
         let replace = !std::mem::replace(&mut grep.answered, true);
         if replace {
             grep.hits.clear();
+            grep.pattern = grep.pending_pattern.take();
         }
         let labels = match hits {
             Ok(hits) => {
@@ -262,6 +289,154 @@ mod tests {
     use crate::{Hit, Msg};
 
     const WAIT: Duration = Duration::from_millis(200);
+
+    fn preview_spans(h: &mut Harness) -> Vec<(String, Option<u32>)> {
+        h.frame(800., 600.).windows.remove(0).display.lines[0]
+            .spans
+            .iter()
+            .map(|s| (s.text.clone(), s.face.bg))
+            .collect()
+    }
+
+    #[test]
+    fn preview_faces_use_grep_smart_case_and_clear_on_close() {
+        use crate::settings::FaceName;
+        for (query, expected) in [
+            (
+                "foo",
+                vec![
+                    ("été ", None),
+                    ("Foo", Some(FaceName::MatchCurrent)),
+                    (" ", None),
+                    ("foo", Some(FaceName::Match)),
+                ],
+            ),
+            (
+                "Foo",
+                vec![
+                    ("été ", None),
+                    ("Foo", Some(FaceName::MatchCurrent)),
+                    (" foo", None),
+                ],
+            ),
+            (
+                r"\x66oo",
+                vec![
+                    ("été ", None),
+                    ("Foo", Some(FaceName::MatchCurrent)),
+                    (" ", None),
+                    ("foo", Some(FaceName::Match)),
+                ],
+            ),
+        ] {
+            for close in ["RET", "C-g"] {
+                let mut h = grepping(
+                    &[("app/a.txt", "été Foo foo\n")],
+                    &[("app", "a.txt", 0, 4, "été Foo foo")],
+                );
+                h.open("app/a.txt")
+                    .keys("C-x p g")
+                    .keys(query)
+                    .advance(WAIT);
+                let expected: Vec<_> = expected
+                    .iter()
+                    .map(|(s, face)| {
+                        (
+                            s.to_string(),
+                            face.and_then(|name| h.core.settings().theme.face(name).bg),
+                        )
+                    })
+                    .collect();
+                assert_eq!(preview_spans(&mut h), expected, "{query}");
+                h.keys(close);
+                assert_eq!(preview_spans(&mut h), [("été Foo foo".into(), None)]);
+            }
+        }
+    }
+
+    #[test]
+    fn preview_faces_keep_the_displayed_query_until_replacement_results() {
+        use crate::settings::FaceName;
+        let mut h = grepping(
+            &[("app/a.txt", "needle other\n")],
+            &[("app", "a.txt", 0, 0, "needle other")],
+        );
+        h.open("app/a.txt").keys("C-x p g");
+        let first = search(&mut h);
+        let hit = Hit {
+            root: h.path("app"),
+            path: "a.txt".into(),
+            line: 0,
+            col: 0,
+            text: "needle other".into(),
+        };
+        h.send(Msg::Grepped {
+            search: first.id,
+            hits: Ok(vec![hit.clone()]),
+            done: true,
+        });
+        let current = h.core.settings().theme.face(FaceName::MatchCurrent).bg;
+        let old = vec![("needle".into(), current), (" other".into(), None)];
+        assert_eq!(preview_spans(&mut h), old);
+        h.keys("C-a C-k other");
+        assert_eq!(preview_spans(&mut h), old);
+        h.advance(WAIT);
+        assert_eq!(preview_spans(&mut h), old);
+        let id = h
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                crate::Effect::Grep(crate::GrepOp::Search(op)) => Some(op.id),
+                _ => None,
+            })
+            .unwrap();
+        h.send(Msg::Grepped {
+            search: id,
+            hits: Ok(vec![Hit { col: 7, ..hit }]),
+            done: true,
+        });
+        assert_eq!(
+            preview_spans(&mut h),
+            [("needle ".into(), None), ("other".into(), current)]
+        );
+    }
+
+    #[test]
+    fn a_pending_file_preview_keeps_ordinary_faces_until_loaded() {
+        let mut h = grepping(
+            &[("app/a.txt", "needle a"), ("app/b.txt", "needle b")],
+            &[
+                ("app", "a.txt", 0, 0, "needle a"),
+                ("app", "b.txt", 0, 0, "needle b"),
+            ],
+        );
+        h.open("app/a.txt").keys("C-x p g needle").advance(WAIT);
+        h.collect_effects = true;
+        h.keys("C-n");
+        assert_eq!(preview_spans(&mut h), [("needle a".into(), None)]);
+        let request = h
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                crate::Effect::File(crate::FileOp::Preview(r)) => Some(r.clone()),
+                _ => None,
+            })
+            .unwrap();
+        h.send(Msg::Previewed {
+            request,
+            result: Ok(Some(crate::buffer::prepare_preview(b"needle b").unwrap())),
+        });
+        let current = h
+            .core
+            .settings()
+            .theme
+            .face(crate::settings::FaceName::MatchCurrent)
+            .bg;
+        assert_eq!(
+            preview_spans(&mut h),
+            [("needle".into(), current), (" b".into(), None)]
+        );
+    }
 
     /// The current workspace's project at `app`, with `lib` as a second root.
     fn grepping(files: &[(&str, &str)], hits: &[(&str, &str, usize, usize, &str)]) -> Harness {

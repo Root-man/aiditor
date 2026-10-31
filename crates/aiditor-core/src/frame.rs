@@ -91,7 +91,16 @@ impl Core {
         let roots = self.roots();
         let window = &mut self.windows.window;
         let (buffers, settings) = (&mut self.buffers, &self.settings);
-        let mut display = window_display(window, buffers, settings, rows, rows, usize::MAX, &roots);
+        let mut display = window_display(
+            window,
+            buffers,
+            settings,
+            rows,
+            rows,
+            usize::MAX,
+            &roots,
+            None,
+        );
         if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
             display.mode_line = session.mode_line();
         }
@@ -124,6 +133,7 @@ impl Core {
         };
         let chrome = self.settings.mode_line_height();
         let origin = self.prompts.minibuffer.as_ref().map(|mb| mb.from);
+        let search = self.prompts.preview_search(&self.grep);
         let windows = (self.windows.tree.layout(frame, cell, chrome).into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;
@@ -150,8 +160,10 @@ impl Core {
                     ((room - if numbered { width } else { TEXT_INSET }) / cell_width) as usize;
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
-                let mut display =
-                    window_display(window, buffers, settings, rows, drawn, cols, &roots);
+                let matches = search.filter(|(from, _)| *from == id).map(|(_, s)| s);
+                let mut display = window_display(
+                    window, buffers, settings, rows, drawn, cols, &roots, matches,
+                );
                 if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
                     display.mode_line = session.mode_line();
                 }
@@ -233,6 +245,7 @@ impl Core {
 
 /// `window`'s display model `cols` chars wide, keeping point in the first `rows` of the `drawn`
 /// text rows, point's line shown from the column that keeps point visible.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn window_display(
     window: &mut Window,
     buffers: &mut Buffers,
@@ -241,6 +254,7 @@ pub(crate) fn window_display(
     drawn: usize,
     cols: usize,
     roots: &[PathBuf],
+    search: Option<&dyn display::Search>,
 ) -> display::WindowDisplay {
     window.set_cols(cols);
     // shortcut: scrolls in buffer lines, so folds above point scroll it further than needed and a top line inside a fold repeats its placeholder; scroll in display lines when folds get common.
@@ -278,7 +292,7 @@ pub(crate) fn window_display(
         None => left..left.saturating_add(width),
     };
     let mut display = display::build(
-        buffer, top, drawn, point, mark, settings, shown, wrap, roots,
+        buffer, top, drawn, point, mark, settings, shown, wrap, roots, search,
     );
     if let Some(terminal) = buffer.terminal().filter(|_| !buffer.copy_mode()) {
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));

@@ -112,6 +112,8 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol-schema",
  "alacritty_terminal",
+ "grep-matcher",
+ "grep-regex",
  "insta",
  "jiff",
  "libc",

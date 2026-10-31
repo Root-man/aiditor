@@ -6,6 +6,11 @@ use crate::settings::{FaceName, LineNumbers, Settings, Theme};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+/// Nonempty UTF-8 byte ranges matched on one complete source line, in order.
+pub trait Search {
+    fn matches(&self, text: &str) -> Vec<Range<usize>>;
+}
+
 #[derive(Debug, PartialEq)]
 pub struct WindowDisplay {
     pub lines: Vec<Line>,
@@ -370,6 +375,7 @@ pub fn build(
     shown: Range<usize>,
     wrap: Option<Wrap>,
     roots: &[PathBuf],
+    search: Option<&dyn Search>,
 ) -> WindowDisplay {
     let text = buffer.text();
     let (top_line, end_line) = (
@@ -471,6 +477,8 @@ pub fn build(
     };
     // Display columns of `line` consumed so far, the skipped ones included.
     let mut col: usize = 0;
+    let mut matched_line = None;
+    let mut matches = Vec::new();
     while lines.len() < rows {
         let range = match Some(line.number) == point_line {
             true => shown.clone(),
@@ -547,6 +555,27 @@ pub fn build(
                 Prop::Face(f) => face = f.over(face),
                 Prop::Named(refs) => face = settings.theme.resolve(refs).over(face),
                 _ => {}
+            }
+        }
+        if let Some(search) = search {
+            let number = text.char_to_line(pos - 1);
+            if matched_line != Some(number) {
+                matched_line = Some(number);
+                let content = String::from(text.line(number));
+                let byte = text.line_to_byte(number);
+                matches = search
+                    .matches(content.trim_end_matches('\n'))
+                    .into_iter()
+                    .map(|r| text.byte_to_char(byte + r.start)..text.byte_to_char(byte + r.end))
+                    .collect::<Vec<_>>();
+            }
+            let i = matches.partition_point(|r| r.end < pos);
+            if matches.get(i).is_some_and(|r| r.start < pos) {
+                let name = match i == 0 && Some(number) == point_line {
+                    true => FaceName::MatchCurrent,
+                    false => FaceName::Match,
+                };
+                face = settings.theme.face(name).over(face);
             }
         }
         if region.as_ref().is_some_and(|r| r.contains(&(pos - 1))) {
@@ -1049,6 +1078,117 @@ mod tests {
     }
 
     #[test]
+    fn swiper_preview_faces_follow_selection_and_close_with_the_prompt() {
+        for close in ["RET", "C-g"] {
+            let mut h = Harness::new(&[("a.txt", "été Foo foo\nfoo bar\n")]);
+            h.open("a.txt").keys("C-s foo");
+            let theme = &h.core.settings().theme;
+            let (matched, current) = (
+                theme.face(FaceName::Match),
+                theme.face(FaceName::MatchCurrent),
+            );
+            let spans = |h: &mut Harness| {
+                h.frame(800., 600.)
+                    .windows
+                    .remove(0)
+                    .display
+                    .lines
+                    .into_iter()
+                    .map(|line| {
+                        line.spans
+                            .into_iter()
+                            .map(|s| (s.text, s.face.bg))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                spans(&mut h)[..2],
+                [
+                    vec![
+                        ("été ".into(), None),
+                        ("Foo".into(), current.bg),
+                        (" ".into(), None),
+                        ("foo".into(), matched.bg)
+                    ],
+                    vec![("foo".into(), matched.bg), (" bar".into(), None)],
+                ]
+            );
+            h.keys("C-n");
+            assert_eq!(
+                spans(&mut h)[1],
+                [("foo".into(), current.bg), (" bar".into(), None)]
+            );
+            h.keys(close);
+            assert_eq!(h.text(), "été Foo foo\nfoo bar\n");
+            for line in spans(&mut h) {
+                for (_, bg) in line {
+                    assert_eq!(bg, None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_faces_belong_to_the_preview_window() {
+        let mut h = Harness::new(&[("a.txt", "foo foo")]);
+        h.open("a.txt").keys("C-x 3 C-s foo");
+        let origin = h.core.prompts.minibuffer.as_ref().unwrap().from;
+        let current = h.core.settings().theme.face(FaceName::MatchCurrent).bg;
+        for window in h.frame(800., 600.).windows {
+            let spans = &window.display.lines[0].spans;
+            if window.id == origin {
+                assert_eq!(spans[0].text, "foo");
+                assert_eq!(spans[0].face.bg, current);
+            } else {
+                assert_eq!(spans[0].text, "foo foo");
+                assert_eq!(spans[0].face, Face::default());
+            }
+        }
+    }
+
+    #[test]
+    fn search_faces_survive_wrapping_and_source_line_scrolling() {
+        let mut h = Harness::new(&[("a.txt", "prefix needle needle suffix\nneedle\n")]);
+        h.open("a.txt").keys("C-s needle");
+        let theme = &h.core.settings().theme;
+        let (matched, current) = (
+            theme.face(FaceName::Match).bg,
+            theme.face(FaceName::MatchCurrent).bg,
+        );
+        let frame = h.frame(104., 600.);
+        let chars: Vec<_> = frame.windows[0]
+            .display
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .flat_map(|s| s.text.chars().map(move |c| (c, s.face.bg)))
+            .filter(|(_, bg)| *bg == matched || *bg == current)
+            .collect();
+        let expected: Vec<_> = "needle"
+            .chars()
+            .map(|c| (c, current))
+            .chain("needleneedle".chars().map(|c| (c, matched)))
+            .collect();
+        assert_eq!(chars, expected);
+
+        h.keys("C-g M->");
+        let id = h.core.windows.window.buffer();
+        h.core.buffers.get_mut(id).unwrap().truncate_lines = true;
+        h.keys("C-s ^prefix.*needle");
+        let frame = h.frame(104., 100.);
+        let highlighted: String = frame.windows[0]
+            .display
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .filter(|s| s.face.bg == current)
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(highlighted, "le needle");
+    }
+
+    #[test]
     fn syntax_entries_are_whole_faces() {
         let mut h = Harness::new(&[("a.js", "// x")]);
         let settings = "[themes.default.syntax]\ncomment = { fg = 7, italic = true }";
@@ -1141,6 +1281,7 @@ mod tests {
             shown,
             None,
             &[],
+            None,
         );
         let texts = (d.lines.iter())
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
@@ -1185,6 +1326,7 @@ mod tests {
             495..505,
             None,
             &[],
+            None,
         );
         let spans: Vec<_> = (d.lines[0].spans.iter())
             .map(|s| (s.text.as_str(), s.face.fg))

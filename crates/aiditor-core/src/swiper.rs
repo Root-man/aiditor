@@ -22,6 +22,20 @@ pub(crate) struct Search {
     negative: Vec<Regex>,
 }
 
+impl crate::display::Search for Search {
+    fn matches(&self, text: &str) -> Vec<Range<usize>> {
+        if self.negative.iter().any(|r| r.is_match(text)) {
+            return Vec::new();
+        }
+        self.positive
+            .iter()
+            .flat_map(|r| r.find_iter(text))
+            .filter(|m| !m.is_empty())
+            .map(|m| m.range())
+            .collect()
+    }
+}
+
 impl Search {
     pub(crate) fn new(text: &Rope) -> Self {
         let snapshot = text.to_string();
@@ -175,6 +189,27 @@ impl Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preview_matches_use_swiper_semantics() {
+        use crate::display::Search as _;
+        let text = "été Foo gap bar foo bar";
+        let mut search = super::Search::new(&ropey::Rope::from_str(text));
+        for (query, expected) in [
+            ("foo bar", vec!["Foo gap bar", "foo bar"]),
+            ("Foo", vec!["Foo"]),
+            ("foo !gap", vec![]),
+            ("!missing", vec![]),
+            ("", vec![]),
+            ("^", vec![]),
+        ] {
+            search.filter(query);
+            let actual: Vec<_> = search.matches(text).into_iter().map(|r| &text[r]).collect();
+            assert_eq!(actual, expected, "{query}");
+        }
+        search.filter("a(");
+        assert_eq!(search.matches("a(b a(b"), [0..2, 4..6]);
+    }
+
     use crate::Msg;
     use crate::harness::{Harness, line_start, mark, on};
 
