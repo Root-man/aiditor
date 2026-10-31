@@ -291,11 +291,27 @@ The frame display SHALL give each window its mode line's left and right groups a
 - **THEN** its right group reads `1:0 │ All`, with no separator before `1:0`
 
 ### Requirement: Mode line segments use colour only for state
-In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `char` in `status-waiting`; `copy` in `status-info`; a running command in `status-running`; `exit <n>` in `status-failed`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's or shell's directory, major mode, region size, position and `[unwatched]` in `mode-line-dim`; a file's name and a terminal's name in `mode-line-buffer-id`. A session model and effort SHALL use `mode-line-dim`, its title `mode-line-buffer-id`, context usage `mode-line-dim`, and mode and lifecycle status their specified risk and status faces. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.
+In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `char` in `status-waiting`; `copy` in `status-info`; a running command in `status-running`; `exit <n>` in `status-failed`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's or shell's directory, region size, position and `[unwatched]` in `mode-line-dim`; a file's name and a terminal's name in `mode-line-buffer-id`. A session model and effort SHALL use `mode-line-dim`, its title `mode-line-buffer-id`, context usage `mode-line-dim`, and mode and lifecycle status their specified risk and status faces. The file's language name and version SHALL use an overridable `mode-line-<language>` face: Elixir and HEEx purple/rose (`mode-line-elixir`), JavaScript green (`mode-line-javascript`), TypeScript and TSX blue (`mode-line-typescript`), Rust rusty red (`mode-line-rust`), YAML yellow (`mode-line-yaml`), Markdown aqua (`mode-line-markdown`), and TOML orange (`mode-line-toml`). Fundamental SHALL retain `mode-line-dim`. This language coding is an exception to the state-only colour rule. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it. Inactive windows SHALL retain their shared inactive face.
 
 #### Scenario: A modified file in the selected window
-- **WHEN** the selected window's buffer is modified
+- **GIVEN** the selected window shows a file
+- **WHEN** its buffer is modified
 - **THEN** `●` has the `status-modified` foreground and the file's name is bold in the `mode-line` foreground
+
+#### Scenario: Every supported language has a color
+- **GIVEN** files in every supported highlighted language, with or without a pin
+- **WHEN** each file is shown in the selected window
+- **THEN** its entire language segment uses its language family's face, including any displayed version
+
+#### Scenario: Inactive language colors
+- **GIVEN** a file with a colored language segment
+- **WHEN** its window becomes inactive
+- **THEN** the language name and version use the shared `mode-line-inactive` face
+
+#### Scenario: Theme override
+- **GIVEN** settings override a language face's foreground
+- **WHEN** settings are reloaded
+- **THEN** the file's language name and version use the new foreground
 
 ### Requirement: An inactive mode line drops colour
 A window that isn't selected SHALL show the same groups, segments and separators as when selected, all of it in the `mode-line-inactive` face, with no colour or bold from any segment.
@@ -373,15 +389,42 @@ When a file's or terminal's left group is wider than its room, its directory SHA
 - **THEN** the directory is gone and the name is cut only if it still doesn't fit
 
 ### Requirement: The major mode names the file's language
-The major mode SHALL be the name of the language the file is highlighted in, and `Fundamental` for a file with no grammar.
+The major mode SHALL be the name of the language the file is highlighted in, and `Fundamental` for a file with no grammar. For Rust, Elixir and HEEx, and JavaScript, TypeScript and TSX, it SHALL append the declared Rust, Elixir or Node.js version respectively when found above the file. Search SHALL start in the file's directory and ascend to the filesystem root, checking `.tool-versions`, `mise.toml`, then `rust-toolchain.toml` at each level; the first entry for the relevant tool SHALL win. An unrelated tool or unreadable/malformed file SHALL allow searching to continue. With no usable version, the segment SHALL show the language alone. Only file contents SHALL be read: no compiler, version manager, template or command SHALL be executed to resolve a version.
 
 #### Scenario: A Rust file
-- **WHEN** `a.rs` is shown
+- **GIVEN** `a.rs` has no pin above it
+- **WHEN** it is shown
 - **THEN** the major mode is `Rust`
 
 #### Scenario: No grammar
-- **WHEN** `a.txt` is shown
+- **GIVEN** `a.txt` has no grammar
+- **WHEN** it is shown
 - **THEN** the major mode is `Fundamental`
+
+#### Scenario: Supported pin formats
+- **GIVEN** a Rust or Elixir file below `.tool-versions` or `mise.toml` declaring its tool version, or a Rust file below `rust-toolchain.toml` declaring `toolchain.channel`
+- **WHEN** it is shown
+- **THEN** the language segment includes the declared version, such as `Rust 1.99.0` or `Elixir 1.20.2-otp-26`
+
+#### Scenario: JavaScript runtime
+- **GIVEN** JavaScript, TypeScript or TSX files below a `nodejs` entry in `.tool-versions` or a `node`/`nodejs` entry in `mise.toml`
+- **WHEN** they are shown
+- **THEN** their language names are followed by that runtime version
+
+#### Scenario: Nested pins and ties
+- **GIVEN** a pin at a parent directory and a nearer pin for the same tool
+- **WHEN** a file under the nearer pin is shown
+- **THEN** the nearer pin wins, with ties in one directory resolved in the filename order above
+
+#### Scenario: Multiple versions and system selection
+- **GIVEN** an entry declares several versions or selects `system`
+- **WHEN** its file is shown
+- **THEN** only the first version is used, and `system` shows the language alone without falling back to a parent pin
+
+#### Scenario: Unsupported or invalid value
+- **GIVEN** a pin value is empty, contains whitespace/control characters, or is a dynamic mise template
+- **WHEN** its file is shown
+- **THEN** that entry supplies no displayed version
 
 ### Requirement: Workspace dots aggregate agent session activity
 Each workspace SHALL show a `●` after its name when any owned session is waiting for permission, failed to start or exited, or working on a prompt. Priority across sessions SHALL be waiting in `status-waiting`, then failed/exited in `status-failed`, then working in `status-running`. Live idle and starting sessions SHALL have no dot. The dot SHALL follow activity even in other workspaces; killing a session or workspace SHALL remove its contribution. Hidden dots SHALL aggregate with the same priority.
@@ -399,3 +442,26 @@ Each workspace SHALL show a `●` after its name when any owned session is waiti
 - **GIVEN** a working session in another workspace
 - **WHEN** it completes its prompt with no pending permission
 - **THEN** that workspace returns to having no dot
+
+### Requirement: Language versions follow disk changes
+Open file buffers in every workspace SHALL refresh their language versions when a candidate pin file changes, is created, deleted or atomically replaced, or when the watcher requests a rescan. This SHALL work with project watching disabled and outside project roots, including creation of a nearer pin. Replies from a superseded lookup or for a killed buffer SHALL be ignored. The version SHALL use the language segment's existing faces and fitting rules.
+
+#### Scenario: Editing a shared pin
+- **GIVEN** two workspaces have open files using the same pin
+- **WHEN** another program edits or atomically replaces that pin
+- **THEN** both buffers' language segments follow the new version without reopening files
+
+#### Scenario: A nearer pin appears and disappears
+- **GIVEN** an open file inherits a parent pin and project watching is disabled
+- **WHEN** a nearer pin is created and then deleted
+- **THEN** the segment first uses the nearer version and then returns to the parent's version
+
+#### Scenario: Lost events or late replies
+- **GIVEN** a version lookup is in flight
+- **WHEN** a pin change or rescan starts a newer lookup and the older reply arrives last
+- **THEN** the newer version remains displayed
+
+#### Scenario: Inactive and narrow windows
+- **GIVEN** a file with a pinned version
+- **WHEN** its window is inactive or too narrow for its whole mode line
+- **THEN** the version is dimmed with the rest of the inactive mode line or truncated under the existing group fitting rules

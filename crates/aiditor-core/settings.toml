@@ -49,6 +49,13 @@ mode-line = { fg = 0xd4d4d4, bg = 0x3c3c3c }
 mode-line-inactive = { fg = 0xd4d4d4, bg = 0x282828 }
 mode-line-dim = { fg = 0x808080 }
 mode-line-buffer-id = { bold = true }
+mode-line-elixir = { fg = 0xdf91bf }
+mode-line-javascript = { fg = 0xb5cea8 }
+mode-line-typescript = { fg = 0x82aaff }
+mode-line-rust = { fg = 0xed927b }
+mode-line-yaml = { fg = 0xdcdcaa }
+mode-line-markdown = { fg = 0x4ec9b0 }
+mode-line-toml = { fg = 0xd9a066 }
 workspace-bar = { fg = 0xd4d4d4, bg = 0x282828 }
 workspace-current = { fg = 0xffcc00 }
 divider = { bg = 0x3c3c3c }

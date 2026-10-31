@@ -691,7 +691,22 @@ fn file_mode_line(
         _ => None,
     };
     left.extend(disk.map(|disk| segment(disk, FaceName::StatusFailed)));
-    left.push(segment(buffer.language(), FaceName::ModeLineDim));
+    let mut language = buffer.language().to_string();
+    if let Some(version) = &buffer.language_version {
+        language.push(' ');
+        language.push_str(version);
+    }
+    let language_face = match buffer.language() {
+        "Elixir" | "HEEx" => FaceName::ModeLineElixir,
+        "JavaScript" => FaceName::ModeLineJavascript,
+        "TypeScript" | "TSX" => FaceName::ModeLineTypescript,
+        "Rust" => FaceName::ModeLineRust,
+        "YAML" => FaceName::ModeLineYaml,
+        "Markdown" => FaceName::ModeLineMarkdown,
+        "TOML" => FaceName::ModeLineToml,
+        _ => FaceName::ModeLineDim,
+    };
+    left.push(segment(&language, language_face));
     let mut right = Vec::new();
     if let Some(region) = region {
         right.push(segment(&region_size(buffer, region), FaceName::ModeLineDim));
@@ -1234,7 +1249,7 @@ mod tests {
         assert_eq!(line.text(), "src/a.rs │ Rust  1:0 │ All");
         assert_eq!(line.left[0][0], ("src/".into(), FaceName::ModeLineDim));
         assert_eq!(line.left[0][1], ("a.rs".into(), FaceName::ModeLineBufferId));
-        assert_eq!(line.left[1][0].1, FaceName::ModeLineDim);
+        assert_eq!(line.left[1][0].1, FaceName::ModeLineRust);
         assert_eq!(line.right[1][0].1, FaceName::ModeLineDim);
         // Under no root, the whole directory shows.
         h.core.projects[0].project.primary.path = "/elsewhere".into();
@@ -1258,6 +1273,93 @@ mod tests {
         h.open("web/b.rs");
         let text = h.display(5).mode_line.text();
         assert_eq!(text, "web/b.rs │ Rust  1:0 │ All", "a file at its root");
+    }
+
+    #[test]
+    fn every_supported_language_colors_its_name_and_version_in_the_selected_window() {
+        let mut h = Harness::new(&[(
+            ".tool-versions",
+            "rust 1.99.0\nelixir 1.20.2-otp-26\nnodejs 24.0.0",
+        )]);
+        for (file, expected, face) in [
+            ("a.ex", "Elixir 1.20.2-otp-26", FaceName::ModeLineElixir),
+            ("a.heex", "HEEx 1.20.2-otp-26", FaceName::ModeLineElixir),
+            ("a.js", "JavaScript 24.0.0", FaceName::ModeLineJavascript),
+            ("a.ts", "TypeScript 24.0.0", FaceName::ModeLineTypescript),
+            ("a.tsx", "TSX 24.0.0", FaceName::ModeLineTypescript),
+            ("a.rs", "Rust 1.99.0", FaceName::ModeLineRust),
+            ("a.yaml", "YAML", FaceName::ModeLineYaml),
+            ("a.md", "Markdown", FaceName::ModeLineMarkdown),
+            ("a.toml", "TOML", FaceName::ModeLineToml),
+            ("a.txt", "Fundamental", FaceName::ModeLineDim),
+        ] {
+            h.read_reply(file, Some(b""));
+            h.open(file);
+            h.send(crate::Msg::Tick);
+            let line = h.display(5).mode_line;
+            let theme = &h.core.settings().theme;
+            let active = line.draw(200, true, theme);
+            let language = active.left.iter().find(|s| s.text == expected).unwrap();
+            assert_eq!(
+                language.face,
+                theme.face(face).over(theme.face(FaceName::ModeLine)),
+                "{file}"
+            );
+            let inactive = line.draw(200, false, theme);
+            let language = inactive.left.iter().find(|s| s.text == expected).unwrap();
+            assert_eq!(
+                language.face,
+                theme.face(FaceName::ModeLineInactive),
+                "{file}"
+            );
+        }
+        h.send(crate::Msg::SettingsLoaded(Ok(Some(
+            "[themes.default.faces]\nmode-line-rust = {fg = 0x123456}".into(),
+        ))));
+        h.open("a.rs");
+        let line = h.display(5).mode_line;
+        let drawn = line.draw(200, true, &h.core.settings().theme);
+        let language = drawn.left.iter().find(|s| s.text == "Rust 1.99.0").unwrap();
+        assert_eq!(language.face.fg, Some(0x123456));
+    }
+
+    #[test]
+    fn a_pinned_language_uses_the_shared_mode_line_faces_and_fitting() {
+        let mut h = Harness::new(&[("a.rs", ""), (".tool-versions", "rust 1.99.0")]);
+        h.core.projects[0].project.primary.path = h.path("");
+        h.open("a.rs");
+        h.send(crate::Msg::Tick);
+        let line = h.display(5).mode_line;
+        assert_eq!(line.text(), "a.rs │ Rust 1.99.0  1:0 │ All");
+        assert_eq!(
+            line.left[1],
+            [("Rust 1.99.0".into(), FaceName::ModeLineRust)]
+        );
+        let theme = &Settings::default().theme;
+        let inactive = line.draw(80, false, theme);
+        assert_eq!(
+            inactive
+                .left
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "a.rs │ Rust 1.99.0"
+        );
+        assert!(
+            inactive
+                .left
+                .iter()
+                .all(|s| s.face == theme.face(FaceName::ModeLineInactive))
+        );
+        let narrow = line.draw(22, true, theme);
+        assert_eq!(
+            narrow
+                .left
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "a.rs │ Rus…"
+        );
     }
 
     #[test]

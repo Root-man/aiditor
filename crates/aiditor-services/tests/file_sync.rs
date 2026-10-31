@@ -174,6 +174,67 @@ impl Editor {
             self.send(msg);
         }
     }
+
+    fn wait_for_language(&mut self, expected: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let line = self.core.frame().windows[0].display.mode_line.text();
+            if line.contains(&format!("│ {expected} ")) {
+                return;
+            }
+            let msg = self
+                .reports
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|err| panic!("waiting for {expected}: {err}; mode line = {line}"));
+            self.send(msg);
+        }
+    }
+}
+
+#[test]
+fn language_pins_refresh_all_workspaces_without_project_watches() {
+    let _native = native::lock();
+    let mut editor = Editor::new(
+        &[("src/a.rs", ""), (".tool-versions", "rust 1.99.0")],
+        "watch = false",
+    );
+    editor.wait_for_language("Rust 1.99.0");
+    let first = editor.core.workspace();
+    let second = editor
+        .core
+        .new_workspace("second", editor.core.project_id("sync").unwrap());
+    editor.open("src/a.rs");
+    editor.ready(".tool-versions");
+    fs::write(editor.root.join(".tool-versions"), "rust 1.98.0").unwrap();
+    editor.wait_for_language("Rust 1.98.0");
+    editor.core.switch_workspace(first).unwrap();
+    editor.wait_for_language("Rust 1.98.0");
+    fs::write(editor.root.join("pin.tmp"), "rust 1.97.0").unwrap();
+    fs::rename(
+        editor.root.join("pin.tmp"),
+        editor.root.join(".tool-versions"),
+    )
+    .unwrap();
+    editor.wait_for_language("Rust 1.97.0");
+    fs::write(
+        editor.root.join("src/mise.toml"),
+        "[tools]\nrust = '1.96.0'",
+    )
+    .unwrap();
+    editor.wait_for_language("Rust 1.96.0");
+    fs::remove_file(editor.root.join("src/mise.toml")).unwrap();
+    editor.wait_for_language("Rust 1.97.0");
+    fs::remove_file(editor.root.join(".tool-versions")).unwrap();
+    editor.wait_for_language("Rust");
+    fs::write(
+        editor.root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = '1.99.0'",
+    )
+    .unwrap();
+    editor.wait_for_language("Rust 1.99.0");
+    editor.core.switch_workspace(second).unwrap();
+    editor.wait_for_language("Rust 1.99.0");
+    assert_eq!(editor.core.watch_set().roots, []);
 }
 
 #[test]

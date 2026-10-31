@@ -108,6 +108,16 @@ pub fn run(op: FileOp) -> Msg {
                 })
                 .collect(),
         ),
+        FileOp::LanguageVersion {
+            buffer,
+            request,
+            path,
+            language,
+        } => Msg::LanguageVersion {
+            buffer,
+            request,
+            version: language_version(&path, language),
+        },
         FileOp::Index {
             project,
             walk,
@@ -143,6 +153,17 @@ pub fn run(op: FileOp) -> Msg {
             result: crate::projects::write(&path, old.as_deref(), text),
         },
     }
+}
+
+/// The nearest declared version, read without invoking the tool or its version manager.
+pub fn language_version(path: &Path, language: &str) -> Option<String> {
+    aiditor_core::language_version::candidates(path, language)
+        .into_iter()
+        .find_map(|candidate| {
+            let text = fs::read_to_string(&candidate).ok()?;
+            aiditor_core::language_version::parse(&candidate, language, &text)
+        })
+        .filter(|version| !version.is_empty())
 }
 
 /// The repository holding `path`, with the branch `HEAD` names, a detached head's being its short
@@ -447,6 +468,41 @@ fn create_temp(target: &Path, next: &AtomicU64) -> io::Result<(PathBuf, fs::File
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn language_versions_use_the_nearest_relevant_entry_in_filename_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let src = root.join("src");
+        std::fs::create_dir(&src).unwrap();
+        let file = src.join("a.rs");
+        let version = || super::language_version(&file, "Rust");
+        assert_eq!(version(), None);
+        std::fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = '1.99.0'",
+        )
+        .unwrap();
+        assert_eq!(version().as_deref(), Some("1.99.0"));
+        std::fs::write(root.join("mise.toml"), "[tools]\nrust = '1.98.0'").unwrap();
+        assert_eq!(version().as_deref(), Some("1.98.0"));
+        std::fs::write(root.join(".tool-versions"), "rust 1.97.0").unwrap();
+        assert_eq!(version().as_deref(), Some("1.97.0"));
+        std::fs::write(src.join("mise.toml"), "[tools]\nrust = '1.96.0'").unwrap();
+        assert_eq!(version().as_deref(), Some("1.96.0"));
+        std::fs::write(src.join(".tool-versions"), "elixir 1.20.2-otp-26").unwrap();
+        assert_eq!(version().as_deref(), Some("1.96.0"));
+        assert_eq!(
+            super::language_version(&src.join("a.ex"), "Elixir").as_deref(),
+            Some("1.20.2-otp-26")
+        );
+        std::fs::write(src.join("mise.toml"), "[not valid").unwrap();
+        assert_eq!(version().as_deref(), Some("1.97.0"));
+        std::fs::write(src.join(".tool-versions"), "rust system").unwrap();
+        assert_eq!(version(), None);
+        std::fs::remove_file(src.join(".tool-versions")).unwrap();
+        assert_eq!(version().as_deref(), Some("1.97.0"));
+    }
+
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;

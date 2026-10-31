@@ -26,6 +26,7 @@ mod jump;
 pub mod key;
 pub mod keymap;
 mod kill_ring;
+pub mod language_version;
 mod mark;
 mod markdown;
 mod minibuffer;
@@ -149,6 +150,12 @@ pub enum Msg {
     Checked(Vec<(PathBuf, Option<u64>)>),
     /// The file service's answer to `FileOp::Head`: each file's repository, if it is in one.
     Heads(Vec<(PathBuf, Option<Head>)>),
+    /// The file service's declared language version for a buffer's latest lookup.
+    LanguageVersion {
+        buffer: BufferId,
+        request: u64,
+        version: Option<String>,
+    },
     /// A watch registration failure or recovery, shown in the echo area and Messages.
     WatchStatus(String),
     /// The grep service's hits for search `search`, in batches as they are found, or why the
@@ -420,6 +427,13 @@ pub enum FileOp {
     Check(Vec<PathBuf>),
     /// Find each file's repository and send `Msg::Heads`.
     Head(Vec<PathBuf>),
+    /// Read the nearest pin for this language and answer `Msg::LanguageVersion`.
+    LanguageVersion {
+        buffer: BufferId,
+        request: u64,
+        path: PathBuf,
+        language: &'static str,
+    },
     /// Walk every root of `project`, leaving out what its `ignore` patterns match, and send
     /// `Msg::Indexed` with `walk`.
     Index {
@@ -772,6 +786,17 @@ impl Ctx<'_> {
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
             Msg::Heads(files) => self.on_heads(files),
+            Msg::LanguageVersion {
+                buffer,
+                request,
+                version,
+            } => {
+                if let Some(buffer) = self.core.buffers.get_mut(buffer)
+                    && buffer.version_request == request
+                {
+                    buffer.language_version = version;
+                }
+            }
             Msg::WatchStatus(message) => self.core.report(message),
             Msg::Hint => {
                 self.core.hint_timer = None;
@@ -1106,6 +1131,7 @@ impl Core {
         }
         ctx.ensure_watch_indexes();
         ctx.ask_heads();
+        ctx.ask_language_versions();
         ctx.ensure_environments();
         ctx.ask_on_focus();
         let mut effects = ctx.effects;

@@ -27,7 +27,7 @@ impl Core {
     }
 
     /// The roots of every project a workspace is bound to, with its ignore patterns, and every
-    /// file a buffer visits with the git files that show its repository's state.
+    /// file a buffer visits, its language pin candidates and its repository's state files.
     pub fn watch_set(&self) -> WatchSet {
         let mut roots: Vec<(PathBuf, Vec<String>)> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
@@ -44,6 +44,11 @@ impl Core {
                     .iter()
                     .cloned()
                     .chain(b.head.iter().flat_map(Head::watched))
+                    .chain(
+                        b.file
+                            .iter()
+                            .flat_map(|p| crate::language_version::candidates(p, b.language())),
+                    )
             })
             .collect();
         files.sort();
@@ -85,6 +90,23 @@ impl Core {
 }
 
 impl Ctx<'_> {
+    pub(crate) fn ask_language_versions(&mut self) {
+        for (id, buffer) in self.core.buffers.iter_mut() {
+            if !std::mem::replace(&mut buffer.version_asked, true)
+                && let Some(path) = &buffer.file
+                && !crate::language_version::candidates(path, buffer.language()).is_empty()
+            {
+                buffer.version_request += 1;
+                self.effects.push(Effect::File(FileOp::LanguageVersion {
+                    buffer: id,
+                    request: buffer.version_request,
+                    path: path.clone(),
+                    language: buffer.language(),
+                }));
+            }
+        }
+    }
+
     pub(crate) fn ensure_watch_indexes(&mut self) {
         let names: Vec<_> = self
             .core
@@ -188,6 +210,15 @@ impl Ctx<'_> {
         let reported = |path: &PathBuf| paths.iter().any(|(p, _)| p == path);
         let mut git = std::collections::BTreeSet::new();
         for (_, buffer) in self.core.buffers.iter_mut() {
+            let candidates = buffer
+                .file
+                .iter()
+                .flat_map(|p| crate::language_version::candidates(p, buffer.language()));
+            let version_stale = rescan
+                || candidates
+                    .into_iter()
+                    .any(|candidate| paths.iter().any(|(path, _)| candidate.starts_with(path)));
+            buffer.version_asked &= !version_stale;
             let watched: Vec<_> = buffer.head.iter().flat_map(Head::watched).collect();
             let stale = rescan
                 || buffer.file.as_ref().is_some_and(reported)
@@ -257,6 +288,69 @@ mod tests {
 
     fn mode_line(h: &mut Harness) -> String {
         h.display(5).mode_line.text()
+    }
+
+    #[test]
+    fn language_versions_follow_pins_in_every_workspace() {
+        let mut h = Harness::new(&[("src/a.rs", ""), (".tool-versions", "rust 1.99.0")]);
+        h.open("src/a.rs");
+        h.send(Msg::Tick);
+        let first = h.core.workspace();
+        assert!(mode_line(&mut h).contains("Rust 1.99.0"));
+        assert!(h.watched.files.contains(&h.path("src/mise.toml")));
+        h.new_workspace("second", "home");
+        h.open("src/a.rs");
+        h.send(Msg::Tick);
+        h.read_reply("src/mise.toml", Some(b"[tools]\nrust = '1.98.0'"));
+        report(&mut h, &["src/mise.toml"]);
+        assert!(mode_line(&mut h).contains("Rust 1.98.0"));
+        h.core.switch_workspace(first).unwrap();
+        assert!(mode_line(&mut h).contains("Rust 1.98.0"));
+        h.read_reply("src/mise.toml", None);
+        report(&mut h, &["src/mise.toml"]);
+        assert!(mode_line(&mut h).contains("Rust 1.99.0"));
+        h.read_reply(".tool-versions", None);
+        h.send(Msg::FilesChanged {
+            paths: vec![],
+            rescan: true,
+        });
+        assert_eq!(
+            h.display(5).mode_line.left[1],
+            [("Rust".into(), FaceName::ModeLineRust)]
+        );
+        h.keys("C-x k RET");
+        h.keys("C-x t 0");
+        h.keys("C-x k RET");
+        assert_eq!(h.watched.files, Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn a_superseded_version_reply_cannot_replace_the_current_version() {
+        let mut h = Harness::new(&[("a.rs", "")]);
+        h.open("a.rs");
+        h.send(Msg::Tick);
+        let id = h.core.windows.window.buffer();
+        let old = h.core.current().version_request;
+        h.read_reply(".tool-versions", Some(b"rust 1.99.0"));
+        report(&mut h, &[".tool-versions"]);
+        assert!(mode_line(&mut h).contains("Rust 1.99.0"));
+        h.send(Msg::LanguageVersion {
+            buffer: id,
+            request: old,
+            version: Some("1.98.0".into()),
+        });
+        assert!(mode_line(&mut h).contains("Rust 1.99.0"));
+        let request = h.core.current().version_request;
+        h.keys("C-x k RET");
+        h.send(Msg::LanguageVersion {
+            buffer: id,
+            request,
+            version: Some("1.98.0".into()),
+        });
+        assert_eq!(name(&h), "*scratch*<main>");
+        h.open("a.rs");
+        h.send(Msg::Tick);
+        assert!(mode_line(&mut h).contains("Rust 1.99.0"));
     }
 
     #[test]

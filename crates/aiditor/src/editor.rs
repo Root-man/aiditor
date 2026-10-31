@@ -1412,6 +1412,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_file_mode_line_paints_its_declared_language_version(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join(".tool-versions"), "rust 1.99.0").unwrap();
+        let mut core = Core::default();
+        core.open(&path, files::read(&path).unwrap());
+        let effects = core.handle(Instant::now(), Msg::Tick);
+        for effect in effects {
+            if let Effect::File(op) = effect {
+                core.handle(Instant::now(), files::run(op));
+            }
+        }
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            Editor::new(
+                core,
+                Args::default(),
+                aiditor_services::channel(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.focus(&editor.read(cx).focus));
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, _| {
+            e.painted[0].mode_line.text.ends_with("│ Rust 1.99.0")
+        }));
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn a_mode_lines_right_group_ends_at_the_right_inset(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
