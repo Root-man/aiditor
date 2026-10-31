@@ -190,6 +190,16 @@ pub(crate) fn gutter(
     Gutter { width, rows }
 }
 
+/// Puts the `hl-line` background under every row of the cursor's line, below any of its own.
+pub(crate) fn highlight_line(display: &mut WindowDisplay) {
+    let Some(number) = display.cursor.map(|(l, _)| display.lines[l].number) else {
+        return;
+    };
+    for line in display.lines.iter_mut().filter(|l| l.number == number) {
+        (line.decorations).insert(0, Decoration::Background(FaceName::HlLine));
+    }
+}
+
 /// Where each visual row of a line of `len` chars starts, `width` chars to a row. At words a row
 /// breaks after the last whitespace that fits, one more fitting in the column left for the
 /// marker, and at the width when none does.
@@ -730,6 +740,39 @@ mod tests {
         h.core.windows.window.set_active(true);
         prop(&mut h, 1..5, Prop::Face(RED));
         insta::assert_debug_snapshot!(h.display(1).lines);
+    }
+
+    #[test]
+    fn the_region_and_a_match_keep_their_background_on_point_s_line() {
+        let mut h = Harness::new(&[("a.txt", "one two three")]);
+        h.open("a.txt").keys("C-SPC C-f C-f C-f");
+        let hl = Decoration::Background(FaceName::HlLine);
+        let matched = Face {
+            bg: Some(0x123456),
+            ..Face::default()
+        };
+        prop(&mut h, 4..7, Prop::Face(matched));
+        let region = h.core.settings().theme.face(FaceName::Region).bg;
+        let line = h
+            .frame(800., 600.)
+            .windows
+            .remove(0)
+            .display
+            .lines
+            .remove(0);
+        let spans: Vec<_> = (line.spans.iter())
+            .map(|s| (s.text.as_str(), s.face.bg))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("one", region),
+                (" ", None),
+                ("two", matched.bg),
+                (" three", None)
+            ]
+        );
+        assert_eq!(line.decorations, [hl]);
     }
 
     #[test]

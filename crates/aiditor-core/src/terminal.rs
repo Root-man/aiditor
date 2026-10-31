@@ -1199,7 +1199,9 @@ mod tests {
     }
 
     mod in_the_core {
+        use crate::buffer::Decoration;
         use crate::harness::{Harness, mark};
+        use crate::settings::FaceName;
         use crate::{Effect, Msg, TerminalId, TerminalOp};
 
         fn output(h: &mut Harness, id: TerminalId, bytes: &str) {
@@ -1377,6 +1379,8 @@ mod tests {
             let frame = h.frame(800., 300.);
             let display = &frame.windows[0].display;
             assert!(display.terminal.is_none() && display.cursor.is_some());
+            let hl = Decoration::Background(FaceName::HlLine);
+            assert_eq!(display.lines.last().unwrap().decorations, [hl]);
             assert_eq!(display.mode_line, "%% t [copy]  5001:1");
             // Motion, swiper and the mark work; inserting fails; the shell hears nothing.
             h.keys("M-< C-n C-SPC C-e M-w");
@@ -1515,6 +1519,9 @@ mod tests {
             assert_eq!((span.text.as_str(), span.face.fg), ("red", Some(red)));
             h.keys("C-c C-t");
             assert_eq!(h.core.current().properties().count(), 0);
+            let frame = h.frame(800., 300.);
+            let lines = &frame.windows[0].display.lines;
+            assert!(lines.iter().all(|l| l.decorations.is_empty()), "char mode");
         }
 
         #[test]

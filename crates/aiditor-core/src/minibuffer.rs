@@ -41,7 +41,7 @@ pub(crate) struct Minibuffer {
     args: Args,
     prompt: String,
     /// The window to select again on closing.
-    from: WindowId,
+    pub(crate) from: WindowId,
     /// The history entry shown, 1 the newest; 0 is the text typed before moving.
     index: usize,
     /// What was typed before the first history move.
