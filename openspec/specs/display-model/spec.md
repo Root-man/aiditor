@@ -223,34 +223,50 @@ Unless its buffer truncates lines, a window at least 2 columns wide SHALL show e
 - **THEN** the echo area says `Truncate long lines disabled` and the line wraps again
 
 ### Requirement: The frame display names the current project and workspace
-The frame display SHALL carry the name of the current workspace's project and the current workspace's name for the workspace modeline, whatever buffer, window or minibuffer is current.
+The frame display SHALL carry workspace modeline spans for every workspace in creation order, each as `project › workspace`, separated by ` │ ` in `separator`. The current entry SHALL use the bright `workspace-bar` foreground with its workspace name in `workspace-current`; the other entries SHALL use `mode-line-dim`. Project names SHALL be bold and ` › ` SHALL use `separator`. Editing, splitting windows and prompting SHALL retain the workspace overview.
 
 #### Scenario: Names follow the current workspace
-- **WHEN** the current workspace is `main`, bound to project `home`
-- **THEN** the frame display names project `home` and workspace `main`
-- **WHEN** a workspace `w2` for project `other` becomes current and is renamed `w3`
-- **THEN** it names project `other` and workspace `w3`
-- **WHEN** `main` is made current again
-- **THEN** it names `home` and `main` again
+- **GIVEN** workspaces `main` of `home` and then `w2` of `other`
+- **WHEN** `w2` is renamed `w3` and `main` becomes current
+- **THEN** the bar reads `home › main │ other › w3`, with `main` highlighted and the other entry dim
 
 #### Scenario: Names stay while editing and prompting
-- **WHEN** the window is split, another window selected, another buffer shown or the minibuffer opened
-- **THEN** the frame display still names the current project and workspace
+- **GIVEN** a workspace overview
+- **WHEN** the window is split, another buffer shown or the minibuffer opened
+- **THEN** the workspace overview keeps its order and current highlight
 
 ### Requirement: The workspace modeline names are truncated to the frame width
-When `<project> › <workspace>` is wider than the frame's columns, the names SHALL be cut so the line fits: a name that fits in half the room left after ` › ` stays whole and the other takes the rest, otherwise each takes half, the workspace getting the odd column. A cut name ends in `…` and keeps at least that character when it has any room.
+The workspace modeline SHALL reserve five columns for the clock and two columns of separation. If all entries do not fit the remaining width at the workspace font size, it SHALL retain a contiguous range containing the current workspace and as many immediate neighbours as fit, expanding toward the nearest neighbours and preferring the preceding one on ties. Hidden entries SHALL fold into a trailing `+N` entry, separated by ` │ `, with the most urgent hidden activity dot. If the current entry itself is too wide, its names SHALL share the available room after separators and its dot: a name fitting half stays whole and the other takes the rest, otherwise each takes half with the workspace receiving the odd column. A cut name SHALL end in `…`. At widths insufficient for everything, retain the current names before the overflow entry and omit parts that cannot fit; the line SHALL stay within its budget.
+
+#### Scenario: Overflow around a middle workspace
+- **GIVEN** five short workspace entries and room for three entries plus overflow
+- **WHEN** the middle workspace becomes current
+- **THEN** the bar shows it and its immediate neighbours in creation order, then `+2` with the most urgent hidden dot
+
+#### Scenario: A long current name
+- **GIVEN** a current workspace name too long for the modeline
+- **WHEN** the frame narrows
+- **THEN** the current entry remains visible, its names shortened with `…`, and the bar fits the remaining width
+
+#### Scenario: A wider workspace font
+- **GIVEN** a frame with overflowing workspaces
+- **WHEN** the workspace font size increases
+- **THEN** fewer entries fit and the current entry stays visible
 
 #### Scenario: Names that fit stay whole
-- **WHEN** project `aiditor` and workspace `watcher-fix` are shown 40 columns wide
-- **THEN** the names are `aiditor` and `watcher-fix`
+- **GIVEN** project `aiditor` and workspace `watcher-fix`
+- **WHEN** the entry has 40 columns after reserving the clock
+- **THEN** both names stay whole
 
 #### Scenario: A long workspace name is cut
-- **WHEN** project `Legacy crap` and a 60-character workspace name are shown 40 columns wide
-- **THEN** the project stays `Legacy crap` and the workspace is cut to 26 characters ending in `…`
+- **GIVEN** project `Legacy crap` and a 60-character workspace name
+- **WHEN** the current entry has 40 columns after reserving the clock
+- **THEN** the project stays whole and the workspace is cut to 26 characters ending in `…`
 
 #### Scenario: Two long names are both cut
-- **WHEN** two 30-character names are shown 23 columns wide
-- **THEN** each is cut to 10 characters ending in `…`
+- **GIVEN** two 30-character project and workspace names
+- **WHEN** the current entry has 23 columns after reserving the clock
+- **THEN** each name is cut to 10 characters ending in `…`
 
 ### Requirement: Text keeps clear of the window's sides
 A window's text SHALL start 12 px from its left edge where it has no gutter, and SHALL stop at least 12 px before its right edge. The display SHALL give each window the columns that leave, and the frame display SHALL report where the text starts.
@@ -366,3 +382,20 @@ The major mode SHALL be the name of the language the file is highlighted in, and
 #### Scenario: No grammar
 - **WHEN** `a.txt` is shown
 - **THEN** the major mode is `Fundamental`
+
+### Requirement: Workspace dots aggregate agent session activity
+Each workspace SHALL show a `●` after its name when any owned session is waiting for permission, failed to start or exited, or working on a prompt. Priority across sessions SHALL be waiting in `status-waiting`, then failed/exited in `status-failed`, then working in `status-running`. Live idle and starting sessions SHALL have no dot. The dot SHALL follow activity even in other workspaces; killing a session or workspace SHALL remove its contribution. Hidden dots SHALL aggregate with the same priority.
+
+#### Scenario: Mixed activity across sessions
+- **GIVEN** a workspace with working, failed and permission-waiting sessions
+- **WHEN** the bar is built
+- **THEN** its dot uses `status-waiting`
+- **WHEN** the waiting session becomes idle
+- **THEN** its dot uses `status-failed`
+- **WHEN** the failed session is killed
+- **THEN** its dot uses `status-running`
+
+#### Scenario: Idle after completing a prompt
+- **GIVEN** a working session in another workspace
+- **WHEN** it completes its prompt with no pending permission
+- **THEN** that workspace returns to having no dot

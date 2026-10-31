@@ -100,15 +100,17 @@ Emoji SHALL be drawn wherever the frontend draws text. When the colour emoji fon
 - **THEN** the crab is drawn in colour from Apple Color Emoji
 
 ### Requirement: The workspace modeline is drawn above every window
-The frontend SHALL draw one workspace modeline row above the window tree, its background spanning the frame edge to edge while its text keeps the 12 px inset, in the editor's font at the workspace font size and that size's line height plus 4 px, rounded, showing the project name bold, ` › ` in the `separator` face and the workspace name, in the `workspace-bar` face. The windows SHALL be laid out below it, so it never covers buffer text, in windowed and fullscreen frames alike.
+The frontend SHALL draw one workspace modeline row above the window tree, its `workspace-bar` background spanning the frame edge to edge while its text keeps the 12 px inset, in the editor's font at the workspace font size and that size's line height plus 4 px, rounded. It SHALL draw the core's fitted workspace spans with their faces and the local 24-hour `HH:MM` clock at the right inset, leaving at least two columns between groups when space permits. The windows SHALL be laid out below it in windowed and fullscreen frames alike.
 
 #### Scenario: One bar above the splits
-- **WHEN** the frame shows two side-by-side windows in workspace `main` of project `home`
-- **THEN** one row reading `home › main` is drawn above both windows, from the frame's left edge to its right, and the windows start below it
+- **GIVEN** workspace `main` of `home` and workspace `work` of `aiditor`
+- **WHEN** the frame shows two side-by-side windows and has room for both entries
+- **THEN** one row reading `home › main │ aiditor › work` is drawn above both windows, with a right-aligned clock, and the windows start below it
 
 #### Scenario: Design size
-- **WHEN** `workspace_font_size` is 13 and `line_height` is 1.4
-- **THEN** the workspace modeline is 22 px high
+- **GIVEN** `workspace_font_size` is 13 and `line_height` is 1.4
+- **WHEN** the bar is drawn
+- **THEN** it is 22 px high
 
 ### Requirement: Text is inset from the frame's edges
 Mode lines, the echo line, minibuffer rows, key hint rows and the debug stats SHALL draw their text 12 px from the frame's or window's left edge. Their backgrounds and windows SHALL reach the frame's edges, with no gap.
@@ -141,3 +143,16 @@ All text SHALL be shaped with contextual alternates off, with no setting, so `->
 #### Scenario: A ligature font
 - **WHEN** the font is Cascadia Code and a line holds `->`
 - **THEN** `-` and `>` are drawn as two characters
+
+### Requirement: The workspace clock updates on minute boundaries
+The clock SHALL show the local hour and minute at launch, with leading zeroes, and refresh on the next minute boundary even without editor input. Each wakeup SHALL read local wall time and recalculate the next boundary, so late wakeups, day rollover and clock changes do not accumulate drift. Clock reads SHALL occur outside the core.
+
+#### Scenario: A quiet minute rolls over
+- **GIVEN** the clock reads `20:41` at 20:41:59.750
+- **WHEN** the next 250 ms pass without input
+- **THEN** the frontend refreshes to `20:42` and schedules the next minute boundary
+
+#### Scenario: Day rollover
+- **GIVEN** local time is 23:59:59
+- **WHEN** the next minute arrives
+- **THEN** the clock shows `00:00`
