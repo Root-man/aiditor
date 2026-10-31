@@ -101,6 +101,7 @@ WindowDisplay {
                 ),
             ],
         ],
+        path: None,
     },
     terminal: None,
 }

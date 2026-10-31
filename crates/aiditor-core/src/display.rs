@@ -24,6 +24,8 @@ pub type Segment = Vec<(String, FaceName)>;
 pub struct ModeLine {
     pub left: Vec<Segment>,
     pub right: Vec<Segment>,
+    /// Which span of the drawn left group is a path, separators counting, to shorten first.
+    pub path: Option<usize>,
 }
 
 /// A mode line as drawn: its groups with their separators and faces, cut to the window's width.
@@ -72,26 +74,19 @@ impl ModeLine {
         // shortcut: a wide char counts as one column, so a CJK name can run under the right group; measure widths when the display does.
         let (l, r) = (chars(&left), chars(&right));
         let (l_room, r_room) = share_room(l, r, cols.saturating_sub(GROUP_GAP));
-        // A file's directory gives way first, so its name stays.
+        // A directory gives way first, so a file's name or a terminal's last directory stays.
         if l > l_room
-            && let Some(dir) = self.left.first().and_then(directory)
+            && let Some(dir) = self.path
         {
             left[dir].text = shorten(&left[dir].text, l - l_room);
             left.retain(|span| !span.text.is_empty());
+            left.pop_if(|span| span.text == " │ ");
         }
         ModeBar {
             left: cut(left, l_room),
             right: cut(right, r_room),
         }
     }
-}
-
-/// Which piece of a mode line's first segment is a file's directory, the one before its name.
-fn directory(segment: &Segment) -> Option<usize> {
-    let is_dir = |p: &[(String, FaceName)]| {
-        p[0].1 == FaceName::ModeLineDim && p[1].1 == FaceName::ModeLineBufferId
-    };
-    segment.windows(2).position(is_dir)
 }
 
 /// `text` less `excess` chars from its start, keeping its end after a `…`; nothing if that is all.
@@ -582,9 +577,10 @@ pub fn build(
     WindowDisplay {
         lines,
         cursor,
-        mode_line: match &buffer.file {
-            Some(file) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
-            None => mode_line(buffer, l + 1, c),
+        mode_line: match (&buffer.file, buffer.terminal()) {
+            (Some(file), _) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
+            (_, Some(terminal)) => terminal_mode_line(buffer, terminal, l + 1, c),
+            _ => mode_line(buffer, l + 1, c),
         },
         terminal: None,
     }
@@ -606,18 +602,53 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     ]];
     let agent = buffer.agent_mode.as_ref().map(|m| format!("[{m}]"));
     left.extend(agent.map(|mode| segment(&mode, FaceName::ModeLine)));
-    let mut right = Vec::new();
-    let position = segment(&format!("{line}:{col}"), FaceName::ModeLine);
-    // A terminal in char mode has no point to show.
-    match buffer.terminal() {
-        Some(_) if buffer.copy_mode() => {
-            right.push(segment("[copy]", FaceName::StatusInfo));
-            right.push(position);
-        }
-        Some(_) => right.push(segment("[char]", FaceName::StatusWaiting)),
-        None => right.push(position),
+    let right = vec![segment(&format!("{line}:{col}"), FaceName::ModeLine)];
+    ModeLine {
+        left,
+        right,
+        path: None,
     }
-    ModeLine { left, right }
+}
+
+/// The mode line of terminal `buffer`, with point at `line`:`col` in copy mode.
+fn terminal_mode_line(
+    buffer: &Buffer,
+    terminal: &crate::terminal::Terminal,
+    line: usize,
+    col: usize,
+) -> ModeLine {
+    let segment = |text: &str, face| vec![(text.to_string(), face)];
+    let name = buffer.name.replace('\n', "^J");
+    let mut left = vec![segment(&name, FaceName::ModeLineBufferId)];
+    if let Some(cwd) = terminal.cwd() {
+        let home = std::env::home_dir();
+        let dir: PathBuf = match home.and_then(|home| cwd.strip_prefix(home).ok()) {
+            // Through components, so home itself gets no trailing slash.
+            Some(rest) => Path::new("~").join(rest).components().collect(),
+            None => cwd.to_path_buf(),
+        };
+        let dir = dir.to_string_lossy().replace('\n', "^J");
+        left.push(segment(&dir, FaceName::ModeLineDim));
+    }
+    let mut right = Vec::new();
+    if let Some(command) = terminal.running() {
+        // Program output, and one line in the bar.
+        let command = command.replace(char::is_control, " ");
+        right.push(segment(&format!("◉ {command}"), FaceName::StatusRunning));
+    }
+    if let Some(code) = terminal.failed() {
+        right.push(segment(&format!("exit {code}"), FaceName::StatusFailed));
+    }
+    // A terminal in char mode has no point to show.
+    if buffer.copy_mode() {
+        right.push(segment("copy", FaceName::StatusInfo));
+        right.push(segment(&format!("{line}:{col}"), FaceName::ModeLine));
+    } else {
+        right.push(segment("char", FaceName::StatusWaiting));
+    }
+    // After the name and its separator.
+    let path = (left.len() > 1).then_some(2);
+    ModeLine { left, right, path }
 }
 
 /// The mode line of `buffer`, which visits `file`, with the current project's `roots`, the active
@@ -650,6 +681,7 @@ fn file_mode_line(
         None => dir.to_path_buf(),
     };
     let dir = shown(&dir.join(""));
+    let path = (!dir.is_empty()).then_some(name.len());
     if !dir.is_empty() {
         name.push((dir, FaceName::ModeLineDim));
     }
@@ -680,7 +712,7 @@ fn file_mode_line(
     }
     right.push(segment(&format!("{line}:{col}"), FaceName::ModeLine));
     right.push(segment(position, FaceName::ModeLineDim));
-    ModeLine { left, right }
+    ModeLine { left, right, path }
 }
 
 /// `3 lines, 84 chars`, counting lines as Emacs's `count-lines`: a last line the region only
@@ -1152,6 +1184,7 @@ mod tests {
         let line = ModeLine {
             left: segment(left),
             right: segment(right),
+            path: None,
         };
         let bar = line.draw(cols, true, &Settings::default().theme);
         let text = |spans: &[Span]| spans.iter().map(|s| s.text.as_str()).collect();
@@ -1240,6 +1273,7 @@ mod tests {
                 piece("display.rs", FaceName::ModeLineBufferId),
             ]],
             right: vec![vec![piece("1:0", FaceName::ModeLine)]],
+            path: Some(1),
         };
         let left = |cols| {
             let spans = line.draw(cols, true, &Settings::default().theme).left;

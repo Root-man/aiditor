@@ -54,6 +54,7 @@ Some(
                         ),
                     ],
                 ],
+                path: None,
             },
             terminal: None,
         },

@@ -68,7 +68,7 @@ When the mark is set and active, the text between point and mark SHALL be drawn 
 - **THEN** no span has the `region` background
 
 ### Requirement: Each window has a mode line
-The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. For a buffer not visiting a file, the left group SHALL hold whether it is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then any agent mode, and the right group point's line (from 1) and column (from 0). For a buffer visiting a file, the left group SHALL hold `●` when modified and `⊘` when read-only, the file's directory relative to its project root, after that root's name in a project of several roots, and its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then its major mode. The right group SHALL hold the active region's size, `UTF-8 CRLF` when its file uses CRLF line endings, its branch, point's line and column, then its position.
+The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. For a terminal buffer, the left group SHALL hold its name, then the shell's directory, and the right group the running command, the last command's non-zero exit status, the input mode, then point's line and column in copy mode. For any other buffer not visiting a file, the left group SHALL hold whether it is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then any agent mode, and the right group point's line (from 1) and column (from 0). For a buffer visiting a file, the left group SHALL hold `●` when modified and `⊘` when read-only, the file's directory relative to its project root, after that root's name in a project of several roots, and its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then its major mode. The right group SHALL hold the active region's size, `UTF-8 CRLF` when its file uses CRLF line endings, its branch, point's line and column, then its position.
 
 #### Scenario: A modified file
 - **WHEN** `src/a.rs` under a project root has been edited and point is on line 3, column 2
@@ -117,6 +117,10 @@ The display SHALL end each window with a mode line of two groups of segments, a 
 #### Scenario: A buffer with no file
 - **WHEN** `*scratch*` is shown modified with point on line 3, column 2
 - **THEN** the left group is `** *scratch*` and the right group `3:2`
+
+#### Scenario: A terminal
+- **WHEN** terminal `t`'s shell is in `/srv` and a command is running
+- **THEN** the left group's segments are `t` and `/srv`, and the right group's `◉ <command>` and `char`
 
 ### Requirement: The frame display lays windows out by the split tree
 Given the frame's width and height in pixels and the font's cell width, as last reported by the frontend, the frame display SHALL list every window in the split tree's order with its id, its rectangle, whether it is selected, and its window display built for the rectangle's height. A stacked split SHALL give its first part the split's ratio of the space with its text area rounded to whole lines, and a side-by-side split the ratio rounded to whole cells, the second part taking the rest less a 1 px divider between side-by-side parts. The rectangles SHALL tile the frame without overlap.
@@ -271,7 +275,7 @@ The frame display SHALL give each window its mode line's left and right groups a
 - **THEN** its right group reads `1:0 │ All`, with no separator before `1:0`
 
 ### Requirement: Mode line segments use colour only for state
-In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `[char]` in `status-waiting`; `[copy]` in `status-info`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's directory, major mode, region size, position and `[unwatched]` in `mode-line-dim`; a file's name in `mode-line-buffer-id`. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.
+In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `char` in `status-waiting`; `copy` in `status-info`; a running command in `status-running`; `exit <n>` in `status-failed`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's or shell's directory, major mode, region size, position and `[unwatched]` in `mode-line-dim`; a file's name and a terminal's name in `mode-line-buffer-id`. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.
 
 #### Scenario: A modified file in the selected window
 - **WHEN** the selected window's buffer is modified
@@ -342,7 +346,7 @@ While the region is active in a window showing a file, the right group SHALL sta
 - **THEN** the right group has no size
 
 ### Requirement: A file's directory gives way before its name
-When a file's left group is wider than its room, its directory SHALL lose its start to a `…`, and SHALL be left out when that is not enough, before the rest of the group is cut.
+When a file's or terminal's left group is wider than its room, its directory SHALL lose its start to a `…`, and SHALL be left out when that is not enough, before the rest of the group is cut.
 
 #### Scenario: A deep path in a narrow window
 - **WHEN** `crates/core/src/display.rs` has room for all but three of its directory's columns
