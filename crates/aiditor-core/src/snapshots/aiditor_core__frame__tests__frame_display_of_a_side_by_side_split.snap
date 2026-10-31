@@ -103,6 +103,9 @@ FrameDisplay {
                             ),
                         ],
                     ],
+                    path: Some(
+                        0,
+                    ),
                 },
                 terminal: None,
             },
@@ -344,6 +347,9 @@ FrameDisplay {
                             ),
                         ],
                     ],
+                    path: Some(
+                        0,
+                    ),
                 },
                 terminal: None,
             },

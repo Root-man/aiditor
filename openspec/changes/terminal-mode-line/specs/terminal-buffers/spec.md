@@ -28,6 +28,14 @@ A terminal window's mode line SHALL show the terminal's directory as the left gr
 - **WHEN** OSC 7 sets the directory to `/srv`
 - **THEN** the segment is `/srv`
 
+#### Scenario: Too narrow
+- **WHEN** the directory is `/srv/one/two/three` and the left group has room for 14 columns
+- **THEN** it reads `t │ …two/three`, keeping the directory's end
+
+#### Scenario: No room for the directory
+- **WHEN** the left group has room for no part of the directory
+- **THEN** it reads `t`, with no separator
+
 ### Requirement: The terminal follows the running command
 A terminal SHALL take a `C` mark's `cmdline_url=` field, percent-decoded, as its running command. A `C` mark SHALL set the running command, none if the field is absent or malformed, and clear the exit status. A `D` mark SHALL clear the running command and set the exit status to its code when that is not zero, else clear it. An `A` mark SHALL clear the running command. Both SHALL follow marks on either screen and past a full scrollback.
 

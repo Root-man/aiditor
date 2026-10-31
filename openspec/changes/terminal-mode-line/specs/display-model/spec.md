@@ -61,3 +61,14 @@ In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘
 #### Scenario: A modified file in the selected window
 - **WHEN** the selected window's buffer is modified
 - **THEN** `●` has the `status-modified` foreground and the file's name is bold in the `mode-line` foreground
+
+### Requirement: A file's directory gives way before its name
+When a file's or terminal's left group is wider than its room, its directory SHALL lose its start to a `…`, and SHALL be left out when that is not enough, before the rest of the group is cut.
+
+#### Scenario: A deep path in a narrow window
+- **WHEN** `crates/core/src/display.rs` has room for all but three of its directory's columns
+- **THEN** the left group starts `…es/core/src/display.rs`
+
+#### Scenario: No room for the directory
+- **WHEN** the room is under the file name's width plus one
+- **THEN** the directory is gone and the name is cut only if it still doesn't fit

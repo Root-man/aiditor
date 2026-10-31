@@ -20,10 +20,11 @@
 
 **A separate function for the mode line**, as `file_mode_line`: terminals share nothing with the `%%` group any more.
 
+**A long directory loses its start**, as a file's does, so the last directory stays. `ModeLine` now says which span is the path, since `name │ dim` alone can't tell a terminal's directory from a file's major mode.
+
 **Control chars in a command show as spaces.** A multi-line command is one line in the bar, and the text comes from program output, so nothing in it may reach the shaper as a newline.
 
 ## Risks / Trade-offs
 
 - Output is untrusted, so `cat`ing a crafted file can fake a command or an exit in the mode line. It is display only, and marks already share this.
 - Output waits while in copy mode, so `◉` and `exit` hold still there until copy mode ends.
-- A long directory is cut from its end by the mode line's usual rule, unlike a file's directory.

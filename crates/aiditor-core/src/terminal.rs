@@ -1658,6 +1658,20 @@ mod tests {
         }
 
         #[test]
+        fn a_narrow_mode_line_keeps_the_end_of_the_directory() {
+            let (mut h, id) = shown();
+            let line = mode_line(&mut h, id, "\x1b]7;file:///srv/one/two/three\x07");
+            let left = |cols| {
+                let theme = &h.core.settings().theme;
+                let spans = line.draw(cols, true, theme).left;
+                spans.iter().map(|s| s.text.as_str()).collect::<String>()
+            };
+            assert_eq!(left(28), "t │ /srv/one/two/three");
+            assert_eq!(left(20), "t │ …two/three");
+            assert_eq!(left(10), "t", "no separator is left behind");
+        }
+
+        #[test]
         fn output_waits_for_copy_mode_to_end() {
             let (mut h, id, text) = copying();
             h.keys("M-<");
