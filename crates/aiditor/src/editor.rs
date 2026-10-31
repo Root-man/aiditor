@@ -585,6 +585,56 @@ mod tests {
     }
 
     #[gpui::test]
+    fn swiper_input_produces_match_background_runs_and_cleans_up(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "été Foo foo\nfoo bar\n");
+        for close in ["ctrl-g", "enter"] {
+            cx.simulate_keystrokes("alt-< ctrl-s");
+            cx.simulate_input("foo");
+            editor.update_in(cx, |e, window, _| {
+                let line = e.core.frame().windows.remove(0).display.lines.remove(0);
+                let font = e.font(window).0;
+                let theme = &e.core.settings().theme;
+                let runs: Vec<_> = line
+                    .spans
+                    .iter()
+                    .map(|s| text_run(s.text.len(), s.face, false, &font, theme))
+                    .collect();
+                assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), [6, 3, 1, 3]);
+                assert_eq!(
+                    runs[1].background_color,
+                    theme.face(FaceName::MatchCurrent).bg.map(|c| rgb(c).into())
+                );
+                assert_eq!(
+                    runs[3].background_color,
+                    theme.face(FaceName::Match).bg.map(|c| rgb(c).into())
+                );
+                assert_eq!(runs[1].font.weight, gpui::FontWeight::BOLD);
+            });
+            cx.run_until_parked();
+            assert_eq!(painted(&editor, cx, 0).1[0].text.as_ref(), "été Foo foo");
+            cx.simulate_keystrokes("ctrl-n");
+            editor.update(cx, |e, _| {
+                let line = e.core.frame().windows.remove(0).display.lines.remove(1);
+                assert_eq!(line.spans[0].text, "foo");
+                assert_eq!(
+                    line.spans[0].face.bg,
+                    e.core.settings().theme.face(FaceName::MatchCurrent).bg
+                );
+            });
+            cx.simulate_keystrokes(close);
+            editor.update(cx, |e, _| {
+                assert_eq!(e.core.text(), "été Foo foo\nfoo bar\n");
+                for line in e.core.frame().windows.remove(0).display.lines {
+                    for span in line.spans {
+                        assert_eq!(span.face, Face::default());
+                    }
+                }
+            });
+        }
+    }
+
+    #[gpui::test]
     fn the_window_title_follows_the_current_workspace(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "");
@@ -1150,6 +1200,28 @@ mod tests {
                 "docs/a:1:needle docs"
             ]
         );
+        for _ in 0..1000 {
+            let ready = editor.update(cx, |e, _| {
+                let line = e.core.frame().windows.remove(0).display.lines.remove(0);
+                line.spans.first().is_some_and(|span| {
+                    span.text == "needle"
+                        && span.face.bg == e.core.settings().theme.face(FaceName::MatchCurrent).bg
+                })
+            });
+            if ready {
+                break;
+            }
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        editor.update(cx, |e, _| {
+            let line = e.core.frame().windows.remove(0).display.lines.remove(0);
+            assert_eq!(line.spans[0].text, "needle");
+            assert_eq!(
+                line.spans[0].face.bg,
+                e.core.settings().theme.face(FaceName::MatchCurrent).bg
+            );
+        });
         cx.simulate_keystrokes("ctrl-g ctrl-u ctrl-x p g");
         wait(cx, 3);
         assert_eq!(candidates(cx), ["app", "lib", "docs"]);

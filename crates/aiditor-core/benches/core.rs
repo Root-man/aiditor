@@ -60,6 +60,7 @@ fn main() {
         0..120,
         None,
         &[],
+        None,
     );
     assert_eq!(frame.lines.len(), 50);
     assert_eq!(
@@ -79,6 +80,7 @@ fn main() {
                 0..120,
                 None,
                 &[],
+                None,
             ));
         },
         &mut output,

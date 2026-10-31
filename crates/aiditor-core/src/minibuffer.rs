@@ -125,6 +125,24 @@ pub(crate) struct Prompts {
 }
 
 impl Prompts {
+    pub(crate) fn preview_search<'a>(
+        &'a self,
+        grep: &'a crate::grep::ProjectGrep,
+    ) -> Option<(WindowId, &'a dyn display::Search)> {
+        let mb = self.minibuffer.as_ref()?;
+        mb.saved.as_ref()?;
+        mb.previewed.as_ref()?;
+        if mb.reading.is_some() {
+            return None;
+        }
+        let search: &dyn display::Search = match mb.command {
+            "swiper" => self.swiper()?,
+            "project-grep" => grep,
+            _ => return None,
+        };
+        Some((mb.from, search))
+    }
+
     pub(crate) fn swiper(&self) -> Option<&crate::swiper::Search> {
         self.minibuffer
             .as_ref()?
@@ -689,7 +707,7 @@ impl Core {
         let cols = (((width - 2. * TEXT_INSET) / cell_width) as usize)
             .saturating_sub(count.len() + prompt.chars().count());
         let (window, buffers) = (&mut self.windows.window, &mut self.buffers);
-        let display = window_display(window, buffers, &self.settings, 1, 1, cols, &[]);
+        let display = window_display(window, buffers, &self.settings, 1, 1, cols, &[], None);
         Some(display::Minibuffer {
             count,
             prompt,
