@@ -13,20 +13,29 @@ fi
   if [[ -o interactive ]]; then
     typeset -gi _aiditor_ran=0
 
+    # Byte by byte, so the percent-encoding matches what the editor decodes.
+    _aiditor_encode() {
+      builtin emulate -L zsh -o extended_glob
+      builtin local LC_ALL=C
+      builtin print -rn -- ${1//(#m)[^A-Za-z0-9\/._~-]/%${(l:2::0:)$(( [##16] #MATCH ))}}
+    }
+
     _aiditor_precmd() {
       builtin local -i ret=$?
-      builtin emulate -L zsh -o extended_glob
+      builtin emulate -L zsh
       (( _aiditor_ran )) && builtin print -rn -- $'\e]133;D;'$ret$'\a'
       _aiditor_ran=0
-      # Byte by byte, so the percent-encoding matches what the editor decodes.
-      builtin local LC_ALL=C
-      builtin print -rn -- $'\e]133;A\a\e]7;file://'$HOST${PWD//(#m)[^A-Za-z0-9\/._~-]/%${(l:2::0:)$(( [##16] #MATCH ))}}$'\a'
+      builtin print -rn -- $'\e]133;A\a\e]7;file://'$HOST
+      _aiditor_encode $PWD
+      builtin print -rn -- $'\a'
       [[ $PS1 == *$'\e]133;B\a'* ]] || PS1+=$'%{\e]133;B\a%}'
     }
 
     _aiditor_preexec() {
       _aiditor_ran=1
-      builtin print -rn -- $'\e]133;C\a'
+      builtin print -rn -- $'\e]133;C;cmdline_url='
+      _aiditor_encode $1
+      builtin print -rn -- $'\a'
     }
 
     # The user's .zshrc runs after this file, so ordering waits for the first prompt. zsh

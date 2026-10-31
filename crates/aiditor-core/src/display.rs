@@ -582,9 +582,10 @@ pub fn build(
     WindowDisplay {
         lines,
         cursor,
-        mode_line: match &buffer.file {
-            Some(file) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
-            None => mode_line(buffer, l + 1, c),
+        mode_line: match (&buffer.file, buffer.terminal()) {
+            (Some(file), _) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
+            (_, Some(terminal)) => terminal_mode_line(buffer, terminal, l + 1, c),
+            _ => mode_line(buffer, l + 1, c),
         },
         terminal: None,
     }
@@ -606,16 +607,45 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     ]];
     let agent = buffer.agent_mode.as_ref().map(|m| format!("[{m}]"));
     left.extend(agent.map(|mode| segment(&mode, FaceName::ModeLine)));
+    let right = vec![segment(&format!("{line}:{col}"), FaceName::ModeLine)];
+    ModeLine { left, right }
+}
+
+/// The mode line of terminal `buffer`, with point at `line`:`col` in copy mode.
+fn terminal_mode_line(
+    buffer: &Buffer,
+    terminal: &crate::terminal::Terminal,
+    line: usize,
+    col: usize,
+) -> ModeLine {
+    let segment = |text: &str, face| vec![(text.to_string(), face)];
+    let name = buffer.name.replace('\n', "^J");
+    let mut left = vec![segment(&name, FaceName::ModeLineBufferId)];
+    if let Some(cwd) = terminal.cwd() {
+        let home = std::env::home_dir();
+        let dir: PathBuf = match home.and_then(|home| cwd.strip_prefix(home).ok()) {
+            // Through components, so home itself gets no trailing slash.
+            Some(rest) => Path::new("~").join(rest).components().collect(),
+            None => cwd.to_path_buf(),
+        };
+        let dir = dir.to_string_lossy().replace('\n', "^J");
+        left.push(segment(&dir, FaceName::ModeLineDim));
+    }
     let mut right = Vec::new();
-    let position = segment(&format!("{line}:{col}"), FaceName::ModeLine);
+    if let Some(command) = terminal.running() {
+        // Program output, and one line in the bar.
+        let command = command.replace(char::is_control, " ");
+        right.push(segment(&format!("◉ {command}"), FaceName::StatusRunning));
+    }
+    if let Some(code) = terminal.failed() {
+        right.push(segment(&format!("exit {code}"), FaceName::StatusFailed));
+    }
     // A terminal in char mode has no point to show.
-    match buffer.terminal() {
-        Some(_) if buffer.copy_mode() => {
-            right.push(segment("[copy]", FaceName::StatusInfo));
-            right.push(position);
-        }
-        Some(_) => right.push(segment("[char]", FaceName::StatusWaiting)),
-        None => right.push(position),
+    if buffer.copy_mode() {
+        right.push(segment("copy", FaceName::StatusInfo));
+        right.push(segment(&format!("{line}:{col}"), FaceName::ModeLine));
+    } else {
+        right.push(segment("char", FaceName::StatusWaiting));
     }
     ModeLine { left, right }
 }

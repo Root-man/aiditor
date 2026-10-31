@@ -311,6 +311,7 @@ async fn zsh_integration_sends_marks_and_keeps_the_users_files() {
             &format!("cd '{cwd}'"),
             "false",
             "echo Z=$ZDOTDIR $ENVV $RCV S=$seen",
+            "true é;",
         ],
     )
     .await;
@@ -322,15 +323,18 @@ async fn zsh_integration_sends_marks_and_keeps_the_users_files() {
     assert!(!output[..first_a].contains("\x1b]133;"), "{output:?}");
     let prompt = "\x1b]133;A\x07\x1b]7;file://";
     let d = output.find(&format!("\x1b]133;D;1\x07{prompt}")).unwrap();
-    assert!(output[..d].contains("\x1b]133;C\x07"), "{output:?}");
+    let false_ran = "\x1b]133;C;cmdline_url=false\x07";
+    assert!(output[..d].contains(false_ran), "{output:?}");
     let encoded = cwd.replace("a é%b", "a%20%C3%A9%25b");
     assert!(
         output[d..].contains(&format!("{encoded}\x07")),
         "{output:?}"
     );
     // The theme replaces PS1 after the first prompt's hooks; B is on every later prompt.
-    assert_eq!(output.matches("\x1b]133;B\x07").count(), 3, "{output:?}");
-    assert_eq!(output.matches("p> \x1b]133;B\x07").count(), 3, "{output:?}");
+    assert_eq!(output.matches("\x1b]133;B\x07").count(), 4, "{output:?}");
+    assert_eq!(output.matches("p> \x1b]133;B\x07").count(), 4, "{output:?}");
+    let typed = "\x1b]133;C;cmdline_url=true%20%C3%A9%3B\x07";
+    assert!(output.contains(typed), "{output:?}");
 }
 
 #[tokio::test]
@@ -354,7 +358,7 @@ async fn zsh_integration_leaves_an_unset_zdotdir_unset() {
     .await;
     assert!(output.contains("Z=unset r gone"), "{output:?}");
     // With no hook rewriting PS1, the first prompt has every mark before the first command.
-    let c = output.find("\x1b]133;C\x07").unwrap();
+    let c = output.find("\x1b]133;C;").unwrap();
     let first = &output[..c];
     assert!(first.contains("\x1b]133;A\x07\x1b]7;file://"), "{output:?}");
     assert!(first.contains("\x1b]133;B\x07"), "{output:?}");

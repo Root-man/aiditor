@@ -70,7 +70,8 @@ pub enum Mark {
 
 /// What `Scan` stops the batch at, to apply once alacritty has seen the bytes before it.
 enum Signal {
-    Mark(Mark),
+    /// A mark, with the command line a `C` mark gave.
+    Mark(Mark, Option<String>),
     Cwd(PathBuf),
     ClearHistory,
     Reset,
@@ -85,15 +86,23 @@ struct Scan {
 impl Perform for Scan {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         self.signal = match params {
-            [b"133", kind, rest @ ..] => Some(Signal::Mark(match *kind {
-                b"A" => Mark::Prompt,
-                b"B" => Mark::Input,
-                b"C" => Mark::Output,
-                b"D" => Mark::End(
-                    (rest.first()).and_then(|code| std::str::from_utf8(code).ok()?.parse().ok()),
-                ),
-                _ => return,
-            })),
+            [b"133", kind, rest @ ..] => {
+                let mark = match *kind {
+                    b"A" => Mark::Prompt,
+                    b"B" => Mark::Input,
+                    b"C" => Mark::Output,
+                    b"D" => Mark::End(
+                        (rest.first())
+                            .and_then(|code| std::str::from_utf8(code).ok()?.parse().ok()),
+                    ),
+                    _ => return,
+                };
+                let command = (rest.iter())
+                    .find_map(|field| field.strip_prefix(b"cmdline_url="))
+                    .and_then(percent_decoded);
+                let command = command.map(|text| String::from_utf8_lossy(&text).into_owned());
+                Some(Signal::Mark(mark, command))
+            }
             [b"7", url @ ..] => local_dir(&url.join(&b';')).map(Signal::Cwd),
             _ => None,
         };
@@ -124,21 +133,27 @@ fn local_dir(url: &[u8]) -> Option<PathBuf> {
     let local = host.is_empty()
         || host.eq_ignore_ascii_case(b"localhost")
         || host.eq_ignore_ascii_case(&hostname());
-    let mut decoded = Vec::with_capacity(path.len());
+    let decoded = percent_decoded(path)?;
+    (local && !decoded.contains(&0)).then(|| OsString::from_vec(decoded).into())
+}
+
+/// `text` with its `%XX` escapes decoded; `None` if one is malformed.
+fn percent_decoded(text: &[u8]) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(text.len());
     let mut i = 0;
-    while i < path.len() {
-        if path[i] == b'%' {
-            let hex = path
+    while i < text.len() {
+        if text[i] == b'%' {
+            let hex = text
                 .get(i + 1..i + 3)
                 .filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
             decoded.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
             i += 3;
         } else {
-            decoded.push(path[i]);
+            decoded.push(text[i]);
             i += 1;
         }
     }
-    (local && !decoded.contains(&0)).then(|| OsString::from_vec(decoded).into())
+    Some(decoded)
 }
 
 fn hostname() -> Vec<u8> {
@@ -160,6 +175,11 @@ pub struct Terminal {
     /// Each mark with its absolute line (the scrollback's oldest is 0) and column.
     marks: Vec<(usize, usize, Mark)>,
     cwd: Option<PathBuf>,
+    /// The command between its `C` and `D` marks, kept apart from the marks as those stop at a
+    /// full scrollback and on the alternate screen, where a dying program leaves zsh's `D`.
+    running: Option<String>,
+    /// The last command's exit status, when it failed.
+    failed: Option<i32>,
 }
 
 impl Terminal {
@@ -178,6 +198,8 @@ impl Terminal {
             scan: Scan::default(),
             marks: Vec::new(),
             cwd: None,
+            running: None,
+            failed: None,
         }
     }
 
@@ -196,11 +218,21 @@ impl Terminal {
             // stop there; count them (as a ring offset) if marks must outlive 10,000 lines.
             let full = main && self.term.grid().history_size() >= SCROLLBACK;
             match self.scan.signal.take() {
-                Some(Signal::Mark(mark)) if main && !full => {
-                    let grid = self.term.grid();
-                    let point = grid.cursor.point;
-                    let line = grid.history_size() + point.line.0 as usize;
-                    self.marks.push((line, point.column.0, mark));
+                Some(Signal::Mark(mark, command)) => {
+                    match mark {
+                        Mark::Prompt => self.running = None,
+                        Mark::Output => (self.running, self.failed) = (command, None),
+                        Mark::End(code) => {
+                            (self.running, self.failed) = (None, code.filter(|&c| c != 0));
+                        }
+                        Mark::Input => {}
+                    }
+                    if main && !full {
+                        let grid = self.term.grid();
+                        let point = grid.cursor.point;
+                        let line = grid.history_size() + point.line.0 as usize;
+                        self.marks.push((line, point.column.0, mark));
+                    }
                 }
                 Some(Signal::Cwd(path)) => self.cwd = Some(path),
                 Some(Signal::ClearHistory) if main => self.marks.clear(),
@@ -226,6 +258,16 @@ impl Terminal {
     /// The shell's directory, from its last local OSC 7, else the one `vterm` spawned it in.
     pub fn cwd(&self) -> Option<&Path> {
         self.cwd.as_deref()
+    }
+
+    /// The running command as the shell gave it, if it did.
+    pub fn running(&self) -> Option<&str> {
+        self.running.as_deref()
+    }
+
+    /// The last command's exit status, when it failed.
+    pub fn failed(&self) -> Option<i32> {
+        self.failed
     }
 
     /// The grid's rows and columns.
@@ -938,6 +980,46 @@ mod tests {
     }
 
     #[test]
+    fn the_running_command_and_last_failure_follow_the_marks() {
+        let state = |t: &Terminal| (t.running().map(String::from), t.failed());
+        let run = |t: &mut Terminal, end: &str| {
+            t.feed(b"\x1b]133;C;cmdline_url=cargo%20test\x07");
+            assert_eq!(state(t), (Some("cargo test".into()), None));
+            t.feed(end.as_bytes());
+        };
+        let mut t = Terminal::new(3, 20);
+        run(&mut t, "\x1b]133;D;101\x07");
+        assert_eq!(state(&t), (None, Some(101)));
+        t.feed(b"\x1b]133;A\x07\x1b]133;B\x07");
+        assert_eq!(state(&t), (None, Some(101)), "an empty prompt keeps it");
+        run(&mut t, "\x1b]133;D;0\x07");
+        assert_eq!(state(&t), (None, None));
+        run(&mut t, "\x1b]133;A\x07");
+        assert_eq!(state(&t), (None, None), "a shell that sends no end");
+        t.feed(b"\x1b]133;C\x07\x1b]133;C;cmdline_url=%zz\x07");
+        assert_eq!(state(&t), (None, None), "no text to show");
+    }
+
+    #[test]
+    fn the_running_command_outlives_the_marks() {
+        let mut t = Terminal::new(2, 20);
+        t.feed("\x1b]133;C;cmdline_url=vim\x07\x1b[?1049h".as_bytes());
+        t.feed(b"\x1b]133;D;1\x07");
+        assert_eq!(
+            (t.running(), t.failed()),
+            (None, Some(1)),
+            "on the alternate screen"
+        );
+        t.feed(b"\x1b[?1049l");
+        t.feed("\n".repeat(SCROLLBACK + 2).as_bytes());
+        t.feed("\x1b]133;C;cmdline_url=make\x07".as_bytes());
+        assert_eq!(t.marks(), []);
+        assert_eq!(t.running(), Some("make"), "past a full scrollback");
+        t.feed(b"\x1b]133;D;2\x07");
+        assert_eq!((t.running(), t.failed()), (None, Some(2)));
+    }
+
+    #[test]
     fn osc_7_sets_a_local_cwd() {
         let mut t = fed(3, 10, "\x1b]7;file://localhost/tmp/a%20b\x07");
         assert_eq!(t.cwd(), Some(Path::new("/tmp/a b")));
@@ -1381,8 +1463,8 @@ mod tests {
             assert!(display.terminal.is_none() && display.cursor.is_some());
             let hl = Decoration::Background(FaceName::HlLine);
             assert_eq!(display.lines.last().unwrap().decorations, [hl]);
-            assert_eq!(display.mode_line.text(), "%% t  [copy] │ 5001:1");
-            assert_eq!(display.mode_line.left[0][0].1, FaceName::StatusFailed);
+            assert_eq!(display.mode_line.text(), "t  copy │ 5001:1");
+            assert_eq!(display.mode_line.left[0][0].1, FaceName::ModeLineBufferId);
             assert_eq!(display.mode_line.right[0][0].1, FaceName::StatusInfo);
             // Motion, swiper and the mark work; inserting fails; the shell hears nothing.
             h.keys("M-< C-n C-SPC C-e M-w");
@@ -1534,6 +1616,47 @@ mod tests {
             assert_eq!((h.text(), h.point()), ("vim".into(), 3));
         }
 
+        /// The mode line of `t`, shown as `shown()` leaves it, after `bytes`.
+        fn mode_line(h: &mut Harness, id: TerminalId, bytes: &str) -> crate::display::ModeLine {
+            output(h, id, bytes);
+            h.frame(800., 300.).windows.remove(0).display.mode_line
+        }
+
+        #[test]
+        fn the_mode_line_shows_each_state_of_a_terminal() {
+            let (mut h, id) = shown();
+            let run = "\x1b]133;C;cmdline_url=cargo%20test\x07";
+            let line = mode_line(&mut h, id, run);
+            assert_eq!(line.text(), "t  ◉ cargo test │ char");
+            assert_eq!(line.right[0][0].1, FaceName::StatusRunning);
+            assert_eq!(line.right[1][0].1, FaceName::StatusWaiting);
+            let line = mode_line(&mut h, id, "\x1b]133;D;101\x07");
+            assert_eq!(line.text(), "t  exit 101 │ char");
+            assert_eq!(line.right[0][0].1, FaceName::StatusFailed);
+            h.keys("C-c C-t");
+            let line = h.frame(800., 300.).windows.remove(0).display.mode_line;
+            assert_eq!(line.text(), "t  exit 101 │ copy │ 1:0");
+            assert_eq!(line.right[1][0].1, FaceName::StatusInfo);
+            h.keys("C-c C-t");
+            let again = "\x1b]133;C;cmdline_url=a%0Ab\x07";
+            assert_eq!(mode_line(&mut h, id, again).text(), "t  ◉ a b │ char");
+            let line = mode_line(&mut h, id, "\x1b]133;D;0\x07");
+            assert_eq!(line.text(), "t  char", "a success shows nothing");
+        }
+
+        #[test]
+        fn the_mode_line_shows_the_shells_directory() {
+            let (mut h, id) = shown();
+            let line = mode_line(&mut h, id, "\x1b]7;file:///srv\x07");
+            assert_eq!(line.text(), "t │ /srv  char");
+            assert_eq!(line.left[1][0].1, FaceName::ModeLineDim);
+            let home = std::env::home_dir().unwrap();
+            let cd = |path: &std::path::Path| format!("\x1b]7;file://{}\x07", path.display());
+            assert_eq!(mode_line(&mut h, id, &cd(&home)).text(), "t │ ~  char");
+            let line = mode_line(&mut h, id, &cd(&home.join("crates")));
+            assert_eq!(line.text(), "t │ ~/crates  char");
+        }
+
         #[test]
         fn output_waits_for_copy_mode_to_end() {
             let (mut h, id, text) = copying();
@@ -1547,7 +1670,7 @@ mod tests {
             assert_eq!(screen, "$ new\n");
             let frame = h.frame(800., 300.);
             assert!(frame.windows[0].display.terminal.is_some());
-            assert_eq!(frame.windows[0].display.mode_line.text(), "%% t  [char]");
+            assert_eq!(frame.windows[0].display.mode_line.text(), "t  char");
             let mode = &frame.windows[0].display.mode_line.right[0][0];
             assert_eq!(mode.1, FaceName::StatusWaiting);
             assert_eq!(typed(&mut h, "a"), "a", "char mode again");
