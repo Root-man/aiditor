@@ -127,6 +127,11 @@ pub enum Msg {
         request: u64,
         result: Result<Vec<FileEntry>, String>,
     },
+    /// Metadata for visible project files, owned by one prompt session.
+    Annotated {
+        session: u64,
+        entries: Vec<FileEntry>,
+    },
     /// The file service's answer to `FileOp::Open`: the file's bytes and hash, `None` when there
     /// is no file, or why it couldn't be read.
     Opened {
@@ -426,6 +431,11 @@ pub enum FileOp {
     },
     /// List `dir` and send `Msg::Listed` with `request`.
     ListDir { dir: PathBuf, request: u64 },
+    /// Annotate visible file labels and answer with `Msg::Annotated`.
+    Annotate {
+        session: u64,
+        files: Vec<(String, PathBuf)>,
+    },
     /// Read the file and send `Msg::Opened`.
     Open { intent: VisitIntent, path: PathBuf },
     /// Read the file and send `Msg::Previewed`.
@@ -737,6 +747,7 @@ impl Ctx<'_> {
             } => self.core.on_reverted(buffer, tick, result),
             Msg::Diffed { buffer, result } => self.on_diffed(buffer, result),
             Msg::Listed { request, result } => self.on_listed(request, result),
+            Msg::Annotated { session, entries } => self.core.on_annotated(session, entries),
             Msg::Opened {
                 intent,
                 path,

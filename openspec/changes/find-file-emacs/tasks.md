@@ -12,3 +12,9 @@
 ## 3. Integration
 
 - [x] 3.1 Document the new find-file behavior and run formatting, clippy, workspace tests, architecture checks, Python reporting tests and OpenSpec validation.
+
+## 4. Project finder review changes
+
+- [x] 4.1 Extend unselected empty-query behavior to project-find-file and update affected preview/navigation tests and check benchmark drivers; verify pending-index, TAB, typed acceptance and clearing behavior.
+- [x] 4.2 Fetch and cache metadata for visible project matches through the captured root mapping; verify bounded requests, missing files, duplicate roots, reloads, stale sessions and name-only matching with core/service tests.
+- [x] 4.3 Verify project finder metadata layout with GPUI, update docs, and rerun all CI checks.

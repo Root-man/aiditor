@@ -34,7 +34,7 @@ When the filename query after the last slash is empty, find-file SHALL start or 
 - **THEN** its entries are listed with no selection and the count reads `*/N`
 
 ### Requirement: Filesystem entries carry metadata
-Filesystem completion entries SHALL show Unix type and permission bits, decimal human-readable file size (`41 B`, `4.1 kB`, `48.2 MB`) and compact modification age (`5s ago`, `3d10h ago`). Directories SHALL show `—` as their size. Metadata SHALL be collected without blocking editor input as part of the directory listing, and SHALL remain a snapshot until another listing. A metadata failure SHALL retain the entry with `—` for unavailable fields. Symlinked directories SHALL remain navigable with a trailing slash; a symlink's mode SHALL identify it as a link. Future timestamps SHALL display `0s ago`.
+Filesystem completion entries SHALL show Unix type and permission bits, decimal human-readable file size (`41 B`, `4.1 kB`, `48.2 MB`) and compact modification age (`5s ago`, `3d10h ago`). Directories SHALL show `—` as their size. For directory prompts, metadata SHALL be collected without blocking editor input as part of the directory listing, and SHALL remain a snapshot until another listing. A metadata failure SHALL retain the entry with `—` for unavailable fields. Symlinked directories SHALL remain navigable with a trailing slash; a symlink's mode SHALL identify it as a link. Future timestamps SHALL display `0s ago`.
 
 #### Scenario: Listing metadata
 - **GIVEN** a directory with a 41-byte file and a subdirectory

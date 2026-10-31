@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: C-n and C-p move the selection
-`C-n` or `<down>` SHALL select the next candidate and `C-p` or `<up>` the previous one, each repeated by the prefix argument and stopping at the first and last candidate. Any change to the text SHALL select the first match again, except find-file with an empty filename query SHALL clear the selection. In find-file, C-n from no selection SHALL select the first candidate and C-p the last. These keys SHALL keep their global bindings in a minibuffer without candidates.
+`C-n` or `<down>` SHALL select the next candidate and `C-p` or `<up>` the previous one, each repeated by the prefix argument and stopping at the first and last candidate. Any change to the text SHALL select the first match again, except find-file with an empty filename query and project-find-file with an empty query SHALL clear the selection. In either file finder, C-n from no selection SHALL select the first candidate and C-p the last. These keys SHALL keep their global bindings in a minibuffer without candidates.
 
 #### Scenario: Moving down and back
 - **GIVEN** a prompt completes over `apple`, `banana`, `cherry`
@@ -14,7 +14,7 @@
 - **THEN** the first match is selected
 
 ### Requirement: TAB completes and RET picks the selected candidate
-`TAB` SHALL replace the minibuffer's text with the selected candidate, point at its end. `RET` SHALL return the selected candidate as the string, or the text as typed when no candidate is selected. In find-file, TAB with no selection SHALL complete the first match when one exists.
+`TAB` SHALL replace the minibuffer's text with the selected candidate, point at its end. `RET` SHALL return the selected candidate as the string, or the text as typed when no candidate is selected. In either file finder, TAB with no selection SHALL complete the first match when one exists.
 
 #### Scenario: TAB inserts the selection
 - **GIVEN** a prompt completes over `apple`, `banana`, `cherry`
@@ -32,7 +32,7 @@
 - **THEN** the command gets the string `zzz`
 
 ### Requirement: The frame display shows the completion list
-While a completing minibuffer is open the frame display SHALL carry up to 10 candidates, a window of the matches that holds the selected one, and which of them is selected, and a count of the selected match's number and the number of matches, as ` 13/15 ` (`   0/0 ` with no match in ordinary completion, `   */N ` with no selection in find-file). The frontend SHALL draw the count before the prompt and the candidates one per line below the prompt line, the selected one highlighted.
+While a completing minibuffer is open the frame display SHALL carry up to 10 candidates, a window of the matches that holds the selected one, and which of them is selected, and a count of the selected match's number and the number of matches, as ` 13/15 ` (`   0/0 ` with no match in ordinary completion, `   */N ` with no selection in either file finder). The frontend SHALL draw the count before the prompt and the candidates one per line below the prompt line, the selected one highlighted.
 
 #### Scenario: The list in the frame
 - **GIVEN** a prompt completes over 15 candidates
@@ -58,3 +58,8 @@ Filesystem completion SHALL draw directory names in the theme's `directory` face
 - **GIVEN** filesystem entries with long names and metadata
 - **WHEN** the frame narrows
 - **THEN** names are clipped before the dimmed columns and the annotations stay within the row
+
+#### Scenario: Project file annotations
+- **GIVEN** project-find-file displays indexed paths with metadata
+- **WHEN** the list is drawn or narrowed
+- **THEN** it uses the same dimmed right-aligned metadata columns and name clipping as find-file

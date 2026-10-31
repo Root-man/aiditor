@@ -1149,6 +1149,123 @@ mod tests {
         h.core.current().file.clone()
     }
 
+    fn annotation_requests(h: &mut Harness) -> Vec<(u64, Vec<(String, std::path::PathBuf)>)> {
+        std::mem::take(&mut h.effects)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::Effect::File(crate::FileOp::Annotate { session, files }) => {
+                    Some((session, files))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn project_files_start_unselected_and_support_navigation_tab_and_typed_ret() {
+        let mut h = findable(&[]);
+        h.index_reply("a", &["a", "x", "y"], &["a"]);
+        h.index_reply("b", &["x", "y"], &["b"]);
+        h.read_reply("a/a", Some(b"first"));
+        h.keys("C-x p f");
+        let original = shown(&h);
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(
+            (mb.count.trim(), mb.selected, mb.files),
+            ("*/5", None, true)
+        );
+        h.keys("C-n");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "1/5");
+        let buffer = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
+        assert_eq!(
+            h.core.buffers.get(buffer).unwrap().text().to_string(),
+            "first"
+        );
+        h.keys("x C-a C-k");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/5");
+        assert_eq!(shown(&h), original);
+        h.keys("C-p");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "5/5");
+        h.keys("C-g C-x p f TAB");
+        assert_eq!(h.text(), "a/a");
+        h.keys("C-a C-k");
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/5");
+        h.collect_effects = true;
+        h.keys("RET");
+        assert!(h.effects.iter().any(|effect| matches!(effect,
+            crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("a")
+        )));
+    }
+
+    #[test]
+    fn project_metadata_is_requested_only_for_newly_visible_files_and_never_matched() {
+        let mut h = findable(&[]);
+        let names: Vec<_> = (0..30).map(|i| format!("f{i:02}")).collect();
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        h.index_reply("a", &names, &["a"]);
+        h.index_reply("b", &[], &["b"]);
+        h.keys("C-x p f");
+        let requests = annotation_requests(&mut h);
+        assert_eq!(requests.len(), 1);
+        let (session, files) = &requests[0];
+        assert_eq!(files.len(), 10);
+        assert_eq!(files[0], ("a/f00".into(), h.path("a/f00")));
+        assert_eq!(files[9], ("a/f09".into(), h.path("a/f09")));
+        h.send(Msg::Annotated {
+            session: *session,
+            entries: files
+                .iter()
+                .map(|(name, _)| crate::FileEntry {
+                    name: name.clone(),
+                    annotation: "-rw-r--r--      41 B       5s ago".into(),
+                })
+                .collect(),
+        });
+        assert_eq!(h.core.minibuffer().unwrap().annotations.len(), 10);
+        assert!(
+            h.core
+                .minibuffer()
+                .unwrap()
+                .annotations
+                .iter()
+                .all(|n| n.contains("41 B"))
+        );
+        assert_eq!(annotation_requests(&mut h), Vec::new());
+        h.keys("C-u 11 C-n");
+        let next = annotation_requests(&mut h);
+        assert_eq!(next, [(*session, vec![("a/f10".into(), h.path("a/f10"))])]);
+        h.keys("C-p");
+        assert_eq!(annotation_requests(&mut h), Vec::new());
+        h.send(Msg::Insert {
+            text: "41".into(),
+            replace: None,
+        });
+        assert_eq!(candidates(&mut h), Vec::<String>::new());
+        h.keys("C-a C-k");
+        assert_eq!(annotation_requests(&mut h), Vec::new());
+        assert!(h.core.minibuffer().unwrap().annotations[0].contains("41 B"));
+    }
+
+    #[test]
+    fn project_metadata_ignores_replies_from_a_closed_session() {
+        let mut h = findable(&[]);
+        h.keys("C-x p f");
+        let first = annotation_requests(&mut h).remove(0);
+        h.keys("C-g C-x p f");
+        let second = annotation_requests(&mut h).remove(0);
+        let reply = |session, note: &str| Msg::Annotated {
+            session,
+            entries: vec![crate::FileEntry {
+                name: "a/x".into(),
+                annotation: note.into(),
+            }],
+        };
+        h.send(reply(first.0, "stale"));
+        assert_eq!(h.core.minibuffer().unwrap().annotations, ["", ""]);
+        h.send(reply(second.0, "current"));
+        assert_eq!(h.core.minibuffer().unwrap().annotations, ["current", ""]);
+    }
+
     #[test]
     fn project_file_completion_highlights_the_root_and_path() {
         let mut h = findable(&[]);
@@ -1202,8 +1319,12 @@ mod tests {
         let pending = ctx.effects;
         assert_eq!(h.core.message(), Some("Indexing tmp..."));
         assert_eq!(candidates(&mut h), Vec::<String>::new());
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/0");
+        let original = shown(&h);
         h.run(pending);
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
+        assert_eq!(h.core.minibuffer().unwrap().count.trim(), "*/2");
+        assert_eq!(shown(&h), original);
         h.keys("C-g C-x p f");
         assert_eq!(h.core.index_requests(), 1, "no second walk");
         assert_eq!(candidates(&mut h), ["a/x", "b/x"]);
@@ -1246,6 +1367,46 @@ mod tests {
     }
 
     #[test]
+    fn project_metadata_uses_captured_duplicate_root_labels_after_reload() {
+        let (mut h, mut loaded) = saved_finder();
+        loaded.project.roots.push(Root {
+            path: h.path("new/lib"),
+            role: String::new(),
+        });
+        let names: Vec<_> = (0..12).map(|i| format!("f{i:02}")).collect();
+        h.index_reply(
+            "old/lib",
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+            &["old/lib"],
+        );
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded.clone())],
+        });
+        h.keys("C-x p f");
+        let first = annotation_requests(&mut h).remove(0);
+        assert_eq!(first.1.len(), 10);
+        std::mem::swap(&mut loaded.project.primary, &mut loaded.project.roots[0]);
+        h.send(Msg::ProjectsLoaded {
+            dir: None,
+            projects: vec![Ok(loaded)],
+        });
+        h.keys("lib<2>/x");
+        let next = annotation_requests(&mut h).remove(0);
+        assert_eq!(next.1, [("lib<2>/x".into(), h.path("new/lib/x"))]);
+        h.send(Msg::Annotated {
+            session: next.0,
+            entries: vec![crate::FileEntry {
+                name: "lib<2>/x".into(),
+                annotation: "captured".into(),
+            }],
+        });
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["lib<2>/x"]);
+        assert_eq!(mb.annotations, ["captured"]);
+    }
+
+    #[test]
     fn finder_preview_candidates_and_typed_paths_keep_their_original_mapping() {
         for accept in ["RET", "lib/new.rs M-RET"] {
             let (mut h, mut loaded) = saved_finder();
@@ -1257,7 +1418,7 @@ mod tests {
                 projects: vec![Ok(loaded)],
             });
             assert_eq!(candidates(&mut h), ["lib/x"]);
-            h.keys("zzz C-a C-k");
+            h.keys("zzz C-a C-k C-n");
             let origin = h.core.windows.others[&h.core.windows.tree.leaves()[0]].buffer();
             assert_eq!(
                 h.core.buffers.get(origin).unwrap().text().to_string(),
@@ -1266,7 +1427,7 @@ mod tests {
             h.keys(accept);
             let file = if accept == "RET" { "x" } else { "new.rs" };
             assert_eq!(visited(&h), Some(h.path(&format!("old/lib/{file}"))));
-            h.keys("C-x p f RET");
+            h.keys("C-x p f C-n RET");
             assert_eq!(visited(&h), Some(h.path("new/lib/x")));
         }
     }
@@ -1313,7 +1474,7 @@ mod tests {
         assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("old/lib/new.rs"))));
         h.keys("C-x p f");
         assert_eq!(candidates(&mut h), ["lib/x"]);
-        h.keys("RET");
+        h.keys("C-n RET");
         assert!(h.effects.iter().any(|e| matches!(e, crate::Effect::File(crate::FileOp::Open { path, .. }) if *path == h.path("new/lib/x"))));
     }
 
@@ -1355,7 +1516,7 @@ mod tests {
     fn the_finder_previews_files_in_a_hidden_buffer() {
         let mut h = findable(&[]);
         h.read_reply("b/x", Some("bee".as_ref()));
-        h.keys("C-x p f C-n");
+        h.keys("C-x p f C-n C-n");
         assert_eq!(shown(&h), " x");
         let peek = h.core.buffers.visiting(&h.path("b/x")).unwrap();
         let buffer = h.core.buffers.get(peek).unwrap();
@@ -1370,7 +1531,7 @@ mod tests {
         h.keys("C-g");
         assert_eq!(name(&h), "*scratch*<main>");
         assert!(h.core.buffers.visiting(&h.path("b/x")).is_none(), "killed");
-        h.keys("C-x p f C-n RET");
+        h.keys("C-x p f C-n C-n RET");
         assert_eq!(visited(&h), Some(h.path("b/x")));
         assert_eq!((name(&h), h.core.current().read_only), ("x", false));
     }
@@ -1379,14 +1540,14 @@ mod tests {
     fn the_finder_previews_a_visited_file_s_own_buffer() {
         let mut h = findable(&[]);
         h.open("b/x").open("a/x");
-        h.keys("C-x p f C-n");
+        h.keys("C-x p f C-n C-n");
         assert_eq!(shown(&h), "x");
     }
 
     #[test]
     fn accepting_a_prepared_preview_reads_the_file_afresh() {
         let mut h = findable(&[]);
-        h.keys("C-x p f");
+        h.keys("C-x p f C-n");
         let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
         h.read_reply("a/x", Some("changed after preview".as_ref()));
         h.keys("RET");
@@ -1403,7 +1564,7 @@ mod tests {
         let other = h.new_workspace("other", "tmp");
         h.core.switch_workspace(main).unwrap();
         let original = h.core.windows.window.buffer();
-        h.keys("C-x p f");
+        h.keys("C-x p f C-n");
         let peek = h.core.buffers.visiting(&h.path("a/x")).unwrap();
         h.core.switch_workspace(other).unwrap();
         h.core.switch_workspace(main).unwrap();
@@ -1415,7 +1576,7 @@ mod tests {
     #[test]
     fn a_read_no_longer_awaited_is_dropped() {
         let mut h = findable(&[]);
-        h.keys("C-x p f");
+        h.keys("C-x p f C-n");
         let result = Ok(Some(crate::buffer::prepare_preview(b"late").unwrap()));
         h.send(Msg::Previewed {
             request: crate::PreviewRequest {

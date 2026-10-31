@@ -196,6 +196,7 @@ impl Harness {
             && matcher.tick(50).running
         {}
         let mut effects = Vec::new();
+        self.core.poll_completion(self.now, &mut effects);
         self.core.preview(&mut effects);
         self.run(effects);
     }
@@ -318,6 +319,7 @@ impl Harness {
                                     }),
                                 })
                         }
+                        FileOp::Annotate { .. } => None,
                         FileOp::Head(paths) => Some(Msg::Heads(
                             (paths.iter())
                                 .map(|path| (path.clone(), self.heads.get(path).cloned()))

@@ -72,6 +72,24 @@ pub fn run(op: FileOp) -> Msg {
             let result = list(&dir).map_err(|err| format!("{}: {err}", dir.display()));
             Msg::Listed { request, result }
         }
+        FileOp::Annotate { session, files } => {
+            let now = SystemTime::now();
+            let entries = files
+                .into_iter()
+                .map(|(name, path)| {
+                    let metadata = fs::symlink_metadata(&path).ok();
+                    let directory = metadata.as_ref().is_some_and(|m| {
+                        m.is_dir()
+                            || m.is_symlink() && fs::metadata(&path).is_ok_and(|m| m.is_dir())
+                    });
+                    FileEntry {
+                        name,
+                        annotation: file_annotation(metadata.as_ref(), directory, now),
+                    }
+                })
+                .collect();
+            Msg::Annotated { session, entries }
+        }
         FileOp::Open { intent, path } => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
             Msg::Opened {
@@ -990,6 +1008,44 @@ mod tests {
         );
         let err = roots[0].1.clone().unwrap_err();
         assert!(err.starts_with(&format!("{}: ", gone.display())), "{err}");
+    }
+
+    #[test]
+    fn annotates_project_labels_and_preserves_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small");
+        let large = dir.path().join("large");
+        fs::write(&small, [b'x'; 41]).unwrap();
+        fs::write(&large, [b'x'; 4100]).unwrap();
+        fs::set_permissions(&small, Permissions::from_mode(0o640)).unwrap();
+        let Msg::Annotated { session, entries } = run(FileOp::Annotate {
+            session: 7,
+            files: vec![
+                ("lib/file".into(), small),
+                ("lib<2>/file".into(), large),
+                ("lib/gone".into(), dir.path().join("gone")),
+            ],
+        }) else {
+            panic!("not annotated");
+        };
+        assert_eq!(session, 7);
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["lib/file", "lib<2>/file", "lib/gone"]
+        );
+        assert_eq!(
+            entries[0]
+                .annotation
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>(),
+            ["-rw-r-----", "41", "B"]
+        );
+        assert!(entries[1].annotation.contains("4.1 kB"));
+        assert_eq!(
+            entries[2].annotation.split_whitespace().collect::<Vec<_>>(),
+            ["—", "—", "—"]
+        );
     }
 
     #[test]

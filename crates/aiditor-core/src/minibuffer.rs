@@ -59,6 +59,8 @@ pub(crate) struct Minibuffer {
     reading: Option<PreviewRequest>,
     /// The hidden buffer a previewed file was read into, killed on closing.
     peek: Option<BufferId>,
+    /// Project file annotations; an empty value reserves a requested candidate.
+    file_notes: HashMap<String, String>,
 }
 
 /// The selection in a completing minibuffer's list of matches.
@@ -355,6 +357,9 @@ impl Ctx<'_> {
                 filtered,
             };
             completion.select(preselect);
+            if command.name == "project-find-file" {
+                completion.selected = None;
+            }
             completion
         });
         // A fresh buffer per prompt, so undo and markers never carry over.
@@ -384,6 +389,7 @@ impl Ctx<'_> {
             previewed: None,
             reading: None,
             peek: None,
+            file_notes: HashMap::new(),
         });
         core.select(MINIBUFFER);
         match start {
@@ -615,7 +621,7 @@ impl Core {
             );
             completion.pattern = pattern.to_string();
             completion.select(0);
-            if mb.command == "find-file" && pattern.is_empty() {
+            if matches!(mb.command, "find-file" | "project-find-file") && pattern.is_empty() {
                 completion.selected = None;
             }
         }
@@ -624,6 +630,45 @@ impl Core {
         }
         if matcher.tick(10).running {
             self.prompts.repoll = Some(self.timers.start(now, REPOLL, None, Msg::Tick));
+        }
+        if let Some(finder) = &mb.finder {
+            let snapshot = matcher.snapshot();
+            let matched = snapshot.matched_item_count() as usize;
+            let start = completion.top.min(matched);
+            let end = (start + COMPLETION_ROWS).min(matched);
+            let files = snapshot
+                .matched_items(start as u32..end as u32)
+                .filter_map(|item| {
+                    let name = &item.data.0;
+                    if mb.file_notes.contains_key(name) {
+                        return None;
+                    }
+                    mb.file_notes.insert(name.clone(), String::new());
+                    Some((name.clone(), finder.path(name)))
+                })
+                .collect::<Vec<_>>();
+            if !files.is_empty() {
+                effects.push(Effect::File(FileOp::Annotate {
+                    session: mb.session,
+                    files,
+                }));
+            }
+        }
+    }
+
+    pub(crate) fn on_annotated(&mut self, session: u64, entries: Vec<crate::FileEntry>) {
+        let Some(mb) = self
+            .prompts
+            .minibuffer
+            .as_mut()
+            .filter(|mb| mb.session == session)
+        else {
+            return;
+        };
+        for entry in entries {
+            if let Some(note) = mb.file_notes.get_mut(&entry.name) {
+                *note = entry.annotation;
+            }
         }
     }
 
@@ -760,7 +805,12 @@ impl Core {
                         };
                         highlights.push(ranges);
                         candidates.push(item.data.0.clone());
-                        annotations.push(item.data.1.clone());
+                        annotations.push(
+                            mb.file_notes
+                                .get(&item.data.0)
+                                .unwrap_or(&item.data.1)
+                                .clone(),
+                        );
                     }
                     (matched, rows)
                 }
@@ -772,7 +822,7 @@ impl Core {
                 .map(|n| n.min(matched - 1));
             selected = number.map(|n| n - rows.start);
             let number = number.map(|n| (n + 1).to_string()).unwrap_or_else(|| {
-                if mb.command == "find-file" {
+                if matches!(mb.command, "find-file" | "project-find-file") {
                     "*".into()
                 } else {
                     "0".into()
@@ -796,7 +846,7 @@ impl Core {
             prompt,
             status,
             display,
-            files: mb.completion.as_ref().is_some_and(|c| c.dir.is_some()),
+            files: mb.finder.is_some() || mb.completion.as_ref().is_some_and(|c| c.dir.is_some()),
             candidates,
             highlights,
             annotations,
