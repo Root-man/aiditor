@@ -110,7 +110,7 @@ FrameDisplay {
             mode_line: ModeBar {
                 left: [
                     Span {
-                        text: "/aiditor-test/",
+                        text: "…t/",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -140,7 +140,22 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  …",
+                        text: " │ ",
+                        face: Face {
+                            fg: Some(
+                                8421504,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "Fundamental",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -172,7 +187,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -202,7 +217,22 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │…",
+                        text: " │ ",
+                        face: Face {
+                            fg: Some(
+                                8421504,
+                            ),
+                            bg: Some(
+                                3947580,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "All",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -321,7 +351,7 @@ FrameDisplay {
             mode_line: ModeBar {
                 left: [
                     Span {
-                        text: "/aiditor-test/",
+                        text: "…t/",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -351,7 +381,22 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  …",
+                        text: " │ ",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                2631720,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "Fundamental",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -383,7 +428,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -413,7 +458,22 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  …",
+                        text: " │ ",
+                        face: Face {
+                            fg: Some(
+                                13948116,
+                            ),
+                            bg: Some(
+                                2631720,
+                            ),
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                        },
+                        fold: false,
+                    },
+                    Span {
+                        text: "A…",
                         face: Face {
                             fg: Some(
                                 13948116,

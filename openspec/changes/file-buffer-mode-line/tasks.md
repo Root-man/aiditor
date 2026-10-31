@@ -28,6 +28,12 @@
 - [x] 5.2 Watch `.git/index`, re-ask on it and on the file, verified by harness tests
 - [x] 5.3 Show ` ±` in the branch segment, verified by a display test, and update `docs/editor.md`
 
+## 6. Review: path and spacing
+
+- [x] 6.1 Shorten a file's directory before its name in a narrow window, verified by a display test
+- [x] 6.2 Show the root's name in a project of several roots, verified by a display test
+- [x] 6.3 Reduce the separator to ` │ `, verified by frame tests and snapshots, and update `docs/editor.md`
+
 ## Workflow follow-up
 
 - Archive after review.

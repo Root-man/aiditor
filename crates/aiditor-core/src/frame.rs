@@ -496,15 +496,15 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "x\r\n"), ("b.txt", "x\n")]);
         h.open("b.txt");
         let (left, right, _) = bar(&mut h, 800., 0);
-        assert_eq!(left, "/aiditor-test/b.txt  │  Fundamental");
-        assert_eq!(right, "[unwatched]  │  1:0  │  All");
+        assert_eq!(left, "/aiditor-test/b.txt │ Fundamental");
+        assert_eq!(right, "[unwatched] │ 1:0 │ All");
         h.open("a.txt");
         let (_, right, line) = bar(&mut h, 800., 0);
-        assert_eq!(right, "[unwatched]  │  UTF-8 CRLF  │  1:0  │  All");
+        assert_eq!(right, "[unwatched] │ UTF-8 CRLF │ 1:0 │ All");
         let theme = &h.core.settings().theme;
         let over = |name| theme.face(name).over(theme.face(FaceName::ModeLine));
         assert_eq!(line.right[0].face, over(FaceName::ModeLineDim));
-        assert_eq!(line.right[1].text, "  │  ");
+        assert_eq!(line.right[1].text, " │ ");
         assert_eq!(line.right[1].face, over(FaceName::Separator));
         assert_eq!(line.right[2].face, over(FaceName::StatusWaiting));
     }
@@ -545,7 +545,7 @@ mod tests {
         let (left, right, _) = bar(&mut h, 200., 0);
         assert_eq!(
             (left.as_str(), right.as_str()),
-            ("/aiditor-…", "[unwatche…")
+            ("a-very-lo…", "[unwatche…")
         );
         // Shorter than a gap, nothing is left.
         let (left, right, _) = bar(&mut h, 24., 0);

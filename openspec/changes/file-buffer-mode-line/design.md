@@ -34,6 +34,12 @@
 
 **`UTF-8 CRLF`, not `CRLF`.** Frame 9 draws the pair as one segment, and #155 adds encodings to it. A BOM stays out: it is still UTF-8.
 
+**Directory shortened in `draw`, added in review.** `draw` has the room, so it finds the dim piece before the `mode-line-buffer-id` one and takes the excess from its start, keeping the directories nearest the file. Alternative: a flag on `ModeLine` naming the piece, which adds a field for what the faces already say.
+
+**Root name from `root_names`, added in review.** The same name, `<2>` included, as `C-x p f` lists, shown only with several roots.
+
+**` │ ` for the separator, added in review.** Frames draw two spaces each side; used, that left too much empty bar. It applies to every buffer's mode line.
+
 ## Risks / Trade-offs
 
 - [A repository created after the visit isn't seen] → until a rescan or the next visit; `shortcut:` comment. Watching every ancestor for `.git` costs more than this is worth.

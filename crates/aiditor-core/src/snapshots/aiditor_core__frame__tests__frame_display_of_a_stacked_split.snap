@@ -140,7 +140,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -187,7 +187,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -217,7 +217,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 8421504,
@@ -381,7 +381,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -428,7 +428,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 13948116,
@@ -458,7 +458,7 @@ FrameDisplay {
                         fold: false,
                     },
                     Span {
-                        text: "  │  ",
+                        text: " │ ",
                         face: Face {
                             fg: Some(
                                 13948116,

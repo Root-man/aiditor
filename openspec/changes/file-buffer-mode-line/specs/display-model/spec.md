@@ -44,6 +44,17 @@ While the region is active in a window showing a file, the right group SHALL sta
 - **WHEN** the mark is set but the region is not active
 - **THEN** the right group has no size
 
+### Requirement: A file's directory gives way before its name
+When a file's left group is wider than its room, its directory SHALL lose its start to a `…`, and SHALL be left out when that is not enough, before the rest of the group is cut.
+
+#### Scenario: A deep path in a narrow window
+- **WHEN** `crates/core/src/display.rs` has room for all but three of its directory's columns
+- **THEN** the left group starts `…es/core/src/display.rs`
+
+#### Scenario: No room for the directory
+- **WHEN** the room is under the file name's width plus one
+- **THEN** the directory is gone and the name is cut only if it still doesn't fit
+
 ### Requirement: The major mode names the file's language
 The major mode SHALL be the name of the language the file is highlighted in, and `Fundamental` for a file with no grammar.
 
@@ -58,7 +69,7 @@ The major mode SHALL be the name of the language the file is highlighted in, and
 ## MODIFIED Requirements
 
 ### Requirement: Each window has a mode line
-The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. For a buffer not visiting a file, the left group SHALL hold whether it is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then any agent mode, and the right group point's line (from 1) and column (from 0). For a buffer visiting a file, the left group SHALL hold `●` when modified and `⊘` when read-only, the file's directory relative to its project root and its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then its major mode. The right group SHALL hold the active region's size, `UTF-8 CRLF` when its file uses CRLF line endings, its branch, point's line and column, then its position.
+The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. For a buffer not visiting a file, the left group SHALL hold whether it is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then any agent mode, and the right group point's line (from 1) and column (from 0). For a buffer visiting a file, the left group SHALL hold `●` when modified and `⊘` when read-only, the file's directory relative to its project root, after that root's name in a project of several roots, and its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then its major mode. The right group SHALL hold the active region's size, `UTF-8 CRLF` when its file uses CRLF line endings, its branch, point's line and column, then its position.
 
 #### Scenario: A modified file
 - **WHEN** `src/a.rs` under a project root has been edited and point is on line 3, column 2
@@ -67,6 +78,10 @@ The display SHALL end each window with a mode line of two groups of segments, a 
 #### Scenario: A clean file at its root
 - **WHEN** an unmodified `a.txt` at a project root is shown
 - **THEN** the left group's segments are `a.txt` and `Fundamental`
+
+#### Scenario: A file in a project of several roots
+- **WHEN** `src/a.rs` under a root named `api` is shown in a project with two roots
+- **THEN** the left group's first segment is `api/src/a.rs`
 
 #### Scenario: A file outside the project's roots
 - **WHEN** `/etc/hosts` is shown in a project with no root above it
@@ -105,15 +120,15 @@ The display SHALL end each window with a mode line of two groups of segments, a 
 - **THEN** the left group is `** *scratch*` and the right group `3:2`
 
 ### Requirement: The frame display joins segments with separators
-The frame display SHALL give each window its mode line's left and right groups as styled text, with `  │  ` between the segments of a group and none around a group or where a segment doesn't apply.
+The frame display SHALL give each window its mode line's left and right groups as styled text, with ` │ ` between the segments of a group and none around a group or where a segment doesn't apply.
 
 #### Scenario: Two segments
 - **WHEN** a selected window shows a CRLF file
-- **THEN** its right group reads `UTF-8 CRLF  │  1:0  │  All`, the `│` in the `separator` face
+- **THEN** its right group reads `UTF-8 CRLF │ 1:0 │ All`, the `│` in the `separator` face
 
 #### Scenario: A segment that doesn't apply
 - **WHEN** a selected window shows an LF file
-- **THEN** its right group reads `1:0  │  All`, with no separator before `1:0`
+- **THEN** its right group reads `1:0 │ All`, with no separator before `1:0`
 
 ### Requirement: Mode line segments use colour only for state
 In the selected window, `**` and `●` SHALL be in `status-modified`; `%%`, `⊘`, `[deleted]` and `[conflict]` in `status-failed`; `UTF-8 CRLF` and `[char]` in `status-waiting`; `[copy]` in `status-info`; the branch in `vcs-branch` and its ` ±` in `status-modified`; a file's directory, major mode, region size, position and `[unwatched]` in `mode-line-dim`; a file's name in `mode-line-buffer-id`. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.

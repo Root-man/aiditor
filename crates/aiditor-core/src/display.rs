@@ -1,6 +1,7 @@
 //! The display model: what the core shows for a window, for the frontend to draw.
 
 use crate::buffer::{Buffer, Decoration, Face, Prop};
+use crate::project_commands::root_names;
 use crate::settings::{FaceName, LineNumbers, Settings, Theme};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -61,20 +62,46 @@ impl ModeLine {
             let mut spans = Vec::new();
             for (i, segment) in segments.iter().enumerate() {
                 if i > 0 {
-                    spans.push(span("  │  ", FaceName::Separator));
+                    spans.push(span(" │ ", FaceName::Separator));
                 }
                 spans.extend(segment.iter().map(|(text, name)| span(text, *name)));
             }
             spans
         };
-        let (left, right) = (group(&self.left), group(&self.right));
+        let (mut left, right) = (group(&self.left), group(&self.right));
         // shortcut: a wide char counts as one column, so a CJK name can run under the right group; measure widths when the display does.
         let (l, r) = (chars(&left), chars(&right));
         let (l_room, r_room) = share_room(l, r, cols.saturating_sub(GROUP_GAP));
+        // A file's directory gives way first, so its name stays.
+        if l > l_room
+            && let Some(dir) = self.left.first().and_then(directory)
+        {
+            left[dir].text = shorten(&left[dir].text, l - l_room);
+            left.retain(|span| !span.text.is_empty());
+        }
         ModeBar {
             left: cut(left, l_room),
             right: cut(right, r_room),
         }
+    }
+}
+
+/// Which piece of a mode line's first segment is a file's directory, the one before its name.
+fn directory(segment: &Segment) -> Option<usize> {
+    let is_dir = |p: &[(String, FaceName)]| {
+        p[0].1 == FaceName::ModeLineDim && p[1].1 == FaceName::ModeLineBufferId
+    };
+    segment.windows(2).position(is_dir)
+}
+
+/// `text` less `excess` chars from its start, keeping its end after a `…`; nothing if that is all.
+fn shorten(text: &str, excess: usize) -> String {
+    let len = text.chars().count();
+    match len > excess {
+        true => (['…'].into_iter())
+            .chain(text.chars().skip(excess + 1))
+            .collect(),
+        false => String::new(),
     }
 }
 
@@ -613,7 +640,15 @@ fn file_mode_line(
     }
     let shown = |path: &Path| path.to_string_lossy().replace('\n', "^J");
     let dir = file.parent().unwrap_or(Path::new(""));
-    let dir = (roots.iter().find_map(|root| dir.strip_prefix(root).ok())).unwrap_or(dir);
+    let names = root_names(roots.iter().map(PathBuf::as_path));
+    let found = (roots.iter().zip(&names))
+        .find_map(|(root, name)| Some((dir.strip_prefix(root).ok()?, name)));
+    let dir = match found {
+        // Which root a file is in matters only when there are several.
+        Some((relative, name)) if roots.len() > 1 => Path::new(name).join(relative),
+        Some((relative, _)) => relative.to_path_buf(),
+        None => dir.to_path_buf(),
+    };
     let dir = shown(&dir.join(""));
     if !dir.is_empty() {
         name.push((dir, FaceName::ModeLineDim));
@@ -1175,6 +1210,46 @@ mod tests {
         h.core.projects[0].project.primary.path = "/elsewhere".into();
         let text = h.display(5).mode_line.text();
         assert_eq!(text, "/aiditor-test/src/a.rs │ Rust  1:0 │ All");
+    }
+
+    #[test]
+    fn a_file_in_a_project_of_several_roots_shows_its_root() {
+        let mut h = Harness::new(&[("api/src/a.rs", ""), ("web/b.rs", "")]);
+        let root = |path: &std::path::Path| crate::project::Root {
+            path: path.to_path_buf(),
+            role: String::new(),
+        };
+        let project = &mut h.core.projects[0].project;
+        project.primary.path = "/aiditor-test/api".into();
+        project.roots = vec![root("/aiditor-test/web".as_ref())];
+        h.open("api/src/a.rs");
+        let text = h.display(5).mode_line.text();
+        assert_eq!(text, "api/src/a.rs │ Rust  1:0 │ All", "the primary too");
+        h.open("web/b.rs");
+        let text = h.display(5).mode_line.text();
+        assert_eq!(text, "web/b.rs │ Rust  1:0 │ All", "a file at its root");
+    }
+
+    #[test]
+    fn a_narrow_mode_line_shortens_the_directory_before_the_name() {
+        let piece = |text: &str, face| (text.to_string(), face);
+        let line = ModeLine {
+            left: vec![vec![
+                piece("● ", FaceName::StatusModified),
+                piece("crates/core/src/", FaceName::ModeLineDim),
+                piece("display.rs", FaceName::ModeLineBufferId),
+            ]],
+            right: vec![vec![piece("1:0", FaceName::ModeLine)]],
+        };
+        let left = |cols| {
+            let spans = line.draw(cols, true, &Settings::default().theme).left;
+            spans.iter().map(|s| s.text.as_str()).collect::<String>()
+        };
+        assert_eq!(left(33), "● crates/core/src/display.rs");
+        assert_eq!(left(30), "● …es/core/src/display.rs");
+        assert_eq!(left(18), "● …display.rs");
+        assert_eq!(left(17), "● display.rs");
+        assert_eq!(left(16), "● display.…", "then the name is cut");
     }
 
     #[test]
