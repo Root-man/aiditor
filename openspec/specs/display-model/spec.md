@@ -68,27 +68,27 @@ When the mark is set and active, the text between point and mark SHALL be drawn 
 - **THEN** no span has the `region` background
 
 ### Requirement: Each window has a mode line
-The display SHALL end each window with a mode line showing whether the buffer is read-only (`%%`), modified (`**`) or neither (`--`), its name followed by ` (DOS)` when its file uses CRLF line endings, ` [deleted]` when its file was deleted on disk and ` [conflict]` when its unsaved edits conflict with a change to its file, and point's line (from 1) and column (from 0).
+The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. The left group SHALL hold whether the buffer is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then any agent mode. The right group SHALL hold `(DOS)` when its file uses CRLF line endings, then point's line (from 1) and column (from 0).
 
 #### Scenario: A modified file
 - **WHEN** `a.txt` has been edited and point is on line 3, column 2
-- **THEN** the mode line reads `** a.txt  3:2`
+- **THEN** the left group is `** a.txt` and the right group `3:2`
 
 #### Scenario: A CRLF file
 - **WHEN** an unmodified CRLF file `a.txt` is shown with point at the start
-- **THEN** the mode line reads `-- a.txt (DOS)  1:0`
+- **THEN** the left group is `-- a.txt` and the right group's segments are `(DOS)` and `1:0`
 
 #### Scenario: A read-only buffer
 - **WHEN** a refused binary file `a.bin` is shown
-- **THEN** the mode line reads `%% a.bin  1:0`
+- **THEN** the left group is `%% a.bin` and the right group `1:0`
 
 #### Scenario: A deleted file
 - **WHEN** the file of an unmodified buffer `a.txt` is deleted on disk, with point at the start
-- **THEN** the mode line reads `-- a.txt [deleted]  1:0`
+- **THEN** the left group's segments are `-- a.txt` and `[deleted]`, and the right group is `1:0`
 
 #### Scenario: A conflicted file
 - **WHEN** `x` is typed at the start of `a.txt` and another program then rewrites the file
-- **THEN** the mode line reads `** a.txt [conflict]  1:1`
+- **THEN** the left group's segments are `** a.txt` and `[conflict]`, and the right group is `1:1`
 
 ### Requirement: The frame display lays windows out by the split tree
 Given the frame's width and height in pixels and the font's cell width, as last reported by the frontend, the frame display SHALL list every window in the split tree's order with its id, its rectangle, whether it is selected, and its window display built for the rectangle's height. A stacked split SHALL give its first part the split's ratio of the space with its text area rounded to whole lines, and a side-by-side split the ratio rounded to whole cells, the second part taking the rest less a 1 px divider between side-by-side parts. The rectangles SHALL tile the frame without overlap.
@@ -230,3 +230,43 @@ A window's text SHALL start 12 px from its left edge where it has no gutter, and
 #### Scenario: The minibuffer
 - **WHEN** a prompt is open in a frame 100 px wide with 8 px cells
 - **THEN** the minibuffer's line scrolls in 9 columns less the prompt
+
+### Requirement: The frame display joins segments with separators
+The frame display SHALL give each window its mode line's left and right groups as styled text, with `  │  ` between the segments of a group and none around a group or where a segment doesn't apply.
+
+#### Scenario: Two segments
+- **WHEN** a selected window shows a CRLF file
+- **THEN** its right group reads `(DOS)  │  1:0`, the `│` in the `separator` face
+
+#### Scenario: A segment that doesn't apply
+- **WHEN** a selected window shows an LF file
+- **THEN** its right group reads `1:0`, with no separator
+
+### Requirement: Mode line segments use colour only for state
+In the selected window, `**` SHALL be in `status-modified`; `%%`, `[deleted]` and `[conflict]` in `status-failed`; `(DOS)` and `[char]` in `status-waiting`; `[copy]` in `status-info`; `[unwatched]` in `mode-line-dim`. Other text SHALL be in the `mode-line` face, and every segment's face SHALL sit over it.
+
+#### Scenario: A modified file in the selected window
+- **WHEN** the selected window's buffer is modified
+- **THEN** `**` has the `status-modified` foreground and the name the `mode-line` foreground
+
+### Requirement: An inactive mode line drops colour
+A window that isn't selected SHALL show the same groups, segments and separators as when selected, all of it in the `mode-line-inactive` face, with no colour or bold from any segment.
+
+#### Scenario: A modified CRLF file in an inactive window
+- **WHEN** a modified CRLF file is shown in a window that isn't selected
+- **THEN** the mode line has the same text as in the selected window and every span has the `mode-line-inactive` face
+
+### Requirement: A wide mode line is cut to its window
+When both groups and a two-column gap don't fit between the window's 12 px insets, a group that fits in half the room SHALL stay whole and the other SHALL take the rest, else each SHALL take half, the right group getting any odd column. A cut group SHALL end in `…`, and a group with no room SHALL show nothing.
+
+#### Scenario: A long name
+- **WHEN** a buffer with a long name is shown in a narrow window with its right group `1:0`
+- **THEN** the right group stays `1:0` and the left group is cut to the rest, ending in `…`
+
+#### Scenario: Both groups too long
+- **WHEN** both groups are wider than half the room
+- **THEN** each is cut to half of it, ending in `…`
+
+#### Scenario: It fits
+- **WHEN** both groups and the gap fit
+- **THEN** neither group is cut

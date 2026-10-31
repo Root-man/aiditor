@@ -405,12 +405,15 @@ mod tests {
         let first = walks(&mut h).pop().unwrap();
         h.send(answer(&first, &["old"], 2));
         let accepted = h.core.watch_set();
-        let line = h.frame(800., 600.).windows[0].display.mode_line.clone();
+        let line = h.frame(800., 600.).windows[0].display.mode_line.text();
         request(&mut h, project, false);
         let active = walks(&mut h).pop().unwrap();
         request(&mut h, project, true);
         assert_eq!(h.core.watch_set(), accepted);
-        assert_eq!(h.frame(800., 600.).windows[0].display.mode_line, line);
+        assert_eq!(
+            h.frame(800., 600.).windows[0].display.mode_line.text(),
+            line
+        );
         assert_eq!(
             h.core.index[&project].counts(&(first.2.clone(), first.3.clone())),
             Some((1, 2))
@@ -451,7 +454,8 @@ mod tests {
             h.frame(800., 600.).windows[0]
                 .display
                 .mode_line
-                .ends_with("[unwatched]")
+                .text()
+                .contains("[unwatched]")
         );
         h.send(Msg::Indexed {
             project,

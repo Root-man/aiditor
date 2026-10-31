@@ -17,6 +17,27 @@ WindowDisplay {
             0,
         ),
     ),
-    mode_line: "-- *scratch*<main>  1:0",
+    mode_line: ModeLine {
+        left: [
+            [
+                (
+                    "--",
+                    ModeLine,
+                ),
+                (
+                    " *scratch*<main>",
+                    ModeLine,
+                ),
+            ],
+        ],
+        right: [
+            [
+                (
+                    "1:0",
+                    ModeLine,
+                ),
+            ],
+        ],
+    },
     terminal: None,
 }

@@ -260,6 +260,7 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
         editor.core.frame().windows[0]
             .display
             .mode_line
+            .text()
             .contains("[conflict]")
     );
     editor.keys("C-x C-s");
@@ -324,6 +325,7 @@ fn visited_files_still_follow_the_disk_without_project_root_watches() {
             editor.core.frame().windows[0]
                 .display
                 .mode_line
+                .text()
                 .contains("[unwatched]")
         );
         fs::write(editor.root.join("a.tmp"), "external\n").unwrap();

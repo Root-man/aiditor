@@ -2,7 +2,7 @@
 
 use crate::buffer::{BufferId, Buffers};
 use crate::display::TEXT_INSET;
-use crate::settings::{LineNumbers, Settings};
+use crate::settings::{FaceName, LineNumbers, Settings};
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx, display};
 
@@ -151,14 +151,18 @@ impl Core {
                         .get(window.buffer())
                         .is_some_and(|buffer| buffer.file.is_some())
                 {
-                    display.mode_line.push_str(" [unwatched]");
+                    let unwatched = ("[unwatched]".to_string(), FaceName::ModeLineDim);
+                    display.mode_line.right.insert(0, vec![unwatched]);
                 }
+                let bar_cols = ((rect.width - 2. * TEXT_INSET) / cell_width) as usize;
+                let mode_line = display.mode_line.draw(bar_cols, selected, &settings.theme);
                 display::FrameWindow {
                     id,
                     rect,
                     selected,
                     display,
                     gutter,
+                    mode_line,
                 }
             })
             .collect();
@@ -264,22 +268,11 @@ pub(crate) fn window_display(
     display
 }
 
-/// Cuts the workspace modeline's names so `<project> › <workspace>` fits in `cols`: a name
-/// that fits in half the room stays whole and the other takes the rest, else each takes half.
+/// Cuts the workspace modeline's names so `<project> › <workspace>` fits in `cols`.
 fn fit_names(project: &str, workspace: &str, cols: usize) -> (String, String) {
     let (p, w) = (project.chars().count(), workspace.chars().count());
     let room = cols.saturating_sub(" › ".chars().count());
-    if p + w <= room {
-        return (project.to_string(), workspace.to_string());
-    }
-    let half = room / 2;
-    let (p_room, w_room) = if p <= half {
-        (p, room - p)
-    } else if w <= room - half {
-        (room - w, w)
-    } else {
-        (half, room - half)
-    };
+    let (p_room, w_room) = display::share_room(p, w, room);
     let cut = |name: &str, len: usize, keep: usize| match keep >= len {
         true => name.to_string(),
         false => (name.chars().take(keep.saturating_sub(1)))
@@ -295,6 +288,7 @@ mod tests {
     use crate::buffer::Decoration;
     use crate::display::FrameDisplay;
     use crate::display::FrameWindow;
+    use crate::display::{ModeBar, Span};
     use crate::harness::Harness;
     use crate::harness::ask;
     use crate::harness::on;
@@ -395,11 +389,11 @@ mod tests {
         h.open("a.txt");
         for _ in 0..2 {
             let names: Vec<_> = (h.frame(80., 100.).windows.iter())
-                .map(|w| w.display.mode_line.clone())
+                .map(|w| w.display.mode_line.text())
                 .collect();
             assert_eq!(
                 names,
-                ["-- a.txt  1:0 [unwatched]", "** *scratch*<main>  1:1"]
+                ["-- a.txt  [unwatched] │ 1:0", "** *scratch*<main>  1:1"]
             );
             h.keys("C-x o");
         }
@@ -409,17 +403,17 @@ mod tests {
     fn fileless_buffers_show_ordinary_mode_lines_in_unwatched_projects() {
         let mut h = Harness::new(&[]);
         assert_eq!(
-            h.frame(800., 600.).windows[0].display.mode_line,
+            h.frame(800., 600.).windows[0].display.mode_line.text(),
             "-- *scratch*<main>  1:0"
         );
         h.keys("C-x t l M-<");
         assert_eq!(
-            h.frame(800., 600.).windows[0].display.mode_line,
+            h.frame(800., 600.).windows[0].display.mode_line.text(),
             "%% *Workspaces*  1:0"
         );
         h.keys("q M-z C-x b *Messages* RET M-<");
         assert_eq!(
-            h.frame(800., 600.).windows[0].display.mode_line,
+            h.frame(800., 600.).windows[0].display.mode_line.text(),
             "%% *Messages*  1:0"
         );
     }
@@ -435,14 +429,14 @@ mod tests {
             h.frame(800., 600.)
                 .windows
                 .into_iter()
-                .map(|w| w.display.mode_line)
+                .map(|w| w.display.mode_line.text())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(lines(&mut h), ["-- x  1:0 [unwatched]"]);
+        assert_eq!(lines(&mut h), ["-- x  [unwatched] │ 1:0"]);
         h.keys("C-x p w home RET C-p RET");
         assert_eq!(lines(&mut h), ["-- x  1:0"]);
         h.keys("C-x p w home RET C-n RET M-x");
-        assert_eq!(lines(&mut h), ["-- x  1:0 [unwatched]"]);
+        assert_eq!(lines(&mut h), ["-- x  [unwatched] │ 1:0"]);
         h.keys("C-g");
         h.core
             .add_project(crate::project::Loaded::ad_hoc("other", &h.path("other")));
@@ -451,7 +445,7 @@ mod tests {
         h.send(crate::Msg::Tick);
         assert_eq!(lines(&mut h), ["-- x<2>  1:0"]);
         h.keys("C-x p p home RET");
-        assert_eq!(lines(&mut h), ["-- x  1:0 [unwatched]"]);
+        assert_eq!(lines(&mut h), ["-- x  [unwatched] │ 1:0"]);
     }
 
     #[test]
@@ -468,6 +462,71 @@ mod tests {
         assert_eq!(h.frame(80., 100.).title, "*scratch*<w3> | w3 | other");
         h.core.switch_workspace(main).unwrap();
         assert_eq!(h.frame(80., 100.).title, "t.txt * | main | home");
+    }
+
+    /// The window's mode line as drawn, with each group's text.
+    fn bar(h: &mut Harness, width: f32, i: usize) -> (String, String, ModeBar) {
+        let window = h.frame(width, 100.).windows.remove(i);
+        let text = |spans: &[Span]| spans.iter().map(|s| s.text.as_str()).collect();
+        let (left, right) = (text(&window.mode_line.left), text(&window.mode_line.right));
+        (left, right, window.mode_line)
+    }
+
+    #[test]
+    fn segments_are_split_by_separators_only_where_they_apply() {
+        let mut h = Harness::new(&[("a.txt", "x\r\n"), ("b.txt", "x\n")]);
+        h.open("b.txt");
+        let (left, right, _) = bar(&mut h, 800., 0);
+        assert_eq!(left, "-- b.txt");
+        assert_eq!(right, "[unwatched]  │  1:0");
+        h.open("a.txt");
+        let (_, right, line) = bar(&mut h, 800., 0);
+        assert_eq!(right, "[unwatched]  │  (DOS)  │  1:0");
+        let theme = &h.core.settings().theme;
+        let over = |name| theme.face(name).over(theme.face(FaceName::ModeLine));
+        assert_eq!(line.right[0].face, over(FaceName::ModeLineDim));
+        assert_eq!(line.right[1].text, "  │  ");
+        assert_eq!(line.right[1].face, over(FaceName::Separator));
+        assert_eq!(line.right[2].face, over(FaceName::StatusWaiting));
+    }
+
+    #[test]
+    fn state_has_colour_over_the_mode_line() {
+        let mut h = Harness::new(&[("a.txt", "x\n")]);
+        h.open("a.txt").keys("y");
+        let (_, _, line) = bar(&mut h, 800., 0);
+        let theme = &h.core.settings().theme;
+        let over = |name| theme.face(name).over(theme.face(FaceName::ModeLine));
+        assert_eq!(line.left[0].text, "**");
+        assert_eq!(line.left[0].face, over(FaceName::StatusModified));
+        assert_eq!(line.left[1].face, over(FaceName::ModeLine));
+    }
+
+    #[test]
+    fn an_inactive_mode_line_keeps_its_text_without_colour() {
+        let mut h = Harness::new(&[("a.txt", "x\r\n")]);
+        h.open("a.txt").keys("y C-x 2");
+        let (left, right, selected) = bar(&mut h, 800., 0);
+        let (other_left, other_right, inactive) = bar(&mut h, 800., 1);
+        assert_eq!((left, right), (other_left, other_right));
+        assert_ne!(selected.left[0].face, inactive.left[0].face);
+        let face = h.core.settings().theme.face(FaceName::ModeLineInactive);
+        assert!((inactive.left.iter().chain(&inactive.right)).all(|s| s.face == face));
+    }
+
+    #[test]
+    fn a_narrow_window_cuts_its_mode_line() {
+        let mut h = Harness::new(&[("a-very-long-name-indeed.txt", "x\n")]);
+        h.open("a-very-long-name-indeed.txt");
+        // 8 px cells: 22 columns between the insets, 20 less the gap, 10 for each group.
+        let (left, right, _) = bar(&mut h, 200., 0);
+        assert_eq!(
+            (left.as_str(), right.as_str()),
+            ("-- a-very…", "[unwatche…")
+        );
+        // Shorter than a gap, nothing is left.
+        let (left, right, _) = bar(&mut h, 24., 0);
+        assert_eq!((left.as_str(), right.as_str()), ("", ""));
     }
 
     #[test]

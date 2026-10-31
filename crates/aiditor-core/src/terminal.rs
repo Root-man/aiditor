@@ -1381,7 +1381,9 @@ mod tests {
             assert!(display.terminal.is_none() && display.cursor.is_some());
             let hl = Decoration::Background(FaceName::HlLine);
             assert_eq!(display.lines.last().unwrap().decorations, [hl]);
-            assert_eq!(display.mode_line, "%% t [copy]  5001:1");
+            assert_eq!(display.mode_line.text(), "%% t  [copy] │ 5001:1");
+            assert_eq!(display.mode_line.left[0][0].1, FaceName::StatusFailed);
+            assert_eq!(display.mode_line.right[0][0].1, FaceName::StatusInfo);
             // Motion, swiper and the mark work; inserting fails; the shell hears nothing.
             h.keys("M-< C-n C-SPC C-e M-w");
             assert_eq!(clipboard(&h).as_deref(), Some("2"));
@@ -1545,7 +1547,9 @@ mod tests {
             assert_eq!(screen, "$ new\n");
             let frame = h.frame(800., 300.);
             assert!(frame.windows[0].display.terminal.is_some());
-            assert_eq!(frame.windows[0].display.mode_line, "%% t [char]");
+            assert_eq!(frame.windows[0].display.mode_line.text(), "%% t  [char]");
+            let mode = &frame.windows[0].display.mode_line.right[0][0];
+            assert_eq!(mode.1, FaceName::StatusWaiting);
             assert_eq!(typed(&mut h, "a"), "a", "char mode again");
         }
 

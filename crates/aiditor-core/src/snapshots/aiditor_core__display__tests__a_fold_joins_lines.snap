@@ -80,6 +80,27 @@ WindowDisplay {
             1,
         ),
     ),
-    mode_line: "** *scratch*<main>  5:1",
+    mode_line: ModeLine {
+        left: [
+            [
+                (
+                    "**",
+                    StatusModified,
+                ),
+                (
+                    " *scratch*<main>",
+                    ModeLine,
+                ),
+            ],
+        ],
+        right: [
+            [
+                (
+                    "5:1",
+                    ModeLine,
+                ),
+            ],
+        ],
+    },
     terminal: None,
 }

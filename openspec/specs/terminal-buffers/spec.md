@@ -289,15 +289,15 @@ Copy mode's text SHALL carry each cell's resolved foreground and background colo
 - **THEN** the buffer holds no colours
 
 ### Requirement: The mode line shows the terminal's mode
-A terminal window's mode line SHALL show `[char]` after the buffer name in char mode, without point's position, and `[copy]` followed by point's line and column in copy mode.
+A terminal window's mode line SHALL show `[char]` as a right group segment in char mode, without point's position, and `[copy]` followed by a segment with point's line and column in copy mode.
 
 #### Scenario: Char mode
 - **WHEN** a terminal buffer `t` is shown in char mode
-- **THEN** its mode line reads `%% t [char]`
+- **THEN** its left group is `%% t` and its right group `[char]`
 
 #### Scenario: Copy mode
 - **WHEN** copy mode is entered with point on line 5001, column 1
-- **THEN** the mode line reads `%% t [copy]  5001:1`
+- **THEN** the left group is `%% t` and the right group's segments are `[copy]` and `5001:1`
 
 ### Requirement: Copy mode is a read-only buffer
 In copy mode, keys and typed text SHALL run commands as in any read-only buffer instead of reaching the shell, and the window SHALL draw the text with point and region, not the live screen. Edits SHALL fail with `Buffer is read-only`.
