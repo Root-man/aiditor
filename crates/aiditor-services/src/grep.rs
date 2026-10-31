@@ -42,7 +42,7 @@ impl Grep {
 
 const HELD: usize = 64;
 
-/// Searches all roots concurrently and delivers hits in collector arrival order.
+/// Searches roots in order and delivers each root's hits in collector arrival order.
 pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool + Sync, send: impl FnMut(Msg)) {
     search_with_hook(op, cancelled, send, |_, _| {});
 }
@@ -73,37 +73,43 @@ fn search_with_hook(
         return reply(Ok(Vec::new()), true);
     }
     let patterns = crate::files::Patterns::lenient(&op.ignore);
-    let walk = crate::files::grep_walker(&op.roots, &patterns, op.workers.get()).build_parallel();
     let stop = AtomicBool::new(false);
     let halted = || stop.load(Ordering::Relaxed) || cancelled();
     let (tx, rx) = mpsc::sync_channel::<Hit>(HELD);
     let (matcher, halted, hook) = (&matcher, &halted, &hook);
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            walk.run(|| {
-                let tx = tx.clone();
-                let mut searcher = SearcherBuilder::new()
-                    .line_number(true)
-                    .binary_detection(BinaryDetection::quit(b'\0'))
-                    .build();
-                Box::new(move |entry| {
-                    if halted() {
-                        return WalkState::Quit;
-                    }
-                    let Ok(entry) = entry else {
-                        return WalkState::Continue;
-                    };
-                    if crate::files::searchable_file(&entry) {
-                        hook(entry.path(), 0);
-                        search_file(&mut searcher, matcher, op, &entry, &tx, halted, hook);
-                    }
-                    if halted() {
-                        WalkState::Quit
-                    } else {
-                        WalkState::Continue
-                    }
-                })
-            });
+            for root in &op.roots {
+                if halted() {
+                    break;
+                }
+                let walk =
+                    crate::files::grep_walker(root, &patterns, op.workers.get()).build_parallel();
+                walk.run(|| {
+                    let tx = tx.clone();
+                    let mut searcher = SearcherBuilder::new()
+                        .line_number(true)
+                        .binary_detection(BinaryDetection::quit(b'\0'))
+                        .build();
+                    Box::new(move |entry| {
+                        if halted() {
+                            return WalkState::Quit;
+                        }
+                        let Ok(entry) = entry else {
+                            return WalkState::Continue;
+                        };
+                        if crate::files::searchable_file(&entry) {
+                            hook(entry.path(), 0);
+                            search_file(&mut searcher, matcher, root, &entry, &tx, halted, hook);
+                        }
+                        if halted() {
+                            WalkState::Quit
+                        } else {
+                            WalkState::Continue
+                        }
+                    })
+                });
+            }
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (mut hits, mut found, mut deadline) = (Vec::new(), 0, None);
@@ -153,16 +159,13 @@ fn search_with_hook(
 fn search_file(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
-    op: &GrepSearch,
+    root: &std::path::Path,
     entry: &ignore::DirEntry,
     tx: &mpsc::SyncSender<Hit>,
     halted: &(impl Fn() -> bool + Sync),
     hook: &(impl Fn(&std::path::Path, usize) + Sync),
 ) {
     let file = entry.path();
-    let Some(root) = op.roots.iter().find(|r| file.starts_with(r)) else {
-        return;
-    };
     let path = file.strip_prefix(root).unwrap_or(file);
     let mut found = 0;
     let sink = Lossy(|line, text: &str| {
@@ -186,7 +189,7 @@ fn search_file(
             return Ok(false);
         }
         hook(file, found);
-        Ok(found < op.limit && !halted())
+        Ok(!halted())
     });
     // Unreadable files are skipped, as `rg` skips them.
     _ = searcher.search_path(matcher, file, sink);
@@ -541,10 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn later_root_hit_arrives_before_an_earlier_file_finishes() {
-        let (early, late) = (tree(&[("slow", "x\n")]), tree(&[("fast", "x\n")]));
-        let early_path = early.path().join("slow");
-        let search_op = with_workers(op(&[early.path(), late.path()], "x", 100), 2);
+    fn same_root_hit_arrives_before_an_earlier_file_finishes() {
+        let dir = tree(&[("slow", "x\n"), ("fast", "x\n")]);
+        let early_path = dir.path().join("slow");
+        let search_op = with_workers(op(&[dir.path()], "x", 100), 2);
         let released = Arc::new(AtomicBool::new(false));
         let release = released.clone();
         let (started_tx, started_rx) = mpsc::channel();
@@ -578,7 +581,7 @@ mod tests {
         else {
             panic!("not an intermediate hit")
         };
-        assert_eq!(hits[0].root, late.path());
+        assert_eq!(hits[0].path, Path::new("fast"));
         handle.join().unwrap();
         let mut all = hits;
         for msg in msgs_rx.try_iter() {
@@ -624,58 +627,62 @@ mod tests {
     }
 
     #[test]
-    fn first_received_hits_fill_the_cap_before_a_stalled_root() {
-        let (early, late) = (tree(&[("slow", "x\n")]), tree(&[("fast", "x\nx\nx\n")]));
-        let early_path = early.path().join("slow");
-        let search_op = with_workers(op(&[early.path(), late.path()], "x", 3), 2);
-        let released = Arc::new(AtomicBool::new(false));
-        let release = released.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (msgs_tx, msgs_rx) = mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            search_with_hook(
-                &search_op,
-                || false,
-                |m| {
-                    msgs_tx.send(m).unwrap();
-                },
-                |path, line| {
-                    if line == 0 && path == early_path {
-                        started_tx.send(()).unwrap();
-                        while !release.load(Ordering::Relaxed) {
-                            std::thread::yield_now();
-                        }
-                    }
-                },
-            );
-        });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let mut msgs = Vec::new();
-        loop {
-            let msg = msgs_rx.recv_timeout(Duration::from_secs(5));
-            if let Ok(msg) = msg {
-                let done = matches!(msg, Msg::Grepped { done: true, .. });
-                msgs.push(msg);
-                if done {
-                    break;
-                }
-            } else {
-                released.store(true, Ordering::Relaxed);
-                handle.join().unwrap();
-                panic!("cap completion waited for the stalled root");
+    fn earlier_roots_fill_the_global_cap_first() {
+        let (early, late) = (tree(&[("a", "x\nx\nx\n")]), tree(&[("b", "x\nx\n")]));
+        for workers in [1, 4] {
+            for limit in [2, 4, 10] {
+                let msgs = run(&with_workers(
+                    op(&[early.path(), late.path()], "x", limit),
+                    workers,
+                ));
+                assert_eq!(batches(&msgs).iter().filter(|(_, done)| *done).count(), 1);
+                let hits: Vec<_> = msgs
+                    .into_iter()
+                    .flat_map(|m| match m {
+                        Msg::Grepped { hits, .. } => hits.unwrap(),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                let expected: Vec<_> = [early.path(); 3]
+                    .into_iter()
+                    .chain([late.path(); 2])
+                    .take(limit)
+                    .collect();
+                assert_eq!(
+                    hits.iter().map(|h| h.root.as_path()).collect::<Vec<_>>(),
+                    expected
+                );
             }
         }
-        released.store(true, Ordering::Relaxed);
-        handle.join().unwrap();
-        assert_eq!(batches(&msgs).iter().map(|(n, _)| n).sum::<usize>(), 3);
-        assert_eq!(batches(&msgs).iter().filter(|(_, done)| *done).count(), 1);
-        assert!(
-            msgs.into_iter()
-                .flat_map(|m| match m {
-                    Msg::Grepped { hits, .. } => hits.unwrap(),
-                    _ => unreachable!(),
-                })
-                .all(|h| h.root == late.path())
+    }
+
+    #[test]
+    fn nested_roots_have_their_own_relative_paths_and_ignores() {
+        let dir = tree(&[("lib/a", "needle\n"), ("lib/skip", "needle\n")]);
+        let nested = dir.path().join("lib");
+        let mut search = with_workers(op(&[&nested, dir.path()], "needle", 100), 4);
+        search.ignore = vec!["/skip".into()];
+        let hits: Vec<_> = run(&search)
+            .into_iter()
+            .flat_map(|m| match m {
+                Msg::Grepped { hits, .. } => hits.unwrap(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            (&hits[0].root, hits[0].path.as_path()),
+            (&nested, Path::new("a"))
+        );
+        assert_eq!(
+            hits[1..]
+                .iter()
+                .map(|h| (&h.root, h.path.as_path()))
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                (&dir.path().to_path_buf(), Path::new("lib/a")),
+                (&dir.path().to_path_buf(), Path::new("lib/skip"))
+            ]
+            .into()
         );
     }
 
