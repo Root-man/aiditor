@@ -9,10 +9,10 @@ use aiditor_core::display::TEXT_INSET;
 use aiditor_core::settings::FaceName;
 use aiditor_core::{Core, Effect, Msg, RecoveryOp};
 use aiditor_services::{
-    agents, configuration, environment, files, grep, recovery, terminal, watcher,
+    agents, clock, configuration, environment, files, grep, recovery, terminal, watcher,
 };
 use gpui::{
-    ClipboardItem, Context, FocusHandle, Font, FontFeatures, FontWeight, KeyDownEvent, Pixels,
+    ClipboardItem, Context, FocusHandle, Font, FontFeatures, KeyDownEvent, Pixels, StyledText,
     Task, Window, div, font, prelude::*, px, rgb,
 };
 use tokio::sync::mpsc;
@@ -29,6 +29,8 @@ pub(crate) struct Editor {
     tx: mpsc::Sender<Msg>,
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
+    clock: String,
+    _clock_task: Task<()>,
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
     grep: grep::Grep,
@@ -87,12 +89,15 @@ impl Editor {
         let watcher = watcher::Watcher::spawn(move |msg| _ = reports.blocking_send(msg));
         // The launch's messages ran before there was a watcher to send their watch set to.
         watcher.set(core.watch_set());
+        let (clock, clock_task) = Self::start_clock(clock::read, cx);
         Editor {
             core,
             benchmark: None,
             focus: cx.focus_handle(),
             tx,
             timer: None,
+            clock,
+            _clock_task: clock_task,
             config_dir: args.config_dir,
             grep: grep::Grep::default(),
             terminals: terminal::Terminals::new(args.zsh_dir),
@@ -104,6 +109,30 @@ impl Editor {
             painted: Vec::new(),
             reported: Default::default(),
         }
+    }
+
+    fn start_clock(
+        mut read: impl FnMut() -> (String, Duration) + 'static,
+        cx: &mut Context<Self>,
+    ) -> (String, Task<()>) {
+        let (text, mut delay) = read();
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(delay).await;
+                let (text, next) = read();
+                delay = next;
+                if this
+                    .update(cx, |editor, cx| {
+                        editor.clock = text;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (text, task)
     }
 
     fn drain(mut rx: mpsc::Receiver<Msg>, cx: &mut Context<Self>) {
@@ -369,10 +398,14 @@ impl Render for Editor {
             None => div().child(row(mode_line_height).px(inset).child(message)),
         };
         let bar = theme.face(FaceName::WorkspaceBar);
-        let separator = theme
-            .face(FaceName::Separator)
-            .fg
-            .unwrap_or(theme.foreground());
+        let workspace_text: String = frame.workspaces.iter().map(|s| s.text.as_str()).collect();
+        let runs = frame
+            .workspaces
+            .iter()
+            .map(|s| text_run(s.text.len(), s.face, false, &font, theme))
+            .collect();
+        let workspaces = StyledText::new(workspace_text).with_runs(runs);
+        let workspace_gap = cell * (2. * settings.workspace_font_size() / settings.font_size);
         let root = div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -394,9 +427,21 @@ impl Render for Editor {
                     .debug_selector(|| "workspace-modeline".into())
                     .bg(rgb(bar.bg.unwrap_or(theme.background())))
                     .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
-                    .child(div().font_weight(FontWeight::BOLD).child(frame.project))
-                    .child(div().text_color(rgb(separator)).child(" › "))
-                    .child(frame.workspace),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .debug_selector(|| "workspace-entries".into())
+                            .child(workspaces),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .ml(workspace_gap)
+                            .debug_selector(|| "workspace-clock".into())
+                            .child(self.clock.clone()),
+                    ),
             )
             .child(div().flex_1().flex().overflow_hidden().child(FrameElement {
                 editor: cx.entity(),
@@ -582,11 +627,57 @@ mod tests {
         );
         assert_eq!(bar.size.height, px(22.), "13 px type: 18.2 plus 4, rounded");
         let frame = editor.update(cx, |e, _| e.core.frame());
-        let title = format!("t.txt | {} | {}", frame.workspace, frame.project);
+        let workspace = editor.read_with(cx, |e, _| e.core.workspaces()[0].name.clone());
+        let project = editor.read_with(cx, |e, _| e.core.projects()[0].name.clone());
+        let title = format!("t.txt | {workspace} | {project}");
         assert_eq!(
             frame.title, title,
             "the bar names the title's workspace and project"
         );
+    }
+
+    #[gpui::test]
+    fn the_workspace_clock_stays_at_the_right_inset_and_wakes_without_keys(
+        cx: &mut TestAppContext,
+    ) {
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            let mut reads = 0;
+            let (text, task) = Editor::start_clock(
+                move || {
+                    reads += 1;
+                    match reads {
+                        1 => ("20:41".into(), Duration::from_millis(250)),
+                        _ => ("20:42".into(), Duration::from_secs(60)),
+                    }
+                },
+                cx,
+            );
+            e.clock = text;
+            e._clock_task = task;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.clock.clone()), "20:41");
+        cx.executor().advance_clock(Duration::from_millis(249));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.clock.clone()), "20:41");
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.clock.clone()), "20:42");
+        let clock = cx.debug_bounds("workspace-clock").unwrap();
+        let entries = cx.debug_bounds("workspace-entries").unwrap();
+        let width = cx.update(|window, _| window.viewport_size().width);
+        assert!((clock.right() - (width - px(TEXT_INSET))).abs() < px(1.));
+        assert!(clock.left() > entries.right());
+        cx.simulate_keystrokes("ctrl-x t 2 enter");
+        cx.simulate_input("second");
+        cx.simulate_keystrokes("enter");
+        let workspaces = editor.update(cx, |e, _| e.core.frame().workspaces);
+        let text: String = workspaces.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.ends_with(" › second"), "{text}");
+        let clock_after = cx.debug_bounds("workspace-clock").unwrap();
+        assert_eq!(clock_after, clock);
     }
 
     #[gpui::test]

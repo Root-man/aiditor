@@ -44,6 +44,7 @@ mod watching;
 pub mod window;
 pub mod workspace;
 mod workspace_list;
+mod workspace_modeline;
 
 use std::backtrace::Backtrace;
 use std::cell::RefCell;

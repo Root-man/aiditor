@@ -146,6 +146,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "jiff",
  "libc",
  "notify",
  "portable-pty",

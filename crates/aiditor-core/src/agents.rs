@@ -29,6 +29,23 @@ const PROMPT: &str = "> ";
 /// The session buffer's major mode.
 pub(crate) const MODE: &str = "agent-session-mode";
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Activity {
+    Working,
+    Failed,
+    Waiting,
+}
+
+impl Activity {
+    pub(crate) fn face(self) -> FaceName {
+        match self {
+            Self::Working => FaceName::StatusRunning,
+            Self::Failed => FaceName::StatusFailed,
+            Self::Waiting => FaceName::StatusWaiting,
+        }
+    }
+}
+
 pub(crate) struct Session {
     /// The registry name it was started as.
     agent: String,
@@ -137,6 +154,18 @@ fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
 }
 
 impl Session {
+    pub(crate) fn activity(&self) -> Option<Activity> {
+        if self.ended {
+            Some(Activity::Failed)
+        } else if !self.asks.is_empty() {
+            Some(Activity::Waiting)
+        } else if self.turn {
+            Some(Activity::Working)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn mode_line(&self) -> ModeLine {
         let segment = |text: &str, face| vec![(text.replace(char::is_control, " "), face)];
         let options = self
@@ -192,17 +221,13 @@ impl Session {
         };
         left.push(segment(title, FaceName::ModeLineBufferId));
         let mut right = Vec::new();
-        let status = if self.ended {
-            Some(("● exited", FaceName::StatusFailed))
-        } else if !self.asks.is_empty() {
-            Some(("● awaiting permission", FaceName::StatusWaiting))
-        } else if self.turn {
-            Some(("● working", FaceName::StatusRunning))
-        } else {
-            None
-        };
-        if let Some((text, face)) = status {
-            right.push(segment(text, face));
+        if let Some(activity) = self.activity() {
+            let text = match activity {
+                Activity::Working => "● working",
+                Activity::Failed => "● exited",
+                Activity::Waiting => "● awaiting permission",
+            };
+            right.push(segment(text, activity.face()));
         }
         if let Some((used, size)) = self.usage.filter(|(_, size)| *size > 0) {
             let percent = u128::from(used.min(size)) * 100 / u128::from(size);
@@ -2765,6 +2790,49 @@ mod tests {
                 vec![(format!("[{mode}]"), face)]
             );
         }
+    }
+
+    #[test]
+    fn workspace_dots_follow_owned_sessions_even_while_another_workspace_is_current() {
+        let mut h = session();
+        let work = h.core.workspace();
+        let working = h.core.windows.window.buffer();
+        let dots = |h: &mut Harness| {
+            h.frame(1600., 600.)
+                .workspaces
+                .into_iter()
+                .filter(|s| s.text == " ●")
+                .map(|s| s.face.fg)
+                .collect::<Vec<_>>()
+        };
+        let face = |h: &Harness, name| h.core.settings.theme.face(name).fg;
+        assert_eq!(dots(&mut h), vec![]);
+        h.keys("a RET");
+        assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusRunning)]);
+        h.keys("M-x agent-start RET claude RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Err("failed".into()),
+        });
+        let failed = h.core.windows.window.buffer();
+        assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusFailed)]);
+        ask(&mut h, 1, "one", Some("First"));
+        h.core.rename_workspace("renamed").unwrap();
+        let other = h.new_workspace("other", "home");
+        assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusWaiting)]);
+        h.core.switch_workspace(work).unwrap();
+        h.core.switch_to(working);
+        h.keys("C-c C-y");
+        assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusFailed)]);
+        h.core.kill_buffer(failed);
+        assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusRunning)]);
+        h.core.switch_workspace(other).unwrap();
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert_eq!(dots(&mut h), vec![]);
+        exited(&mut h, 0, 0);
+        assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusFailed)]);
+        h.core.kill_workspace(work).unwrap();
+        assert_eq!(dots(&mut h), vec![]);
     }
 
     #[test]
