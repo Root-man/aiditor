@@ -443,6 +443,39 @@ pub(crate) fn text_run(
     }
 }
 
+pub(crate) fn completion_runs(
+    len: usize,
+    highlights: &[std::ops::Range<usize>],
+    font: &Font,
+    theme: &Theme,
+) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for range in highlights {
+        if start < range.start {
+            runs.push(text_run(
+                range.start - start,
+                Face::default(),
+                false,
+                font,
+                theme,
+            ));
+        }
+        runs.push(text_run(
+            range.len(),
+            theme.face(FaceName::CompletionMatch),
+            false,
+            font,
+            theme,
+        ));
+        start = range.end;
+    }
+    if start < len {
+        runs.push(text_run(len - start, Face::default(), false, font, theme));
+    }
+    runs
+}
+
 /// The echo line at a prompt: the match count, the prompt, the minibuffer's line and any `message` in brackets,
 /// with the byte offset of point in it.
 pub(crate) fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -> (String, usize) {

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::buffer::{BufferId, file_name};
 use crate::command::{Args, Command, Filter, Preview};
@@ -117,6 +118,7 @@ pub(crate) struct Prompts {
     history: HashMap<String, Vec<String>>,
     /// The fuzzy matcher for completion, made on first use.
     pub(crate) matcher: Option<Nucleo<(String, String, Option<ProjectId>)>>,
+    highlight_matcher: Option<nucleo::Matcher>,
     /// The timer that polls the matcher again while it is still matching.
     repoll: Option<TimerId>,
     pub(crate) accepted_swiper: Option<crate::swiper::Search>,
@@ -608,6 +610,7 @@ impl Core {
             _ => mb.prompt.to_string(),
         };
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
+        let mut highlights = Vec::new();
         let (mut count, mut shown) = (String::new(), 0);
         if let Some(completion) = &mut mb.completion {
             let range = |matched: usize| {
@@ -620,6 +623,7 @@ impl Core {
                     (candidates, annotations) = items
                         .map(|&i| (f.candidate(i), f.notes.get(i).cloned().unwrap_or_default()))
                         .unzip();
+                    highlights.resize_with(candidates.len(), Vec::new);
                     (f.matched.len(), rows)
                 }
                 (None, Some(matcher)) => {
@@ -628,9 +632,46 @@ impl Core {
                     let matched = snapshot.matched_item_count() as usize;
                     let rows = range(matched);
                     let items = snapshot.matched_items(rows.start as u32..rows.end as u32);
-                    (candidates, annotations) = items
-                        .map(|item| (item.data.0.clone(), item.data.1.clone()))
-                        .unzip();
+                    let highlighter = self
+                        .prompts
+                        .highlight_matcher
+                        .get_or_insert_with(|| nucleo::Matcher::new(nucleo::Config::DEFAULT));
+                    let pattern = snapshot.pattern().column_pattern(0);
+                    for item in items {
+                        let mut indices = Vec::new();
+                        pattern.indices(
+                            item.matcher_columns[0].slice(..),
+                            highlighter,
+                            &mut indices,
+                        );
+                        indices.sort_unstable();
+                        indices.dedup();
+                        // Nucleo's ASCII fast path counts bytes, including both chars of CRLF.
+                        let ranges = if item.data.0.is_ascii() {
+                            indices
+                                .into_iter()
+                                .map(|i| i as usize..i as usize + 1)
+                                .collect()
+                        } else {
+                            let mut indices = indices.into_iter().peekable();
+                            item.data
+                                .0
+                                .grapheme_indices(true)
+                                .enumerate()
+                                .filter_map(|(i, (byte, grapheme))| {
+                                    if indices.peek() == Some(&(i as u32)) {
+                                        indices.next();
+                                        Some(byte..byte + grapheme.len())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        };
+                        highlights.push(ranges);
+                        candidates.push(item.data.0.clone());
+                        annotations.push(item.data.1.clone());
+                    }
                     (matched, rows)
                 }
                 (None, None) => (0, 0..0),
@@ -654,6 +695,7 @@ impl Core {
             prompt,
             display,
             candidates,
+            highlights,
             annotations,
             selected,
             rows: shown,
@@ -1212,6 +1254,80 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_highlights_follow_the_query_and_visible_rows() {
+        let mut h = on("");
+        h.keys("M-x pff");
+        let mb = h.core.minibuffer().unwrap();
+        let i = mb
+            .candidates
+            .iter()
+            .position(|c| c == "project-find-file")
+            .unwrap();
+        assert_eq!(mb.highlights[i], [0..1, 8..9, 13..14]);
+        h.keys("C-g");
+        ask_completing(&mut h, |_, _| {
+            (0..15).map(|i| format!("file{i:02}")).collect()
+        });
+        h.keys("C-c p fi C-u 12 C-n");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!((mb.candidates.len(), mb.selected), (10, Some(9)));
+        assert!(mb.highlights.iter().all(|ranges| ranges == &[0..1, 1..2]));
+        h.keys("DEL DEL 14");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["file14"]);
+        assert_eq!(mb.highlights, [vec![4..5, 5..6]]);
+        h.keys("DEL DEL");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates.len(), 10);
+        assert_eq!(
+            mb.highlights,
+            vec![Vec::<std::ops::Range<usize>>::new(); 10]
+        );
+    }
+
+    #[test]
+    fn fuzzy_highlights_cover_unicode_graphemes_and_overlapping_atoms() {
+        let mut h = on("");
+        ask_completing(&mut h, |_, _| vec!["cafe\u{301}-👩‍💻-Été".into()]);
+        h.keys("C-c p");
+        for (query, expected) in [
+            ("cafe cafe", vec![0..1, 1..2, 2..3, 3..6]),
+            ("👩", vec![7..18]),
+            ("É", vec![19..21]),
+            ("té", vec![21..22, 22..24]),
+        ] {
+            h.keys("C-a C-k");
+            h.send(Msg::Insert {
+                text: query.into(),
+                replace: None,
+            });
+            let mb = h.core.minibuffer().unwrap();
+            assert_eq!(mb.candidates, ["cafe\u{301}-👩‍💻-Été"], "{query}");
+            assert_eq!(mb.highlights, [expected], "{query}");
+        }
+    }
+
+    #[test]
+    fn ascii_highlights_use_nucleos_byte_indices_after_crlf() {
+        let mut h = on("");
+        ask_completing(&mut h, |_, _| vec!["a\r\nb".into()]);
+        h.keys("C-c p b");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["a\r\nb"]);
+        assert_eq!(mb.highlights, [vec![3..4]]);
+    }
+
+    #[test]
+    fn buffer_completion_highlights_the_buffer_name() {
+        let mut h = on("");
+        h.core.buffers.create("project-find-file.txt");
+        h.keys("C-x b pff");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["project-find-file.txt"]);
+        assert_eq!(mb.highlights, [vec![0..1, 8..9, 13..14]]);
+    }
+
+    #[test]
     fn typing_filters_candidates() {
         let mut h = on("");
         ask_completing(&mut h, fruit);
@@ -1326,6 +1442,12 @@ mod tests {
         h.keys("C-c p");
         let mb = h.core.minibuffer().unwrap();
         assert_eq!(mb.annotations, ["apple-note", "banana-note", ""]);
+        h.keys("ap");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["apple"]);
+        assert_eq!(mb.highlights, [vec![0..1, 1..2]]);
+        assert_eq!(mb.annotations, ["apple-note"]);
+        h.keys("C-a C-k");
         h.keys("note");
         assert_eq!(listed(&mut h).0, Vec::<String>::new());
     }
