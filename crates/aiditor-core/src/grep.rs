@@ -31,6 +31,7 @@ pub(crate) struct ProjectGrep {
     /// Whether search `searches` is running, and whether it has answered yet.
     running: bool,
     answered: bool,
+    no_matches: bool,
     /// The project's roots with their names, the primary first.
     roots: Vec<(PathBuf, String)>,
     /// The project's ignore patterns.
@@ -40,6 +41,18 @@ pub(crate) struct ProjectGrep {
 }
 
 impl ProjectGrep {
+    pub(crate) fn status(&self) -> Option<&'static str> {
+        if self.deadline.is_some() {
+            None
+        } else if self.running {
+            Some("[searching]")
+        } else if self.no_matches {
+            Some("[no matches]")
+        } else {
+            None
+        }
+    }
+
     fn hit(&self, label: &str) -> Option<&Hit> {
         self.hits
             .iter()
@@ -80,6 +93,7 @@ impl Core {
         let grep = &mut self.grep;
         if text != grep.typed {
             grep.typed = text;
+            grep.no_matches = false;
             grep.deadline = Some(now + DEBOUNCE);
             if let Some(id) = grep.timer.take() {
                 self.timers.cancel(id);
@@ -92,6 +106,7 @@ impl Core {
         }
         (grep.deadline, grep.timer) = (None, None);
         if text.chars().count() < MIN_INPUT {
+            grep.no_matches = false;
             if std::mem::take(&mut grep.running) {
                 effects.push(Effect::Grep(GrepOp::Cancel));
             }
@@ -100,6 +115,7 @@ impl Core {
         }
         grep.searches += 1;
         (grep.running, grep.answered) = (true, false);
+        grep.no_matches = false;
         effects.push(Effect::Grep(GrepOp::Search(GrepSearch {
             id: grep.searches,
             roots: grep.roots.iter().map(|(root, _)| root.clone()).collect(),
@@ -126,6 +142,7 @@ impl Core {
             Ok(hits) => {
                 let labels: Vec<String> = hits.iter().map(|hit| grep.label(hit)).collect();
                 grep.hits.extend(labels.iter().cloned().zip(hits));
+                grep.no_matches = done && grep.hits.is_empty();
                 labels
             }
             Err(err) => {
@@ -291,6 +308,124 @@ mod tests {
         assert_eq!(h.core.message(), Some("Match required"));
         h.keys("needle").advance(WAIT).keys("RET C-x p g M-p");
         assert_eq!(h.text(), "needle");
+    }
+
+    #[test]
+    fn prompt_tracks_running_batches_and_successful_completion() {
+        let mut h = grepping(FILES, &[]);
+        h.hits.clear();
+        h.keys("C-x p g needle");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
+        h.advance(WAIT);
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(
+            (mb.prompt.as_str(), mb.count.as_str()),
+            ("[searching] Grep in home: ", "   0/0 ")
+        );
+        let search = h.core.grep.searches;
+        for line in 0..2 {
+            h.send(Msg::Grepped {
+                search,
+                hits: Ok(vec![Hit {
+                    root: h.path("app"),
+                    path: "a.rs".into(),
+                    line,
+                    col: 0,
+                    text: "needle".into(),
+                }]),
+                done: false,
+            });
+            let mb = h.core.minibuffer().unwrap();
+            assert_eq!(mb.prompt, "[searching] Grep in home: ");
+            assert_eq!(mb.count, format!("   1/{} ", line + 1));
+        }
+        h.send(Msg::Grepped {
+            search,
+            hits: Ok(Vec::new()),
+            done: true,
+        });
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(
+            (mb.prompt.as_str(), mb.count.as_str()),
+            ("Grep in home: ", "   1/2 ")
+        );
+    }
+
+    #[test]
+    fn empty_completion_clears_on_edit_and_keeps_history() {
+        let mut h = grepping(FILES, &[]);
+        h.keys("C-x p g needle").advance(WAIT);
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(
+            (mb.prompt.as_str(), mb.count.as_str()),
+            ("[no matches] Grep in home: ", "   0/0 ")
+        );
+        h.keys("C-g C-x p g M-p");
+        assert_eq!(h.text(), "needle");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
+        h.advance(WAIT);
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "[searching] Grep in home: "
+        );
+        let search = h.core.grep.searches;
+        h.keys("DEL DEL DEL DEL");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
+        h.send(Msg::Grepped {
+            search,
+            hits: Ok(Vec::new()),
+            done: true,
+        });
+        h.advance(WAIT);
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(
+            (mb.prompt.as_str(), mb.count.as_str()),
+            ("Grep in home: ", "   0/0 ")
+        );
+    }
+
+    #[test]
+    fn obsolete_replies_leave_the_current_prompt_status_alone() {
+        let mut h = grepping(FILES, &[]);
+        h.hits.clear();
+        h.keys("C-x p g needle").advance(WAIT);
+        let old = h.core.grep.searches;
+        h.keys("s");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
+        h.advance(WAIT);
+        for hits in [Ok(Vec::new()), Err("obsolete error".into())] {
+            h.send(Msg::Grepped {
+                search: old,
+                hits,
+                done: true,
+            });
+            assert_eq!(
+                h.core.minibuffer().unwrap().prompt,
+                "[searching] Grep in home: "
+            );
+        }
+        let cancelled = h.core.grep.searches;
+        h.keys("C-g C-x p g");
+        h.send(Msg::Grepped {
+            search: cancelled,
+            hits: Ok(Vec::new()),
+            done: true,
+        });
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
+        h.keys("ab(").advance(WAIT);
+        h.send(Msg::Grepped {
+            search: h.core.grep.searches,
+            hits: Err("error: unclosed group".into()),
+            done: true,
+        });
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
+        assert_eq!(h.core.message(), Some("error: unclosed group"));
+        h.keys("C-g C-x p g needle")
+            .advance(WAIT)
+            .keys("C-a C-k")
+            .advance(WAIT);
+        assert_eq!(h.greps.last(), Some(&None));
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Grep in home: ");
     }
 
     #[test]

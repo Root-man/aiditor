@@ -603,7 +603,10 @@ impl Core {
     /// The open minibuffer's prompt and the line holding its point.
     pub(crate) fn minibuffer(&mut self) -> Option<display::Minibuffer> {
         let mb = self.prompts.minibuffer.as_mut()?;
-        let prompt = mb.prompt.to_string();
+        let prompt = match (mb.command, self.grep.status()) {
+            ("project-grep", Some(status)) => format!("{status} {}", mb.prompt),
+            _ => mb.prompt.to_string(),
+        };
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
         let (mut count, mut shown) = (String::new(), 0);
         if let Some(completion) = &mut mb.completion {

@@ -1052,6 +1052,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn grep_status_keeps_the_echo_cursor_with_the_input(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let (editor, cx) = editor(cx, "");
+        cx.simulate_keystrokes("ctrl-x p g");
+        cx.simulate_input("needle");
+        let now = Instant::now() + Duration::from_secs(1);
+        let search = editor.update(cx, |e, cx| {
+            let search = e
+                .core
+                .handle(now, Msg::Tick)
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Grep(aiditor_core::GrepOp::Search(search)) => Some(search.id),
+                    _ => None,
+                })
+                .unwrap();
+            cx.notify();
+            search
+        });
+        cx.run_until_parked();
+        let line = |cx: &mut VisualTestContext| {
+            editor.update(cx, |e, _| {
+                let mb = e.core.frame().minibuffer.unwrap();
+                echo_line(&mb, "")
+            })
+        };
+        let project = editor.read_with(cx, |e, _| e.core.projects()[0].name.clone());
+        let running = format!("   0/0 [searching] Grep in {project}: needle");
+        assert_eq!(line(cx), (running.clone(), running.len()));
+        editor.update(cx, |e, cx| {
+            e.core.handle(
+                now,
+                Msg::Grepped {
+                    search,
+                    hits: Ok(Vec::new()),
+                    done: true,
+                },
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let empty = format!("   0/0 [no matches] Grep in {project}: needle");
+        assert_eq!(line(cx), (empty.clone(), empty.len()));
+        cx.simulate_keystrokes("ctrl-b");
+        assert_eq!(line(cx), (empty.clone(), empty.len() - 1));
+        cx.simulate_keystrokes("ctrl-g ctrl-x p g");
+        let fresh = format!("   0/0 Grep in {project}: ");
+        assert_eq!(line(cx), (fresh.clone(), fresh.len()));
+    }
+
+    #[gpui::test]
     fn m_x_runs_a_command_by_name(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "abc");
