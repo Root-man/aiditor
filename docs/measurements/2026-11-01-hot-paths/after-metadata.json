@@ -42,7 +42,7 @@
   "suite_order": "core, focused, services, diagnostics, GUI; sequential",
   "gui_repeat": "one separate sequential repeat to investigate the cat maximum; no samples discarded",
   "platform_validation": {
-    "macOS": "workspace tests, final core follow-up, fmt, clippy and benchmark reporting tests passed",
-    "Linux": "pending draft PR CI"
+    "macOS": "workspace tests, final core follow-up, fmt, clippy and benchmark reporting tests passed; hosted CI also passed in https://github.com/Root-man/aiditor/actions/runs/41309485440",
+    "Linux": "passed in https://github.com/Root-man/aiditor/actions/runs/41309485440 on 05af0ac2aa07f598e7b30cfaf1eb5558afdd784d"
   }
 }

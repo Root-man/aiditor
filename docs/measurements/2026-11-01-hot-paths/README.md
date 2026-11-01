@@ -12,7 +12,7 @@ The repaired full core suite (69 cases), focused suite (14) and service suite (9
 - Raw service summaries: [baseline](baseline-services.tsv), [after](after-services.tsv).
 - [All 92 comparisons](comparisons.json), [scope diagnostic](scope-reuse.log), [preview component diagnostic](preview-work.log).
 - GUI events and parser reports: [after TSV](after-ui.tsv), [report](after-ui.md), [repeat TSV](after-ui-repeat.tsv), [repeat report](after-ui-repeat.md).
-- [Scenario and structural validation](validation.md). Linux execution is pending the draft PR's CI; all local results below are macOS results.
+- [Scenario and structural validation](validation.md). [Linux and macOS CI passed](https://github.com/Root-man/aiditor/actions/runs/41309485440) on implementation commit `05af0ac`; all local timing results below are macOS results.
 
 The three supplied `2026-11-01-main-benchmarks` files remain byte-for-byte unchanged. Their recorded hashes were checked again after measurement. Those supplied GUI samples supply the earlier GUI comparison; the new sequential baseline supplies every headless comparison here. No cross-host PR #314 ratios are used in this report.
 

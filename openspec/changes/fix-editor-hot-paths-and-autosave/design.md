@@ -157,6 +157,6 @@ Before completion, update `docs/editor.md` for visibility-gated message renderin
 - [x] Worker completion delivery cannot block shutdown; GUI, headless, harness and service tests use the same protocol.
 - [x] Swiper text and syntax ranges are bounded before allocation/painting and passed to GPUI with valid byte runs; navigation is independent of presentation.
 - [x] Benchmark corrections preserve existing fixture and sampling definitions; new cases have distinct names and retained raw results.
-- [ ] Core remains independent of GPUI/Tokio, existing macOS/Linux checks pass, and no dependencies, settings or recovery format are added.
+- [x] Core remains independent of GPUI/Tokio, existing macOS/Linux checks pass, and no dependencies, settings or recovery format are added.
 
-Evidence: [scenario reconciliation and platform status](../../../docs/measurements/2026-11-01-hot-paths/validation.md). The final platform checkbox awaits the draft PR CI matrix.
+Evidence: [scenario reconciliation and platform status](../../../docs/measurements/2026-11-01-hot-paths/validation.md). The macOS/Linux CI matrix passed on implementation commit `05af0ac`: [run 41309485440](https://github.com/Root-man/aiditor/actions/runs/41309485440).

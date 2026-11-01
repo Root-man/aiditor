@@ -4,7 +4,7 @@ Local execution: macOS 27.0.1, Apple M5 Pro, Rust 1.99.0. The workspace run pass
 
 `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, all 21 benchmark-reporting Python tests, the core GPUI/Tokio dependency boundary, and strict OpenSpec validation passed. All 92 matched headless cases and both real-window GUI reports passed their self-checks/parsers. The supplied baseline hashes still match. Its patch artifact contains intentional context-line whitespace and is excluded from the staged whitespace check; source and documentation are checked normally. The existing CI matrix is unchanged and runs these checks on `ubuntu-latest` and `macos-latest`.
 
-Linux execution is pending the draft PR's CI. This document does not treat the macOS run as Linux evidence.
+Linux and macOS CI both passed on implementation commit `05af0ac2aa07f598e7b30cfaf1eb5558afdd784d` in [CI run 41309485440](https://github.com/Root-man/aiditor/actions/runs/41309485440); [the job/step conclusions](ci-evidence.json) are retained. The Linux job includes formatting, dependency/profile boundaries, Clippy, the full test suite and Python reporting tests. Local timings remain macOS measurements.
 
 ## Auto-save scenarios
 
@@ -74,4 +74,4 @@ Fresh-parse comparisons cover Rust, JavaScript, TypeScript/TSX and Markdown inje
 - [x] Worker replies do not block shutdown; all callers use the correlated protocol.
 - [x] Swiper strings/runs are bounded before presentation; full-source navigation and current-theme styling remain intact.
 - [x] Existing benchmark definitions/sampling are preserved except the specified assertion repair; distinct focused cases and all raw reports are retained.
-- [ ] Complete the unchanged macOS/Linux CI matrix. macOS local checks passed; Linux CI is pending. Core excludes GPUI/Tokio, and no dependency, setting or on-disk recovery format was added. The omitted grep-list and terminal-theme candidates were not changed.
+- [x] The unchanged macOS/Linux CI matrix passed on implementation commit `05af0ac`. Core excludes GPUI/Tokio, and no dependency, setting or on-disk recovery format was added. The omitted grep-list and terminal-theme candidates were not changed.
