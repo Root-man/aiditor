@@ -19,7 +19,7 @@ The approved designs are on the [aiditor visual direction canvas](https://claude
 - **3 · Project grep:** hits grouped by file, match highlighting in the previewed buffer, the fixed-width count and the searching state.
 - **4 · find-file:** the `*/16` count, directories in their own face, and annotations for mode bits, size and age.
 - **5 · Terminal:** test output, with the exit status and input mode in the mode line.
-- **6 · Agent session, monospace:** the interactive session buffer: messages, timings, tool-call blocks, the permission request, file chips and the growing prompt.
+- **6 · Agent session, monospace:** the interactive session buffer: messages, timings and the working timer, collapsed tool groups and tool-call blocks, the permission request, file chips and the growing prompt.
 - **6b · Session prompt:** `@` references, `/` commands, `agent-attach-file` and folded pastes.
 - **6c · File chips:** the chip's kinds and states, and file links in agent prose.
 - **7 · Agent session, rich:** a sketch for M7, with proportional prose and cards. Not approved; see below.

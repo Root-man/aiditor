@@ -1691,15 +1691,15 @@ milestones:
   # ───────────────────────────────────────────── M6 ─────────────────────────────────────────────
   - key: m6
     title: "M6 · Interactive session"
-    description: "The monospace session buffer becomes interactive: messages as units, timings, tool-call blocks, file chips, @ references, attachments, slash commands, questions from agents, fork and rollback."
-    gate: "In one session: reference a file with @, attach a screenshot and a directory, paste a long log, run a slash command, open a tool call's output and a file link with RET, answer an agent's question with your own answer, fill in a form question, then fork and roll back from a chosen message."
+    description: "The monospace session buffer becomes interactive: messages as units, timings, tool groups and tool-call blocks, file chips, @ references, attachments, slash commands, questions from agents, fork and rollback."
+    gate: "In one session: reference a file with @, attach a screenshot and a directory, paste a long log, run a slash command, open a tool group and a call in it, open the call's output and a file link with RET, answer an agent's question with your own answer, fill in a form question, then fork and roll back from a chosen message."
     epics:
       - key: m6-session-ui
         title: "Interactive transcript"
         labels: [acp, frontend]
         design: "#acp-integration-and-session-management"
         body: |
-          The monospace session buffer becomes something to act on, as the approved design's session boards draw it: messages as units, timings, tool-call blocks and file links. Tasks are tracked as sub-issues.
+          The monospace session buffer becomes something to act on, as the approved design's session boards draw it: messages as units, timings, tool groups, tool-call blocks and file links. Tasks are tracked as sub-issues.
         tasks:
           - key: m6-face-box
             title: "Boxed faces and right-aligned text"
@@ -1710,6 +1710,15 @@ milestones:
               - "A boxed run draws its border and keeps its width in cells"
               - "Right-aligned text follows window resizes, and a line too long falls back to one space"
               - "Display tests cover both"
+          - key: m6-icons
+            title: "Line icons in buffer rows"
+            labels: [core]
+            body: |
+              Frame 6 draws small line icons in tool rows, which a font can't be relied on for. A display property names an icon from a set bundled with the editor (book, magnifier, pencil, terminal, globe, wrench) and the frontend paints it as an SVG with GPUI's `paint_svg`, in the run's foreground, over two cells of plain spaces in the text. The grid stays monospace, and search, kill and copy see the spaces. The set is drawn from an icon library whose licence allows bundling; record which in docs/editor.md.
+            acceptance:
+              - "An icon paints in its run's face, in both themes, and takes two cells"
+              - "Motion, search and kill treat it as its two spaces"
+              - "Display tests cover the property"
           - key: m6-messages
             title: "Messages as units in the transcript"
             body: |
@@ -1723,23 +1732,39 @@ milestones:
           - key: m6-timings
             title: "Timestamps and durations on agent actions"
             body: |
-              ACP carries no times, so the core stamps each update when it arrives. User and agent messages show their clock time right-aligned in `annotation`; a thought's header reads `Thought for 4s`; a tool call shows how long it ran, and a counter (`waiting 0:12`) while it waits for permission; a turn ends with a `Worked 2m 05s` line. History replayed by `session/load` shows no times.
+              ACP carries no times, so the core stamps each update when it arrives. User and agent messages show their clock time right-aligned in `annotation`; a thought's header reads `Thought for 4s`; a tool call shows how long it ran, and a counter (`waiting 0:12`) while it waits for permission; and while a turn runs the transcript's last line, above the prompt, reads `Working for 2m 16s`, ticking each second and counting permission waits, and becomes `Worked 2m 16s` when the turn ends. History replayed by `session/load` shows no times.
             acceptance:
               - "Live messages, thoughts, tool calls and turns show their times"
               - "The waiting counter ticks while a permission is open"
+              - "`Working for` is the last line above the prompt, ticks each second, and becomes `Worked` in place when the turn ends, however it ended"
+              - "A session that isn't shown costs no redraws, and its line is current when shown"
               - "Replayed history shows no times"
               - "Core tests cover each with a fake clock"
             blocked_by: [m6-face-box, m6-messages]
           - key: m6-tool-blocks
             title: "Tool-call blocks with command input and output"
             body: |
-              A folded tool call is one header line: the fold marker, a status mark (`✓`, `✗`, `●`), the kind, the command or path, and on the right its duration or `exit N`. `TAB` opens it: a command shows `$ <command>`, its first 20 output lines and `… N more lines`; an edit shows its diff. `RET` on the header opens the full output in its own read-only buffer.
+              A folded tool call is one header line: the fold marker, a status mark (`✓`, `✗`, `●`), the kind's icon and verb, the command or path, and on the right its duration or `exit N`. `TAB` opens it: a command shows `$ <command>`, its first 20 output lines and `… N more lines`; an edit shows its diff. `RET` on the header opens the full output in its own read-only buffer.
             acceptance:
-              - "Headers show status, kind, target and duration or exit status"
+              - "Headers show status, kind icon and verb, target and duration or exit status"
               - "An opened command shows its input, at most 20 output lines and the rest counted"
               - "RET on a header opens the full output"
               - "Display tests cover folded, open and failed calls"
-            blocked_by: [m6-timings]
+            blocked_by: [m6-timings, m6-icons]
+          - key: m6-tool-groups
+            title: "Collapse consecutive tool calls into groups"
+            body: |
+              Consecutive tool calls fold into one line, as frame 6 draws it. `TAB` on the line opens the group into its calls' rows, and `TAB` on a row opens that call. An agent message, the plan or a user prompt ends a group; thoughts go inside it as rows. A single call is its row, with no group line. The line reads `<icon> <verbs>` in `session-thought`, by the rules in docs/editor.md, with the running call's verb in the present tense, and on the right `<n> failed` in `status-failed` and the group's duration, first start to last end. A call waiting for permission keeps its row showing under the folded line, above its block, and a question's block shows there in place of the row, until answered. The answered line stays in the group and folds with it. Groups rebuild from the replayed calls after `session/load`, without durations. A running group stays folded as it grows, and whatever is open stays open across updates.
+            acceptance:
+              - "Consecutive calls show as one line, and a message, plan or prompt starts a new group"
+              - "TAB opens the group, then a row, and TAB inside folds back to the level above"
+              - "The title follows the kinds in order of first appearance, and the running verb is in the present tense"
+              - "A failed call shows `<n> failed` on the folded line"
+              - "A waiting call's row shows under the folded line, and folds back with its answered line once answered"
+              - "C-n, C-p, search and kill behave across folded groups as across folded calls"
+              - "Replayed history groups the same way"
+              - "Display tests cover folded, open, running, failed and waiting groups"
+            blocked_by: [m6-tool-blocks, m6-permission-collapse]
           - key: m6-permission-collapse
             title: "Answered permission requests shrink to one line"
             body: |
