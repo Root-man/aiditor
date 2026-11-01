@@ -459,14 +459,21 @@ impl Render for Editor {
                     let runs = if grep {
                         grep_runs(&c, &font, theme)
                     } else {
+                        let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
+                        faces.extend(
+                            highlights
+                                .into_iter()
+                                .map(|range| (range, theme.face(FaceName::CompletionMatch))),
+                        );
                         completion_runs(
                             c.len(),
-                            &highlights,
+                            &faces,
                             if mb.files && c.ends_with('/') {
                                 theme.face(FaceName::Directory)
                             } else {
                                 Face::default()
                             },
+                            (Some(i) == mb.selected).then_some(selected),
                             &font,
                             theme,
                         )
@@ -838,6 +845,120 @@ mod tests {
                 e.core.settings().theme.syntax["keyword"]
             );
         });
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn swiper_results_render_source_faces_and_keep_selection(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.js");
+        std::fs::write(&path, "// é🙂 comment\nconst value = \"é🙂\";\n").unwrap();
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.open(&path, files::read(&path).unwrap());
+            cx.notify();
+        });
+        cx.simulate_keystrokes("ctrl-s");
+        for styled in [true, false] {
+            editor.update(cx, |e, cx| {
+                e.handle(Msg::SettingsLoaded(Ok(Some(format!(
+                    "[themes.default.syntax]\ncomment = {{ fg = 0x123456, bg = 0x223344, italic = {styled}, underline = {styled} }}\nkeyword = {{ fg = 0x654321, bg = 0x334455, bold = {styled} }}"
+                )))), cx);
+            });
+            cx.run_until_parked();
+            for expected_selected in [0, 1] {
+                editor.update_in(cx, |e, window, _| {
+                    let mb = e.core.frame().minibuffer.unwrap();
+                    assert_eq!(mb.selected, Some(expected_selected));
+                    let font = e.font(window).0;
+                    let theme = &e.core.settings().theme;
+                    for (row, token, capture) in [
+                        (0, "é🙂 comment", "comment"),
+                        (1, "const", "keyword"),
+                        (1, "é🙂", "string"),
+                    ] {
+                        let selected_bg = (mb.selected == Some(row))
+                            .then(|| theme.face(FaceName::CompletionSelected).bg.unwrap());
+                        let runs = completion_runs(
+                            mb.candidates[row].len(),
+                            &mb.syntax[row],
+                            Face::default(),
+                            selected_bg,
+                            &font,
+                            theme,
+                        );
+                        assert_eq!(
+                            runs.iter().map(|run| run.len).sum::<usize>(),
+                            mb.candidates[row].len()
+                        );
+                        assert_eq!(runs[0].color, rgb(theme.foreground()).into());
+                        let byte = mb.candidates[row].find(token).unwrap();
+                        let mut end = 0;
+                        let run = runs
+                            .iter()
+                            .find(|run| {
+                                end += run.len;
+                                end > byte
+                            })
+                            .unwrap();
+                        let face = theme.syntax[capture];
+                        assert_eq!(run.color, rgb(face.fg.unwrap()).into());
+                        assert_eq!(
+                            run.background_color,
+                            selected_bg.or(face.bg).map(|c| rgb(c).into())
+                        );
+                        assert_eq!(
+                            run.font.weight,
+                            if face.bold {
+                                gpui::FontWeight::BOLD
+                            } else {
+                                font.weight
+                            }
+                        );
+                        assert_eq!(
+                            run.font.style,
+                            if face.italic {
+                                gpui::FontStyle::Italic
+                            } else {
+                                font.style
+                            }
+                        );
+                        assert_eq!(run.underline.is_some(), face.underline);
+                        let shaped = window.text_system().shape_line(
+                            mb.candidates[row].clone().into(),
+                            px(e.core.settings().font_size),
+                            &runs,
+                            None,
+                        );
+                        assert_eq!(shaped.text.as_ref(), mb.candidates[row]);
+                    }
+                });
+                assert!(cx.debug_bounds("completion-0").is_some());
+                assert!(cx.debug_bounds("completion-1").is_some());
+                cx.simulate_keystrokes(if expected_selected == 0 {
+                    "ctrl-n"
+                } else {
+                    "ctrl-p"
+                });
+            }
+        }
+        cx.simulate_input("value");
+        cx.run_until_parked();
+        editor.update(cx, |e, _| {
+            let mb = e.core.frame().minibuffer.unwrap();
+            assert_eq!(mb.candidates, ["2 const value = \"é🙂\";"]);
+            assert_eq!(mb.selected, Some(0));
+        });
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.text()),
+            "// é🙂 comment\nconst value = \"é🙂\";\n"
+        );
         cx.update(|window, _| window.remove_window());
         drop(editor);
         cx.run_until_parked();
@@ -1700,9 +1821,17 @@ mod tests {
             let theme = &e.core.settings().theme;
             let font = e.font(window).0;
             let directory = theme.face(FaceName::Directory);
-            let runs = completion_runs(mb.candidates[0].len(), &[], directory, &font, theme);
+            let runs = completion_runs(mb.candidates[0].len(), &[], directory, None, &font, theme);
             assert_eq!(runs[0].color, rgb(directory.fg.unwrap()).into());
-            let runs = completion_runs(3, &[0..1, 2..3], directory, &font, theme);
+            let matched = theme.face(FaceName::CompletionMatch);
+            let runs = completion_runs(
+                3,
+                &[(0..1, matched), (2..3, matched)],
+                directory,
+                None,
+                &font,
+                theme,
+            );
             assert_eq!(
                 runs[0].color,
                 rgb(theme.face(FaceName::CompletionMatch).fg.unwrap()).into()
@@ -1883,8 +2012,13 @@ mod tests {
                 let theme = &e.core.settings().theme;
                 let runs = completion_runs(
                     mb.candidates[i].len(),
-                    &mb.highlights[i],
+                    &mb.highlights[i]
+                        .iter()
+                        .cloned()
+                        .map(|range| (range, theme.face(FaceName::CompletionMatch)))
+                        .collect::<Vec<_>>(),
                     Face::default(),
+                    None,
                     &font,
                     theme,
                 );

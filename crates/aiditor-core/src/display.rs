@@ -224,6 +224,8 @@ pub struct Minibuffer {
     pub candidates: Vec<String>,
     /// Matched graphemes' UTF-8 byte ranges in each candidate; empty for custom filters.
     pub highlights: Vec<Vec<Range<usize>>>,
+    /// Syntax faces in each Swiper candidate's UTF-8 byte ranges, including its prefix offset.
+    pub syntax: Vec<Vec<(Range<usize>, Face)>>,
     /// Each of `candidates`' annotation, empty for none.
     pub annotations: Vec<String>,
     /// Project grep file headers, each before the candidate at its index.

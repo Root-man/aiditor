@@ -1,12 +1,15 @@
 //! Swiper: the buffer's matching lines listed in the minibuffer, as ivy's `swiper`.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
 use ropey::Rope;
 
+use crate::buffer::Face;
 use crate::command::{Args, Preview};
+use crate::syntax::Syntax;
 use crate::{Core, Ctx};
 
 /// How many lines swiper lists: a final newline adds none.
@@ -18,6 +21,7 @@ fn lines(text: &Rope) -> usize {
 pub(crate) struct Search {
     snapshot: String,
     lines: Vec<Range<usize>>,
+    syntax: Option<(Rope, Syntax)>,
     positive: Option<Regex>,
     negative: Vec<Regex>,
 }
@@ -37,7 +41,7 @@ impl crate::display::Search for Search {
 }
 
 impl Search {
-    pub(crate) fn new(text: &Rope) -> Self {
+    pub(crate) fn new(text: &Rope, syntax: Option<Syntax>) -> Self {
         let snapshot = text.to_string();
         let mut lines = Vec::new();
         let mut start = 0;
@@ -51,6 +55,7 @@ impl Search {
         Self {
             snapshot,
             lines,
+            syntax: syntax.map(|syntax| (text.clone(), syntax)),
             positive: None,
             negative: Vec::new(),
         }
@@ -75,6 +80,43 @@ impl Search {
         let width = self.lines.len().to_string().len();
         let content = &self.snapshot[self.lines[line].clone()];
         format!("{:<width$} {}", line + 1, content)
+    }
+
+    pub(crate) fn highlights(
+        &self,
+        lines: &[usize],
+        palette: &BTreeMap<String, Face>,
+    ) -> Vec<Vec<(Range<usize>, Face)>> {
+        let Some((text, syntax)) = &self.syntax else {
+            return vec![Vec::new(); lines.len()];
+        };
+        let ranges: Vec<_> = lines
+            .iter()
+            .map(|&line| {
+                let bytes = &self.lines[line];
+                text.byte_to_char(bytes.start)..text.byte_to_char(bytes.end)
+            })
+            .collect();
+        let drawn: Vec<_> = ranges.iter().filter(|r| !r.is_empty()).cloned().collect();
+        let faces = syntax.highlights(text, &drawn, palette);
+        let prefix = self.lines.len().to_string().len() + 1;
+        lines
+            .iter()
+            .zip(ranges)
+            .map(|(&line, range)| {
+                let start = self.lines[line].start;
+                faces
+                    .iter()
+                    .skip_while(|(r, _)| r.end <= range.start)
+                    .take_while(|(r, _)| r.start < range.end)
+                    .map(|(r, face)| {
+                        let start_byte = text.char_to_byte(r.start) - start + prefix;
+                        let end_byte = text.char_to_byte(r.end) - start + prefix;
+                        (start_byte..end_byte, *face)
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     fn target(&self, text: &Rope, line: usize) -> Option<usize> {
@@ -193,7 +235,7 @@ mod tests {
     fn preview_matches_use_swiper_semantics() {
         use crate::display::Search as _;
         let text = "été Foo gap bar foo bar";
-        let mut search = super::Search::new(&ropey::Rope::from_str(text));
+        let mut search = super::Search::new(&ropey::Rope::from_str(text), None);
         for (query, expected) in [
             ("foo bar", vec!["Foo gap bar", "foo bar"]),
             ("Foo", vec!["Foo"]),
@@ -211,7 +253,186 @@ mod tests {
     }
 
     use crate::Msg;
+    use crate::buffer::Face;
     use crate::harness::{Harness, line_start, mark, on};
+
+    fn result_face(h: &mut Harness, row: usize, token: &str) -> Face {
+        let mb = h.core.frame().minibuffer.unwrap();
+        let start = mb.candidates[row].find(token).unwrap();
+        mb.syntax[row]
+            .iter()
+            .find(|(range, _)| range.start <= start && range.end >= start + token.len())
+            .map_or(Face::default(), |(_, face)| *face)
+    }
+
+    #[test]
+    fn result_syntax_retains_multiline_and_injected_context() {
+        for (file, text, query, token, capture) in [
+            (
+                "a.js",
+                "/* open\né🙂 needle\n*/\n",
+                "needle",
+                "é🙂 needle",
+                "comment",
+            ),
+            (
+                "a.js",
+                "const s = `open\né🙂 needle\nend`;\n",
+                "needle",
+                "é🙂 needle",
+                "string",
+            ),
+            (
+                "a.md",
+                "```rust\nfn f(value: i32) {\n  value;\n}\n```\n",
+                "value;",
+                "value",
+                "variable.parameter",
+            ),
+            (
+                "a.ex",
+                "def f do\n  ~H\"\"\"\n<div title=\"é\">{String.upcase(\"needle\")}</div>\n\"\"\"\nend\n",
+                "needle",
+                "div",
+                "tag",
+            ),
+            (
+                "a.ex",
+                "def f do\n  ~H\"\"\"\n<div>{String.upcase(\"needle\")}</div>\n\"\"\"\nend\n",
+                "needle",
+                "String",
+                "module",
+            ),
+        ] {
+            let mut h = Harness::new(&[(file, text)]);
+            h.open(file).keys("C-s");
+            h.send(Msg::Insert {
+                text: query.into(),
+                replace: None,
+            });
+            let expected = h.core.settings().theme.syntax[capture];
+            assert_eq!(result_face(&mut h, 0, token), expected, "{file} {token}");
+        }
+    }
+
+    #[test]
+    fn result_syntax_follows_filtering_scrolling_and_theme_reload() {
+        let text: String = (0..15)
+            .map(|i| format!("const value{i} = \"é🙂\";\n"))
+            .collect();
+        let mut h = Harness::new(&[("a.js", &text)]);
+        h.open("a.js").keys("C-s C-u 12 C-n");
+        let mb = h.core.frame().minibuffer.unwrap();
+        assert_eq!(mb.candidates.len(), 10);
+        assert!(mb.candidates[mb.selected.unwrap()].contains("value12"));
+        for row in 0..mb.candidates.len() {
+            let theme = h.core.settings().theme.syntax.clone();
+            assert_eq!(result_face(&mut h, row, "const"), theme["keyword"]);
+            assert_eq!(result_face(&mut h, row, "é🙂"), theme["string"]);
+            assert_eq!(result_face(&mut h, row, " "), Face::default());
+        }
+        h.send(Msg::Insert {
+            text: "value14".into(),
+            replace: None,
+        });
+        assert_eq!(
+            h.core.frame().minibuffer.unwrap().candidates,
+            ["15 const value14 = \"é🙂\";"]
+        );
+        h.send(Msg::SettingsLoaded(Ok(Some("[themes.default.syntax]\nkeyword = { fg = 7, bold = true, underline = true }\nstring = { fg = 8, italic = true }".into()))));
+        assert_eq!(
+            result_face(&mut h, 0, "const"),
+            Face {
+                fg: Some(7),
+                bold: true,
+                underline: true,
+                ..Face::default()
+            }
+        );
+        assert_eq!(
+            result_face(&mut h, 0, "é🙂"),
+            Face {
+                fg: Some(8),
+                italic: true,
+                ..Face::default()
+            }
+        );
+        h.keys("C-a C-k");
+        assert_eq!(h.core.frame().minibuffer.unwrap().candidates.len(), 10);
+        assert_eq!(result_face(&mut h, 0, "const").fg, Some(7));
+    }
+
+    #[test]
+    fn result_syntax_freezes_pending_edits_and_survives_origin_changes() {
+        let mut h = Harness::new(&[("a.js", "const value = \"é🙂\";\n")]);
+        h.open("a.js");
+        let buffer = h.core.windows.window.buffer();
+        h.send(Msg::Insert {
+            text: "// ".into(),
+            replace: None,
+        });
+        h.keys("C-s value");
+        let comment = h.core.settings().theme.syntax["comment"];
+        assert_eq!(result_face(&mut h, 0, "const value = \"é🙂\";"), comment);
+        let before = h.core.frame().minibuffer.unwrap();
+        h.core
+            .buffers
+            .get_mut(buffer)
+            .unwrap()
+            .insert(0, "/*\n")
+            .unwrap();
+        let after = h.core.frame().minibuffer.unwrap();
+        assert_eq!(
+            (&after.candidates, &after.syntax),
+            (&before.candidates, &before.syntax)
+        );
+        let origin = h.core.buffers.get(buffer).unwrap();
+        let tick = origin.tick();
+        let replacement = "const value = 7;\n";
+        let result = crate::buffer::revert(
+            &h.path("a.js"),
+            origin.text(),
+            Ok(Some((
+                replacement.as_bytes().to_vec(),
+                crate::buffer::hash(replacement.as_bytes()),
+            ))),
+        );
+        h.send(Msg::Reverted {
+            buffer,
+            tick,
+            result,
+        });
+        let after = h.core.frame().minibuffer.unwrap();
+        assert_eq!(
+            (after.candidates, after.syntax),
+            (before.candidates, before.syntax)
+        );
+        h.keys("RET");
+        assert_eq!(h.text(), replacement);
+        assert_eq!(h.point(), "const value".len());
+    }
+
+    #[test]
+    fn result_syntax_keeps_blank_rows_plain() {
+        let mut h = Harness::new(&[("a.js", "\nconst value = 1;\n\n")]);
+        h.open("a.js").keys("C-s");
+        assert_eq!(
+            h.core.frame().minibuffer.unwrap().candidates,
+            ["1 ", "2 const value = 1;", "3 "]
+        );
+        assert_eq!(result_face(&mut h, 0, "1 "), Face::default());
+        assert_eq!(result_face(&mut h, 2, "3 "), Face::default());
+        let keyword = h.core.settings().theme.syntax["keyword"];
+        assert_eq!(result_face(&mut h, 1, "const"), keyword);
+    }
+
+    #[test]
+    fn plain_result_rows_keep_the_ordinary_face() {
+        let mut h = on("const value = \"é🙂\";\n");
+        h.keys("C-s value");
+        assert_eq!(result_face(&mut h, 0, "const"), Face::default());
+        assert_eq!(result_face(&mut h, 0, "é🙂"), Face::default());
+    }
 
     #[test]
     #[ignore = "manual reproducible Swiper baseline; prints timings"]
