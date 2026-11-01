@@ -89,7 +89,13 @@ impl Editor {
             spawn_heartbeat(cx);
         }
         let reports = tx.clone();
-        let watcher = watcher::Watcher::spawn(move |msg| _ = reports.blocking_send(msg));
+        #[cfg(test)]
+        let stopped = tests::watcher_lifetime();
+        let watcher = watcher::Watcher::spawn(move |msg| {
+            #[cfg(test)]
+            let _stopped = &stopped;
+            _ = reports.blocking_send(msg);
+        });
         // The launch's messages ran before there was a watcher to send their watch set to.
         watcher.set(core.watch_set());
         let (clock, clock_task) = Self::start_clock(clock::read, cx);
@@ -670,19 +676,71 @@ mod tests {
     use gpui::{Bounds, EntityInputHandler, ShapedLine};
     use gpui::{TestAppContext, VisualTestContext};
 
+    thread_local! {
+        static WATCHERS: std::cell::RefCell<Vec<std::sync::mpsc::Receiver<()>>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+        static DIRECTORIES: std::cell::RefCell<Vec<std::sync::Arc<tempfile::TempDir>>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    fn tempdir() -> std::sync::Arc<tempfile::TempDir> {
+        let dir = std::sync::Arc::new(tempfile::tempdir().unwrap());
+        DIRECTORIES.with(|dirs| dirs.borrow_mut().push(dir.clone()));
+        dir
+    }
+
+    pub(super) fn watcher_lifetime() -> std::sync::mpsc::Sender<()> {
+        let (stopped, receiver) = std::sync::mpsc::channel();
+        WATCHERS.with(|watchers| watchers.borrow_mut().push(receiver));
+        stopped
+    }
+
+    struct NativeTest {
+        cx: TestAppContext,
+        _lock: Option<std::sync::MutexGuard<'static, ()>>,
+    }
+
+    impl NativeTest {
+        fn new(cx: &TestAppContext) -> Self {
+            Self {
+                cx: cx.clone(),
+                _lock: crate::native::lock(),
+            }
+        }
+    }
+
+    impl Drop for NativeTest {
+        fn drop(&mut self) {
+            // GPUI's macro shuts down after the body returns, after a local lock would be released.
+            self.cx.quit();
+            self.cx.run_until_parked();
+            WATCHERS.with(|watchers| {
+                for stopped in watchers.take() {
+                    assert_eq!(
+                        stopped.recv_timeout(Duration::from_secs(30)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+                        "watcher reporter must close before the next native fixture starts"
+                    );
+                }
+            });
+            DIRECTORIES.with(|dirs| drop(dirs.take()));
+        }
+    }
+
     fn editor<'a>(
         cx: &'a mut TestAppContext,
         text: &str,
     ) -> (gpui::Entity<Editor>, &'a mut VisualTestContext) {
         let (editor, cx) = cx.add_window_view(|window, cx| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let path = dir.path().join("t.txt");
             std::fs::write(&path, text).unwrap();
             let mut core = Core::default();
             core.open(&path, files::read(&path).unwrap());
             // The fixture has no Tokio runtime for the file's repository lookup.
             core.handle(Instant::now(), Msg::Tick);
-            cx.on_release(move |_, _| drop(dir)).detach();
             Editor::new(
                 core,
                 Args::default(),
@@ -742,7 +800,7 @@ mod tests {
 
     #[gpui::test]
     fn every_bundled_binding_reaches_the_core(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         // `C-x C-s` hands the save to Tokio's blocking pool.
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
@@ -771,7 +829,7 @@ mod tests {
 
     #[gpui::test]
     fn typing_goes_through_the_text_input(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("aB");
         cx.simulate_keystrokes("ctrl-u 3 x ctrl-x u");
@@ -783,10 +841,10 @@ mod tests {
 
     #[gpui::test]
     fn syntax_styles_reach_font_runs_after_settings_reload(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("a.js");
         std::fs::write(&path, "// comment\nconst value = 1;\n").unwrap();
         let (editor, cx) = editor(cx, "");
@@ -850,10 +908,10 @@ mod tests {
 
     #[gpui::test]
     fn markdown_injections_reach_font_runs_and_follow_input(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("a.md");
         let text = "*italic* **bold** `code` [docs](https://x.dev)\n\n```rust\nfn main(value: i32) { value; value; }\n```\n";
         std::fs::write(&path, text).unwrap();
@@ -931,10 +989,10 @@ mod tests {
 
     #[gpui::test]
     fn swiper_results_render_source_faces_and_keep_selection(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("a.js");
         std::fs::write(&path, "// é🙂 comment\nconst value = \"é🙂\";\n").unwrap();
         let (editor, cx) = editor(cx, "");
@@ -1045,7 +1103,7 @@ mod tests {
 
     #[gpui::test]
     fn swiper_input_produces_match_background_runs_and_cleans_up(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "été Foo foo\nfoo bar\n");
         for close in ["ctrl-g", "enter"] {
             cx.simulate_keystrokes("alt-< ctrl-s");
@@ -1095,7 +1153,7 @@ mod tests {
 
     #[gpui::test]
     fn the_window_title_follows_the_current_workspace(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         let shown = cx.window_title().unwrap();
         assert!(shown.starts_with("t.txt | "), "{shown}");
@@ -1202,7 +1260,7 @@ mod tests {
 
     #[gpui::test]
     fn closing_the_window_offers_to_save(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
         let path = editor.read_with(cx, |e, _| e.core.current().file.clone().unwrap());
@@ -1213,10 +1271,10 @@ mod tests {
 
     #[gpui::test]
     fn startup_indexes_before_watching_and_applies_ignores(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path();
         std::fs::create_dir(root.join("ignored")).unwrap();
         std::fs::write(root.join("x"), "").unwrap();
@@ -1258,10 +1316,10 @@ mod tests {
 
     #[gpui::test]
     fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let args = Args {
             config_dir: Some(dir.path().to_owned()),
             ..Args::default()
@@ -1313,14 +1371,14 @@ mod tests {
 
     #[gpui::test]
     fn integrated_finders_visits_saves_and_directory_recovery(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .max_blocking_threads(1)
             .enable_all()
             .build()
             .unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().canonicalize().unwrap().join("repo");
         std::fs::create_dir_all(root.join("sub")).unwrap();
         for name in ["a", "b", "c"] {
@@ -1503,17 +1561,17 @@ mod tests {
 
     #[gpui::test]
     fn recovery_files_are_written_and_removed_on_quit(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let args = Args {
             recovery_dir: Some(dir.path().to_owned()),
             ..Args::default()
         };
         let channel = aiditor_services::channel();
         let mut core = Core::default();
-        let source = tempfile::tempdir().unwrap();
+        let source = tempdir();
         let path = source.path().join("t.txt");
         std::fs::write(&path, "").unwrap();
         core.open(&path, files::read(&path).unwrap());
@@ -1560,7 +1618,7 @@ mod tests {
     fn long_swiper_rows_reach_gpui_as_bounded_text_and_valid_selected_runs(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (editor, cx) = editor(cx, "");
@@ -1631,7 +1689,7 @@ mod tests {
 
     #[gpui::test]
     fn a_prompt_reads_typed_text(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             e.core.register(Command {
@@ -1659,7 +1717,7 @@ mod tests {
 
     #[gpui::test]
     fn the_echo_line_is_one_string_with_point_in_it(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("abc");
@@ -1679,10 +1737,10 @@ mod tests {
     fn multi_root_grep_prioritizes_the_current_file_and_prefix_selects_one_root(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let base = dir.path().canonicalize().unwrap();
         for name in ["app", "lib", "docs"] {
             std::fs::create_dir(base.join(name)).unwrap();
@@ -1852,7 +1910,7 @@ mod tests {
 
     #[gpui::test]
     fn grep_status_keeps_the_echo_cursor_with_the_input(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x p g");
         cx.simulate_input("needle");
@@ -1922,7 +1980,7 @@ mod tests {
 
     #[gpui::test]
     fn m_x_runs_a_command_by_name(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "abc");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("forward-char");
@@ -1936,8 +1994,8 @@ mod tests {
 
     #[gpui::test]
     fn find_file_draws_unselected_entries_and_aligned_metadata(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
-        let dir = tempfile::tempdir().unwrap();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
         std::fs::create_dir(dir.path().join("a-directory")).unwrap();
         for name in [
             "b.txt",
@@ -2041,8 +2099,8 @@ mod tests {
     fn project_file_metadata_uses_the_file_columns_without_initial_preview(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
-        let dir = tempfile::tempdir().unwrap();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
         for name in ["a.txt", "b.txt", &format!("c{}.txt", "long".repeat(40))] {
             std::fs::write(dir.path().join(name), [b'x'; 41]).unwrap();
         }
@@ -2148,7 +2206,7 @@ mod tests {
 
     #[gpui::test]
     fn fuzzy_completion_input_uses_the_themes_match_face(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("pff");
@@ -2236,7 +2294,7 @@ mod tests {
 
     #[gpui::test]
     fn a_completing_prompt_filters_and_picks(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             e.core.register(Command {
@@ -2282,7 +2340,7 @@ mod tests {
 
     #[gpui::test]
     fn input_methods_compose_and_replace(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "😀");
         cx.simulate_keystrokes("ctrl-e");
         let state = |cx: &mut VisualTestContext| {
@@ -2317,7 +2375,7 @@ mod tests {
 
     #[gpui::test]
     fn copy_and_paste_go_through_the_clipboard(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "ab");
         let (copy, paste) = if cfg!(target_os = "macos") {
             ("cmd-c", "cmd-v")
@@ -2347,7 +2405,7 @@ mod tests {
 
     #[gpui::test]
     fn a_full_channel_lets_other_ui_work_run(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         let (tx, rx) = mpsc::channel(1000);
         for _ in 0..1000 {
@@ -2375,7 +2433,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_cells_sit_on_the_grid(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let (id, _) = e.core.create_terminal("term", 3, 20);
@@ -2404,7 +2462,7 @@ mod tests {
 
     #[gpui::test]
     fn a_line_number_ends_before_the_text_and_the_toggle_takes_it_away(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a\nb");
         let gutter = |cx: &mut VisualTestContext| {
             editor.read_with(cx, |e, _| {
@@ -2431,7 +2489,7 @@ mod tests {
 
     #[gpui::test]
     fn the_zoom_keys_lay_the_frame_out_again(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a\nb");
         let laid_out = |cx: &mut VisualTestContext| {
             editor.read_with(cx, |e, _| {
@@ -2460,7 +2518,7 @@ mod tests {
 
     #[gpui::test]
     fn windows_reach_the_frame_edges_with_their_text_inset(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("display-line-numbers-mode");
@@ -2482,7 +2540,7 @@ mod tests {
     fn the_echo_line_is_as_high_as_a_mode_line_and_never_moves_the_windows(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a");
         let (bottom, height) = editor.read_with(cx, |e, _| {
             let settings = e.core.settings();
@@ -2503,7 +2561,7 @@ mod tests {
 
     #[gpui::test]
     fn side_by_side_windows_leave_a_pixel_for_the_divider(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 3");
         cx.run_until_parked();
@@ -2539,7 +2597,7 @@ mod tests {
 
     #[gpui::test]
     fn a_session_mode_line_paints_its_title_and_exit_status(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let settings = "[agents.fake]\ncommand = 'unused'";
@@ -2582,8 +2640,8 @@ mod tests {
 
     #[gpui::test]
     fn a_file_mode_line_paints_its_declared_language_version(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
-        let dir = tempfile::tempdir().unwrap();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, "fn main() {}\n").unwrap();
         std::fs::write(dir.path().join(".tool-versions"), "rust 1.99.0").unwrap();
@@ -2616,7 +2674,7 @@ mod tests {
 
     #[gpui::test]
     fn a_mode_lines_right_group_ends_at_the_right_inset(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.run_until_parked();
         let (x, width, right) = editor.read_with(cx, |e, _| {
@@ -2633,7 +2691,7 @@ mod tests {
 
     #[gpui::test]
     fn only_an_inactive_mode_line_has_a_rule(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 2");
         cx.run_until_parked();
@@ -2661,7 +2719,7 @@ mod tests {
 
     #[gpui::test]
     fn ligatures_are_off_for_all_text(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         let calt =
             cx.update(|window, cx| editor.read(cx).font(window).0.features.is_calt_enabled());
@@ -2670,7 +2728,7 @@ mod tests {
 
     #[gpui::test]
     fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "hello world");
         let cursor = |cx: &mut VisualTestContext| {
             let (bounds, rows) = painted(&editor, cx, 0);

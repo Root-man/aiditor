@@ -1018,7 +1018,6 @@ pub fn decode(bytes: &[u8]) -> Result<(String, bool, bool), &'static str> {
     }
     let text =
         std::str::from_utf8(&bytes[if bom { 3 } else { 0 }..]).map_err(|_| "not valid UTF-8")?;
-    // The first line break sets the ending; lone CRs stay in the text.
     let crlf = text.contains('\n')
         && text
             .match_indices('\n')
