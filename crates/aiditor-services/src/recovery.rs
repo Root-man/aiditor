@@ -23,9 +23,6 @@ pub fn spawn(
     let handle = thread::spawn(move || {
         for op in rx {
             let result = run(&dir, &op);
-            if let Err(err) = &result {
-                tracing::warn!(%err, dir = %dir.display(), "auto-save failed");
-            }
             if let RecoveryOp::AutoSave {
                 buffer,
                 request,
@@ -52,6 +49,8 @@ pub fn spawn(
                     tick,
                     result,
                 });
+            } else if let Err(err) = result {
+                tracing::warn!(%err, dir = %dir.display(), "auto-save cleanup failed");
             }
         }
     });
