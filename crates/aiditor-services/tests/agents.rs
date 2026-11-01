@@ -733,7 +733,7 @@ async fn killing_the_workspace_stops_its_agent() {
     let mut live = Live::new(dir.path(), "{}");
     live.keys("C-x t 2 RET f i x RET");
     live.start().await;
-    live.keys("C-x t 0");
+    live.keys("C-x t 0 yes RET");
     live.gone().await;
 }
 
