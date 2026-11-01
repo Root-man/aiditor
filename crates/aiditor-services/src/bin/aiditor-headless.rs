@@ -118,6 +118,15 @@ mod tests {
         core.launch(dir.path(), dir.path());
         core.open(&file, files::read(&file).unwrap());
         let mut service = Some(recovery::spawn(dir.path().join("recovery"), |_| {}));
+        send(
+            &mut core,
+            &mut service,
+            Msg::Resize {
+                width: 800.,
+                height: 600.,
+                cell_width: 8.,
+            },
+        );
         for key in parse_keys("C-x C-r x C-x C-s C-x p g needle").unwrap() {
             send(&mut core, &mut service, Msg::Key(key));
         }

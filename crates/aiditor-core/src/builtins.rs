@@ -263,6 +263,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "find-file",
             spec: ArgSpec {
+                unselected: true,
                 prompts: &["Find file: "],
                 files: Some(0),
                 preview: Some(preview_file),
@@ -407,6 +408,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-find-file",
             // Asks its own question, so it can start indexing before the prompt opens.
             spec: ArgSpec {
+                unselected: true,
                 preview: Some(|core, c| {
                     let finder = core.prompts.minibuffer.as_ref()?.finder.as_ref()?;
                     Some(Preview::File(finder.path(c)))
@@ -419,6 +421,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-grep",
             // Asks its own question, which names the project; the hits are matched already.
             spec: ArgSpec {
+                grep_hits: true,
                 filter: Some(crate::command::Filter::Items(|_, items| {
                     (0..items.len()).collect()
                 })),
@@ -430,6 +433,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "workspace-new",
             spec: ArgSpec {
+                project_candidates: true,
                 project: true,
                 prompts: &["New workspace for project: ", "Workspace name: "],
                 completion: Some(projects_then_free),

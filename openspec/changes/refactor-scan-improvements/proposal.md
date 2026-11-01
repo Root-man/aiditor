@@ -21,7 +21,7 @@ Bugs and risks:
 Performance:
 
 - 4: Cut project grep's listed rows to the visible width, as swiper does.
-- 5: Defer command-output rendering in hidden sessions, and append new output to folded calls instead of rebuilding the block each frame.
+- 5: Defer command-output rendering in hidden sessions, and append new output to folded calls instead of rebuilding the block each frame, and jump over hidden lines during folded display layout.
 - 15: Set the window title only when it changes.
 - 19: Replace linear hit lookups and per-batch path cloning in project grep.
 
@@ -56,7 +56,7 @@ None.
 ## Impact
 
 - `aiditor-services`: `files.rs`, `agents.rs`.
-- `aiditor-core`: `buffer.rs`, `agents.rs` and a new `agents/render.rs`, `grep.rs`, `minibuffer.rs`, `command.rs`, `builtins.rs`, `lib.rs`, `autosave.rs`, `watching.rs`, `visiting.rs`, `workspace.rs`, `file_index.rs`, `project.rs`, and the hot-path benches.
+- `aiditor-core`: `buffer.rs`, `agents.rs` and a new `agents/render.rs`, `grep.rs`, `minibuffer.rs`, `command.rs`, `builtins.rs`, `lib.rs`, `autosave.rs`, `watching.rs`, `visiting.rs`, `workspace.rs`, `file_index.rs`, `project.rs`, `display.rs`, and the hot-path benches.
 - `aiditor`: `editor.rs`.
 - `docs/editor.md` records the new behavior. No dependencies, settings or public file formats change.
 - Panics outside commands stay out of scope; #168 tracks them.

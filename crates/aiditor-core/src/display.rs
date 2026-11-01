@@ -428,9 +428,7 @@ pub fn build(
     while widen {
         let hidden: usize = (props.iter())
             .filter(|(_, p)| matches!(p, Prop::Invisible(_)))
-            .map(|(r, _)| {
-                text.char_to_line(r.end.min(last)) - text.char_to_line(r.start.max(first))
-            })
+            .map(|(r, _)| text.char_to_line(r.end) - text.char_to_line(r.start.max(first)))
             .sum();
         let end = text.line_to_char((end_line + hidden).min(text.len_lines()));
         widen = end > last;
@@ -1120,6 +1118,24 @@ mod tests {
         let display = h.display(2);
         assert_eq!(texts(&mut h, 2), ["a…", "ef"]);
         assert_eq!(display.lines[1].spans[0].face, RED);
+    }
+
+    #[test]
+    fn large_chained_folds_reach_visible_text_and_its_faces() {
+        let first = format!("head\n{}", "hidden\n".repeat(10_000));
+        let second = format!("middle\n{}", "more\n".repeat(10_000));
+        let text = format!("{first}{second}last");
+        let mut h = Harness::new(&[("folds.txt", &text)]);
+        h.open("folds.txt");
+        prop(&mut h, 4..first.len() - 1, Prop::Invisible("…".into()));
+        prop(
+            &mut h,
+            first.len() + 6..first.len() + second.len() - 1,
+            Prop::Invisible("…".into()),
+        );
+        prop(&mut h, text.len() - 4..text.len(), Prop::Face(RED));
+        assert_eq!(texts(&mut h, 3), ["head…", "middle…", "last"]);
+        assert_eq!(h.display(3).lines[2].spans[0].face, RED);
     }
 
     #[test]

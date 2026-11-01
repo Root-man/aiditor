@@ -370,6 +370,14 @@ mod tests {
         let mut core = aiditor_core::Core::default();
         core.launch(dir.path(), dir.path());
         let now = Instant::now();
+        core.handle(
+            now,
+            Msg::Resize {
+                width: 800.,
+                height: 600.,
+                cell_width: 8.,
+            },
+        );
         for key in aiditor_core::key::parse_keys("C-x p g needle").unwrap() {
             core.handle(now, Msg::Key(key));
         }

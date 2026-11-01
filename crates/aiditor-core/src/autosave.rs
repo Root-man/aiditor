@@ -7,6 +7,17 @@ use crate::buffer::{Buffer, BufferId};
 use crate::command::Args;
 use crate::{Core, Ctx, Effect, Effects, Msg, RecoveryOp};
 
+#[derive(Default)]
+pub(crate) struct Autosave {
+    pub(crate) saved: std::collections::HashMap<BufferId, State>,
+    pub(crate) next: u64,
+    pub(crate) retry: Option<crate::timer::TimerId>,
+    pub(crate) stopped: bool,
+    pub(crate) idle: Option<crate::timer::TimerId>,
+    pub(crate) max: Option<crate::timer::TimerId>,
+    pub(crate) recovered: Vec<crate::Recovered>,
+}
+
 /// How long after the last edit buffers are auto-saved, and the most edits wait while typing goes on.
 const AUTOSAVE_IDLE: Duration = Duration::from_secs(2);
 const AUTOSAVE_MAX: Duration = Duration::from_secs(30);
@@ -49,13 +60,13 @@ impl RecoveryOp {
 impl Ctx<'_> {
     pub(crate) fn write_autosaves(&mut self) {
         let core = &mut *self.core;
-        if core.autosave_stopped {
+        if core.autosave.stopped {
             return;
         }
         for id in [
-            core.autosave_idle.take(),
-            core.autosave_max.take(),
-            core.autosave_retry.take(),
+            core.autosave.idle.take(),
+            core.autosave.max.take(),
+            core.autosave.retry.take(),
         ]
         .into_iter()
         .flatten()
@@ -66,15 +77,15 @@ impl Ctx<'_> {
             if !autosaves(b) {
                 continue;
             }
-            let state = core.autosaved.entry(id).or_default();
+            let state = core.autosave.saved.entry(id).or_default();
             if state.confirmed == Some(b.tick())
                 || state.pending.is_some()
                 || state.retry.is_some_and(|at| at > self.now)
             {
                 continue;
             }
-            core.next_autosave += 1;
-            let request = core.next_autosave;
+            core.autosave.next += 1;
+            let request = core.autosave.next;
             let tick = b.tick();
             let replaces = state.old.clone();
             state.pending = Some(Pending {
@@ -104,7 +115,7 @@ impl Ctx<'_> {
         result: Result<Vec<(PathBuf, String)>, String>,
     ) {
         let core = &mut *self.core;
-        let Some(state) = core.autosaved.get_mut(&buffer) else {
+        let Some(state) = core.autosave.saved.get_mut(&buffer) else {
             return;
         };
         if !state
@@ -144,7 +155,7 @@ impl Ctx<'_> {
     pub(crate) fn recover_buffers(&mut self, args: Args) -> Result<(), String> {
         let core = &mut *self.core;
         if let Some(answer) = args.strings.first() {
-            let r = core.recovered.remove(0);
+            let r = core.autosave.recovered.remove(0);
             let mut keep = false;
             if answer.eq_ignore_ascii_case("yes") {
                 let id = match &r.path {
@@ -169,7 +180,7 @@ impl Ctx<'_> {
                 }
                 keep = r.path.is_some();
                 if keep {
-                    let old = &mut self.core.autosaved.entry(id).or_default().old;
+                    let old = &mut self.core.autosave.saved.entry(id).or_default().old;
                     if !old.contains(&r.file) {
                         old.push(r.file.clone());
                     }
@@ -181,7 +192,7 @@ impl Ctx<'_> {
                     .push(Effect::Recovery(RecoveryOp::DeleteRecovery(r.file)));
             }
         }
-        let Some(next) = self.core.recovered.first() else {
+        let Some(next) = self.core.autosave.recovered.first() else {
             return match args.strings.is_empty() {
                 true => Err("No auto-saved buffers to recover".into()),
                 false => Ok(()),
@@ -201,16 +212,17 @@ impl Ctx<'_> {
 impl Core {
     pub(crate) fn autosave(&mut self, now: Instant, input: bool, effects: &mut Effects) {
         let quit = effects.iter().position(|e| matches!(e, Effect::Quit));
-        self.autosave_stopped |= quit.is_some();
+        self.autosave.stopped |= quit.is_some();
         let stale: Vec<_> = self
-            .autosaved
+            .autosave
+            .saved
             .keys()
             .copied()
-            .filter(|&id| self.autosave_stopped || !self.buffers.get(id).is_some_and(autosaves))
+            .filter(|&id| self.autosave.stopped || !self.buffers.get(id).is_some_and(autosaves))
             .collect();
         let mut cleanup = Vec::new();
         for id in stale {
-            let state = self.autosaved.remove(&id).unwrap();
+            let state = self.autosave.saved.remove(&id).unwrap();
             cleanup.push(Effect::Recovery(RecoveryOp::DeleteAutoSave(id)));
             cleanup.extend(
                 state
@@ -221,39 +233,39 @@ impl Core {
         }
         let at = quit.unwrap_or(effects.len());
         effects.splice(at..at, cleanup);
-        let unwritten = !self.autosave_stopped
+        let unwritten = !self.autosave.stopped
             && self.buffers.recent().any(|(id, b)| {
                 autosaves(b)
-                    && self.autosaved.get(&id).is_none_or(|s| {
+                    && self.autosave.saved.get(&id).is_none_or(|s| {
                         s.confirmed != Some(b.tick()) && s.pending.is_none() && s.retry.is_none()
                     })
             });
         if unwritten {
-            if input || self.autosave_idle.is_none() {
-                if let Some(id) = self.autosave_idle.take() {
+            if input || self.autosave.idle.is_none() {
+                if let Some(id) = self.autosave.idle.take() {
                     self.timers.cancel(id);
                 }
-                self.autosave_idle =
+                self.autosave.idle =
                     Some(self.timers.start(now, AUTOSAVE_IDLE, None, Msg::AutoSave));
             }
-            if self.autosave_max.is_none() {
-                self.autosave_max = Some(self.timers.start(now, AUTOSAVE_MAX, None, Msg::AutoSave));
+            if self.autosave.max.is_none() {
+                self.autosave.max = Some(self.timers.start(now, AUTOSAVE_MAX, None, Msg::AutoSave));
             }
         } else {
-            for id in [self.autosave_idle.take(), self.autosave_max.take()]
+            for id in [self.autosave.idle.take(), self.autosave.max.take()]
                 .into_iter()
                 .flatten()
             {
                 self.timers.cancel(id);
             }
         }
-        if let Some(id) = self.autosave_retry.take() {
+        if let Some(id) = self.autosave.retry.take() {
             self.timers.cancel(id);
         }
-        if !self.autosave_stopped
-            && let Some(at) = self.autosaved.values().filter_map(|s| s.retry).min()
+        if !self.autosave.stopped
+            && let Some(at) = self.autosave.saved.values().filter_map(|s| s.retry).min()
         {
-            self.autosave_retry = Some(self.timers.start(
+            self.autosave.retry = Some(self.timers.start(
                 now,
                 at.saturating_duration_since(now),
                 None,
@@ -338,7 +350,7 @@ mod tests {
         h.open("a").keys("x");
         let op = pending(&mut h);
         h.keys("y").advance(40 * SEC);
-        let state = &h.core.autosaved[&h.core.windows.window.buffer()];
+        let state = &h.core.autosave.saved[&h.core.windows.window.buffer()];
         assert!(state.pending.is_some() && state.confirmed.is_none());
         h.run(vec![Effect::Recovery(op)]);
         assert_eq!(recovered(&h)[0].2, "x");
@@ -355,7 +367,7 @@ mod tests {
         let retry = pending(&mut h);
         h.send(success(&old));
         let id = h.core.windows.window.buffer();
-        let state = h.core.autosaved[&id].pending.as_ref().unwrap();
+        let state = h.core.autosave.saved[&id].pending.as_ref().unwrap();
         assert!(
             matches!(&retry, RecoveryOp::AutoSave { request, tick, .. } if state.request == *request && state.tick == *tick)
         );
@@ -428,7 +440,10 @@ mod tests {
                 .send(reply)
                 .send(late_failure)
                 .advance(40 * SEC);
-            assert!(h.core.autosaved.is_empty(), "phase={phase} action={action}");
+            assert!(
+                h.core.autosave.saved.is_empty(),
+                "phase={phase} action={action}"
+            );
         }
         let mut h = Harness::new(&[("a", "")]);
         h.open("a").keys("x");
@@ -438,7 +453,7 @@ mod tests {
         let new = pending(&mut h);
         h.send(success(&old));
         let id = h.core.windows.window.buffer();
-        let request = h.core.autosaved[&id].pending.as_ref().unwrap().request;
+        let request = h.core.autosave.saved[&id].pending.as_ref().unwrap().request;
         assert!(
             matches!(&new, RecoveryOp::AutoSave { request: current, .. } if request == *current)
         );
@@ -466,7 +481,7 @@ mod tests {
             .unwrap();
         h.keys("RET");
         let id = h.core.windows.window.buffer();
-        assert_eq!(h.core.autosaved[&id].old.len(), 2);
+        assert_eq!(h.core.autosave.saved[&id].old.len(), 2);
         h.send(old.failed("blocked".into()).unwrap());
         let next = pending(&mut h);
         assert!(
@@ -498,7 +513,10 @@ mod tests {
         h.keys("RET");
         h.run(vec![Effect::Recovery(op)]);
         let id = h.core.windows.window.buffer();
-        assert_eq!(h.core.autosaved[&id].old, [PathBuf::from("/recovery/two")]);
+        assert_eq!(
+            h.core.autosave.saved[&id].old,
+            [PathBuf::from("/recovery/two")]
+        );
         assert_eq!(recovered(&h)[0].2, "one");
         let op = pending(&mut h);
         let RecoveryOp::AutoSave {
@@ -518,8 +536,11 @@ mod tests {
             result: Ok(vec![("/recovery/two".into(), "cleanup blocked".into())]),
         });
         assert_eq!(recovered(&h)[0].2, "two");
-        assert_eq!(h.core.autosaved[&id].confirmed, Some(*tick));
-        assert_eq!(h.core.autosaved[&id].old, [PathBuf::from("/recovery/two")]);
+        assert_eq!(h.core.autosave.saved[&id].confirmed, Some(*tick));
+        assert_eq!(
+            h.core.autosave.saved[&id].old,
+            [PathBuf::from("/recovery/two")]
+        );
         assert!(
             h.core
                 .message()

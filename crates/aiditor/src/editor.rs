@@ -32,6 +32,7 @@ pub(crate) struct Editor {
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
     clock: String,
+    title: String,
     _clock_task: Task<()>,
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
@@ -109,6 +110,7 @@ impl Editor {
             tx,
             timer: None,
             clock,
+            title: String::new(),
             _clock_task: clock_task,
             config_dir: args.config_dir,
             grep: grep::Grep::default(),
@@ -121,6 +123,281 @@ impl Editor {
             painted: Vec::new(),
             reported: Default::default(),
         }
+    }
+
+    fn hint_rows(
+        &self,
+        hint: Option<aiditor_core::display::Hint>,
+        cell: Pixels,
+    ) -> Option<gpui::Div> {
+        let line_height = px(self.core.settings().line_height());
+        let inset = px(TEXT_INSET);
+        let line = || {
+            div()
+                .h(line_height)
+                .line_height(line_height)
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        hint.map(|hint| {
+            // Keys right-aligned so the colons line up, as Emacs's which-key.
+            let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
+            let keys = keys.max().unwrap_or(0);
+            let entries: Vec<String> = (hint.entries.iter())
+                .map(|(key, what)| format!("{key:>keys$} : {what}"))
+                .collect();
+            let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
+            let column = cell * width as f32;
+            div()
+                .flex()
+                .flex_wrap()
+                .px(inset)
+                .child(line().w_full().child(format!("{}-", hint.keys)))
+                .children(entries.into_iter().map(|e| line().w(column).child(e)))
+        })
+    }
+
+    fn echo_area(
+        &self,
+        minibuffer: Option<aiditor_core::display::Minibuffer>,
+        message: Option<String>,
+        font: &Font,
+        cell: Pixels,
+        window: &Window,
+    ) -> gpui::Div {
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let line_height = px(settings.line_height());
+        let mode_line_height = px(settings.mode_line_height());
+        let inset = px(TEXT_INSET);
+        let row = |height: Pixels| {
+            div()
+                .h(height)
+                .line_height(height)
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        let line = || row(line_height);
+        let cursor_fg = theme
+            .face(FaceName::Cursor)
+            .fg
+            .unwrap_or(theme.background());
+        let message = message.unwrap_or_default();
+        match minibuffer {
+            // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
+            Some(mb) => {
+                let (text, byte) = echo_line(&mb, &message);
+                // Shaped whole, the cursor laid over it, so moving it never shifts the text (#11).
+                let run = text_run(text.len(), Face::default(), false, font, theme);
+                let shaped = (window.text_system()).shape_line(
+                    text.clone().into(),
+                    px(settings.font_size),
+                    &[run],
+                    None,
+                );
+                let (x, width, under) = block(&shaped, byte, cell);
+                let cursor = div()
+                    .debug_selector(|| "minibuffer-cursor".into())
+                    .absolute()
+                    .top_0()
+                    .left(x)
+                    .w(width)
+                    .h(mode_line_height)
+                    .bg(rgb(theme.cursor()))
+                    .text_color(rgb(cursor_fg))
+                    .child(under.to_string());
+                let status = mb.status.map(|status| {
+                    div()
+                        .debug_selector(|| "grep-status".into())
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bg(rgb(theme.background()))
+                        .text_color(rgb(theme
+                            .face(FaceName::Annotation)
+                            .fg
+                            .unwrap_or(theme.foreground())))
+                        .child(status)
+                });
+                let prompt = row(mode_line_height)
+                    .debug_selector(|| "minibuffer-prompt".into())
+                    .relative()
+                    .child(text)
+                    .child(cursor)
+                    .children(status);
+                let prompt = div().px(inset).child(prompt);
+                let padding = (mb.candidates.len() + mb.groups.len()..mb.rows).map(|_| line());
+                let selected = theme
+                    .face(FaceName::CompletionSelected)
+                    .bg
+                    .unwrap_or(theme.background());
+                let grep = !mb.groups.is_empty();
+                let mut groups = mb.groups.into_iter().peekable();
+                let rows = mb
+                    .candidates
+                    .into_iter()
+                    .zip(mb.highlights)
+                    .zip(mb.annotations)
+                    .enumerate();
+                let candidates = rows.flat_map(|(i, ((c, highlights), note))| {
+                    let header = if groups.peek().is_some_and(|(at, _)| *at == i) {
+                        let (_, label) = groups.next().unwrap();
+                        let rule = || {
+                            div().h(px(1.)).bg(rgb(theme
+                                .face(FaceName::Separator)
+                                .fg
+                                .unwrap_or(theme.foreground())))
+                        };
+                        let run = text_run(
+                            label.len(),
+                            theme.face(FaceName::GrepFile),
+                            false,
+                            font,
+                            theme,
+                        );
+                        Some(
+                            line()
+                                .debug_selector(|| format!("grep-header-{i}"))
+                                .flex()
+                                .items_center()
+                                .gap(cell)
+                                .px(inset)
+                                .child(
+                                    rule()
+                                        .w(cell * 2.)
+                                        .flex_shrink_0()
+                                        .debug_selector(|| format!("grep-rule-before-{i}")),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(StyledText::new(label).with_runs(vec![run])),
+                                )
+                                .child(
+                                    rule()
+                                        .flex_1()
+                                        .debug_selector(|| format!("grep-rule-after-{i}")),
+                                ),
+                        )
+                    } else {
+                        None
+                    };
+                    let runs = if grep {
+                        grep_runs(&c, font, theme)
+                    } else {
+                        let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
+                        faces.extend(
+                            highlights
+                                .into_iter()
+                                .map(|range| (range, theme.face(FaceName::CompletionMatch))),
+                        );
+                        completion_runs(
+                            c.len(),
+                            &faces,
+                            if mb.files && c.ends_with('/') {
+                                theme.face(FaceName::Directory)
+                            } else {
+                                Face::default()
+                            },
+                            (Some(i) == mb.selected).then_some(selected),
+                            font,
+                            theme,
+                        )
+                    };
+                    let text = div()
+                        .debug_selector(|| format!("completion-name-{i}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(StyledText::new(c).with_runs(runs));
+                    let text = if mb.files { text.flex_1() } else { text };
+                    let note = (!note.is_empty()).then(|| {
+                        let face = if mb.files {
+                            theme.face(FaceName::Annotation)
+                        } else {
+                            Face::default()
+                        };
+                        let run = text_run(note.len(), face, false, font, theme);
+                        let note = div()
+                            .debug_selector(|| format!("completion-annotation-{i}"))
+                            .ml(cell * 2.)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .child(StyledText::new(note).with_runs(vec![run])),
+                            );
+                        if mb.files { note } else { note.opacity(0.6) }
+                    });
+                    let candidate = line()
+                        .debug_selector(|| format!("completion-{i}"))
+                        .flex()
+                        .overflow_hidden()
+                        .px(inset)
+                        .child(text)
+                        .children(note);
+                    let candidate = match Some(i) == mb.selected {
+                        true => candidate.bg(rgb(selected)),
+                        false => candidate,
+                    };
+                    header.into_iter().chain(Some(candidate))
+                });
+                div().child(prompt).children(candidates).children(padding)
+            }
+            None => div().child(row(mode_line_height).px(inset).child(message)),
+        }
+    }
+
+    fn workspace_bar(
+        &self,
+        workspaces: Vec<aiditor_core::display::Span>,
+        font: &Font,
+        cell: Pixels,
+    ) -> gpui::Div {
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let inset = px(TEXT_INSET);
+        let row = |height: Pixels| {
+            div()
+                .h(height)
+                .line_height(height)
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        let bar = theme.face(FaceName::WorkspaceBar);
+        let workspace_text: String = workspaces.iter().map(|s| s.text.as_str()).collect();
+        let runs = workspaces
+            .iter()
+            .map(|s| text_run(s.text.len(), s.face, false, font, theme))
+            .collect();
+        let workspaces = StyledText::new(workspace_text).with_runs(runs);
+        let workspace_gap = cell * (2. * settings.workspace_font_size() / settings.font_size);
+        row(px(settings.workspace_modeline_height()))
+            .flex()
+            .flex_none()
+            .px(inset)
+            .text_size(px(settings.workspace_font_size()))
+            .debug_selector(|| "workspace-modeline".into())
+            .bg(rgb(bar.bg.unwrap_or(theme.background())))
+            .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .debug_selector(|| "workspace-entries".into())
+                    .child(workspaces),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .ml(workspace_gap)
+                    .debug_selector(|| "workspace-clock".into())
+                    .child(self.clock.clone()),
+            )
     }
 
     fn start_clock(
@@ -342,13 +619,11 @@ impl Render for Editor {
         let frame = self.core.frame();
         let settings = self.core.settings();
         let theme = &settings.theme;
-        let cursor_fg = theme
-            .face(FaceName::Cursor)
-            .fg
-            .unwrap_or(theme.background());
         let line_height = px(settings.line_height());
-        window.set_window_title(&frame.title);
-        let mode_line_height = px(settings.mode_line_height());
+        if self.title != frame.title {
+            window.set_window_title(&frame.title);
+            self.title = frame.title.clone();
+        }
         let inset = px(TEXT_INSET);
         let row = |height: Pixels| {
             (div().h(height).line_height(height))
@@ -356,198 +631,9 @@ impl Render for Editor {
                 .overflow_hidden()
         };
         let line = || row(line_height);
-        let hint = frame.hint.map(|hint| {
-            // Keys right-aligned so the colons line up, as Emacs's which-key.
-            let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
-            let keys = keys.max().unwrap_or(0);
-            let entries: Vec<String> = (hint.entries.iter())
-                .map(|(key, what)| format!("{key:>keys$} : {what}"))
-                .collect();
-            let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
-            let column = cell * width as f32;
-            div()
-                .flex()
-                .flex_wrap()
-                .px(inset)
-                .child(line().w_full().child(format!("{}-", hint.keys)))
-                .children(entries.into_iter().map(|e| line().w(column).child(e)))
-        });
-        let message = frame.message.unwrap_or_default();
-        let echo = match frame.minibuffer {
-            // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
-            Some(mb) => {
-                let (text, byte) = echo_line(&mb, &message);
-                // Shaped whole, the cursor laid over it, so moving it never shifts the text (#11).
-                let run = text_run(text.len(), Face::default(), false, &font, theme);
-                let shaped = (window.text_system()).shape_line(
-                    text.clone().into(),
-                    px(settings.font_size),
-                    &[run],
-                    None,
-                );
-                let (x, width, under) = block(&shaped, byte, cell);
-                let cursor = div()
-                    .debug_selector(|| "minibuffer-cursor".into())
-                    .absolute()
-                    .top_0()
-                    .left(x)
-                    .w(width)
-                    .h(mode_line_height)
-                    .bg(rgb(theme.cursor()))
-                    .text_color(rgb(cursor_fg))
-                    .child(under.to_string());
-                let status = mb.status.map(|status| {
-                    div()
-                        .debug_selector(|| "grep-status".into())
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bg(rgb(theme.background()))
-                        .text_color(rgb(theme
-                            .face(FaceName::Annotation)
-                            .fg
-                            .unwrap_or(theme.foreground())))
-                        .child(status)
-                });
-                let prompt = row(mode_line_height)
-                    .debug_selector(|| "minibuffer-prompt".into())
-                    .relative()
-                    .child(text)
-                    .child(cursor)
-                    .children(status);
-                let prompt = div().px(inset).child(prompt);
-                let padding = (mb.candidates.len() + mb.groups.len()..mb.rows).map(|_| line());
-                let selected = theme
-                    .face(FaceName::CompletionSelected)
-                    .bg
-                    .unwrap_or(theme.background());
-                let grep = !mb.groups.is_empty();
-                let mut groups = mb.groups.into_iter().peekable();
-                let rows = mb
-                    .candidates
-                    .into_iter()
-                    .zip(mb.highlights)
-                    .zip(mb.annotations)
-                    .enumerate();
-                let candidates = rows.flat_map(|(i, ((c, highlights), note))| {
-                    let header = if groups.peek().is_some_and(|(at, _)| *at == i) {
-                        let (_, label) = groups.next().unwrap();
-                        let rule = || {
-                            div().h(px(1.)).bg(rgb(theme
-                                .face(FaceName::Separator)
-                                .fg
-                                .unwrap_or(theme.foreground())))
-                        };
-                        let run = text_run(
-                            label.len(),
-                            theme.face(FaceName::GrepFile),
-                            false,
-                            &font,
-                            theme,
-                        );
-                        Some(
-                            line()
-                                .debug_selector(|| format!("grep-header-{i}"))
-                                .flex()
-                                .items_center()
-                                .gap(cell)
-                                .px(inset)
-                                .child(
-                                    rule()
-                                        .w(cell * 2.)
-                                        .flex_shrink_0()
-                                        .debug_selector(|| format!("grep-rule-before-{i}")),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(StyledText::new(label).with_runs(vec![run])),
-                                )
-                                .child(
-                                    rule()
-                                        .flex_1()
-                                        .debug_selector(|| format!("grep-rule-after-{i}")),
-                                ),
-                        )
-                    } else {
-                        None
-                    };
-                    let runs = if grep {
-                        grep_runs(&c, &font, theme)
-                    } else {
-                        let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
-                        faces.extend(
-                            highlights
-                                .into_iter()
-                                .map(|range| (range, theme.face(FaceName::CompletionMatch))),
-                        );
-                        completion_runs(
-                            c.len(),
-                            &faces,
-                            if mb.files && c.ends_with('/') {
-                                theme.face(FaceName::Directory)
-                            } else {
-                                Face::default()
-                            },
-                            (Some(i) == mb.selected).then_some(selected),
-                            &font,
-                            theme,
-                        )
-                    };
-                    let text = div()
-                        .debug_selector(|| format!("completion-name-{i}"))
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(StyledText::new(c).with_runs(runs));
-                    let text = if mb.files { text.flex_1() } else { text };
-                    let note = (!note.is_empty()).then(|| {
-                        let face = if mb.files {
-                            theme.face(FaceName::Annotation)
-                        } else {
-                            Face::default()
-                        };
-                        let run = text_run(note.len(), face, false, &font, theme);
-                        let note = div()
-                            .debug_selector(|| format!("completion-annotation-{i}"))
-                            .ml(cell * 2.)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .flex()
-                            .justify_end()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .child(StyledText::new(note).with_runs(vec![run])),
-                            );
-                        if mb.files { note } else { note.opacity(0.6) }
-                    });
-                    let candidate = line()
-                        .debug_selector(|| format!("completion-{i}"))
-                        .flex()
-                        .overflow_hidden()
-                        .px(inset)
-                        .child(text)
-                        .children(note);
-                    let candidate = match Some(i) == mb.selected {
-                        true => candidate.bg(rgb(selected)),
-                        false => candidate,
-                    };
-                    header.into_iter().chain(Some(candidate))
-                });
-                div().child(prompt).children(candidates).children(padding)
-            }
-            None => div().child(row(mode_line_height).px(inset).child(message)),
-        };
-        let bar = theme.face(FaceName::WorkspaceBar);
-        let workspace_text: String = frame.workspaces.iter().map(|s| s.text.as_str()).collect();
-        let runs = frame
-            .workspaces
-            .iter()
-            .map(|s| text_run(s.text.len(), s.face, false, &font, theme))
-            .collect();
-        let workspaces = StyledText::new(workspace_text).with_runs(runs);
-        let workspace_gap = cell * (2. * settings.workspace_font_size() / settings.font_size);
+        let hint = self.hint_rows(frame.hint, cell);
+        let echo = self.echo_area(frame.minibuffer, frame.message, &font, cell, window);
+        let workspaces = self.workspace_bar(frame.workspaces, &font, cell);
         let root = div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -560,31 +646,7 @@ impl Render for Editor {
             .font(font)
             .text_size(px(settings.font_size))
             .children(stats.map(|s| line().px(inset).child(s)))
-            .child(
-                row(px(settings.workspace_modeline_height()))
-                    .flex()
-                    .flex_none()
-                    .px(inset)
-                    .text_size(px(settings.workspace_font_size()))
-                    .debug_selector(|| "workspace-modeline".into())
-                    .bg(rgb(bar.bg.unwrap_or(theme.background())))
-                    .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .debug_selector(|| "workspace-entries".into())
-                            .child(workspaces),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .ml(workspace_gap)
-                            .debug_selector(|| "workspace-clock".into())
-                            .child(self.clock.clone()),
-                    ),
-            )
+            .child(workspaces)
             .child(div().flex_1().flex().overflow_hidden().child(FrameElement {
                 editor: cx.entity(),
                 windows: frame.windows,

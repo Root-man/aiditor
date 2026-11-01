@@ -130,6 +130,7 @@ impl Prompts {
     pub(crate) fn preview_search<'a>(
         &'a self,
         grep: &'a crate::grep::ProjectGrep,
+        commands: &HashMap<&'static str, Command>,
     ) -> Option<(WindowId, &'a dyn display::Search)> {
         let mb = self.minibuffer.as_ref()?;
         mb.saved.as_ref()?;
@@ -137,10 +138,13 @@ impl Prompts {
         if mb.reading.is_some() {
             return None;
         }
-        let search: &dyn display::Search = match mb.command {
-            "swiper" => self.swiper()?,
-            "project-grep" => grep,
-            _ => return None,
+        let spec = &commands[mb.command].spec;
+        let search: &dyn display::Search = if matches!(spec.filter, Some(Filter::Swiper)) {
+            self.swiper()?
+        } else if spec.grep_hits {
+            grep
+        } else {
+            return None;
         };
         Some((mb.from, search))
     }
@@ -203,6 +207,13 @@ impl Prompts {
     /// The command the open prompt answers.
     pub(crate) fn command(&self) -> Option<&'static str> {
         self.minibuffer.as_ref().map(|mb| mb.command)
+    }
+
+    pub(crate) fn selected_index(&self) -> Option<usize> {
+        let completion = self.minibuffer.as_ref()?.completion.as_ref()?;
+        let filtered = completion.filtered.as_ref()?;
+        let last = filtered.matched.len().checked_sub(1)?;
+        Some(filtered.matched[completion.selected?.min(last)])
     }
 
     /// The selected candidate, if the minibuffer is completing and anything matches.
@@ -339,7 +350,7 @@ impl Ctx<'_> {
             let injector = matcher.injector();
             for (index, c) in candidates.into_iter().flatten().enumerate() {
                 let note = note(core, &c);
-                let project = (command.name == "workspace-new" && args.strings.is_empty())
+                let project = (command.spec.project_candidates && args.strings.is_empty())
                     .then(|| core.projects[index].id);
                 injector.push((c, note, project), |(c, _, _), cols| {
                     cols[0] = c.as_str().into()
@@ -360,7 +371,7 @@ impl Ctx<'_> {
                 filtered,
             };
             completion.select(preselect);
-            if command.name == "project-find-file" {
+            if command.spec.unselected {
                 completion.selected = None;
             }
             completion
@@ -419,7 +430,11 @@ impl Ctx<'_> {
         let filtered = completion.is_some_and(|c| c.filtered.is_some());
         let project = selected
             .as_ref()
-            .filter(|_| core.prompts.command() == Some("workspace-new"))
+            .filter(|_| {
+                core.prompts
+                    .command()
+                    .is_some_and(|name| core.commands[name].spec.project_candidates)
+            })
             .and_then(|_| {
                 let snapshot = core.prompts.matcher.as_ref()?.snapshot();
                 let last = snapshot.matched_item_count().checked_sub(1)?;
@@ -624,7 +639,7 @@ impl Core {
             );
             completion.pattern = pattern.to_string();
             completion.select(0);
-            if matches!(mb.command, "find-file" | "project-find-file") && pattern.is_empty() {
+            if self.commands[mb.command].spec.unselected && pattern.is_empty() {
                 completion.selected = None;
             }
         }
@@ -709,7 +724,7 @@ impl Core {
         };
         let mb = self.prompts.minibuffer.as_mut()?;
         let prompt = mb.prompt.to_string();
-        let grep = mb.command == "project-grep" && !self.grep.choosing_root();
+        let grep = self.commands[mb.command].spec.grep_hits && !self.grep.choosing_root();
         let status = if grep { self.grep.status() } else { None };
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
         let mut highlights = Vec::new();
@@ -723,13 +738,13 @@ impl Core {
             let (matched, rows) = match (&completion.filtered, self.prompts.matcher.as_mut()) {
                 (Some(f), _) => {
                     let mut rows = range(f.matched.len());
-                    if mb.command == "project-grep" && !self.grep.choosing_root() {
+                    if grep {
                         let end = |top| {
                             let mut used = 0;
                             let mut previous = None;
                             let mut end = top;
                             for &i in &f.matched[top..] {
-                                let hit = self.grep.hit(&f.items[i]).expect("listed grep hit");
+                                let hit = self.grep.hit_at(i).expect("listed grep hit");
                                 let file = (&hit.root, &hit.path);
                                 let cost = 1 + usize::from(previous != Some(file));
                                 if used + cost > COMPLETION_ROWS {
@@ -755,24 +770,30 @@ impl Core {
                     (candidates, annotations) = items
                         .map(|&i| {
                             (
-                                f.swiper
-                                    .as_ref()
-                                    .map_or_else(|| f.candidate(i), |s| s.presentation(i, columns)),
+                                if grep {
+                                    let hit = self.grep.hit_at(i).expect("listed grep hit");
+                                    let width = self.grep.line_number_width();
+                                    let text: String = hit.text.chars().take(columns).collect();
+                                    format!("{:>width$}: {text}", hit.line + 1)
+                                } else {
+                                    f.swiper.as_ref().map_or_else(
+                                        || f.candidate(i),
+                                        |s| s.presentation(i, columns),
+                                    )
+                                },
                                 f.notes.get(i).cloned().unwrap_or_default(),
                             )
                         })
                         .unzip();
-                    if mb.command == "project-grep" && !self.grep.choosing_root() {
+                    if grep {
                         let mut previous = None;
-                        let number_width = self.grep.line_number_width();
-                        for (i, candidate) in candidates.iter_mut().enumerate() {
-                            let hit = self.grep.hit(candidate).expect("listed grep hit");
+                        for (i, &index) in f.matched[rows.clone()].iter().enumerate() {
+                            let hit = self.grep.hit_at(index).expect("listed grep hit");
                             let file = (&hit.root, &hit.path);
                             if previous != Some(file) {
                                 groups.push((i, self.grep.file_label(hit)));
                             }
                             previous = Some(file);
-                            *candidate = format!("{:>number_width$}: {}", hit.line + 1, hit.text);
                         }
                     }
                     highlights.resize_with(candidates.len(), Vec::new);
@@ -846,7 +867,7 @@ impl Core {
                 .map(|n| n.min(matched - 1));
             selected = number.map(|n| n - rows.start);
             let number = number.map(|n| (n + 1).to_string()).unwrap_or_else(|| {
-                if matches!(mb.command, "find-file" | "project-find-file") {
+                if self.commands[mb.command].spec.unselected {
                     "*".into()
                 } else {
                     "0".into()
@@ -1188,6 +1209,24 @@ mod tests {
                 crate::buffer::prepare_preview(text.as_bytes()).unwrap(),
             )),
         });
+    }
+
+    #[test]
+    fn a_refused_preview_allows_the_next_selection() {
+        let mut h = pending_previews();
+        let first = reads(&mut h).pop().unwrap();
+        h.keys("C-n");
+        h.send(Msg::Previewed {
+            request: first,
+            result: Err("not a regular file".into()),
+        });
+        let next = reads(&mut h).pop().unwrap();
+        answer_preview(&mut h, next, "banana text");
+        let peek = h.core.prompts.minibuffer.as_ref().unwrap().peek.unwrap();
+        assert_eq!(
+            h.core.buffers.get(peek).unwrap().text().to_string(),
+            "banana text"
+        );
     }
 
     #[test]

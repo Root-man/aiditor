@@ -129,13 +129,6 @@ fn run(mut state: State, rx: Receiver<In>, send: impl Fn(Msg)) {
     }
 }
 
-fn is_ignore(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|s| s.to_str()),
-        Some(".ignore" | ".gitignore")
-    )
-}
-
 /// A watched root with its project's ignore patterns; a root shared by projects with different
 /// patterns is one of these per project.
 struct Root {
@@ -260,7 +253,8 @@ impl State {
         {
             return false;
         }
-        (is_ignore(path) && self.roots.iter().any(|r| path.starts_with(&r.path)))
+        (aiditor_core::project::is_ignore_file(path)
+            && self.roots.iter().any(|r| path.starts_with(&r.path)))
             || self.kept(path)
             || (path.parent()).is_some_and(|dir| self.kept(dir) || self.extra.contains(dir))
     }
@@ -497,7 +491,7 @@ impl State {
             // An ignored file in a kept directory is left out, unless a buffer visits it.
             let ignored = match path.parent().filter(|dir| self.kept(dir)) {
                 Some(dir)
-                    if !is_ignore(path)
+                    if !aiditor_core::project::is_ignore_file(path)
                         && !self.files.contains(path)
                         && fs::symlink_metadata(path).is_ok() =>
                 {

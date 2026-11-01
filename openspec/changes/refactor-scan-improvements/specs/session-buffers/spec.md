@@ -62,3 +62,13 @@ The SGR escapes removed from the terminal output and from text content items SHA
 - **GIVEN** two calls receive the same chunks, one open and one folded
 - **WHEN** the frame is built and the folded call is opened
 - **THEN** both blocks hold the same text and faces
+
+## ADDED Requirements
+
+### Requirement: Folded output layout skips hidden lines
+Laying out a folded tool call SHALL jump across its hidden lines rather than repeatedly expanding the viewport through them, so a fixed appended chunk does not make folded redisplay grow with retained output.
+
+#### Scenario: A large folded output before visible text
+- **GIVEN** a folded call hides many lines and a visible line follows it
+- **WHEN** a frame showing the call is built
+- **THEN** the folded header and following line are shown with their faces, without walking the hidden lines in viewport-sized batches

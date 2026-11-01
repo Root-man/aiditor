@@ -54,6 +54,21 @@ fn chunk(core: &mut Core, id: AgentId, text: &str) {
     );
 }
 
+fn tool_output(core: &mut Core, id: AgentId, text: &str) {
+    let update = serde_json::from_value(serde_json::json!({
+        "sessionUpdate": "tool_call_update", "toolCallId": "tool",
+        "_meta": {"terminal_output_delta": {"terminal_id": "t", "data": text}}
+    }))
+    .unwrap();
+    core.handle(
+        Instant::now(),
+        Msg::AgentUpdate {
+            id,
+            update: Box::new(SessionNotification::new("s", update)),
+        },
+    );
+}
+
 fn session() -> (Core, AgentId) {
     let mut core = Core::default();
     let project =
@@ -214,6 +229,53 @@ fn main() {
             },
             &mut output,
         );
+    }
+    for size in [500_000, 5_000_000] {
+        for state in ["shown-folded", "shown-open", "hidden"] {
+            prepared(
+                &format!("hot-stream/tool-output-{state}-{size}"),
+                || {
+                    let (mut core, id) = session();
+                    let call = serde_json::from_value(serde_json::json!({
+                        "sessionUpdate": "tool_call", "toolCallId": "tool", "title": "command",
+                        "_meta": {"terminal_info": {"terminal_id": "t"}}
+                    }))
+                    .unwrap();
+                    core.handle(
+                        Instant::now(),
+                        Msg::AgentUpdate {
+                            id,
+                            update: Box::new(SessionNotification::new("s", call)),
+                        },
+                    );
+                    let line = format!("{}\n", "output line ".repeat(80));
+                    tool_output(&mut core, id, &line.repeat(size / line.len()));
+                    black_box(core.frame());
+                    if state == "shown-open" {
+                        command(&mut core, "end-of-buffer");
+                        command(&mut core, "previous-line");
+                        command(&mut core, "previous-line");
+                        command(&mut core, "agent-toggle-tool-call");
+                        assert!(
+                            core.frame().windows[0]
+                                .display
+                                .lines
+                                .iter()
+                                .flat_map(|line| &line.spans)
+                                .any(|span| span.text == "Output:")
+                        );
+                    } else if state == "hidden" {
+                        core.open(Path::new("/other.txt"), Some((b"other".to_vec(), 0)));
+                    }
+                    tool_output(&mut core, id, "next line\n");
+                    core
+                },
+                |core| {
+                    black_box(core.frame());
+                },
+                &mut output,
+            );
+        }
     }
     for shown in [true, false] {
         let (mut core, _) = session();

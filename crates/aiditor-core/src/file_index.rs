@@ -126,10 +126,8 @@ impl FileIndex {
     // shortcut: a create or delete re-walks the whole project; update the index per path if large projects lag.
     pub(crate) fn stale(&mut self, paths: &[(PathBuf, Disk)]) -> bool {
         if paths.iter().any(|(path, _)| {
-            matches!(
-                path.file_name().and_then(|s| s.to_str()),
-                Some(".ignore" | ".gitignore")
-            ) && self.roots.iter().any(|(root, _)| path.starts_with(root))
+            crate::project::is_ignore_file(path)
+                && self.roots.iter().any(|(root, _)| path.starts_with(root))
         }) {
             self.refresh_filtering();
             return true;
@@ -224,7 +222,7 @@ impl Ctx<'_> {
             Reply::Accepted { loud, errors } => {
                 let n: usize = index.roots.iter().map(|(_, files)| files.len()).sum();
                 self.core.fill_project_finder(project);
-                self.core.watch_refresh = true;
+                self.core.watch.refresh = true;
                 if !loud {
                     if !errors.is_empty() {
                         tracing::info!(?project, errors, "re-walk after a file change");

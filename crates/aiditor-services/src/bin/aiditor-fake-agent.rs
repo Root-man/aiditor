@@ -70,6 +70,7 @@ enum Step {
     Write { path: PathBuf, text: String },
     Sleep(u64),
     Stderr(String),
+    StderrBytes(Vec<u8>),
     Exit(i32),
     Stop(StopReason),
     IgnoreSigterm,
@@ -150,6 +151,9 @@ async fn run(
                 _ = cancel.cancelled() => return Ok(StopReason::Cancelled),
             },
             Step::Stderr(line) => eprintln!("{line}"),
+            Step::StderrBytes(bytes) => std::io::stderr().write_all(bytes).map_err(|err| {
+                agent_client_protocol::Error::internal_error().data(err.to_string())
+            })?,
             Step::Exit(code) => std::process::exit(*code),
             Step::Stop(reason) => return Ok(*reason),
             Step::IgnoreSigterm => _ = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) },

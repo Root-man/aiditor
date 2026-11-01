@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
 
+/// Whether a path names an ignore file that changes project filtering.
+pub fn is_ignore_file(path: &std::path::Path) -> bool {
+    matches!(
+        path.file_name().and_then(|s| s.to_str()),
+        Some(".ignore" | ".gitignore")
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {

@@ -65,6 +65,8 @@ The ANSI state moves onto `Term`: a named `Sgr` handler and a `Processor` kept a
 
 Everything else takes the full `show_tool` path: the first output, an exit change, a new backtick run as long as the fence, an open call, or a call whose fields changed. Open calls are left as they are because `render_tool` would need incremental code-block properties, while calls start folded. That limit gets a `shortcut:` comment.
 
+The folded display range must also jump to each intersecting fold's end when counting hidden lines. Clipping that end to the current range makes range expansion repeat once per viewport-sized part of the hidden output. Count the full fold, then fetch any newly reached properties until the range settles; this preserves adjacent folds and their faces without walking hidden lines in batches.
+
 ### Rows 4 and 19: project grep
 
 Row 4 cuts `hit.text` by chars to `columns` at `minibuffer.rs:775`, leaving `Hit` whole for preview and jump. `Hit.text` itself stays full because `col` and `RET` need it.

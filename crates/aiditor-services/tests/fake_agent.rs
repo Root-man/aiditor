@@ -281,3 +281,18 @@ async fn sessions_page_by_cursor() {
     assert_eq!(second.next_cursor, None);
     list(Some("9")).await.unwrap_err();
 }
+
+#[tokio::test]
+async fn stderr_bytes_are_written_verbatim() {
+    let fake = fake(r#"{"prompts": [[{"stderrBytes": [99,97,102,233,13,10]}]]}"#).await;
+    fake.agent
+        .send_request(PromptRequest::new(SESSION, Vec::new()))
+        .block_task()
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read(fake.dir.path().join("stderr"))
+            .unwrap()
+            .ends_with(b"caf\xe9\r\n")
+    );
+}

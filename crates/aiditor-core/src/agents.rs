@@ -6,9 +6,10 @@ use agent_client_protocol_schema::v1::{
     PermissionOptionKind, Plan, PlanEntry, PromptRequest, RequestId, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelect, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent, ToolCallId,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use alacritty_terminal::vte::ansi::{Attr, Color, Handler, Processor};
 use serde_json::{Map, Value};
@@ -23,6 +24,9 @@ use crate::markdown;
 use crate::project::{Project, ProjectId};
 use crate::settings::FaceName;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Request};
+
+mod render;
+use render::*;
 
 /// The prompt line's text, just before the prompt area.
 const PROMPT: &str = "> ";
@@ -69,9 +73,6 @@ pub(crate) struct Session {
     mode_sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
-    /// `session/update`s in order, for the session buffer.
-    // shortcut: tool calls' raw input and output are kept here and merged in `tools`, so twice; drop rendered updates when sessions get long.
-    pub(crate) updates: Vec<SessionNotification>,
     /// A `session/prompt` waits for its answer.
     turn: bool,
     /// The last block above the prompt line, while an agent message or thought streams into it.
@@ -139,18 +140,19 @@ fn mode_option(
     }
 }
 
-/// A select's values, its groups flattened.
-fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
+fn options(select: &SessionConfigSelect) -> Vec<&SessionConfigSelectOption> {
     match &select.options {
-        SessionConfigSelectOptions::Ungrouped(options) => {
-            options.iter().map(|o| &o.value).collect()
+        SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
+        SessionConfigSelectOptions::Grouped(groups) => {
+            groups.iter().flat_map(|g| &g.options).collect()
         }
-        SessionConfigSelectOptions::Grouped(groups) => (groups.iter())
-            .flat_map(|g| &g.options)
-            .map(|o| &o.value)
-            .collect(),
         _ => Vec::new(),
     }
+}
+
+/// A select's values, its groups flattened.
+fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
+    options(select).into_iter().map(|o| &o.value).collect()
 }
 
 impl Session {
@@ -181,13 +183,7 @@ impl Session {
             let SessionConfigKind::Select(select) = &option.kind else {
                 return None;
             };
-            let values: Vec<_> = match &select.options {
-                SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
-                SessionConfigSelectOptions::Grouped(groups) => {
-                    groups.iter().flat_map(|g| &g.options).collect()
-                }
-                _ => Vec::new(),
-            };
+            let values = self::options(select);
             Some(
                 values
                     .iter()
@@ -266,10 +262,19 @@ type Faces = Vec<(Range<usize>, Vec<FaceRef>)>;
 /// A command's terminal, from the `_meta` extension (#100).
 struct Term {
     id: String,
-    /// Every chunk, raw.
-    output: String,
+    sgr: Sgr,
+    processor: Processor,
+    rendered: Option<TermRender>,
     /// `exit <code>` or `signal <name>` once it failed.
     exit: Option<String>,
+}
+
+struct TermRender {
+    bytes: usize,
+    chars: usize,
+    at: usize,
+    faces: usize,
+    fence: usize,
 }
 
 /// The terminal a call announces: its `_meta.terminal_info`, else its first terminal item.
@@ -388,12 +393,14 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        let term = (session.tools.get_mut(&call.tool_call_id))
+        let mut term = (session.tools.get_mut(&call.tool_call_id))
             .and_then(|t| t.term.take())
             .or_else(|| {
                 terminal_id(&call).map(|id| Term {
                     id,
-                    output: String::new(),
+                    sgr: Sgr::default(),
+                    processor: Processor::new(),
+                    rendered: None,
                     exit: None,
                 })
             });
@@ -404,6 +411,18 @@ impl Core {
             false => format!("{header}\n{content}"),
         };
         let (header, len) = (header.chars().count(), text.chars().count());
+        if let Some(term) = &mut term {
+            let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
+            let fence = term.sgr.backticks.max(2) + 1;
+            let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
+            term.rendered = (!term.sgr.text.is_empty()).then(|| TermRender {
+                bytes: output.len(),
+                chars,
+                at: len - header - 1 - fence - 1 - chars,
+                faces: term.sgr.faces.len(),
+                fence,
+            });
+        }
         let tool = match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
                 let start = buffer.marker(tool.start).expect("live while shown");
@@ -448,19 +467,21 @@ impl Core {
                 terminal_tool(&mut session.tools, value),
                 value["data"].as_str(),
             ) {
-                (tool.term.as_mut().expect("found by it").output).push_str(data);
+                let term = tool.term.as_mut().expect("found by it");
+                term.processor.advance(&mut term.sgr, data.as_bytes());
                 tool.dirty = true;
             }
         }
         if let Some(value) = meta.get("terminal_exit")
             && let Some(tool) = terminal_tool(&mut session.tools, value)
         {
-            tool.term.as_mut().expect("found by it").exit =
-                match (value["signal"].as_str(), value["exit_code"].as_i64()) {
-                    (Some(signal), _) => Some(format!("signal {signal}")),
-                    (None, Some(code)) if code != 0 => Some(format!("exit {code}")),
-                    _ => None,
-                };
+            let term = tool.term.as_mut().expect("found by it");
+            term.rendered = None;
+            term.exit = match (value["signal"].as_str(), value["exit_code"].as_i64()) {
+                (Some(signal), _) => Some(format!("signal {signal}")),
+                (None, Some(code)) if code != 0 => Some(format!("exit {code}")),
+                _ => None,
+            };
             tool.dirty = true;
         }
     }
@@ -556,21 +577,65 @@ impl Core {
         }
     }
 
-    /// Renders shown streamed blocks and every dirty tool call, at most once per frame.
+    /// Renders shown streamed blocks and dirty tool calls, at most once per frame.
     pub(crate) fn render_streams(&mut self, shown: &HashSet<BufferId>) {
         let ids: Vec<_> = self.agents.keys().copied().collect();
         for id in ids {
-            if shown.contains(&self.agents[&id].buffer) {
-                self.render_stream(id);
+            if !shown.contains(&self.agents[&id].buffer) {
+                continue;
             }
+            self.render_stream(id);
             let dirty: Vec<_> = (self.agents[&id].tools.values())
                 .filter(|t| t.dirty)
-                .map(|t| t.call.clone())
+                .map(|t| t.call.tool_call_id.clone())
                 .collect();
             for call in dirty {
-                self.show_tool(id, call);
+                if !self.append_tool_output(id, &call) {
+                    self.show_tool(id, self.agents[&id].tools[&call].call.clone());
+                }
             }
         }
+    }
+
+    // shortcut: open calls still rebuild all markdown properties; make them incremental if long open output is slow.
+    fn append_tool_output(&mut self, id: AgentId, call: &ToolCallId) -> bool {
+        let session = self.agents.get_mut(&id).expect("known session");
+        let tool = session.tools.get_mut(call).expect("dirty call");
+        if tool.open {
+            return false;
+        }
+        let Some(term) = &mut tool.term else {
+            return false;
+        };
+        let Some(rendered) = &mut term.rendered else {
+            return false;
+        };
+        if term.sgr.backticks >= rendered.fence {
+            return false;
+        }
+        let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
+        let tail = &output[rendered.bytes..];
+        let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
+        let buffer = self
+            .buffers
+            .get_mut(session.buffer)
+            .expect("session buffer");
+        let start = buffer.marker(tool.start).expect("live while shown");
+        let at = start + tool.len - rendered.fence - 1;
+        buffer.replace_output(at..at, tail);
+        tool.len += chars - rendered.chars;
+        let keep = rendered.faces.saturating_sub(1);
+        tool.faces
+            .truncate(tool.faces.len() - rendered.faces + keep);
+        tool.faces.extend(
+            term.sgr.faces[keep..]
+                .iter()
+                .map(|(r, f)| (rendered.at + r.start..rendered.at + r.end, f.clone())),
+        );
+        (rendered.bytes, rendered.chars, rendered.faces) =
+            (output.len(), chars, term.sgr.faces.len());
+        tool.dirty = false;
+        true
     }
 
     /// The session whose buffer the selected window shows.
@@ -725,7 +790,6 @@ impl Ctx<'_> {
             load: load.map(|id| (id, from)),
             mode_sent: None,
             ended: false,
-            updates: Vec::new(),
             turn: false,
             stream: None,
             tools: HashMap::new(),
@@ -839,78 +903,56 @@ impl Ctx<'_> {
         }
     }
 
-    /// Keeps the update, puts a text message or thought chunk, a tool call or the plan above the
-    /// prompt line, and follows mode changes.
+    /// Puts updates above the prompt line and follows mode changes.
     pub(crate) fn agent_update(&mut self, id: AgentId, update: SessionNotification) {
         let core = &mut *self.core;
         let Some(session) = core.agents.get_mut(&id).filter(|s| !s.ended) else {
             return;
         };
-        let text = match &update.update {
-            SessionUpdate::AgentMessageChunk(chunk) => Some((chunk, false)),
-            SessionUpdate::AgentThoughtChunk(chunk) => Some((chunk, true)),
-            _ => None,
-        }
-        .and_then(|(chunk, thought)| match &chunk.content {
-            ContentBlock::Text(text) => Some((text.text.clone(), thought)),
-            _ => None,
-        });
-        let user = match &update.update {
-            SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
-                ContentBlock::Text(text) => Some(text.text.clone()),
-                _ => None,
-            },
-            _ => None,
-        };
-        let tool = match &update.update {
-            SessionUpdate::ToolCall(call) => Some(Ok(call.clone())),
-            SessionUpdate::ToolCallUpdate(update) => Some(Err(update.clone())),
-            _ => None,
-        };
-        let meta = match &update.update {
-            SessionUpdate::ToolCall(call) => call.meta.clone(),
-            SessionUpdate::ToolCallUpdate(update) => update.meta.clone(),
-            _ => None,
-        };
-        let plan = match &update.update {
-            SessionUpdate::Plan(plan) => Some(plan.clone()),
-            _ => None,
-        };
-        if let SessionUpdate::ConfigOptionUpdate(options) = &update.update
-            && let Some(ready) = &mut session.session
-        {
-            ready.config_options = Some(options.config_options.clone());
-        }
-        if let SessionUpdate::SessionInfoUpdate(info) = &update.update
-            && let Some(title) = info.title.as_opt_deref()
-        {
-            session.title = session_title(title);
-            let name = session_name(&session.agent, &session.workspace, title);
-            core.buffers.rename(session.buffer, &name);
-        }
-        if let SessionUpdate::UsageUpdate(usage) = &update.update {
-            session.usage = Some((usage.used, usage.size));
-        }
-        session.updates.push(update);
-        if let Some(plan) = plan {
-            core.show_plan(id, &plan);
-        }
-        if let Some((text, thought)) = text {
-            core.output(id, &text, Some(thought));
-        }
-        if let Some(text) = user {
-            core.show_user(id, &text);
-        }
-        match tool {
-            // A `tool_call` replaces the call with its id.
-            Some(Ok(call)) => core.show_tool(id, call),
-            // An update carrying only terminal `_meta` waits for the frame.
-            Some(Err(update)) if update.fields != ToolCallUpdateFields::default() => {
-                core.tool_update(id, update)
+        match update.update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                if let ContentBlock::Text(text) = chunk.content {
+                    core.output(id, &text.text, Some(false));
+                }
             }
+            SessionUpdate::AgentThoughtChunk(chunk) => {
+                if let ContentBlock::Text(text) = chunk.content {
+                    core.output(id, &text.text, Some(true));
+                }
+            }
+            SessionUpdate::UserMessageChunk(chunk) => {
+                if let ContentBlock::Text(text) = chunk.content {
+                    core.show_user(id, &text.text);
+                }
+            }
+            SessionUpdate::ToolCall(call) => {
+                let meta = call.meta.clone();
+                core.show_tool(id, call);
+                core.terminal_meta(id, meta.as_ref());
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let meta = update.meta.clone();
+                if update.fields != ToolCallUpdateFields::default() {
+                    core.tool_update(id, update);
+                }
+                core.terminal_meta(id, meta.as_ref());
+            }
+            SessionUpdate::Plan(plan) => core.show_plan(id, &plan),
+            SessionUpdate::ConfigOptionUpdate(options) => {
+                if let Some(ready) = &mut session.session {
+                    ready.config_options = Some(options.config_options);
+                }
+            }
+            SessionUpdate::SessionInfoUpdate(info) => {
+                if let Some(title) = info.title.as_opt_deref() {
+                    session.title = session_title(title);
+                    let name = session_name(&session.agent, &session.workspace, title);
+                    core.buffers.rename(session.buffer, &name);
+                }
+            }
+            SessionUpdate::UsageUpdate(usage) => session.usage = Some((usage.used, usage.size)),
             _ => {}
         }
-        core.terminal_meta(id, meta.as_ref());
     }
 
     /// Shows a permission request from a ready session and cancels one from an ended or killed
@@ -1199,306 +1241,6 @@ impl Ctx<'_> {
             core.log(&line);
         }
         self.effects.push(Effect::Agent(AgentOp::Kill { id }));
-    }
-}
-
-/// Renders `range` of `buffer` as markdown, replacing its properties.
-fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool) {
-    buffer.remove_properties(range.clone());
-    let text = buffer.text().slice(range.clone()).to_string();
-    for (r, prop) in markdown::render(&text, thought) {
-        (buffer.add_property(range.start + r.start..range.start + r.end, prop))
-            .expect("inside the rendered range");
-    }
-}
-
-/// Replaces `range` of `buffer`'s output with `text`, removing its properties, line by line so
-/// point on an unchanged line stays.
-fn rewrite(buffer: &mut Buffer, range: Range<usize>, text: &str) {
-    let old = buffer.text().slice(range.clone()).to_string();
-    buffer.remove_properties(range.clone());
-    for (r, new) in buffer::diff(&old, text).into_iter().rev() {
-        buffer.replace_output(range.start + r.start..range.start + r.end, &new);
-    }
-}
-
-/// The ACP name of an enum value, as `in_progress`.
-fn acp_name(value: impl serde::Serialize) -> String {
-    match serde_json::to_value(value) {
-        Ok(Value::String(name)) => name,
-        _ => "?".into(),
-    }
-}
-
-/// `text`'s first line, followed by ` …` when it has more.
-fn first_line(text: &str) -> String {
-    let mut line = text.lines().next().unwrap_or_default().to_string();
-    if text.trim_end().contains('\n') {
-        line.push_str(" …");
-    }
-    line
-}
-
-/// A tool call's header line, `<title> (<kind>, <status>)` with the title's first line and its
-/// terminal's exit after the status, and the title part's length in chars.
-fn tool_header(call: &ToolCall, term: Option<&Term>) -> (String, usize) {
-    let title = first_line(&call.title);
-    let (kind, status) = (acp_name(call.kind), acp_name(call.status));
-    let suffix = match term.and_then(|t| t.exit.as_ref()) {
-        Some(exit) => format!(" ({kind}, {status}, {exit})"),
-        None => format!(" ({kind}, {status})"),
-    };
-    (format!("{title}{suffix}"), title.chars().count())
-}
-
-/// A plan entry's line, `<content> (<status>, <priority>)` with the content's first line, and
-/// the content part's length in chars.
-fn plan_line(entry: &PlanEntry) -> (String, usize) {
-    let content = first_line(&entry.content);
-    let suffix = format!(
-        " ({}, {})",
-        acp_name(&entry.status),
-        acp_name(&entry.priority)
-    );
-    (format!("{content}{suffix}"), content.chars().count())
-}
-
-/// The plan block's rows: `Plan`, then a line per entry.
-fn plan_rows(plan: &Plan) -> Vec<(String, usize)> {
-    let rows = plan.entries.iter().map(plan_line);
-    std::iter::once(("Plan".to_string(), 4))
-        .chain(rows)
-        .collect()
-}
-
-/// A permission request's rows: `Permission: <title>`, then a numbered line per option,
-/// `<n>. <name> (<kind>)`.
-fn ask_rows(title: &str, options: &[PermissionOption]) -> Vec<(String, usize)> {
-    let header = format!("Permission: {title}");
-    let rows = options.iter().enumerate().map(|(i, o)| {
-        let name = format!("{}. {}", i + 1, first_line(&o.name));
-        let len = name.chars().count();
-        (format!("{name} ({})", acp_name(o.kind)), len)
-    });
-    let len = header.chars().count();
-    std::iter::once((header, len)).chain(rows).collect()
-}
-
-/// A block's text from its rows, a line each.
-fn rows_text(rows: &[(String, usize)]) -> String {
-    let lines: Vec<_> = rows.iter().map(|(text, _)| text.as_str()).collect();
-    lines.join("\n")
-}
-
-/// Renders the block of `rows` at `start`, whose properties were removed: a rule beside each
-/// line and each row's text past its length before the suffix dim.
-fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, usize)]) {
-    let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
-    let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
-    let mut props = Vec::new();
-    let mut line = 0;
-    for (text, content) in rows {
-        let len = text.chars().count();
-        props.push((line..line + 1, rule.clone()));
-        if *content < len {
-            props.push((line + content..line + len, dim.clone()));
-        }
-        line += len + 1;
-    }
-    for (r, prop) in props {
-        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
-    }
-}
-
-/// The line a permission request's block becomes when cancelled or dropped.
-fn cancelled(ask: &Ask) -> String {
-    format!("Cancelled permission for {}", ask.title)
-}
-
-/// Replaces `ask`'s block with `line`, which stays plain.
-fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
-    let start = buffer.marker(ask.start).expect("live while pending");
-    rewrite(buffer, start..start + ask.len, line);
-    buffer.remove_marker(ask.start);
-}
-
-/// Everything a tool call carries, uncut, as markdown: its raw input, its content items without
-/// ANSI escapes, and its terminal's output, or its raw output when no item carries the result;
-/// and the faces of the escapes.
-fn tool_content(call: &ToolCall, term: Option<&Term>) -> (String, Faces) {
-    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
-    let (mut content, mut faces) = (String::new(), Vec::new());
-    // Appends a part whose faces start `at` chars into it.
-    let mut push = |part: String, part_faces: Faces, at: usize| {
-        if !content.is_empty() {
-            content.push_str("\n\n");
-        }
-        let at = content.chars().count() + at;
-        faces.extend((part_faces.into_iter()).map(|(r, f)| (at + r.start..at + r.end, f)));
-        content.push_str(&part);
-    };
-    if let Some(input) = &call.raw_input {
-        push(
-            format!("Input:\n{}", fenced("json", &pretty(input))),
-            vec![],
-            0,
-        );
-    }
-    for item in &call.content {
-        if let (ToolCallContent::Terminal(t), Some(term)) = (item, term)
-            && *t.terminal_id.0 == *term.id
-        {
-            continue;
-        }
-        let (part, part_faces) = match item {
-            ToolCallContent::Content(c) => match &c.content {
-                // Codex sends a read or list command's output here, colored.
-                ContentBlock::Text(text) => coloured(&text.text),
-                ContentBlock::ResourceLink(link) => (link.uri.clone(), vec![]),
-                other => match serde_json::to_value(other) {
-                    Ok(v) => (format!("[{}]", v["type"].as_str().unwrap_or("?")), vec![]),
-                    Err(_) => ("[?]".into(), vec![]),
-                },
-            },
-            ToolCallContent::Diff(d) => {
-                let old = d.old_text.as_deref().unwrap_or_default();
-                let path = d.path.display().to_string();
-                let diff = similar::TextDiff::from_lines(old, &d.new_text);
-                let diff = diff.unified_diff().header(&path, &path).to_string();
-                (format!("{path}\n{}", fenced("diff", &diff)), vec![])
-            }
-            ToolCallContent::Terminal(t) => (format!("Terminal {}", t.terminal_id), vec![]),
-            _ => ("[?]".into(), vec![]),
-        };
-        push(part, part_faces, 0);
-    }
-    if let Some(term) = term {
-        if !term.output.is_empty() {
-            let (output, output_faces) = coloured(&term.output);
-            let block = fenced("", &output);
-            // The faces start after `Output:` and the fence line.
-            let at = "Output:\n".len() + block.find('\n').expect("fenced") + 1;
-            push(format!("Output:\n{block}"), output_faces, at);
-        }
-    } else if let (true, Some(output)) = (call.content.is_empty(), &call.raw_output) {
-        let text = match output {
-            Value::String(text) => text.clone(),
-            // Claude's adapter passes a tool result's text blocks through.
-            Value::Array(items)
-                if !items.is_empty() && items.iter().all(|i| i["text"].is_string()) =>
-            {
-                let texts: Vec<_> = items.iter().filter_map(|i| i["text"].as_str()).collect();
-                texts.join("\n")
-            }
-            other => pretty(other),
-        };
-        push(format!("Output:\n{}", fenced("", &text)), vec![], 0);
-    }
-    (content.trim_end_matches('\n').to_string(), faces)
-}
-
-/// `text` without ANSI escape sequences or carriage returns, and the faces its SGR escapes give
-/// its chars: the theme's 16 colours, bold and underline.
-// shortcut: `\r` is dropped, not taken as a return to the line's start; overwrite the line if progress output shows garbled.
-fn coloured(text: &str) -> (String, Faces) {
-    #[derive(Default)]
-    struct Sgr {
-        text: String,
-        len: usize,
-        face: Vec<FaceRef>,
-        faces: Faces,
-    }
-    impl Handler for Sgr {
-        fn input(&mut self, c: char) {
-            self.text.push(c);
-            if !self.face.is_empty() {
-                match self.faces.last_mut() {
-                    Some((r, f)) if r.end == self.len && *f == self.face => r.end += 1,
-                    _ => self.faces.push((self.len..self.len + 1, self.face.clone())),
-                }
-            }
-            self.len += 1;
-        }
-        fn put_tab(&mut self, count: u16) {
-            (0..count).for_each(|_| self.input('\t'));
-        }
-        // A face never runs across a line's start, where a code line's decoration begins.
-        fn linefeed(&mut self) {
-            self.text.push('\n');
-            self.len += 1;
-        }
-        fn terminal_attribute(&mut self, attr: Attr) {
-            let index = |c: Color| match c {
-                Color::Named(n) if (n as usize) < 16 => Some(n as u8),
-                Color::Indexed(i) if i < 16 => Some(i),
-                _ => None,
-            };
-            let mut set = |of: fn(&FaceRef) -> bool, new: Option<FaceRef>| {
-                self.face.retain(|f| !of(f));
-                self.face.extend(new);
-            };
-            let fg = |f: &FaceRef| matches!(f, FaceRef::Fg(_));
-            let bg = |f: &FaceRef| matches!(f, FaceRef::Bg(_));
-            match attr {
-                Attr::Reset => self.face.clear(),
-                Attr::Foreground(c) => set(fg, index(c).map(FaceRef::Fg)),
-                Attr::Background(c) => set(bg, index(c).map(FaceRef::Bg)),
-                Attr::Bold => set(|f| *f == FaceRef::Bold, Some(FaceRef::Bold)),
-                Attr::CancelBold | Attr::CancelBoldDim => set(|f| *f == FaceRef::Bold, None),
-                Attr::Underline => set(|f| *f == FaceRef::Underline, Some(FaceRef::Underline)),
-                Attr::CancelUnderline => set(|f| *f == FaceRef::Underline, None),
-                _ => {}
-            }
-        }
-    }
-    let mut sgr = Sgr::default();
-    <Processor>::new().advance(&mut sgr, text.as_bytes());
-    (sgr.text, sgr.faces)
-}
-
-/// `text` in a fenced code block whose fence is longer than any run of backticks in it.
-fn fenced(lang: &str, text: &str) -> String {
-    let run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(run.max(2) + 1);
-    let text = text.strip_suffix('\n').unwrap_or(text);
-    format!("{fence}{lang}\n{text}\n{fence}")
-}
-
-/// Renders a tool call's block, whose properties were removed: its header with a rule beside it,
-/// then its content as markdown with a rule beside each line, or folded behind ` …`. No property
-/// contains another's end, so starts and ends ascend.
-fn render_tool(buffer: &mut Buffer, tool: &Tool) {
-    let start = buffer.marker(tool.start).expect("live while shown");
-    let (header, title) = tool_header(&tool.call, tool.term.as_ref());
-    let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
-    let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
-    // A rule on one char touches only its line and sorts before the faces on it.
-    let mut props = vec![(0..1, rule.clone())];
-    let title: String = header.chars().take(title).collect();
-    props.extend(markdown::render(&title, false));
-    props.push((title.chars().count()..tool.header, dim));
-    let body = tool.header + 1..tool.len;
-    if tool.open && !body.is_empty() {
-        let content = buffer
-            .text()
-            .slice(start + body.start..start + body.end)
-            .to_string();
-        let shifted = |(r, p): (Range<usize>, Prop)| (body.start + r.start..body.start + r.end, p);
-        props.extend(markdown::render(&content, false).into_iter().map(shifted));
-        // Sorted with the markdown faces by range; where both apply, the later sorted one wins.
-        let faces = (tool.faces.iter()).map(|(r, f)| (r.clone(), Prop::Named(f.clone())));
-        props.extend(faces.map(shifted));
-        let mut line = body.start;
-        for l in content.split('\n') {
-            props.push((line..line + 1, rule.clone()));
-            line += l.chars().count() + 1;
-        }
-    } else if !body.is_empty() {
-        props.push((tool.header..tool.len, Prop::Invisible(" …".into())));
-    }
-    props.sort_by_key(|(r, _)| (r.start, r.end));
-    for (r, prop) in props {
-        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
     }
 }
 
@@ -1981,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn message_chunks_stream_above_the_prompt_and_updates_are_kept() {
+    fn message_chunks_stream_above_the_prompt() {
         let mut h = session();
         let before = log_text(&h, "*claude stderr*<work>");
         chunk(&mut h, "Hi");
@@ -1997,8 +1739,34 @@ mod tests {
         // The thought is a block of its own, between two message blocks.
         assert_eq!(h.core.text(), "Hi\n\nhmm\n\n there\n\n> ");
         assert_eq!(h.core.point(), h.core.text().chars().count());
-        assert_eq!(h.core.agents[&AgentId(0)].updates.len(), 3);
         assert_eq!(log_text(&h, "*claude stderr*<work>"), before);
+        exited(&mut h, 0, 0);
+        let text = h.core.text().to_string();
+        chunk(&mut h, "late");
+        assert_eq!(h.core.text(), text);
+    }
+
+    #[test]
+    fn an_unknown_agents_update_preserves_every_buffer() {
+        let mut h = session();
+        let before: Vec<_> = h
+            .core
+            .buffers
+            .iter_mut()
+            .map(|(id, b)| (id, b.text().to_string()))
+            .collect();
+        update(
+            &mut h,
+            9,
+            SessionUpdate::AgentMessageChunk(ContentChunk::new("late".into())),
+        );
+        let after: Vec<_> = h
+            .core
+            .buffers
+            .iter_mut()
+            .map(|(id, b)| (id, b.text().to_string()))
+            .collect();
+        assert_eq!(after, before);
     }
 
     #[test]
@@ -2639,6 +2407,73 @@ mod tests {
         h.keys("M-< C-e TAB");
         let red = h.core.settings().theme.ansi[1];
         assert_eq!(drawn(&mut h, "red").fg, Some(red));
+    }
+
+    #[test]
+    fn folded_and_open_output_agree_across_chunk_boundaries() {
+        let (mut folded, mut open) = (session(), session());
+        for h in [&mut folded, &mut open] {
+            tool(h, command());
+            output(h, "terminal_output", "t", "initial\n");
+            h.frame(800., 600.);
+        }
+        open.keys("M-< C-e TAB");
+        for text in [
+            "\u{1b}[3",
+            "1mred",
+            "der\u{1b}[0m\n",
+            "```",
+            "`été\n",
+            "tail\n",
+        ] {
+            for h in [&mut folded, &mut open] {
+                output(h, "terminal_output_delta", "t", text);
+                h.frame(800., 600.);
+            }
+            assert_eq!(folded.core.text(), open.core.text());
+            let faces = |h: &Harness| {
+                h.core.agents[&AgentId(0)]
+                    .tools
+                    .values()
+                    .next()
+                    .unwrap()
+                    .faces
+                    .clone()
+            };
+            assert_eq!(faces(&folded), faces(&open));
+        }
+        folded.keys("M-< C-e TAB");
+        assert_eq!(shown(&mut folded, 20), shown(&mut open, 20));
+        let red = folded.core.settings.theme.ansi[1];
+        assert_eq!(drawn(&mut folded, "redder").fg, Some(red));
+    }
+
+    #[test]
+    fn hidden_tool_output_waits_for_its_session_to_be_shown() {
+        for workspace in [false, true] {
+            let mut h = session();
+            let work = h.core.workspace();
+            let buffer = h.core.windows.window.buffer();
+            tool(&mut h, command());
+            output(&mut h, "terminal_output", "t", "initial\n");
+            h.frame(800., 600.);
+            let before = h.core.buffers.get(buffer).unwrap().text().to_string();
+            if workspace {
+                h.new_workspace("other", "home");
+            } else {
+                h.open("other.txt");
+            }
+            output(&mut h, "terminal_output_delta", "t", "later\n");
+            h.frame(800., 600.);
+            assert_eq!(
+                h.core.buffers.get(buffer).unwrap().text().to_string(),
+                before
+            );
+            h.core.switch_workspace(work).unwrap();
+            h.core.switch_to(buffer);
+            h.frame(800., 600.);
+            assert!(h.core.text().contains("initial\nlater\n```"));
+        }
     }
 
     #[test]
