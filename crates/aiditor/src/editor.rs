@@ -1597,6 +1597,18 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        // The matcher's OS threads finish separately from GPUI's test executor.
+        for _ in 0..100 {
+            let ready = editor.update(cx, |e, _| {
+                e.core.frame().minibuffer.unwrap().candidates.len() == 5
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
         editor.update_in(cx, |e, window, _| {
             let mb = e.core.frame().minibuffer.unwrap();
             assert_eq!((mb.count.trim(), mb.selected), ("*/5", None));
