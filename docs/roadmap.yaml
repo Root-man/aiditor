@@ -1691,8 +1691,8 @@ milestones:
   # ───────────────────────────────────────────── M6 ─────────────────────────────────────────────
   - key: m6
     title: "M6 · Interactive session"
-    description: "The monospace session buffer becomes interactive: messages as units, timings, tool-call blocks, file chips, @ references, attachments, slash commands, fork and rollback."
-    gate: "In one session: reference a file with @, attach a screenshot and a directory, paste a long log, run a slash command, open a tool call's output and a file link with RET, then fork and roll back from a chosen message."
+    description: "The monospace session buffer becomes interactive: messages as units, timings, tool-call blocks, file chips, @ references, attachments, slash commands, questions from agents, fork and rollback."
+    gate: "In one session: reference a file with @, attach a screenshot and a directory, paste a long log, run a slash command, open a tool call's output and a file link with RET, answer an agent's question with your own answer, fill in a form question, then fork and roll back from a chosen message."
     epics:
       - key: m6-session-ui
         title: "Interactive transcript"
@@ -1713,11 +1713,12 @@ milestones:
           - key: m6-messages
             title: "Messages as units in the transcript"
             body: |
-              The core keeps each message's ACP `messageId` from the `session/update` chunks, replayed ones included. Prompts sent live carry none, so a user message is placed after the last agent message before it. The message at point gets a bar in the left margin in `message-at-point`, and `C-c C-p` and `C-c C-n` move to the previous and next message.
+              The core keeps each message's ACP `messageId` from the `session/update` chunks, replayed ones included. Prompts sent live carry none, so a user message is placed after the last agent message before it. The message at point gets a bar in the left margin in `message-at-point`, and `C-c C-p` and `C-c C-n` move to the previous and next message. `C-c C-n` rejects a permission request today, so `agent-reject-once` moves to `C-c C-k`, the key that also skips a question; update the protocol table in docs/editor.md.
             acceptance:
               - "Message ids are kept for live and replayed chunks"
               - "The margin bar follows point from message to message"
               - "C-c C-p and C-c C-n move between messages, past tool calls"
+              - "C-c C-k rejects a permission request"
               - "Core tests cover both keys"
           - key: m6-timings
             title: "Timestamps and durations on agent actions"
@@ -1805,6 +1806,94 @@ milestones:
               - "The list follows available_commands_update"
               - "Commands the editor does itself are hidden"
               - "Checked against the real claude-agent-acp and codex-acp on macOS"
+      - key: m6-questions
+        title: "Agent questions"
+        labels: [acp, frontend]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Agents ask the user through ACP's `elicitation/create`, as frames 6d, 6e and 6f of the [visual direction canvas](https://claude.ai/artifact/VyRd2AK1RfiVhuBx6nA1KP) draw it. claude-agent-acp removes `AskUserQuestion` from the model's tools unless the client advertises `elicitation.form`, and codex-acp asks through the same request. A question is a block in the transcript like a permission request, in the same faces. `RET` acts on the row at point, `C-c C-y` sends, `C-c C-k` skips (`decline`), and cancelling the turn answers `cancel`. Text goes through the minibuffer, so the block stays read-only. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m6-question-choice
+            title: "Answer an agent's single-choice question"
+            body: |
+              Advertise `elicitation.form` and handle `elicitation/create`, as frames 6d and 6f draw it. A question shows as a block above the prompt line with the request's `message`, a row per option with its description, and an own-answer row. A digit or `RET` on an option answers at once, and `o` asks for an own answer in the minibuffer. While the question has a `toolCallId`, its block stands in for that tool call's row. The mode line shows `● awaiting answer`. Point moves to the block only when the prompt is empty; otherwise it stays, digits still type, the echo line says a question is waiting, and `C-c C-q` goes to it.
+
+              `C-c C-k` skips, and also rejects a permission request; `agent-reject-once` keeps `C-c C-n` until "Messages as units in the transcript" takes that key. `agent-cancel` and the end of a session answer `cancel`. A request the agent withdraws with `$/cancel_request` (codex-acp's `autoResolutionMs`) closes its block; the crate exposes `RequestCancellation`. A form this task can't draw yet is answered `decline` with an echo line.
+
+              A request is a question, and not a form, when each field is a choice with at most a companion own-answer field. Companions differ by adapter: claude-agent-acp adds a string field `question_<n>_custom`; codex-acp adds a `None of the above` option and a note field. Extend the fake agent to send elicitations. Record the rule and the decisions here in docs/editor.md, and add frames 6d, 6e and 6f to AGENTS.md.
+            acceptance:
+              - "`clientCapabilities.elicitation.form` is advertised and `url` is not"
+              - "A digit or RET answers with that option's value, and an own answer goes in the adapter's own shape"
+              - "C-c C-k answers `decline`, and rejects a permission request as well"
+              - "Cancelling the turn, killing the buffer and ending the session answer `cancel`"
+              - "A withdrawn request closes its block"
+              - "Point stays in a prompt with text, and C-c C-q goes to the question"
+              - "A form it can't draw is declined and says so in the echo line"
+              - "Core tests with the fake agent cover each answer"
+              - "Checked against the real claude-agent-acp and codex-acp on macOS"
+          - key: m6-question-multi
+            title: "Multi-select questions and option previews"
+            body: |
+              Frame 6d. An `array` field with enum items shows `[ ]` rows: a digit or `RET` ticks one and `C-c C-y` sends. An own answer joins the picks. `minItems` and `maxItems` are enforced when set and not displayed: an out-of-range send stays open with an echo line. An option carrying `_meta["_claude/askUserQuestionOption"].preview` shows it under the option at point in `session-block`, its first lines and `… N more lines`, following point. More than nine options stay rows: digits reach the first nine and `RET` the rest.
+            acceptance:
+              - "Digits and RET tick, and C-c C-y sends the ticked values as a string array"
+              - "minItems and maxItems refuse a send without drawing a count"
+              - "The preview follows point and folds long text"
+              - "A tenth option can be picked with RET"
+            blocked_by: [m6-question-choice]
+          - key: m6-question-several
+            title: "Several questions in one block"
+            body: |
+              Frame 6e. A request with more than one question shows them as a `Questions 2 of 3` block with one open and the rest folded to a line: `✓` with the answer once answered, `○` until then, and each field's `title` as its name. `TAB` moves to the next question while point is in the block, and answering a single choice moves on by itself. `C-c C-y` sends all and `C-c C-k` skips all. Unanswered questions are left out of the response, since nothing in the form is required.
+            acceptance:
+              - "One question is open at a time, and TAB moves between them"
+              - "A single choice moves on to the next question"
+              - "C-c C-y sends every answer so far"
+              - "TAB outside the block still folds tool calls"
+              - "Checked against AskUserQuestion in the real claude-agent-acp on macOS"
+            blocked_by: [m6-question-multi]
+          - key: m6-question-form
+            title: "Form questions with validation"
+            body: |
+              Frame 6e. Any other form shows one row per field: its title, `*` when required, its value or `empty`, and a right-aligned hint. The description shows under the field at point. `RET` edits: the minibuffer for strings, numbers and integers, completion for enums and multi-selects, and a toggle for booleans. Schema `default`s fill the rows first. The minibuffer checks `minLength`, `maxLength`, `pattern` (with the `regex` crate), `format` (email, uri, date, date-time) and `minimum`/`maximum`, and a bad value stays there with the reason in brackets, as `[At most 10]`. `C-c C-y` sends, or stays open with an echo line naming a missing required field. An untouched optional field is left out of the response. The crate keeps `properties` in a `BTreeMap`, so rows come alphabetically; read the raw JSON only if real forms need their order.
+            acceptance:
+              - "Every field type edits and sends with its JSON type: string, number, integer, boolean, string array"
+              - "Defaults fill the rows"
+              - "Each constraint rejects a bad value in the minibuffer"
+              - "A missing required field stops C-c C-y and is named in the echo line"
+              - "Core tests cover each type and constraint"
+            blocked_by: [m6-question-choice]
+          - key: m6-question-url
+            title: "URL questions"
+            body: |
+              Frame 6f. Advertise `elicitation.url`. The block shows the message and the full URL, wrapped with `↪` and never shortened, with its domain bright, and options to open it, copy it or decline. The URL opens only on that key, in the system browser, never prefetched. A domain with an `xn--` label shows in `status-failed` with its decoded form and a warning. After opening, a line shows `in the browser` until `elicitation/complete` arrives with that `elicitationId`; unknown or finished ids are ignored. Agents may never send it, so the session must not stay `● awaiting answer`: `accept` ends the wait as soon as the browser opens.
+            acceptance:
+              - "The whole URL shows before anything opens"
+              - "Open, copy and decline answer `accept`, nothing and `decline`"
+              - "An `xn--` domain is flagged with its decoded form"
+              - "elicitation/complete ends the line, and an unknown id is ignored"
+              - "A session with no elicitation/complete doesn't stay waiting"
+            blocked_by: [m6-question-choice]
+          - key: m6-question-async
+            title: "Non-blocking questions"
+            body: |
+              Frame 6f. A request with `_meta.codex.delivery: "async"` doesn't stop the turn: the block stays where it arrived, output goes in below it, and the mode line keeps `● working` with a `1 question` segment. `C-c C-q` goes to the oldest open question. codex-acp steers an accepted answer into the turn, drops a late one, and withdraws open questions when the turn ends, which closes the block.
+            acceptance:
+              - "Output streams below an open block"
+              - "The mode line counts open questions and keeps the session's status"
+              - "C-c C-q goes to the oldest open question"
+              - "A question withdrawn at the turn's end closes its block"
+              - "Checked against the real codex-acp on macOS"
+            blocked_by: [m6-question-choice]
+          - key: m6-question-answered
+            title: "Answered questions shrink to one line"
+            body: |
+              Frame 6f. Once answered, a question is replaced by one line with a status mark, the question and the answer, as an answered permission request is: `✓` with the answer, `– Skipped`, `✗ Cancelled`, or `○ Closed` when the agent withdrew it. `TAB` opens what was sent, a row per field in `session-block`. The line replaces the tool call's row the block stood in for. History replayed by `session/load` shows whatever the agent replays.
+            acceptance:
+              - "Each outcome shrinks to its line"
+              - "TAB opens and folds the fields that were sent"
+              - "A session/load replay shows no open question"
+            blocked_by: [m6-question-choice, m6-permission-collapse]
       - key: m6-fork
         title: "Fork and roll back sessions"
         labels: [acp]
