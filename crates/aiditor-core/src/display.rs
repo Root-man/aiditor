@@ -3,12 +3,36 @@
 use crate::buffer::{Buffer, Decoration, Face, Prop};
 use crate::project_commands::root_names;
 use crate::settings::{FaceName, LineNumbers, Settings, Theme};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// Nonempty UTF-8 byte ranges matched on one complete source line, in order.
+/// Intersections of nonempty matches on the complete source line with displayed byte intervals.
 pub trait Search {
-    fn matches(&self, text: &str) -> Vec<Range<usize>>;
+    fn matches(&self, text: &str, displayed: &[Range<usize>]) -> Vec<SearchMatch>;
+}
+
+pub struct SearchMatch {
+    pub range: Range<usize>,
+    pub first: bool,
+}
+
+pub(crate) fn retain_match(
+    range: Range<usize>,
+    first: bool,
+    displayed: &[Range<usize>],
+    out: &mut Vec<SearchMatch>,
+) {
+    for shown in displayed
+        .iter()
+        .skip_while(|s| s.end <= range.start)
+        .take_while(|s| s.start < range.end)
+    {
+        out.push(SearchMatch {
+            range: range.start.max(shown.start)..range.end.min(shown.end),
+            first,
+        });
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -484,8 +508,8 @@ pub fn build(
     };
     // Display columns of `line` consumed so far, the skipped ones included.
     let mut col: usize = 0;
-    let mut matched_line = None;
-    let mut matches = Vec::new();
+    let mut positions = search.map(|_| Vec::new());
+    let mut source_positions = Vec::new();
     while lines.len() < rows {
         let range = match Some(line.number) == point_line {
             true => shown.clone(),
@@ -505,6 +529,9 @@ pub fn build(
                 .collect();
             col += placeholder.chars().count();
             if !visible.is_empty() {
+                if positions.is_some() {
+                    source_positions.extend(visible.chars().map(|_| None));
+                }
                 line.spans.push(Span {
                     text: visible,
                     face: Face::default(),
@@ -515,6 +542,9 @@ pub fn build(
             continue;
         }
         if pos == text.len_chars() {
+            if let Some(positions) = &mut positions {
+                positions.push(std::mem::take(&mut source_positions));
+            }
             finish(&mut lines, &mut line, start, pos, 0);
             break;
         }
@@ -541,6 +571,9 @@ pub fn build(
         let c = text.char(pos);
         pos += 1;
         if c == '\n' {
+            if let Some(positions) = &mut positions {
+                positions.push(std::mem::take(&mut source_positions));
+            }
             finish(&mut lines, &mut line, start, pos, text.char_to_line(pos));
             start = pos;
             col = 0;
@@ -549,6 +582,9 @@ pub fn build(
         col += 1;
         if !range.contains(&(col - 1)) {
             continue;
+        }
+        if positions.is_some() {
+            source_positions.push(Some(pos - 1));
         }
         let i = syntax.partition_point(|(range, _)| range.end < pos);
         let mut face = (syntax.get(i))
@@ -562,27 +598,6 @@ pub fn build(
                 Prop::Face(f) => face = f.over(face),
                 Prop::Named(refs) => face = settings.theme.resolve(refs).over(face),
                 _ => {}
-            }
-        }
-        if let Some(search) = search {
-            let number = text.char_to_line(pos - 1);
-            if matched_line != Some(number) {
-                matched_line = Some(number);
-                let content = String::from(text.line(number));
-                let byte = text.line_to_byte(number);
-                matches = search
-                    .matches(content.trim_end_matches('\n'))
-                    .into_iter()
-                    .map(|r| text.byte_to_char(byte + r.start)..text.byte_to_char(byte + r.end))
-                    .collect::<Vec<_>>();
-            }
-            let i = matches.partition_point(|r| r.end < pos);
-            if matches.get(i).is_some_and(|r| r.start < pos) {
-                let name = match i == 0 && Some(number) == point_line {
-                    true => FaceName::MatchCurrent,
-                    false => FaceName::Match,
-                };
-                face = settings.theme.face(name).over(face);
             }
         }
         if region.as_ref().is_some_and(|r| r.contains(&(pos - 1))) {
@@ -600,9 +615,20 @@ pub fn build(
     let mut bottom = pos == text.len_chars();
     if let Some(wrap) = wrap {
         let marker = crate::syntax::face(&settings.theme.syntax, "comment").unwrap_or_default();
-        lines = wrap_lines(lines, &mut cursor, rows, wrap, marker);
+        lines = wrap_lines(lines, &mut cursor, rows, wrap, marker, &mut positions);
         bottom &= lines.len() <= rows;
         lines.truncate(rows);
+    }
+    if let (Some(search), Some(positions)) = (search, positions) {
+        search_overlays(
+            &mut lines,
+            positions,
+            buffer,
+            search,
+            settings,
+            point_line,
+            region.as_ref(),
+        );
     }
     let (l, c) = buffer.line_col(point).unwrap_or_default();
     let position = match (first == 0, bottom) {
@@ -778,20 +804,109 @@ fn region_size(buffer: &Buffer, region: Range<usize>) -> String {
 
 /// Splits each of `lines` into its rows, ending each row but the last with a `\` in `marker`
 /// when not breaking at words, the cursor moving along if it stays in the first `rows`.
+#[allow(clippy::too_many_arguments)]
+fn search_overlays(
+    lines: &mut [Line],
+    positions: Vec<Vec<Option<usize>>>,
+    buffer: &Buffer,
+    search: &dyn Search,
+    settings: &Settings,
+    point_line: Option<usize>,
+    region: Option<&Range<usize>>,
+) {
+    let text = buffer.text();
+    let mut intervals: BTreeMap<usize, Vec<Range<usize>>> = BTreeMap::new();
+    for &pos in positions.iter().take(lines.len()).flatten().flatten() {
+        let shown = intervals.entry(text.char_to_line(pos)).or_default();
+        if let Some(last) = shown.last_mut().filter(|last| last.end == pos) {
+            last.end += 1;
+        } else {
+            shown.push(pos..pos + 1);
+        }
+    }
+    let matches: BTreeMap<_, _> = intervals
+        .into_iter()
+        .map(|(number, shown)| {
+            let byte = text.line_to_byte(number);
+            let shown: Vec<_> = shown
+                .iter()
+                .map(|r| text.char_to_byte(r.start) - byte..text.char_to_byte(r.end) - byte)
+                .collect();
+            let content = String::from(text.line(number));
+            let matches: Vec<_> = search
+                .matches(content.trim_end_matches('\n'), &shown)
+                .into_iter()
+                .map(|m| {
+                    (
+                        text.byte_to_char(byte + m.range.start)
+                            ..text.byte_to_char(byte + m.range.end),
+                        m.first,
+                    )
+                })
+                .collect();
+            (number, matches)
+        })
+        .collect();
+    for (line, positions) in lines.iter_mut().zip(positions) {
+        let mut positions = positions.into_iter();
+        for span in std::mem::take(&mut line.spans) {
+            for c in span.text.chars() {
+                let mut face = span.face;
+                if let Some(pos) = positions.next().flatten() {
+                    let number = text.char_to_line(pos);
+                    let found = &matches[&number];
+                    let i = found.partition_point(|(r, _)| r.end <= pos);
+                    if let Some((_, first)) = found.get(i).filter(|(r, _)| r.contains(&pos)) {
+                        let name = if *first && Some(number) == point_line {
+                            FaceName::MatchCurrent
+                        } else {
+                            FaceName::Match
+                        };
+                        face = settings.theme.face(name).over(face);
+                    }
+                    if region.is_some_and(|r| r.contains(&pos)) {
+                        face = settings.theme.face(FaceName::Region).over(face);
+                    }
+                }
+                match line.spans.last_mut() {
+                    Some(last) if last.face == face && last.fold == span.fold => last.text.push(c),
+                    _ => line.spans.push(Span {
+                        text: c.into(),
+                        face,
+                        fold: span.fold,
+                    }),
+                }
+            }
+        }
+    }
+}
+
 fn wrap_lines(
     lines: Vec<Line>,
     cursor: &mut Option<(usize, usize)>,
     rows: usize,
     wrap: Wrap,
     marker: Face,
+    positions: &mut Option<Vec<Vec<Option<usize>>>>,
 ) -> Vec<Line> {
     let mut out = Vec::new();
     let mut moved = None;
+    let mut mapped = positions.as_ref().map(|_| Vec::new());
     for (i, line) in lines.into_iter().enumerate() {
         let chars: Vec<char> = line.spans.iter().flat_map(|s| s.text.chars()).collect();
         let starts = row_starts(chars.len(), wrap.width, wrap.word, |i| {
             chars[i].is_whitespace()
         });
+        if let (Some(old), Some(mapped)) = (positions.as_ref(), &mut mapped) {
+            for (row, &start) in starts.iter().enumerate() {
+                let end = starts.get(row + 1).copied().unwrap_or(old[i].len());
+                let mut range = old[i][start..end].to_vec();
+                if !wrap.word && row + 1 < starts.len() {
+                    range.push(None);
+                }
+                mapped.push(range);
+            }
+        }
         let row_of = |col: usize| starts.partition_point(|&s| s <= col) - 1;
         if let Some((_, col)) = cursor.filter(|&(l, _)| l == i) {
             moved = Some((out.len() + row_of(col), col - starts[row_of(col)]));
@@ -834,6 +949,7 @@ fn wrap_lines(
         }
     }
     *cursor = moved.filter(|&(r, _)| r < rows);
+    *positions = mapped;
     out
 }
 
@@ -851,6 +967,61 @@ mod tests {
         italic: false,
         underline: false,
     };
+
+    #[test]
+    fn clipped_and_folded_matches_preserve_current_match_identity() {
+        let mut h = Harness::new(&[("a.txt", "abcdef xyz xyz\n")]);
+        h.open("a.txt");
+        let mut search = crate::swiper::Search::new(h.core.current().text(), None);
+        search.filter("abcdef");
+        let draw = |h: &Harness, shown, wrap| {
+            super::build(
+                h.core.current(),
+                0,
+                1,
+                0,
+                None,
+                h.core.settings(),
+                shown,
+                wrap,
+                &[],
+                Some(&search),
+            )
+        };
+        let current = h.core.settings().theme.face(FaceName::MatchCurrent);
+        let line = &draw(&h, 1..4, None).lines[0];
+        assert_eq!(line.spans[0].text, "bcd");
+        assert_eq!(line.spans[0].face.bg, current.bg);
+        search.filter("xyz");
+        let id = h.core.windows.window.buffer();
+        h.core
+            .buffers
+            .get_mut(id)
+            .unwrap()
+            .add_property(7..10, Prop::Invisible("…".into()))
+            .unwrap();
+        let frame = super::build(
+            h.core.current(),
+            0,
+            1,
+            0,
+            None,
+            h.core.settings(),
+            0..30,
+            None,
+            &[],
+            Some(&search),
+        );
+        let span = frame.lines[0]
+            .spans
+            .iter()
+            .find(|s| s.text == "xyz")
+            .unwrap();
+        assert_eq!(
+            span.face.bg,
+            h.core.settings().theme.face(FaceName::Match).bg
+        );
+    }
 
     fn prop(h: &mut Harness, range: std::ops::Range<usize>, prop: Prop) {
         let id = h.core.windows.window.buffer();

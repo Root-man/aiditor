@@ -701,6 +701,12 @@ impl Core {
 
     /// The open minibuffer's prompt and the line holding its point.
     pub(crate) fn minibuffer(&mut self) -> Option<display::Minibuffer> {
+        let (width, _, cell) = self.frame_size;
+        let columns = if cell > 0. {
+            ((width - 2. * TEXT_INSET) / cell).max(0.) as usize
+        } else {
+            0
+        };
         let mb = self.prompts.minibuffer.as_mut()?;
         let prompt = mb.prompt.to_string();
         let grep = mb.command == "project-grep" && !self.grep.choosing_root();
@@ -747,7 +753,14 @@ impl Core {
                     }
                     let items = f.matched[rows.clone()].iter();
                     (candidates, annotations) = items
-                        .map(|&i| (f.candidate(i), f.notes.get(i).cloned().unwrap_or_default()))
+                        .map(|&i| {
+                            (
+                                f.swiper
+                                    .as_ref()
+                                    .map_or_else(|| f.candidate(i), |s| s.presentation(i, columns)),
+                                f.notes.get(i).cloned().unwrap_or_default(),
+                            )
+                        })
                         .unzip();
                     if mb.command == "project-grep" && !self.grep.choosing_root() {
                         let mut previous = None;
@@ -764,8 +777,11 @@ impl Core {
                     }
                     highlights.resize_with(candidates.len(), Vec::new);
                     if let Some(search) = &f.swiper {
-                        syntax = search
-                            .highlights(&f.matched[rows.clone()], &self.settings.theme.syntax);
+                        syntax = search.highlights(
+                            &f.matched[rows.clone()],
+                            columns,
+                            &self.settings.theme.syntax,
+                        );
                     }
                     (f.matched.len(), rows)
                 }

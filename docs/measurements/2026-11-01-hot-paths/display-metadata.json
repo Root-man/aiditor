@@ -1,0 +1,15 @@
+{
+  "displays": [
+    {
+      "_spdisplays_resolution": "1728 x 1117 @ 120.00Hz",
+      "spdisplays_display_type": "spdisplays_built-in-liquid-retina-xdr",
+      "spdisplays_main": "spdisplays_yes",
+      "spdisplays_pixelresolution": "spdisplays_3456x2234Retina"
+    }
+  ],
+  "power": {
+    "source": "AC Power",
+    "battery_percent": 80,
+    "charging": false
+  }
+}

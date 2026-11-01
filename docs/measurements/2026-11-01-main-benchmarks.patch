@@ -1,0 +1,40 @@
+--- a/crates/aiditor-core/benches/core.rs
++++ b/crates/aiditor-core/benches/core.rs
+@@ -102,7 +102,7 @@
+         previous = query.encode_utf16().count();
+         assert_eq!(
+             core.frame().minibuffer.unwrap().count,
+-            format!("1/{matches} ")
++            format!("{:>8} ", format!("1/{matches}"))
+         );
+     }
+     measure(
+@@ -122,7 +122,7 @@
+         &mut output,
+     );
+     assert_eq!(core.text(), "needle !skip");
+-    assert_eq!(core.frame().minibuffer.unwrap().count, "1/80000 ");
++    assert_eq!(core.frame().minibuffer.unwrap().count, " 1/80000 ");
+ 
+     // One PTY batch is at most 64 KB; the core parses each on the UI thread.
+     let (terminal, _) = core.create_terminal("vterm", 50, 120);
+--- a/crates/aiditor-core/benches/scenarios/mod.rs
++++ b/crates/aiditor-core/benches/scenarios/mod.rs
+@@ -301,7 +301,7 @@
+ 
+ fn settle(core: &mut Core, matches: usize) {
+     let start = Instant::now();
+-    let expected = format!("1/{matches} ");
++    let expected = format!("{}/{matches}", if core.text().is_empty() { "*" } else { "1" });
+     loop {
+         // Advance repoll timers without imposing their 16 ms UI cadence on matcher CPU work.
+         core.handle(Instant::now() + Duration::from_secs(1), Msg::Tick);
+@@ -309,7 +309,7 @@
+         if frame
+             .minibuffer
+             .as_ref()
+-            .is_some_and(|m| m.count == expected)
++            .is_some_and(|m| m.count.trim() == expected)
+             && core.next_deadline().is_none()
+         {
+             return;

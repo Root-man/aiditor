@@ -1,0 +1,50 @@
+# Tasks
+
+## 1. Repair the benchmark contracts and capture a comparable baseline (finding 6)
+
+- [x] 1.1 Correct the two Swiper assertions in `crates/aiditor-core/benches/core.rs` and finder settling in `benches/scenarios/mod.rs` using the supplied benchmark patch. Verify padded `1/80000`, initial `*/N`, selected `1/N`, the final total-count assertion and the settle deadline all retain their current contracts; run the core benchmark target successfully.
+- [x] 1.2 Add distinct focused benchmark cases for scoped edit/highlight, dense long-line previews, shown/hidden dirty and clean streams, and ten long Swiper result rows, using the existing sampling support and fixture descriptions in `design.md`. Verify each case's output/self-checks and capture release baseline TSV plus host/toolchain metadata before changing production behavior; preserve existing benchmark names, fixtures and sampling definitions.
+
+## 2. Reuse local syntax analysis (finding 1)
+
+- [x] 2.1 Batch definition highlight captures in `syntax.rs` while retaining pattern precedence and `local` predicates. Verify existing syntax tests and add a focused comparison of definition/reference faces, including declaration-value ordering and shadowing, against a fresh parse.
+- [x] 2.2 Replace unconditional locals invalidation with lexical-scope records and explicit edit tracking. Reuse unchanged scopes with relative positions and invalidate changed binding environments and their dependent descendants. Verify same-length renames, whitespace edits, insertions before a scope and outer-binding changes produce the same faces as a fresh parse.
+- [x] 2.3 Apply scope reuse/invalidation to injected trees and preserve isolated `Syntax` clones used by Swiper. Verify source edits, undo/revert, changed injection boundaries, nested scopes, offscreen definitions and theme reloads across Rust, JavaScript and TypeScript/TSX, with injected-language fixtures.
+- [x] 2.4 Exercise the 10,000/100,000-line independent-function fixture and the existing syntax edit/revert benchmarks. Verify diagnostic evidence that unrelated scopes are reused and retain before/after first-highlight and cached-highlight measurements, documenting conservative full rebuild cases separately.
+
+## 3. Bound preview match materialization (finding 2)
+
+- [x] 3.1 Update `display::Search`, both Swiper/grep implementations and every caller to request displayed byte intervals and return intersecting match spans with original first-match identity. Verify full-line anchors, ordered words, exclusions, smart case, literal fallback and empty-match behavior still match the existing search contracts.
+- [x] 3.2 Update display overlay construction to derive intervals from actual displayed text, share a line's result within the frame and convert only retained boundaries. Verify dense long lines, horizontal scrolling, a partially visible first match, a first match fully offscreen, wrapping/folds and Unicode produce the expected `match`/`match-current` faces.
+- [x] 3.3 Run Swiper and project-grep preview/navigation/cleanup tests and the new dense-preview benchmark. Verify emitted spans remain bounded by the displayed intersections as line match count grows, and record remaining full-line scan cost separately from materialization/conversion cost.
+
+## 4. Defer hidden streamed-message styling (finding 3)
+
+- [x] 4.1 Derive shown buffer ids from the active workspace's laid-out panes before frame construction and restrict only streamed-message flushing to that set. Verify inactive split panes and the prompt origin update, duplicate panes share the flush, and hidden sessions display accumulated formatting on return without another chunk.
+- [x] 4.2 Preserve unconditional `end_stream` rendering, existing dirty tool-call handling and safe killed-session cleanup. Verify hidden type changes, tool calls, plans, permission prompts and submitted prompts finalize their previous blocks; existing earlier-block properties and tool-call rendering tests must pass.
+- [x] 4.3 Run the shown/hidden stream benchmarks with a growing roughly 5,000-line reply. Verify hidden dirty frames retain pending work and have no streamed-message parse in the frame path; record first-show cost and shown-session cost separately so deferred work is visible in the results.
+
+## 5. Confirm and retry recovery writes (finding 4)
+
+- [x] 5.1 Introduce correlated auto-save requests/completions and separate pending/confirmed state in core `lib.rs`/`autosave.rs`; update recovery worker, frontend, headless and harness call sites together. Verify workspace compilation and a delayed-success core test in which an older completion acknowledges only its captured snapshot, while newer text remains eligible and is subsequently persisted without input.
+- [x] 5.2 Make the worker report persistence only after sync/rename and distinguish later old-copy cleanup errors. Retain the current permissions/header/PID protection. Verify service tests observe successful persisted text, a pre-rename failure retaining the previous copy, and successful replacement with a separately reported cleanup failure.
+- [x] 5.3 Wire nonblocking GUI completion callbacks through the existing runtime and make the headless loop receive completions as well as timer deadlines. Correlate unavailable-service/enqueue failures. Verify real completion delivery, timer-driven retry with no input, closed-receiver behavior, and shutdown with more pending notifications than the GUI channel capacity; the worker must finish queued deletes without the UI draining replies.
+- [x] 5.4 Schedule approximately two-second failure retries using the core clock, take the latest snapshot, suppress duplicate in-flight requests and deduplicate identical error messages until success. Verify with the harness clock that retries occur without another edit, unrelated input cannot starve them, new edits are recovered, changed errors are reported and the normal idle/30-second policies still hold.
+- [x] 5.5 Retain earlier-session recovery paths across failed or pending replacements, including multiple accepted copies of one file. Verify old copies survive failed attempts, only applicable successful snapshots release them, and cleanup errors leave a valid replacement while reporting the surviving old copy.
+- [x] 5.6 Retire requests and recovery state on save-to-clean, revert-to-clean, kill and quit, queueing cleanup after pending writes. Verify late success/failure replies cannot revive retired state, an older reply cannot acknowledge a newer request, and edits during a regular save retain protection; cover pending, failed and previously confirmed copies.
+- [x] 5.7 Extend real-worker/headless crash-recovery coverage with a forced temp-path obstruction removed after failure and no new input. Verify recovery eventually contains the latest text, the visited file remains unchanged, relaunch can recover it, and normal quit drains cleanup; run the existing `crash_recovery` integration test as well.
+
+## 6. Clip Swiper rows before text allocation and syntax painting (finding 5)
+
+- [x] 6.1 Compute the completion result-row column budget from frame width, cell width and existing insets; add a Swiper-specific bounded presentation path in `swiper.rs`/`minibuffer.rs`. Verify row lengths at normal, narrow and zero widths and after resize/zoom, without first constructing full result strings.
+- [x] 6.2 Paint only the bounded source ranges and translate their faces to valid byte ranges in the displayed text. Verify Unicode boundaries, multiline syntax, injected languages, offscreen locals, source edits during the prompt and current theme changes retain correct snapshot styling.
+- [x] 6.3 Keep selection identity, preview and acceptance on the full source index/canonical candidate path. Verify a query matching only beyond the clipped edge still selects and jumps to that match, and accepting a row narrower than its line-number prefix reaches the correct line.
+- [x] 6.4 Verify the frontend receives bounded strings/runs, preserves the selected background and displays long rows correctly at multiple widths. Extend the existing GPUI completion tests and run the new ten-long-row benchmark after syntax reuse; record core timing separately from any GUI shaping/painting measurement.
+
+## 7. Integration, measurements and documentation
+
+- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and the benchmark-reporting Python tests from `.github/workflows/ci.yml`; verify the existing macOS/Linux checks and that `cargo tree -p aiditor-core` still excludes GPUI/Tokio. Record actual platform coverage and resolve failures before completion.
+- [x] 7.2 Run the repaired full core/service benchmark suites and new focused cases sequentially on the baseline host/toolchain, retaining raw TSV and metadata. Verify all self-checks and result parsers pass; compare matching definitions and document first/dirty versus cached/clean costs, scope reuse, displayed-span/row bounds and any regressions needing correction.
+- [x] 7.3 Run the existing local GUI baseline/yes/cat scenarios and the long-row presentation check, retaining sample counts and environment metadata. Verify latency reports remain separate from headless timings and state their input-to-paint limits; investigate material regressions in the affected paths.
+- [x] 7.4 Update `docs/editor.md` with acknowledged auto-save/retry, visibility-qualified streamed-message rendering and bounded Swiper presentation; update `docs/performance.md` and add new measurement artifacts. Verify documentation matches the implementation and measured evidence, and the supplied 2026-11-01 baseline files remain unchanged.
+- [ ] 7.5 Reconcile each spec scenario and the design's structural acceptance checklist with completed tests, code inspection or recorded measurements. Run strict OpenSpec validation and verify all six findings are addressed without adding the omitted scan candidates or new dependencies/settings/recovery formats.

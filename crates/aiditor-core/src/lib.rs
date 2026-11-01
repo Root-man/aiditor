@@ -274,6 +274,13 @@ pub enum Msg {
     Quit,
     /// An auto-save timer fired: write recovery files for buffers edited since the last one.
     AutoSave,
+    /// A correlated persistence result; successful snapshots may still have old-copy cleanup errors.
+    AutoSaved {
+        buffer: BufferId,
+        request: u64,
+        tick: u64,
+        result: Result<Vec<(PathBuf, String)>, String>,
+    },
     /// Recovery files an earlier session left, found at launch: offer each one.
     Recover(Vec<Recovered>),
     /// The answer to `Effect::CaptureEnvironment`: the login shell's variables, or why there
@@ -585,11 +592,13 @@ pub enum RecoveryOp {
     /// once written, delete the earlier session's recovery file it `replaces`.
     AutoSave {
         buffer: BufferId,
+        request: u64,
+        tick: u64,
         name: String,
         path: Option<PathBuf>,
         hash: Option<u64>,
         text: Rope,
-        replaces: Option<PathBuf>,
+        replaces: Vec<PathBuf>,
     },
     /// Delete `buffer`'s recovery file.
     DeleteAutoSave(BufferId),
@@ -824,6 +833,12 @@ impl Ctx<'_> {
             Msg::Log(line) => self.core.log(&line),
             Msg::Quit => self.call("save-buffers-kill-terminal", Args::default()),
             Msg::AutoSave => self.write_autosaves(),
+            Msg::AutoSaved {
+                buffer,
+                request,
+                tick,
+                result,
+            } => self.auto_saved(buffer, request, tick, result),
             Msg::Recover(files) if !files.is_empty() => {
                 self.core.recovered.extend(files);
                 self.call("recover-buffers", Args::default());
@@ -986,8 +1001,11 @@ pub struct Core {
     quitting: Vec<BufferId>,
     /// The workspace to kill rather than quit once the saves in `quitting` succeed.
     then_kill: Option<WorkspaceId>,
-    /// Buffers with a recovery file, by the tick written to it.
-    autosaved: HashMap<BufferId, u64>,
+    /// Pending and persisted recovery snapshots, including accepted earlier-session copies.
+    autosaved: HashMap<BufferId, autosave::State>,
+    next_autosave: u64,
+    autosave_retry: Option<TimerId>,
+    autosave_stopped: bool,
     /// The auto-save timers: restarted by each edit, and started by the first edit after a write.
     autosave_idle: Option<TimerId>,
     autosave_max: Option<TimerId>,
@@ -1080,6 +1098,9 @@ impl Default for Core {
             quitting: Vec::new(),
             then_kill: None,
             autosaved: HashMap::new(),
+            next_autosave: 0,
+            autosave_retry: None,
+            autosave_stopped: false,
             autosave_idle: None,
             autosave_max: None,
             recovered: Vec::new(),

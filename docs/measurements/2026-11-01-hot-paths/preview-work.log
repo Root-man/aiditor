@@ -1,0 +1,10 @@
+   Compiling aiditor-core v0.1.0 (/Users/ilia.shchepin/Code/aiditor/crates/aiditor-core)
+    Finished `release` profile [optimized] target(s) in 8.41s
+     Running unittests src/lib.rs (target/release/deps/aiditor_core-cf6704da5750e17d)
+
+running 1 test
+100000: copy=9.584µs full_line_exclusion=15.167µs bounded_match_including_exclusion=18.792µs convert_120=8.292µs word_wrap_layout_once=5.819583ms
+1000000: copy=39.083µs full_line_exclusion=89.375µs bounded_match_including_exclusion=88.25µs convert_120=5.334µs word_wrap_layout_once=36.311417ms
+test swiper::tests::preview_work_diagnostic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 732 filtered out; finished in 0.23s

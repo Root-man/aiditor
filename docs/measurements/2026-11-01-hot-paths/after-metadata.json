@@ -1,0 +1,48 @@
+{
+  "cpu": "Apple M5 Pro",
+  "memory_bytes": 51539607552,
+  "logical_cpus": 18,
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+  "kernel": "Darwin ilia-shchepin 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050 arm64",
+  "sampling": "unchanged benches/support.rs; 21 batches",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+  "base_revision": "6c0ef19fc80eabe0927b7ae8de1cfac7facb314b",
+  "source_state": "implementation worktree published in the associated PR",
+  "commands": [
+    "cargo bench --locked -p aiditor-core --bench core",
+    "cargo bench --locked -p aiditor-core --bench hot_paths",
+    "cargo bench --locked -p aiditor-services --bench services",
+    "cargo test --release -p aiditor-core scope_reuse_diagnostic -- --ignored --nocapture",
+    "cargo test --release -p aiditor-core preview_work_diagnostic -- --ignored --nocapture",
+    "python3 scripts/bench_local.py --suite ui --output after-ui.tsv"
+  ],
+  "source_sha256": {
+    "crates/aiditor-core/Cargo.toml": "5485bf82bcabb95d4f1eeccfb11c986694010834b4abfeb5a540ab93dbbfdb16",
+    "crates/aiditor-core/benches/core.rs": "353847ab1060556fb78485a443be6bb2fd22e237e66dd852d78693dd52ed69d1",
+    "crates/aiditor-core/benches/hot_paths.rs": "f5d1ad164ac2985c03f546f81064d1449f4ec7bfe910a72e36954b1545b586b7",
+    "crates/aiditor-core/benches/scenarios/mod.rs": "1a7f445a5dba961bebc0a25e9ed1c66a06b4436b13a29ed99fbf1486001109ad",
+    "crates/aiditor-core/src/agents.rs": "6f78f2e1f1cc1f71eec53042557f44621f7c07bf1f35d7b57c5087792361943e",
+    "crates/aiditor-core/src/autosave.rs": "6ee2c012900c4ad6ff334ff1bd477b19c7fc007e998c11bc3ee968eb5437d4b5",
+    "crates/aiditor-core/src/display.rs": "4e7f8baf4171f8b8c5dd95ae6ed113e54f37a6c8d9842bf62b6803d0a6dbf2c3",
+    "crates/aiditor-core/src/frame.rs": "4fb054ec0736ebc9242f7d48f8b2448c6f937b8e4ad7d03288912b29a251afea",
+    "crates/aiditor-core/src/grep.rs": "bd345340590e25734b644e85f306f6eb4e70f98b0509ab0806d7d959198b2abb",
+    "crates/aiditor-core/src/harness.rs": "68be5045cd30a1d3fbd3ae73134caef7943a2060db7cb6421dee898ba460e3d3",
+    "crates/aiditor-core/src/lib.rs": "3b33ee145346cd833c656f14e4af6246b8190fcbf9760e7165caa277df609a5a",
+    "crates/aiditor-core/src/minibuffer.rs": "ce63211f276f9f300b7733849344fce2ecfa8ce741a533432f67b7a979ee3956",
+    "crates/aiditor-core/src/swiper.rs": "74ed28444a1313cbcd43d37b4e0a31d2285ba4d08a134c82afacaaaf0369a41b",
+    "crates/aiditor-core/src/syntax.rs": "35b3991b8d770e48cf88802b689ffc236dac245776aa638a7af939d5bcf62dc3",
+    "crates/aiditor-core/src/syntax/locals.rs": "042a4f874d7ee3b55cf471852179ca7623aa6f13a7202bc806203eb2c4e982ad",
+    "crates/aiditor-services/src/bin/aiditor-headless.rs": "bd3525af825180533255a5f9f19eec634b0dba4e4d11c7b6c86eeb830c57e50f",
+    "crates/aiditor-services/src/recovery.rs": "4f3facc5d7a5f3edc3ab3e3ad88218887078a607f7132f911b55f36ddb40bbd5",
+    "crates/aiditor-services/tests/crash_recovery.rs": "0cb79b8ac661df649e09c773382a1b4dba44be638aed06b4f25f14c6e4a3d86c",
+    "crates/aiditor/src/editor.rs": "a0d078e15eed239eca0e14ad6caaa9fbbfc63f4669f5d8bbf94cf1fdcd6d58bd"
+  },
+  "shared_sampler_sha256": "bda920c7428259f09d70c07d020821e82521cb7d03ce418842672634827479a7",
+  "suite_order": "core, focused, services, diagnostics, GUI; sequential",
+  "gui_repeat": "one separate sequential repeat to investigate the cat maximum; no samples discarded",
+  "platform_validation": {
+    "macOS": "workspace tests, final core follow-up, fmt, clippy and benchmark reporting tests passed",
+    "Linux": "pending draft PR CI"
+  }
+}

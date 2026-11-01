@@ -6,7 +6,7 @@
 //! `kbd`-style SCRIPT, then fires the core's timers on the real clock until the core quits.
 
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -24,7 +24,10 @@ fn main() {
     let (dir, file) = (PathBuf::from(dir), std::path::absolute(file).unwrap());
     let mut core = Core::default();
     core.open(&file, files::read(&file).unwrap());
-    let mut service = Some(recovery::spawn(dir.clone()));
+    let (tx, completions) = mpsc::channel();
+    let mut service = Some(recovery::spawn(dir.clone(), move |msg| {
+        _ = tx.send(msg);
+    }));
     send(&mut core, &mut service, Msg::Recover(recovery::list(&dir)));
     for key in parse_keys(&script).unwrap() {
         // As the app's text input does, plain chars arrive as typed text.
@@ -37,13 +40,21 @@ fn main() {
         };
         send(&mut core, &mut service, msg);
     }
-    // Idle until a timer is due, or until killed when none is.
     loop {
-        match core.next_deadline() {
-            Some(at) => std::thread::sleep(at.saturating_duration_since(Instant::now())),
-            None => std::thread::park(),
-        }
-        send(&mut core, &mut service, Msg::Tick);
+        let msg = match core.next_deadline() {
+            Some(at) => {
+                match completions.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    Ok(msg) => msg,
+                    Err(RecvTimeoutError::Timeout) => Msg::Tick,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            None => match completions.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
+        send(&mut core, &mut service, msg);
     }
 }
 
@@ -65,7 +76,16 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
             }
             Effect::Grep(GrepOp::Cancel) => continue,
             Effect::Recovery(op) => {
-                _ = service.as_ref().unwrap().0.send(op);
+                let failure = match service.as_ref() {
+                    Some((tx, _)) => tx
+                        .send(op)
+                        .err()
+                        .and_then(|e| e.0.failed("Recovery service closed".into())),
+                    None => op.failed("Recovery service unavailable".into()),
+                };
+                if let Some(msg) = failure {
+                    send(core, service, msg);
+                }
                 continue;
             }
             Effect::Quit => {
@@ -97,7 +117,7 @@ mod tests {
         let mut core = Core::default();
         core.launch(dir.path(), dir.path());
         core.open(&file, files::read(&file).unwrap());
-        let mut service = Some(recovery::spawn(dir.path().join("recovery")));
+        let mut service = Some(recovery::spawn(dir.path().join("recovery"), |_| {}));
         for key in parse_keys("C-x C-r x C-x C-s C-x p g needle").unwrap() {
             send(&mut core, &mut service, Msg::Key(key));
         }

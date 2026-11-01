@@ -8,26 +8,57 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
-use aiditor_core::{Recovered, RecoveryOp};
+use aiditor_core::{Msg, Recovered, RecoveryOp};
 
 use crate::files;
 
 /// Starts the thread that carries out `RecoveryOp`s in `dir`,
 /// in the order sent, so a delete never overtakes the write before it. It ends when the sender
 /// is dropped.
-pub fn spawn(dir: PathBuf) -> (mpsc::Sender<RecoveryOp>, JoinHandle<()>) {
+pub fn spawn(
+    dir: PathBuf,
+    reply: impl Fn(Msg) + Send + 'static,
+) -> (mpsc::Sender<RecoveryOp>, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
     let handle = thread::spawn(move || {
         for op in rx {
-            if let Err(err) = run(&dir, op) {
+            let result = run(&dir, &op);
+            if let Err(err) = &result {
                 tracing::warn!(%err, dir = %dir.display(), "auto-save failed");
+            }
+            if let RecoveryOp::AutoSave {
+                buffer,
+                request,
+                tick,
+                replaces,
+                ..
+            } = op
+            {
+                let result = result
+                    .map(|()| {
+                        replaces
+                            .into_iter()
+                            .filter_map(|path| {
+                                delete_recovery(&path)
+                                    .err()
+                                    .map(|error| (path, error.to_string()))
+                            })
+                            .collect()
+                    })
+                    .map_err(|e| e.to_string());
+                reply(Msg::AutoSaved {
+                    buffer,
+                    request,
+                    tick,
+                    result,
+                });
             }
         }
     });
     (tx, handle)
 }
 
-fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
+fn run(dir: &Path, op: &RecoveryOp) -> io::Result<()> {
     match op {
         RecoveryOp::AutoSave {
             buffer,
@@ -35,7 +66,7 @@ fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
             path,
             hash,
             text,
-            replaces,
+            ..
         } => {
             // Mode 0700: the files hold unsaved text.
             DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
@@ -54,7 +85,7 @@ fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
             }
             out.sync_all()?;
             fs::rename(&tmp, &file)?;
-            replaces.map_or(Ok(()), |old| delete_recovery(&old))
+            Ok(())
         }
         RecoveryOp::DeleteAutoSave(buffer) => {
             match fs::remove_file(dir.join(format!("{}-{}", std::process::id(), buffer.number()))) {
@@ -62,7 +93,7 @@ fn run(dir: &Path, op: RecoveryOp) -> io::Result<()> {
                 _ => Ok(()),
             }
         }
-        RecoveryOp::DeleteRecovery(file) => delete_recovery(&file),
+        RecoveryOp::DeleteRecovery(file) => delete_recovery(file),
     }
 }
 
@@ -75,7 +106,10 @@ fn delete_recovery(file: &Path) -> io::Result<()> {
         .is_some_and(|n| n.to_string_lossy().starts_with(&own))
     {
         true => Ok(()),
-        false => fs::remove_file(file),
+        false => match fs::remove_file(file) {
+            Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        },
     }
 }
 
@@ -138,8 +172,11 @@ mod tests {
     use super::*;
 
     /// Sends the recovery ops among `effects` and waits for the thread to carry them out.
-    fn run_all(dir: &Path, effects: Vec<Effect>) {
-        let (tx, handle) = spawn(dir.to_path_buf());
+    fn run_all(dir: &Path, effects: Vec<Effect>) -> Vec<Msg> {
+        let (replies, rx) = mpsc::channel();
+        let (tx, handle) = spawn(dir.to_path_buf(), move |msg| {
+            _ = replies.send(msg);
+        });
         for effect in effects {
             if let Effect::Recovery(op) = effect {
                 tx.send(op).unwrap();
@@ -147,6 +184,7 @@ mod tests {
         }
         drop(tx);
         handle.join().unwrap();
+        rx.into_iter().collect()
     }
 
     #[test]
@@ -160,9 +198,11 @@ mod tests {
             replace: None,
         };
         core.handle(t0, insert("hi\nyou"));
-        run_all(&dir, core.handle(t0 + Duration::from_secs(2), Msg::Tick));
-        core.handle(t0, insert("!"));
-        let effects = core.handle(t0 + Duration::from_secs(4), Msg::Tick);
+        for msg in run_all(&dir, core.handle(t0 + Duration::from_secs(2), Msg::Tick)) {
+            core.handle(t0 + Duration::from_secs(2), msg);
+        }
+        core.handle(t0 + Duration::from_secs(3), insert("!"));
+        let effects = core.handle(t0 + Duration::from_secs(5), Msg::Tick);
         let Some(Effect::Recovery(RecoveryOp::AutoSave { buffer, .. })) = effects.first() else {
             panic!("no auto-save: {}", effects.len());
         };
@@ -204,20 +244,172 @@ mod tests {
         let save = || {
             Effect::Recovery(RecoveryOp::AutoSave {
                 buffer,
+                request: 1,
+                tick: 1,
                 name: "a".into(),
                 path: None,
                 hash: None,
                 text: "new".into(),
-                replaces: Some(old.clone()),
+                replaces: vec![old.clone()],
             })
         };
         let tmp = dir.join(format!("{}-{}.tmp", std::process::id(), buffer.number()));
         fs::create_dir_all(&tmp).unwrap();
-        run_all(&dir, vec![save()]);
+        let replies = run_all(&dir, vec![save()]);
+        assert!(matches!(
+            &replies[..],
+            [Msg::AutoSaved {
+                request: 1,
+                tick: 1,
+                result: Err(_),
+                ..
+            }]
+        ));
         assert!(old.exists(), "kept after a failed write");
         fs::remove_dir(&tmp).unwrap();
-        run_all(&dir, vec![save()]);
+        let replies = run_all(&dir, vec![save()]);
+        assert!(
+            matches!(&replies[..], [Msg::AutoSaved { result: Ok(errors), .. }] if errors.is_empty())
+        );
         assert!(!old.exists());
+        assert_eq!(list(&dir)[0].text, "new");
+    }
+
+    #[test]
+    fn persisted_replacements_report_cleanup_errors_separately() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("recovery");
+        let old = root.path().join("old");
+        fs::create_dir(&old).unwrap();
+        fs::write(old.join("copy"), "old").unwrap();
+        let buffer = aiditor_core::buffer::Buffers::default().create("a");
+        let replies = run_all(
+            &dir,
+            vec![Effect::Recovery(RecoveryOp::AutoSave {
+                buffer,
+                request: 7,
+                tick: 9,
+                name: "a".into(),
+                path: None,
+                hash: None,
+                text: "new".into(),
+                replaces: vec![old.clone()],
+            })],
+        );
+        assert!(
+            matches!(&replies[..], [Msg::AutoSaved { request: 7, tick: 9, result: Ok(errors), .. }] if errors.len() == 1 && errors[0].0 == old)
+        );
+        assert_eq!(list(&dir)[0].text, "new");
+        assert_eq!(fs::read_to_string(old.join("copy")).unwrap(), "old");
+    }
+
+    #[test]
+    fn worker_failure_and_core_deadline_retry_persist_the_latest_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("recovery");
+        let file = root.path().join("visited");
+        fs::write(&file, "disk").unwrap();
+        let mut core = Core::default();
+        core.open(&file, files::read(&file).unwrap());
+        let t0 = Instant::now();
+        let insert = |s: &str| Msg::Insert {
+            text: s.into(),
+            replace: None,
+        };
+        core.handle(t0, insert("x"));
+        let effects = core.handle(t0 + Duration::from_secs(2), Msg::Tick);
+        let buffer = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Recovery(RecoveryOp::AutoSave { buffer, .. }) => Some(*buffer),
+                _ => None,
+            })
+            .unwrap();
+        let tmp = dir.join(format!("{}-{}.tmp", std::process::id(), buffer.number()));
+        fs::create_dir_all(&tmp).unwrap();
+        let (replies, rx) = mpsc::channel();
+        let (tx, worker) = spawn(dir.clone(), move |msg| {
+            _ = replies.send(msg);
+        });
+        for effect in effects {
+            if let Effect::Recovery(op) = effect {
+                tx.send(op).unwrap();
+            }
+        }
+        let failure = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(&failure, Msg::AutoSaved { result: Err(_), .. }));
+        core.handle(t0 + Duration::from_secs(2), failure);
+        core.handle(t0 + Duration::from_secs(3), insert("y"));
+        fs::remove_dir(&tmp).unwrap();
+        for effect in core.handle(t0 + Duration::from_secs(4), Msg::Tick) {
+            if let Effect::Recovery(op) = effect {
+                tx.send(op).unwrap();
+            }
+        }
+        let success = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(&success, Msg::AutoSaved { result: Ok(_), .. }));
+        core.handle(t0 + Duration::from_secs(4), success);
+        assert_eq!(list(&dir)[0].text, "xydisk");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "disk");
+        drop(tx);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn saturated_or_closed_gui_receivers_do_not_block_worker_cleanup() {
+        for closed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("recovery");
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let handle = runtime.handle().clone();
+            let (reports, mut rx) = crate::channel();
+            if closed {
+                rx.close();
+            }
+            let (tx, worker) = spawn(dir.clone(), move |msg| {
+                let reports = reports.clone();
+                handle.spawn(async move {
+                    _ = reports.send(msg).await;
+                });
+            });
+            let buffer = aiditor_core::buffer::Buffers::default().create("a");
+            for request in 0..300 {
+                tx.send(RecoveryOp::AutoSave {
+                    buffer,
+                    request,
+                    tick: request,
+                    name: "a".into(),
+                    path: None,
+                    hash: None,
+                    text: "new".into(),
+                    replaces: Vec::new(),
+                })
+                .unwrap();
+            }
+            tx.send(RecoveryOp::DeleteAutoSave(buffer)).unwrap();
+            drop(tx);
+            let start = Instant::now();
+            while !worker.is_finished() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "worker waited for GUI replies"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            worker.join().unwrap();
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+            if !closed {
+                runtime.block_on(async {
+                    for _ in 0..300 {
+                        let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert!(matches!(msg, Msg::AutoSaved { result: Ok(_), .. }));
+                    }
+                });
+            }
+        }
     }
 
     #[test]

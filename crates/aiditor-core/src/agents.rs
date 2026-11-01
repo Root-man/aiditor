@@ -13,7 +13,7 @@ use agent_client_protocol_schema::v1::{
 use alacritty_terminal::vte::ansi::{Attr, Color, Handler, Processor};
 use serde_json::{Map, Value};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
@@ -556,11 +556,13 @@ impl Core {
         }
     }
 
-    /// Renders each streamed block and each call whose terminal changed, at most once per frame.
-    pub(crate) fn render_streams(&mut self) {
+    /// Renders shown streamed blocks and every dirty tool call, at most once per frame.
+    pub(crate) fn render_streams(&mut self, shown: &HashSet<BufferId>) {
         let ids: Vec<_> = self.agents.keys().copied().collect();
         for id in ids {
-            self.render_stream(id);
+            if shown.contains(&self.agents[&id].buffer) {
+                self.render_stream(id);
+            }
             let dirty: Vec<_> = (self.agents[&id].tools.values())
                 .filter(|t| t.dirty)
                 .map(|t| t.call.clone())
@@ -2231,6 +2233,93 @@ mod tests {
         h.core.frame();
         let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
         assert_eq!(props(&h).last(), Some(&("hmm".into(), dim)));
+    }
+
+    #[test]
+    fn hidden_streams_keep_pending_formatting_until_shown() {
+        let mut h = session();
+        let buffer = h.core.current().name.clone();
+        let id = h.core.agents[&AgentId(0)].buffer;
+        h.open("app/src/main.rs");
+        chunk(&mut h, "**a");
+        chunk(&mut h, "b**");
+        h.frame(800., 600.);
+        let b = h.core.buffers.get(id).unwrap();
+        assert!(b.text().to_string().contains("**ab**"));
+        assert!(h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
+        h.call(
+            "switch-to-buffer",
+            Args {
+                strings: vec![buffer],
+                ..Args::default()
+            },
+        );
+        h.frame(800., 600.);
+        assert!(props(&h).contains(&("ab".into(), Prop::Named(vec![FaceRef::Bold]))));
+        assert!(!h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
+    }
+
+    #[test]
+    fn inactive_panes_duplicate_panes_and_prompt_origins_flush_streams() {
+        let mut h = session();
+        h.keys("C-x 3");
+        chunk(&mut h, "**a**");
+        h.frame(800., 600.);
+        assert!(props(&h).contains(&("a".into(), Prop::Named(vec![FaceRef::Bold]))));
+        h.open("app/src/main.rs");
+        chunk(&mut h, " *b*");
+        h.frame(800., 600.);
+        let id = h.core.agents[&AgentId(0)].buffer;
+        assert!(
+            h.core
+                .buffers
+                .get(id)
+                .unwrap()
+                .properties()
+                .any(|(_, p)| *p == Prop::Named(vec![FaceRef::Italic]))
+        );
+        h.keys("C-x o M-x");
+        chunk(&mut h, " `c`");
+        h.frame(800., 600.);
+        assert!(!h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
+        assert!(
+            h.core
+                .buffers
+                .get(id)
+                .unwrap()
+                .properties()
+                .any(|(_, p)| *p == Prop::Named(vec![FaceRef::Face(FaceName::SessionCode)]))
+        );
+    }
+
+    #[test]
+    fn inactive_workspace_streams_finalize_hidden_blocks_and_kill_safely() {
+        let mut h = session();
+        let workspace = h.core.current_workspace().id;
+        let project = h.core.current_workspace().project;
+        h.core.new_workspace("other", project);
+        chunk(&mut h, "**a**");
+        h.frame(800., 600.);
+        assert!(h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
+        thought(&mut h, "hmm");
+        let id = h.core.agents[&AgentId(0)].buffer;
+        assert!(
+            h.core
+                .buffers
+                .get(id)
+                .unwrap()
+                .properties()
+                .any(|(_, p)| *p == Prop::Named(vec![FaceRef::Bold]))
+        );
+        h.core.switch_workspace(workspace).unwrap();
+        h.frame(800., 600.);
+        assert!(props(&h).contains(&(
+            "hmm".into(),
+            Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)])
+        )));
+        h.keys("C-x k RET yes RET");
+        h.frame(800., 600.);
+        assert!(h.core.buffers.get(id).is_none());
     }
 
     #[test]

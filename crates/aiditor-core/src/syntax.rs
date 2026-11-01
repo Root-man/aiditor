@@ -12,6 +12,8 @@ use tree_sitter::{
     InputEdit, Language, Node, Parser, Point, Query, QueryCursor, StreamingIterator, Tree,
 };
 
+mod locals;
+
 /// A language and its highlights query.
 struct Grammar {
     language: Language,
@@ -146,7 +148,7 @@ pub(crate) struct Syntax {
     stale: bool,
     /// The last highlights: their ranges, palette and runs, reused while the tree is unchanged.
     cache: RefCell<Option<Highlights>>,
-    locals: RefCell<Option<Locals>>,
+    locals: RefCell<locals::Cache>,
 }
 
 type Runs = Vec<(Range<usize>, Face)>;
@@ -158,7 +160,7 @@ struct Injection {
     ranges: Vec<tree_sitter::Range>,
     tree: Tree,
     children: Vec<Injection>,
-    locals: RefCell<Option<Locals>>,
+    locals: RefCell<locals::Cache>,
 }
 
 fn content_ranges(node: Node) -> Vec<tree_sitter::Range> {
@@ -278,18 +280,17 @@ fn injections(
             .set_included_ranges(&ranges)
             .expect("ordered content ranges");
         let tree = parse(&mut parser, text, previous.as_ref().map(|i| &i.tree));
-        let children = self::injections(
-            grammar,
-            text,
-            &tree,
-            previous.map_or_else(Vec::new, |i| i.children),
+        let (old_children, locals) = previous.map_or_else(
+            || (Vec::new(), RefCell::default()),
+            |i| (i.children, i.locals),
         );
+        let children = self::injections(grammar, text, &tree, old_children);
         injections.push(Injection {
             grammar,
             ranges,
             tree,
             children,
-            locals: RefCell::default(),
+            locals,
         });
     }
     injections.sort_by_key(|i| i.ranges[0].start_byte);
@@ -298,6 +299,7 @@ fn injections(
 
 impl Injection {
     fn edit(&mut self, edit: &InputEdit) {
+        self.locals.get_mut().edit(&self.tree, edit);
         self.tree.edit(edit);
         for range in &mut self.ranges {
             edit.edit_range(range);
@@ -380,128 +382,6 @@ fn local_pattern(query: &Query, pattern: usize, local: bool) -> bool {
         .all(|(p, positive)| p.key.as_ref() != "local" || local == *positive)
 }
 
-fn locals(grammar: &Grammar, tree: &Tree, text: &Rope) -> Locals {
-    let Some(query) = &grammar.locals else {
-        return Locals::new();
-    };
-    enum Kind {
-        Scope(bool),
-        Definition(usize),
-        Reference,
-    }
-    struct Scope {
-        end: usize,
-        inherits: bool,
-        definitions: BTreeMap<String, Vec<(usize, Option<u32>)>>,
-    }
-    let mut cursor = QueryCursor::new();
-    let source = |node: Node| {
-        text.byte_slice(node.byte_range())
-            .chunks()
-            .map(str::as_bytes)
-    };
-    let mut matches = cursor.matches(query, tree.root_node(), source);
-    let mut events = Vec::new();
-    while let Some(m) = matches.next() {
-        let value_end = m
-            .captures()
-            .iter()
-            .find_map(|c| {
-                (query.capture_names()[c.index as usize] == "local.definition-value")
-                    .then_some(c.node.end_byte())
-            })
-            .unwrap_or(0);
-        for c in m.captures() {
-            let kind = match query.capture_names()[c.index as usize] {
-                "local.scope" => {
-                    Kind::Scope(!query.property_settings(m.pattern_index).iter().any(|p| {
-                        p.key.as_ref() == "local.scope-inherits"
-                            && p.value.as_deref() == Some("false")
-                    }))
-                }
-                "local.definition" => Kind::Definition(value_end),
-                "local.reference" => Kind::Reference,
-                _ => continue,
-            };
-            events.push((c.node.byte_range(), kind));
-        }
-    }
-    events.sort_by_key(|(r, kind)| {
-        (
-            r.start,
-            Reverse(r.end),
-            match kind {
-                Kind::Scope(_) => 0,
-                Kind::Definition(_) => 1,
-                Kind::Reference => 2,
-            },
-        )
-    });
-    let mut scopes = vec![Scope {
-        end: usize::MAX,
-        inherits: false,
-        definitions: BTreeMap::new(),
-    }];
-    let mut locals = Locals::new();
-    let mut highlights = QueryCursor::new();
-    for (range, kind) in events {
-        while range.start >= scopes.last().unwrap().end {
-            scopes.pop();
-        }
-        let key = (range.start, range.end);
-        match kind {
-            Kind::Scope(inherits) => scopes.push(Scope {
-                end: range.end,
-                inherits,
-                definitions: BTreeMap::new(),
-            }),
-            Kind::Definition(value_end) => {
-                highlights.set_byte_range(range.clone());
-                let mut matches = highlights.matches(&grammar.highlights, tree.root_node(), source);
-                let mut capture = None;
-                while let Some(m) = matches.next() {
-                    if local_pattern(&grammar.highlights, m.pattern_index, true) {
-                        for c in m.captures() {
-                            if c.node.byte_range() == range
-                                && capture.is_none_or(|(p, _)| p <= m.pattern_index)
-                            {
-                                capture = Some((m.pattern_index, c.index));
-                            }
-                        }
-                    }
-                }
-                let capture = capture.map(|(_, index)| index);
-                scopes
-                    .last_mut()
-                    .unwrap()
-                    .definitions
-                    .entry(text.byte_slice(range).to_string())
-                    .or_default()
-                    .push((value_end, capture));
-                locals.insert(key, capture);
-            }
-            Kind::Reference if !locals.contains_key(&key) => {
-                let name = text.byte_slice(range.clone()).to_string();
-                for scope in scopes.iter().rev() {
-                    if let Some((_, capture)) = scope
-                        .definitions
-                        .get(&name)
-                        .and_then(|defs| defs.iter().rev().find(|(end, _)| range.start >= *end))
-                    {
-                        locals.insert(key, *capture);
-                        break;
-                    }
-                    if !scope.inherits {
-                        break;
-                    }
-                }
-            }
-            Kind::Reference => {}
-        }
-    }
-    locals
-}
-
 fn paint(
     grammar: &Grammar,
     tree: &Tree,
@@ -509,13 +389,11 @@ fn paint(
     bytes: Range<usize>,
     palette: &BTreeMap<String, Face>,
     painted: &mut [Option<Face>],
-    locals: &RefCell<Option<Locals>>,
+    locals: &RefCell<locals::Cache>,
 ) {
-    if locals.borrow().is_none() {
-        *locals.borrow_mut() = Some(self::locals(grammar, tree, text));
-    }
-    let locals = locals.borrow();
-    let locals = locals.as_ref().unwrap();
+    let locals = locals
+        .borrow_mut()
+        .locals(grammar, tree, text, bytes.clone());
     let compose = std::ptr::eq(grammar, &*MARKDOWN_INLINE);
     let query = &grammar.highlights;
     let faces: Vec<_> = query
@@ -644,13 +522,13 @@ impl Syntax {
             old_end_position: old_end.1,
             new_end_position: new_end.1,
         };
+        self.locals.get_mut().edit(&self.tree, &edit);
         self.tree.edit(&edit);
         for injection in &mut self.injections {
             injection.edit(&edit);
         }
         self.stale = true;
         self.cache.take();
-        self.locals.take();
     }
 
     /// Reparses `text`, reusing the old tree, if it was edited since the last parse.
@@ -668,8 +546,8 @@ impl Syntax {
     }
 
     /// The faces `palette` gives the chars of sorted, disjoint `ranges` of `text`, as sorted,
-    /// disjoint char ranges. Painting queries each range alone; local bindings and definition
-    /// captures are cached across the whole tree, including definitions outside the window.
+    /// disjoint char ranges. Painting queries each range alone; scope-relative binding records
+    /// retain inherited definitions outside the window.
     pub(crate) fn highlights(
         &self,
         text: &Rope,
@@ -1152,6 +1030,156 @@ mod tests {
     }
 
     #[test]
+    fn edited_local_faces_match_fresh_parses_and_keep_snapshots_isolated() {
+        for (file, source, binding) in [
+            (
+                "/a.rs",
+                "fn f(value: i32) { value; { let value = value; value; } value; }\nfn g(other: i32) { other; }\n",
+                "value",
+            ),
+            (
+                "/a.js",
+                "let console = 1; function f(value) { console; value; { let value = value; value; } }\nfunction g(other) { other; }\n",
+                "console",
+            ),
+            (
+                "/a.ts",
+                "let console = 1; function f(value: number) { console; value; { let value = value; value; } }\nfunction g(other: number) { other; }\n",
+                "console",
+            ),
+            (
+                "/a.tsx",
+                "let console = 1; function f(value: number) { console; return <div>{value}</div>; }\nfunction g(other: number) { return <b>{other}</b>; }\n",
+                "console",
+            ),
+            (
+                "/a.md",
+                "```rust\nfn f(value: i32) { value; { let value = value; value; } value; }\n```\n```js\nlet console = 1; function f() { console; }\n```\n",
+                "value",
+            ),
+        ] {
+            let p = palette(&[
+                ("variable.parameter", 1),
+                ("variable", 2),
+                ("variable.builtin", 3),
+                ("function", 4),
+            ]);
+            let mut buffers = crate::buffer::Buffers::default();
+            let id = buffers.create_for_file(Path::new(file), source);
+            let b = buffers.get_mut(id).unwrap();
+            let original = b.text().clone();
+            let snapshot = b.syntax_snapshot().unwrap();
+            let original_runs = snapshot.highlights(&original, &[0..original.len_chars()], &p);
+            let compare = |b: &mut crate::buffer::Buffer| {
+                b.reparse();
+                let text = b.text();
+                let fresh = Syntax::for_file(Path::new(file), text).unwrap();
+                assert_eq!(
+                    b.highlights(&[0..text.len_chars()], &p),
+                    fresh.highlights(text, &[0..text.len_chars()], &p),
+                    "{file}: {text}"
+                );
+                assert_eq!(
+                    snapshot.highlights(&original, &[0..original.len_chars()], &p),
+                    original_runs
+                );
+            };
+            compare(b);
+            let at = source[..source.find(binding).unwrap()].chars().count();
+            b.undo_boundary(0);
+            b.delete(at..at + binding.chars().count()).unwrap();
+            b.insert(at, &"z".repeat(binding.chars().count())).unwrap();
+            b.undo_boundary(0);
+            compare(b);
+            b.insert(0, " \n").unwrap();
+            b.undo_boundary(0);
+            compare(b);
+            b.undo();
+            compare(b);
+            b.undo();
+            compare(b);
+            b.redo();
+            compare(b);
+            b.set_text(source);
+            compare(b);
+            if file.ends_with("md") {
+                b.delete(3..7).unwrap();
+                b.insert(3, "ts").unwrap();
+                compare(b);
+            }
+        }
+    }
+
+    #[test]
+    fn independent_scopes_keep_their_analysis_after_an_edit() {
+        let source: String = (0..200)
+            .map(|i| format!("fn f{i}(value: i32) {{ value; }}\n"))
+            .collect();
+        let mut rope = Rope::from_str(&source);
+        let mut syntax = Syntax::for_file(Path::new("a.rs"), &rope).unwrap();
+        let p = palette(&[("variable.parameter", 1)]);
+        syntax.highlights(&rope, &[0..rope.len_chars()], &p);
+        let before = syntax.locals.borrow().rebuilt;
+        let at = rope.line_to_char(100) + 8;
+        let start = position(&rope, at);
+        rope.insert(at, " ");
+        syntax.edit(start, start, position(&rope, at + 1));
+        syntax.reparse(&rope);
+        let runs = syntax.highlights(&rope, &[0..rope.len_chars()], &p);
+        let fresh = Syntax::for_file(Path::new("a.rs"), &rope).unwrap();
+        assert_eq!(runs, fresh.highlights(&rope, &[0..rope.len_chars()], &p));
+        assert!(
+            syntax.locals.borrow().rebuilt - before < 10,
+            "before={before} after={}",
+            syntax.locals.borrow().rebuilt
+        );
+    }
+
+    #[test]
+    #[ignore = "release diagnostic for the 10k/100k independent-function benchmark"]
+    fn scope_reuse_diagnostic() {
+        use std::time::Instant;
+        for lines in [10_000, 100_000] {
+            let source: String = (0..lines)
+                .map(|i| {
+                    let open = if i % 100 == 0 {
+                        format!("mod group_{} {{ ", i / 100)
+                    } else {
+                        String::new()
+                    };
+                    let close = if i % 100 == 99 { "}" } else { "" };
+                    format!("{open}fn item_{i}() -> usize {{ let café = {i}; café + 1 }}{close}\n")
+                })
+                .collect();
+            let mut rope = Rope::from_str(&source);
+            let mut syntax = Syntax::for_file(Path::new("a.rs"), &rope).unwrap();
+            let p = palette(&[("variable", 1)]);
+            let start = rope.line_to_char(lines / 2);
+            let range = start..rope.line_to_char(lines / 2 + 50);
+            syntax.highlights(&rope, std::slice::from_ref(&range), &p);
+            let before = syntax.locals.borrow().rebuilt;
+            let at = position(&rope, start);
+            rope.insert(start, " ");
+            syntax.edit(at, at, position(&rope, start + 1));
+            let reparse = Instant::now();
+            syntax.reparse(&rope);
+            let reparse = reparse.elapsed();
+            let first = Instant::now();
+            let ranges = [range.start + 1..range.end + 1];
+            let runs = syntax.highlights(&rope, &ranges, &p);
+            let first = first.elapsed();
+            let cached = Instant::now();
+            assert_eq!(syntax.highlights(&rope, &ranges, &p), runs);
+            let cached = cached.elapsed();
+            let rebuilt = syntax.locals.borrow().rebuilt - before;
+            println!(
+                "{lines}: reparse={reparse:?} first={first:?} cached={cached:?} rebuilt={rebuilt} initial={before}"
+            );
+            assert!(rebuilt < 10);
+        }
+    }
+
+    #[test]
     fn markdown_inline_faces_keep_markup_and_heading_context() {
         let text = "# é *one **two** three* `code` [docs](https://x.dev)\n";
         let faces = faces("a.md", text);
@@ -1391,7 +1419,8 @@ mod tests {
         let p = palette(&[("keyword", 1)]);
         assert_eq!(syntax.highlights(&rope, &[0..6], &p), [(0..3, fg(1))]);
         // A tree swapped without `edit` isn't queried: the cached runs come back.
-        syntax.tree = parse(&mut syntax.parser, &Rope::from_str("a; let b;"), None);
+        rope = Rope::from_str("a; let b;");
+        syntax.tree = parse(&mut syntax.parser, &rope, None);
         assert_eq!(syntax.highlights(&rope, &[0..6], &p), [(0..3, fg(1))]);
         assert_eq!(
             syntax.highlights(&rope, &[0..6], &palette(&[("keyword", 2)])),

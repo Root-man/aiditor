@@ -102,7 +102,7 @@ fn main() {
         previous = query.encode_utf16().count();
         assert_eq!(
             core.frame().minibuffer.unwrap().count,
-            format!("1/{matches} ")
+            format!("{:>8} ", format!("1/{matches}"))
         );
     }
     measure(
@@ -122,7 +122,7 @@ fn main() {
         &mut output,
     );
     assert_eq!(core.text(), "needle !skip");
-    assert_eq!(core.frame().minibuffer.unwrap().count, "1/80000 ");
+    assert_eq!(core.frame().minibuffer.unwrap().count, " 1/80000 ");
 
     // One PTY batch is at most 64 KB; the core parses each on the UI thread.
     let (terminal, _) = core.create_terminal("vterm", 50, 120);

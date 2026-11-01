@@ -117,7 +117,6 @@ impl Core {
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
     pub fn frame(&mut self) -> display::FrameDisplay {
-        self.render_streams();
         let unwatched = self
             .projects
             .iter()
@@ -132,9 +131,21 @@ impl Core {
             height,
         };
         let chrome = self.settings.mode_line_height();
+        let panes = self.windows.tree.layout(frame, cell, chrome);
+        let shown = panes
+            .iter()
+            .map(|(id, _)| {
+                if *id == self.windows.selected {
+                    self.windows.window.buffer()
+                } else {
+                    self.windows.others[id].buffer()
+                }
+            })
+            .collect();
+        self.render_streams(&shown);
         let origin = self.prompts.minibuffer.as_ref().map(|mb| mb.from);
         let search = self.prompts.preview_search(&self.grep);
-        let windows = (self.windows.tree.layout(frame, cell, chrome).into_iter())
+        let windows = (panes.into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;
                 let window = match selected {
