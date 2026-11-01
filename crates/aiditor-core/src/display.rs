@@ -1301,6 +1301,42 @@ mod tests {
     }
 
     #[test]
+    fn heex_sigils_reach_the_display_and_follow_edit_history_and_reverts() {
+        let mut h = Harness::new(&[("a.ex", "~H|<div>{String.upcase(\"é\")}</div>|")]);
+        h.open("a.ex");
+        let p = h.core.settings().theme.syntax.clone();
+        let original = colors(&mut h, 1);
+        for (text, name) in [
+            ("div", "tag"),
+            ("String", "module"),
+            ("upcase", "function"),
+            ("\"é\"", "string"),
+        ] {
+            assert!(
+                original.contains(&(text.into(), p[name].fg)),
+                "{text}: {original:?}"
+            );
+        }
+        h.keys("C-f C-f DEL s");
+        let ordinary = colors(&mut h, 1);
+        assert!(
+            ordinary
+                .iter()
+                .any(|(text, color)| text.contains("<div>") && *color == p["string"].fg)
+        );
+        h.keys("C-/ C-/");
+        assert_eq!(colors(&mut h, 1), original);
+        h.keys("C-? C-?");
+        assert_eq!(colors(&mut h, 1), ordinary);
+        h.prepare_revert("a.ex", Some(b"~H|<p><%= if true do %>yes<% end %></p>|"));
+        h.keys("M-x revert-buffer RET y RET");
+        let reverted = colors(&mut h, 1);
+        assert!(reverted.contains(&("p".into(), p["tag"].fg)));
+        assert!(reverted.contains(&("if".into(), p["keyword"].fg)));
+        assert!(reverted.contains(&("end".into(), p["keyword"].fg)));
+    }
+
+    #[test]
     fn other_files_and_the_region_over_code() {
         let mut h = Harness::new(&[("a.txt", "if (x) f(1);"), ("b.ts", "let x")]);
         h.open("a.txt");
