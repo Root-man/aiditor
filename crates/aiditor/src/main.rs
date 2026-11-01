@@ -205,6 +205,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use aiditor_core::{Effect, RecoveryOp};
+
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Args, String> {
@@ -228,6 +232,109 @@ mod tests {
         );
         assert!(!line.contains('\x1b'), "{line}");
         assert!(rx.try_recv().is_err(), "info is not logged");
+    }
+
+    #[test]
+    fn autosave_worker_failures_report_once_per_episode_and_cleanup_still_logs() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("recovery");
+        let file = root.path().join("visited");
+        let (tx, mut rx) = aiditor_services::channel();
+        // The worker needs a global subscriber; the other logging test uses a scoped one.
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(messages_layer(tx.clone())),
+        )
+        .unwrap();
+        let (worker, handle) = recovery::spawn(dir.clone(), move |msg| {
+            tx.blocking_send(msg).unwrap();
+        });
+        let mut core = Core::default();
+        core.open(&file, None);
+        let t0 = Instant::now();
+        let insert = || Msg::Insert {
+            text: "private buffer text".into(),
+            replace: None,
+        };
+        core.handle(t0, insert());
+        let effects = core.handle(t0 + Duration::from_secs(2), Msg::Tick);
+        let buffer = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Recovery(RecoveryOp::AutoSave { buffer, .. }) => Some(*buffer),
+                _ => None,
+            })
+            .unwrap();
+        let tmp = dir.join(format!("{}-{}.tmp", std::process::id(), buffer.number()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let error = std::fs::File::create(&tmp).unwrap_err();
+        let mut attempt = |core: &mut Core, seconds, effects| {
+            for effect in effects {
+                if let Effect::Recovery(op) = effect {
+                    worker.send(op).unwrap();
+                }
+            }
+            let now = t0 + Duration::from_secs(seconds);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let msg = loop {
+                    if let Ok(msg) = rx.try_recv() {
+                        break msg;
+                    }
+                    assert!(Instant::now() < deadline, "worker reply timed out");
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                let completion = matches!(msg, Msg::AutoSaved { .. });
+                core.handle(now, msg);
+                if completion {
+                    break;
+                }
+            }
+        };
+        attempt(&mut core, 2, effects);
+        for seconds in [4, 6] {
+            let effects = core.handle(t0 + Duration::from_secs(seconds), Msg::Tick);
+            attempt(&mut core, seconds, effects);
+        }
+        let messages = |core: &mut Core, seconds| {
+            let now = t0 + Duration::from_secs(seconds);
+            for key in aiditor_core::key::parse_keys("C-x b *Messages* RET").unwrap() {
+                core.handle(now, Msg::Key(key));
+            }
+            let text = core.text();
+            for key in aiditor_core::key::parse_keys("C-x b visited RET").unwrap() {
+                core.handle(now, Msg::Key(key));
+            }
+            text
+        };
+        let first = messages(&mut core, 6);
+        assert_eq!(first, format!("Auto-save {}: {error}\n", file.display()));
+
+        std::fs::remove_dir(&tmp).unwrap();
+        let effects = core.handle(t0 + Duration::from_secs(8), Msg::Tick);
+        attempt(&mut core, 8, effects);
+        assert_eq!(recovery::list(&dir)[0].text, "private buffer text");
+        core.handle(t0 + Duration::from_secs(9), insert());
+        std::fs::create_dir(&tmp).unwrap();
+        let effects = core.handle(t0 + Duration::from_secs(11), Msg::Tick);
+        attempt(&mut core, 11, effects);
+        assert_eq!(messages(&mut core, 11), first.repeat(2));
+
+        let old = root.path().join("old");
+        std::fs::create_dir(&old).unwrap();
+        worker.send(RecoveryOp::DeleteRecovery(old)).unwrap();
+        drop(worker);
+        handle.join().unwrap();
+        while let Ok(msg) = rx.try_recv() {
+            core.handle(t0 + Duration::from_secs(11), msg);
+        }
+        let all = messages(&mut core, 11);
+        assert_eq!(all.lines().count(), 3, "{all}");
+        assert!(
+            all.lines()
+                .last()
+                .unwrap()
+                .contains("auto-save cleanup failed")
+        );
     }
 
     #[test]

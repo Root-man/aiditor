@@ -1,0 +1,18 @@
+{
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+  "kernel": "Darwin ilia-shchepin 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6050 arm64",
+  "revision": "6c0ef19fc80eabe0927b7ae8de1cfac7facb314b",
+  "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+  "cpu": "Apple M5 Pro",
+  "memory_bytes": 51539607552,
+  "logical_cpus": 18,
+  "sampling": "unchanged benches/support.rs; 21 batches",
+  "production": "unchanged baseline 6c0ef19",
+  "command": "core, hot_paths, services sequentially; release --locked",
+  "supplied_baseline_sha256": {
+    "docs/measurements/2026-11-01-main-benchmarks.json": "fe27ced002ff437cfbed6bf19a4ff12a4bcca08dee375fcad1fd083a0b28a71c",
+    "docs/measurements/2026-11-01-main-benchmarks.md": "e51638a8f801a20d81ed9be1b3d63b8cf52243b6501b48d4502fd8e22f0eac58",
+    "docs/measurements/2026-11-01-main-benchmarks.patch": "5deed033aa4ed3b635469a0df4db543c4332319cb092e0ae658f9928f33286a2"
+  }
+}

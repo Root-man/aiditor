@@ -301,7 +301,10 @@ fn sessions(output: &mut String) {
 
 fn settle(core: &mut Core, matches: usize) {
     let start = Instant::now();
-    let expected = format!("1/{matches} ");
+    let expected = format!(
+        "{}/{matches}",
+        if core.text().is_empty() { "*" } else { "1" }
+    );
     loop {
         // Advance repoll timers without imposing their 16 ms UI cadence on matcher CPU work.
         core.handle(Instant::now() + Duration::from_secs(1), Msg::Tick);
@@ -309,7 +312,7 @@ fn settle(core: &mut Core, matches: usize) {
         if frame
             .minibuffer
             .as_ref()
-            .is_some_and(|m| m.count == expected)
+            .is_some_and(|m| m.count.trim() == expected)
             && core.next_deadline().is_none()
         {
             return;

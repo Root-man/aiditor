@@ -1,0 +1,154 @@
+{
+  "conclusion": "success",
+  "headSha": "05af0ac2aa07f598e7b30cfaf1eb5558afdd784d",
+  "jobs": [
+    {
+      "completedAt": "2026-11-01T13:11:59Z",
+      "conclusion": "success",
+      "name": "check (macos-latest)",
+      "startedAt": "2026-11-01T13:04:40Z",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Read Rust version from .tool-versions"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Install GPUI system packages"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install Metal toolchain"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache/restore@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run cargo fmt --all --check"
+        },
+        {
+          "conclusion": "success",
+          "name": "aiditor-core has no GPUI or Tokio dependency"
+        },
+        {
+          "conclusion": "success",
+          "name": "No build profile aborts on panic"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run cargo clippy --all-targets -- -D warnings"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run cargo test"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run actions/cache/save@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Benchmark reporting tests"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ],
+      "url": "https://github.com/Root-man/aiditor/actions/runs/41309485440/job/124856677734"
+    },
+    {
+      "completedAt": "2026-11-01T13:09:12Z",
+      "conclusion": "success",
+      "name": "check (ubuntu-latest)",
+      "startedAt": "2026-11-01T13:04:39Z",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Read Rust version from .tool-versions"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master"
+        },
+        {
+          "conclusion": "success",
+          "name": "Install GPUI system packages"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Install Metal toolchain"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/cache/restore@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run cargo fmt --all --check"
+        },
+        {
+          "conclusion": "success",
+          "name": "aiditor-core has no GPUI or Tokio dependency"
+        },
+        {
+          "conclusion": "success",
+          "name": "No build profile aborts on panic"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run cargo clippy --all-targets -- -D warnings"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run cargo test"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run actions/cache/save@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Benchmark reporting tests"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job"
+        }
+      ],
+      "url": "https://github.com/Root-man/aiditor/actions/runs/41309485440/job/124856678000"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/Root-man/aiditor/actions/runs/41309485440"
+}

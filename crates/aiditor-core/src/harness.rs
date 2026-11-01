@@ -365,6 +365,8 @@ impl Harness {
                 Effect::Quit => self.quit = true,
                 Effect::Recovery(RecoveryOp::AutoSave {
                     buffer,
+                    request,
+                    tick,
                     name,
                     path,
                     text,
@@ -373,12 +375,16 @@ impl Harness {
                 }) => {
                     (self.recovery).insert(buffer, (name, path, text.to_string()));
                     self.deleted.extend(replaces);
+                    self.send(Msg::AutoSaved {
+                        buffer,
+                        request,
+                        tick,
+                        result: Ok(Vec::new()),
+                    });
                 }
                 Effect::Recovery(RecoveryOp::DeleteAutoSave(buffer)) => {
                     assert!(!self.quit, "deleted after the quit");
-                    self.recovery
-                        .remove(&buffer)
-                        .expect("deletes a written file");
+                    self.recovery.remove(&buffer);
                 }
                 Effect::Recovery(RecoveryOp::DeleteRecovery(file)) => self.deleted.push(file),
                 Effect::Grep(GrepOp::Search(op)) => {

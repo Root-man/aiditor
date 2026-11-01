@@ -1,0 +1,1204 @@
+{
+  "core": {
+    "buffer-load/100k-lines": {
+      "baseline": {
+        "median_ns": 526023.4375,
+        "min_ns": 519901.0625,
+        "max_ns": 723130.1875
+      },
+      "after": {
+        "median_ns": 539841.1875,
+        "min_ns": 530820.3125,
+        "max_ns": 760213.5625
+      },
+      "after_over_baseline": 1.0262683162287802
+    },
+    "edit-undo/100k-lines": {
+      "baseline": {
+        "median_ns": 130.7255401611328,
+        "min_ns": 128.81914520263672,
+        "max_ns": 134.92393493652344
+      },
+      "after": {
+        "median_ns": 133.5436553955078,
+        "min_ns": 132.1436538696289,
+        "max_ns": 137.01566314697266
+      },
+      "after_over_baseline": 1.0215574954282185
+    },
+    "display/50-rows-in-100k-lines": {
+      "baseline": {
+        "median_ns": 54279.1328125,
+        "min_ns": 52492.34765625,
+        "max_ns": 61302.57421875
+      },
+      "after": {
+        "median_ns": 54544.59375,
+        "min_ns": 53405.92578125,
+        "max_ns": 58625.9765625
+      },
+      "after_over_baseline": 1.0048906628338554
+    },
+    "swiper/two-queries-in-100k-lines": {
+      "baseline": {
+        "median_ns": 6645145.5,
+        "min_ns": 6567104.5,
+        "max_ns": 6696958.0
+      },
+      "after": {
+        "median_ns": 6830583.5,
+        "min_ns": 6733041.5,
+        "max_ns": 7205458.5
+      },
+      "after_over_baseline": 1.027905784756707
+    },
+    "terminal-output/64k-batch-of-yes": {
+      "baseline": {
+        "median_ns": 622440.09375,
+        "min_ns": 613709.65625,
+        "max_ns": 651987.0
+      },
+      "after": {
+        "median_ns": 641338.5,
+        "min_ns": 610005.1875,
+        "max_ns": 718023.4375
+      },
+      "after_over_baseline": 1.0303618074088756
+    },
+    "terminal-output/64k-batch-of-cat": {
+      "baseline": {
+        "median_ns": 344380.21875,
+        "min_ns": 336408.84375,
+        "max_ns": 374419.28125
+      },
+      "after": {
+        "median_ns": 339196.625,
+        "min_ns": 330684.90625,
+        "max_ns": 348027.34375
+      },
+      "after_over_baseline": 0.9849480502427957
+    },
+    "terminal-display/50x120-screen": {
+      "baseline": {
+        "median_ns": 62958.82031250001,
+        "min_ns": 61398.4375,
+        "max_ns": 65494.95312500001
+      },
+      "after": {
+        "median_ns": 64518.39453125001,
+        "min_ns": 62566.73046875001,
+        "max_ns": 68496.58203125
+      },
+      "after_over_baseline": 1.0247713380112422
+    },
+    "syntax-load/rs/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 29355917.0,
+        "min_ns": 29229125.0,
+        "max_ns": 30189667.0
+      },
+      "after": {
+        "median_ns": 26800750.0,
+        "min_ns": 25826958.0,
+        "max_ns": 30015208.0
+      },
+      "after_over_baseline": 0.9129590467230166
+    },
+    "syntax-edit-frame/rs/10000-lines-character-undo-pair": {
+      "baseline": {
+        "median_ns": 84638208.0,
+        "min_ns": 83807500.0,
+        "max_ns": 89076583.0
+      },
+      "after": {
+        "median_ns": 2187760.375,
+        "min_ns": 2150921.875,
+        "max_ns": 2272755.125
+      },
+      "after_over_baseline": 0.025848377779926532
+    },
+    "syntax-edit-frame/rs/10000-lines-comment-delimiter-undo-pair": {
+      "baseline": {
+        "median_ns": 78061667.0,
+        "min_ns": 77043834.0,
+        "max_ns": 83375916.0
+      },
+      "after": {
+        "median_ns": 19202792.0,
+        "min_ns": 18985958.0,
+        "max_ns": 19761542.0
+      },
+      "after_over_baseline": 0.24599515662405724
+    },
+    "syntax-display/rs/10000-lines-stationary": {
+      "baseline": {
+        "median_ns": 184266.28125,
+        "min_ns": 180186.84375,
+        "max_ns": 190673.828125
+      },
+      "after": {
+        "median_ns": 183757.15625,
+        "min_ns": 180248.046875,
+        "max_ns": 191312.5
+      },
+      "after_over_baseline": 0.9972370148431592
+    },
+    "syntax-display/rs/10000-lines-scroll-pair": {
+      "baseline": {
+        "median_ns": 707218.75,
+        "min_ns": 698664.0625,
+        "max_ns": 722950.5
+      },
+      "after": {
+        "median_ns": 751682.3125,
+        "min_ns": 746638.0,
+        "max_ns": 769239.5625
+      },
+      "after_over_baseline": 1.0628710176306835
+    },
+    "syntax-load/rs/100000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 307056125.0,
+        "min_ns": 305210750.0,
+        "max_ns": 315900666.0
+      },
+      "after": {
+        "median_ns": 275989917.0,
+        "min_ns": 270124250.0,
+        "max_ns": 281814125.0
+      },
+      "after_over_baseline": 0.8988256365184052
+    },
+    "syntax-edit-frame/rs/100000-lines-character-undo-pair": {
+      "baseline": {
+        "median_ns": 898621416.0,
+        "min_ns": 892953292.0,
+        "max_ns": 919709000.0
+      },
+      "after": {
+        "median_ns": 14171833.0,
+        "min_ns": 13579708.0,
+        "max_ns": 15635250.0
+      },
+      "after_over_baseline": 0.015770637943487428
+    },
+    "syntax-edit-frame/rs/100000-lines-comment-delimiter-undo-pair": {
+      "baseline": {
+        "median_ns": 825970583.0,
+        "min_ns": 820867834.0,
+        "max_ns": 837381625.0
+      },
+      "after": {
+        "median_ns": 196587333.0,
+        "min_ns": 193120959.0,
+        "max_ns": 204885292.0
+      },
+      "after_over_baseline": 0.23800766885180946
+    },
+    "syntax-display/rs/100000-lines-stationary": {
+      "baseline": {
+        "median_ns": 192218.75,
+        "min_ns": 188288.40625,
+        "max_ns": 203679.03125
+      },
+      "after": {
+        "median_ns": 195020.828125,
+        "min_ns": 189385.421875,
+        "max_ns": 203865.875
+      },
+      "after_over_baseline": 1.0145775483661192
+    },
+    "syntax-display/rs/100000-lines-scroll-pair": {
+      "baseline": {
+        "median_ns": 726080.75,
+        "min_ns": 720630.25,
+        "max_ns": 749197.9375
+      },
+      "after": {
+        "median_ns": 776458.3125,
+        "min_ns": 767362.0,
+        "max_ns": 798291.625
+      },
+      "after_over_baseline": 1.0693828647846675
+    },
+    "syntax-load/tsx/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 38521250.0,
+        "min_ns": 38016250.0,
+        "max_ns": 39374041.0
+      },
+      "after": {
+        "median_ns": 33820292.0,
+        "min_ns": 33574250.0,
+        "max_ns": 34380875.0
+      },
+      "after_over_baseline": 0.8779645520329689
+    },
+    "syntax-edit-frame/tsx/10000-lines-character-undo-pair": {
+      "baseline": {
+        "median_ns": 100318084.0,
+        "min_ns": 98998916.0,
+        "max_ns": 105815125.0
+      },
+      "after": {
+        "median_ns": 2734145.75,
+        "min_ns": 2692916.75,
+        "max_ns": 2828718.75
+      },
+      "after_over_baseline": 0.02725476445503086
+    },
+    "syntax-edit-frame/tsx/10000-lines-comment-delimiter-undo-pair": {
+      "baseline": {
+        "median_ns": 102843000.0,
+        "min_ns": 101400292.0,
+        "max_ns": 107509625.0
+      },
+      "after": {
+        "median_ns": 5619020.5,
+        "min_ns": 5551104.0,
+        "max_ns": 5699687.5
+      },
+      "after_over_baseline": 0.05463687854302189
+    },
+    "syntax-display/tsx/10000-lines-stationary": {
+      "baseline": {
+        "median_ns": 205229.8125,
+        "min_ns": 199134.765625,
+        "max_ns": 212947.265625
+      },
+      "after": {
+        "median_ns": 208867.1875,
+        "min_ns": 199246.09375,
+        "max_ns": 322580.078125
+      },
+      "after_over_baseline": 1.0177234240761195
+    },
+    "syntax-display/tsx/10000-lines-scroll-pair": {
+      "baseline": {
+        "median_ns": 1005760.4375000001,
+        "min_ns": 992687.5000000001,
+        "max_ns": 1030622.3749999999
+      },
+      "after": {
+        "median_ns": 1102270.8125,
+        "min_ns": 1067867.1875,
+        "max_ns": 1180841.1875
+      },
+      "after_over_baseline": 1.0959576171437941
+    },
+    "syntax-load/tsx/100000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 395077625.0,
+        "min_ns": 388125042.0,
+        "max_ns": 414743291.0
+      },
+      "after": {
+        "median_ns": 353597916.0,
+        "min_ns": 347305958.0,
+        "max_ns": 362646000.0
+      },
+      "after_over_baseline": 0.895008711262755
+    },
+    "syntax-edit-frame/tsx/100000-lines-character-undo-pair": {
+      "baseline": {
+        "median_ns": 1058067083.0000001,
+        "min_ns": 1050496458.0,
+        "max_ns": 1075561708.0
+      },
+      "after": {
+        "median_ns": 4046739.75,
+        "min_ns": 3998239.5000000005,
+        "max_ns": 4293625.0
+      },
+      "after_over_baseline": 0.003824653289965358
+    },
+    "syntax-edit-frame/tsx/100000-lines-comment-delimiter-undo-pair": {
+      "baseline": {
+        "median_ns": 1090197292.0,
+        "min_ns": 1082322250.0,
+        "max_ns": 1122711792.0
+      },
+      "after": {
+        "median_ns": 20551459.0,
+        "min_ns": 19531750.0,
+        "max_ns": 21065542.0
+      },
+      "after_over_baseline": 0.01885113745081656
+    },
+    "syntax-display/tsx/100000-lines-stationary": {
+      "baseline": {
+        "median_ns": 251350.90625000003,
+        "min_ns": 246004.5625,
+        "max_ns": 262094.390625
+      },
+      "after": {
+        "median_ns": 244471.35937499997,
+        "min_ns": 240285.15625,
+        "max_ns": 248366.546875
+      },
+      "after_over_baseline": 0.9726297112764039
+    },
+    "syntax-display/tsx/100000-lines-scroll-pair": {
+      "baseline": {
+        "median_ns": 1138955.75,
+        "min_ns": 1116518.25,
+        "max_ns": 1157848.9375
+      },
+      "after": {
+        "median_ns": 1162914.0625,
+        "min_ns": 1148750.0,
+        "max_ns": 1198979.1875
+      },
+      "after_over_baseline": 1.0210353321452568
+    },
+    "syntax-load/js/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 26336166.0,
+        "min_ns": 25969417.0,
+        "max_ns": 26888250.0
+      },
+      "after": {
+        "median_ns": 23070458.0,
+        "min_ns": 22812542.0,
+        "max_ns": 23858000.0
+      },
+      "after_over_baseline": 0.8759991108804523
+    },
+    "syntax-load/ts/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 19711666.0,
+        "min_ns": 19492667.0,
+        "max_ns": 21761542.0
+      },
+      "after": {
+        "median_ns": 17235250.0,
+        "min_ns": 17044250.0,
+        "max_ns": 17627833.0
+      },
+      "after_over_baseline": 0.8743680011623574
+    },
+    "syntax-load/ex/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 46582750.0,
+        "min_ns": 46016875.0,
+        "max_ns": 48734875.0
+      },
+      "after": {
+        "median_ns": 42874833.0,
+        "min_ns": 42343250.0,
+        "max_ns": 46649125.0
+      },
+      "after_over_baseline": 0.9204015005554631
+    },
+    "syntax-load/heex/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 58832042.0,
+        "min_ns": 57687000.0,
+        "max_ns": 60975375.0
+      },
+      "after": {
+        "median_ns": 56128458.0,
+        "min_ns": 55713334.0,
+        "max_ns": 57079042.0
+      },
+      "after_over_baseline": 0.9540457222273536
+    },
+    "syntax-load/yaml/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 36523500.0,
+        "min_ns": 35577250.0,
+        "max_ns": 40791875.0
+      },
+      "after": {
+        "median_ns": 32957208.0,
+        "min_ns": 32345040.999999996,
+        "max_ns": 34093709.0
+      },
+      "after_over_baseline": 0.9023562363957452
+    },
+    "syntax-load/toml/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 19351666.0,
+        "min_ns": 19151667.0,
+        "max_ns": 19753084.0
+      },
+      "after": {
+        "median_ns": 16932875.0,
+        "min_ns": 16760792.0,
+        "max_ns": 17304083.0
+      },
+      "after_over_baseline": 0.8750086426667347
+    },
+    "syntax-load/md/10000-lines-warm-grammar": {
+      "baseline": {
+        "median_ns": 32627875.0,
+        "min_ns": 32433042.000000004,
+        "max_ns": 33638750.0
+      },
+      "after": {
+        "median_ns": 31657417.0,
+        "min_ns": 31148750.0,
+        "max_ns": 34496125.0
+      },
+      "after_over_baseline": 0.970256781969405
+    },
+    "syntax-display/js/100kb-single-line": {
+      "baseline": {
+        "median_ns": 202974.609375,
+        "min_ns": 195085.9375,
+        "max_ns": 212710.9375
+      },
+      "after": {
+        "median_ns": 201408.859375,
+        "min_ns": 195220.703125,
+        "max_ns": 208109.375
+      },
+      "after_over_baseline": 0.9922859809666773
+    },
+    "syntax-display/rs/1mb-single-line-at-end": {
+      "baseline": {
+        "median_ns": 7586.97509765625,
+        "min_ns": 7521.68798828125,
+        "max_ns": 7777.73046875
+      },
+      "after": {
+        "median_ns": 7643.859863281249,
+        "min_ns": 7545.83740234375,
+        "max_ns": 7750.0205078125
+      },
+      "after_over_baseline": 1.007497687140501
+    },
+    "syntax-display/rs/1mb-single-line-wrapped-at-end": {
+      "baseline": {
+        "median_ns": 296057.28125,
+        "min_ns": 293408.203125,
+        "max_ns": 301666.65625
+      },
+      "after": {
+        "median_ns": 295929.6875,
+        "min_ns": 294469.390625,
+        "max_ns": 302326.171875
+      },
+      "after_over_baseline": 0.999569023435393
+    },
+    "finder/10000-paths-open-close": {
+      "baseline": {
+        "median_ns": 533285.15625,
+        "min_ns": 525625.0,
+        "max_ns": 554748.71875
+      },
+      "after": {
+        "median_ns": 525261.71875,
+        "min_ns": 515886.71874999994,
+        "max_ns": 531761.71875
+      },
+      "after_over_baseline": 0.9849546956145941
+    },
+    "finder/10000-paths-narrow-broaden-pair": {
+      "baseline": {
+        "median_ns": 768260.4375,
+        "min_ns": 712973.9375,
+        "max_ns": 860609.375
+      },
+      "after": {
+        "median_ns": 752388.0,
+        "min_ns": 684640.625,
+        "max_ns": 801697.9375
+      },
+      "after_over_baseline": 0.9793397697899809
+    },
+    "finder/100000-paths-open-close": {
+      "baseline": {
+        "median_ns": 5293708.0,
+        "min_ns": 5139000.0,
+        "max_ns": 5440042.0
+      },
+      "after": {
+        "median_ns": 5274145.5,
+        "min_ns": 5162521.0,
+        "max_ns": 5499250.0
+      },
+      "after_over_baseline": 0.9963045751673496
+    },
+    "finder/100000-paths-narrow-broaden-pair": {
+      "baseline": {
+        "median_ns": 3097520.75,
+        "min_ns": 3016927.25,
+        "max_ns": 3330385.25
+      },
+      "after": {
+        "median_ns": 3320937.5,
+        "min_ns": 3235593.75,
+        "max_ns": 3780562.5
+      },
+      "after_over_baseline": 1.0721276039878023
+    },
+    "revert-diff/txt/100k-lines-one-line": {
+      "baseline": {
+        "median_ns": 11861625.0,
+        "min_ns": 11728333.0,
+        "max_ns": 12278333.0
+      },
+      "after": {
+        "median_ns": 11702959.0,
+        "min_ns": 11567750.0,
+        "max_ns": 11808458.0
+      },
+      "after_over_baseline": 0.9866235865659216
+    },
+    "revert-apply-frame/txt/100k-lines-one-line": {
+      "baseline": {
+        "median_ns": 118208.0,
+        "min_ns": 108875.0,
+        "max_ns": 172292.0
+      },
+      "after": {
+        "median_ns": 118125.0,
+        "min_ns": 108167.0,
+        "max_ns": 124833.0
+      },
+      "after_over_baseline": 0.9992978478613969
+    },
+    "revert-diff/txt/100k-lines-scattered": {
+      "baseline": {
+        "median_ns": 16997167.0,
+        "min_ns": 16844916.0,
+        "max_ns": 17426958.0
+      },
+      "after": {
+        "median_ns": 16816667.0,
+        "min_ns": 16637665.999999998,
+        "max_ns": 17107833.0
+      },
+      "after_over_baseline": 0.989380583246608
+    },
+    "revert-apply-frame/txt/100k-lines-scattered": {
+      "baseline": {
+        "median_ns": 599667.0,
+        "min_ns": 561583.0,
+        "max_ns": 643500.0
+      },
+      "after": {
+        "median_ns": 594042.0,
+        "min_ns": 570291.0,
+        "max_ns": 661667.0
+      },
+      "after_over_baseline": 0.990619793985662
+    },
+    "revert-diff/txt/100k-lines-replace-1000-line-block": {
+      "baseline": {
+        "median_ns": 13841333.0,
+        "min_ns": 13490791.0,
+        "max_ns": 15635416.999999998
+      },
+      "after": {
+        "median_ns": 13564250.0,
+        "min_ns": 13450042.0,
+        "max_ns": 13718375.0
+      },
+      "after_over_baseline": 0.9799814801074435
+    },
+    "revert-apply-frame/txt/100k-lines-replace-1000-line-block": {
+      "baseline": {
+        "median_ns": 142875.0,
+        "min_ns": 130083.0,
+        "max_ns": 177834.0
+      },
+      "after": {
+        "median_ns": 140375.0,
+        "min_ns": 125875.00000000001,
+        "max_ns": 148667.0
+      },
+      "after_over_baseline": 0.9825021872265967
+    },
+    "revert-diff/rs/100k-lines-one-line": {
+      "baseline": {
+        "median_ns": 11748042.0,
+        "min_ns": 11630708.0,
+        "max_ns": 12078917.0
+      },
+      "after": {
+        "median_ns": 11658791.0,
+        "min_ns": 11560583.0,
+        "max_ns": 12059042.0
+      },
+      "after_over_baseline": 0.9924029042456607
+    },
+    "revert-apply-frame/rs/100k-lines-one-line": {
+      "baseline": {
+        "median_ns": 460344166.0,
+        "min_ns": 456954250.0,
+        "max_ns": 464832542.0
+      },
+      "after": {
+        "median_ns": 69779708.0,
+        "min_ns": 68992000.0,
+        "max_ns": 71159459.0
+      },
+      "after_over_baseline": 0.15158160601083842
+    },
+    "revert-diff/rs/100k-lines-scattered": {
+      "baseline": {
+        "median_ns": 17052000.0,
+        "min_ns": 16808958.0,
+        "max_ns": 17756167.0
+      },
+      "after": {
+        "median_ns": 16958958.0,
+        "min_ns": 16695000.000000002,
+        "max_ns": 17381042.0
+      },
+      "after_over_baseline": 0.9945436312456016
+    },
+    "revert-apply-frame/rs/100k-lines-scattered": {
+      "baseline": {
+        "median_ns": 491305417.0,
+        "min_ns": 488342625.0,
+        "max_ns": 497299333.0
+      },
+      "after": {
+        "median_ns": 101619041.0,
+        "min_ns": 100710042.0,
+        "max_ns": 110965250.0
+      },
+      "after_over_baseline": 0.20683476608197054
+    },
+    "revert-diff/rs/100k-lines-replace-1000-line-block": {
+      "baseline": {
+        "median_ns": 13837792.0,
+        "min_ns": 13673209.0,
+        "max_ns": 14112709.0
+      },
+      "after": {
+        "median_ns": 13653125.0,
+        "min_ns": 13483250.0,
+        "max_ns": 14720583.0
+      },
+      "after_over_baseline": 0.9866548796224137
+    },
+    "revert-apply-frame/rs/100k-lines-replace-1000-line-block": {
+      "baseline": {
+        "median_ns": 469215916.0,
+        "min_ns": 463797500.0,
+        "max_ns": 490980500.0
+      },
+      "after": {
+        "median_ns": 74387292.0,
+        "min_ns": 73812083.0,
+        "max_ns": 78026791.0
+      },
+      "after_over_baseline": 0.15853531277059238
+    },
+    "terminal-copy/plain/10k-lines-enter-exit-pair": {
+      "baseline": {
+        "median_ns": 15271833.0,
+        "min_ns": 14716042.0,
+        "max_ns": 15762458.0
+      },
+      "after": {
+        "median_ns": 15142459.0,
+        "min_ns": 14616834.0,
+        "max_ns": 15888415.999999998
+      },
+      "after_over_baseline": 0.9915285873018648
+    },
+    "terminal-copy/plain/10k-lines-display": {
+      "baseline": {
+        "median_ns": 52443.68359375,
+        "min_ns": 51490.72265625,
+        "max_ns": 54273.6015625
+      },
+      "after": {
+        "median_ns": 52345.8671875,
+        "min_ns": 49806.15234375,
+        "max_ns": 56236.65625
+      },
+      "after_over_baseline": 0.9981348296010684
+    },
+    "terminal-copy/plain/10k-lines-scroll-pair": {
+      "baseline": {
+        "median_ns": 148204.1015625,
+        "min_ns": 145770.5078125,
+        "max_ns": 154395.8359375
+      },
+      "after": {
+        "median_ns": 147718.75,
+        "min_ns": 145054.3671875,
+        "max_ns": 150744.796875
+      },
+      "after_over_baseline": 0.9967251138302989
+    },
+    "terminal-copy/colored/10k-lines-enter-exit-pair": {
+      "baseline": {
+        "median_ns": 58455875.0,
+        "min_ns": 57564541.0,
+        "max_ns": 70940041.0
+      },
+      "after": {
+        "median_ns": 58259916.0,
+        "min_ns": 57524958.0,
+        "max_ns": 58564542.0
+      },
+      "after_over_baseline": 0.9966477449871377
+    },
+    "terminal-copy/colored/10k-lines-display": {
+      "baseline": {
+        "median_ns": 204714.1875,
+        "min_ns": 201213.546875,
+        "max_ns": 215181.640625
+      },
+      "after": {
+        "median_ns": 203845.046875,
+        "min_ns": 202188.796875,
+        "max_ns": 211940.75
+      },
+      "after_over_baseline": 0.9957543703462175
+    },
+    "terminal-copy/colored/10k-lines-scroll-pair": {
+      "baseline": {
+        "median_ns": 3147385.5,
+        "min_ns": 3116302.0,
+        "max_ns": 3178271.0
+      },
+      "after": {
+        "median_ns": 3122614.5,
+        "min_ns": 3109333.25,
+        "max_ns": 3140052.0
+      },
+      "after_over_baseline": 0.9921296580924072
+    },
+    "terminal-output/ansi-tui-osc-trace": {
+      "baseline": {
+        "median_ns": 435929.6875,
+        "min_ns": 425315.09375,
+        "max_ns": 445619.78125
+      },
+      "after": {
+        "median_ns": 431213.5625,
+        "min_ns": 423696.625,
+        "max_ns": 434898.4375
+      },
+      "after_over_baseline": 0.9891814548647825
+    },
+    "terminal-display/ansi-unicode-50x120": {
+      "baseline": {
+        "median_ns": 73745.44140625,
+        "min_ns": 72221.19140625,
+        "max_ns": 75385.578125
+      },
+      "after": {
+        "median_ns": 74470.54296875,
+        "min_ns": 72075.84765625,
+        "max_ns": 77425.78125
+      },
+      "after_over_baseline": 1.0098324933538
+    },
+    "terminal-resize/10k-lines-120-to-80-columns": {
+      "baseline": {
+        "median_ns": 2082624.9999999998,
+        "min_ns": 1550042.0,
+        "max_ns": 2369667.0
+      },
+      "after": {
+        "median_ns": 2079999.9999999998,
+        "min_ns": 1522834.0,
+        "max_ns": 2644584.0
+      },
+      "after_over_baseline": 0.9987395714542945
+    },
+    "frame/1-panes-shared-rust": {
+      "baseline": {
+        "median_ns": 145970.703125,
+        "min_ns": 143276.6875,
+        "max_ns": 155299.15625
+      },
+      "after": {
+        "median_ns": 147983.71875,
+        "min_ns": 139874.34375,
+        "max_ns": 160694.015625
+      },
+      "after_over_baseline": 1.013790545512932
+    },
+    "frame/2-panes-shared-rust": {
+      "baseline": {
+        "median_ns": 293906.90625,
+        "min_ns": 284409.5,
+        "max_ns": 314490.234375
+      },
+      "after": {
+        "median_ns": 286720.703125,
+        "min_ns": 279589.1875,
+        "max_ns": 294419.921875
+      },
+      "after_over_baseline": 0.9755493900545251
+    },
+    "frame/4-panes-shared-rust": {
+      "baseline": {
+        "median_ns": 576164.0625,
+        "min_ns": 569990.875,
+        "max_ns": 633132.8125
+      },
+      "after": {
+        "median_ns": 572368.5,
+        "min_ns": 562601.5625,
+        "max_ns": 606402.34375
+      },
+      "after_over_baseline": 0.9934123581336696
+    },
+    "frame/1-panes-distinct-rust": {
+      "baseline": {
+        "median_ns": 143008.140625,
+        "min_ns": 139434.890625,
+        "max_ns": 149653.3203125
+      },
+      "after": {
+        "median_ns": 144008.1328125,
+        "min_ns": 140585.28125,
+        "max_ns": 150376.625
+      },
+      "after_over_baseline": 1.006992554291872
+    },
+    "frame/2-panes-distinct-rust": {
+      "baseline": {
+        "median_ns": 284607.421875,
+        "min_ns": 279148.4375,
+        "max_ns": 290545.578125
+      },
+      "after": {
+        "median_ns": 285809.25,
+        "min_ns": 283093.09375,
+        "max_ns": 289682.953125
+      },
+      "after_over_baseline": 1.0042227574990221
+    },
+    "frame/4-panes-distinct-rust": {
+      "baseline": {
+        "median_ns": 578315.09375,
+        "min_ns": 568264.3125,
+        "max_ns": 603897.125
+      },
+      "after": {
+        "median_ns": 603360.6875,
+        "min_ns": 561274.75,
+        "max_ns": 698695.3125
+      },
+      "after_over_baseline": 1.0433078680129122
+    },
+    "session-render/5000-line-styled-message": {
+      "baseline": {
+        "median_ns": 48518958.0,
+        "min_ns": 48287500.0,
+        "max_ns": 49434000.0
+      },
+      "after": {
+        "median_ns": 48654917.0,
+        "min_ns": 48399667.0,
+        "max_ns": 49307458.0
+      },
+      "after_over_baseline": 1.00280218301473
+    }
+  },
+  "focused": {
+    "hot-scopes/10000-lines-first-highlight-after-edit": {
+      "baseline": {
+        "median_ns": 43818375.0,
+        "min_ns": 43488958.0,
+        "max_ns": 44685542.0
+      },
+      "after": {
+        "median_ns": 1142458.0,
+        "min_ns": 1050333.0,
+        "max_ns": 1214875.0
+      },
+      "after_over_baseline": 0.026072577999526454
+    },
+    "hot-scopes/10000-lines-edit-highlight-undo-pair": {
+      "baseline": {
+        "median_ns": 87537583.0,
+        "min_ns": 86840500.0,
+        "max_ns": 88143042.0
+      },
+      "after": {
+        "median_ns": 2157223.875,
+        "min_ns": 2135781.25,
+        "max_ns": 2211401.0
+      },
+      "after_over_baseline": 0.02464340230869751
+    },
+    "hot-scopes/10000-lines-cached-frame": {
+      "baseline": {
+        "median_ns": 194279.296875,
+        "min_ns": 188966.796875,
+        "max_ns": 206158.84375
+      },
+      "after": {
+        "median_ns": 193694.015625,
+        "min_ns": 189155.59375,
+        "max_ns": 198096.359375
+      },
+      "after_over_baseline": 0.9969874234701571
+    },
+    "hot-scopes/100000-lines-first-highlight-after-edit": {
+      "baseline": {
+        "median_ns": 462244166.0,
+        "min_ns": 460587958.0,
+        "max_ns": 466194792.0
+      },
+      "after": {
+        "median_ns": 7018375.0,
+        "min_ns": 6737208.0,
+        "max_ns": 7844500.000000001
+      },
+      "after_over_baseline": 0.015183263556862284
+    },
+    "hot-scopes/100000-lines-edit-highlight-undo-pair": {
+      "baseline": {
+        "median_ns": 920405958.0,
+        "min_ns": 916984958.0,
+        "max_ns": 933519208.0
+      },
+      "after": {
+        "median_ns": 13558250.0,
+        "min_ns": 13068792.0,
+        "max_ns": 14695375.0
+      },
+      "after_over_baseline": 0.014730728198958485
+    },
+    "hot-scopes/100000-lines-cached-frame": {
+      "baseline": {
+        "median_ns": 199298.828125,
+        "min_ns": 196574.875,
+        "max_ns": 211564.453125
+      },
+      "after": {
+        "median_ns": 200832.03125,
+        "min_ns": 195720.703125,
+        "max_ns": 212195.96875
+      },
+      "after_over_baseline": 1.007692986152625
+    },
+    "hot-preview/100000-matches-stationary": {
+      "baseline": {
+        "median_ns": 12611958.0,
+        "min_ns": 12343625.0,
+        "max_ns": 13132542.0
+      },
+      "after": {
+        "median_ns": 7826604.500000001,
+        "min_ns": 7738937.5,
+        "max_ns": 8012750.000000001
+      },
+      "after_over_baseline": 0.6205701366909088
+    },
+    "hot-preview/1000000-matches-stationary": {
+      "baseline": {
+        "median_ns": 136158333.0,
+        "min_ns": 135369292.0,
+        "max_ns": 140139958.0
+      },
+      "after": {
+        "median_ns": 74576166.0,
+        "min_ns": 74314125.0,
+        "max_ns": 75707750.0
+      },
+      "after_over_baseline": 0.5477165029627676
+    },
+    "hot-stream/shown-clean-frame": {
+      "baseline": {
+        "median_ns": 125667.96875,
+        "min_ns": 124612.3046875,
+        "max_ns": 127833.00781249999
+      },
+      "after": {
+        "median_ns": 126294.59375,
+        "min_ns": 125040.6953125,
+        "max_ns": 130369.78906249999
+      },
+      "after_over_baseline": 1.0049863541699047
+    },
+    "hot-stream/shown-dirty-frame": {
+      "baseline": {
+        "median_ns": 49818292.0,
+        "min_ns": 49300417.0,
+        "max_ns": 51842167.0
+      },
+      "after": {
+        "median_ns": 49863375.0,
+        "min_ns": 49547417.0,
+        "max_ns": 50665541.0
+      },
+      "after_over_baseline": 1.0009049487284711
+    },
+    "hot-stream/hidden-clean-frame": {
+      "baseline": {
+        "median_ns": 1951.8381347656252,
+        "min_ns": 1904.815673828125,
+        "max_ns": 2040.593505859375
+      },
+      "after": {
+        "median_ns": 1991.8314208984375,
+        "min_ns": 1961.4919433593752,
+        "max_ns": 2031.7281494140627
+      },
+      "after_over_baseline": 1.0204900628901867
+    },
+    "hot-stream/hidden-dirty-frame": {
+      "baseline": {
+        "median_ns": 49468708.0,
+        "min_ns": 49099041.0,
+        "max_ns": 52707500.0
+      },
+      "after": {
+        "median_ns": 12750.0,
+        "min_ns": 11333.0,
+        "max_ns": 55125.0
+      },
+      "after_over_baseline": 0.0002577386900826276
+    },
+    "hot-stream/hidden-first-show-frame": {
+      "baseline": {
+        "median_ns": 160041.0,
+        "min_ns": 154625.0,
+        "max_ns": 195541.0
+      },
+      "after": {
+        "median_ns": 49961875.0,
+        "min_ns": 49600084.0,
+        "max_ns": 52856584.0
+      },
+      "after_over_baseline": 312.18172218369045
+    },
+    "hot-swiper/ten-1mb-rows-first-frame": {
+      "baseline": {
+        "median_ns": 38114000.0,
+        "min_ns": 37529333.0,
+        "max_ns": 50964000.0
+      },
+      "after": {
+        "median_ns": 2920000.0,
+        "min_ns": 2785458.0,
+        "max_ns": 2979000.0
+      },
+      "after_over_baseline": 0.07661226845778454
+    }
+  },
+  "services": {
+    "index/10k-files-two-roots-warm-cache": {
+      "baseline": {
+        "median_ns": 22309167.0,
+        "min_ns": 22045584.0,
+        "max_ns": 23000000.0
+      },
+      "after": {
+        "median_ns": 21421750.0,
+        "min_ns": 20625958.0,
+        "max_ns": 22569959.0
+      },
+      "after_over_baseline": 0.960221867539922
+    },
+    "grep/10k-hits-two-roots-complete-warm-cache": {
+      "baseline": {
+        "median_ns": 1106413791.0,
+        "min_ns": 1054692583.0,
+        "max_ns": 1149322792.0
+      },
+      "after": {
+        "median_ns": 1089458167.0,
+        "min_ns": 1027949666.0,
+        "max_ns": 3265519750.0
+      },
+      "after_over_baseline": 0.9846751512517978
+    },
+    "grep/first-batch-two-roots-warm-cache": {
+      "baseline": {
+        "median_ns": 1017083.0,
+        "min_ns": 951791.0,
+        "max_ns": 1166375.0
+      },
+      "after": {
+        "median_ns": 922833.0,
+        "min_ns": 877875.0,
+        "max_ns": 1049000.0
+      },
+      "after_over_baseline": 0.9073330298510545
+    },
+    "grep/sparse-later-root-first-callback-warm-cache": {
+      "baseline": {
+        "median_ns": 677227416.0,
+        "min_ns": 659320541.0,
+        "max_ns": 707696250.0
+      },
+      "after": {
+        "median_ns": 681456458.0,
+        "min_ns": 663979083.0,
+        "max_ns": 717266042.0
+      },
+      "after_over_baseline": 1.0062446408696484
+    },
+    "grep/sparse-later-root-complete-warm-cache": {
+      "baseline": {
+        "median_ns": 1059974542.0,
+        "min_ns": 1031030833.0,
+        "max_ns": 1099573958.0
+      },
+      "after": {
+        "median_ns": 1062128790.9999999,
+        "min_ns": 1042520332.9999999,
+        "max_ns": 1119384792.0
+      },
+      "after_over_baseline": 1.0020323591884908
+    },
+    "grep/10k-hits-two-roots-complete-warm-cache-4-workers": {
+      "baseline": {
+        "median_ns": 384412250.0,
+        "min_ns": 369206208.0,
+        "max_ns": 403148250.0
+      },
+      "after": {
+        "median_ns": 391947000.0,
+        "min_ns": 373500541.0,
+        "max_ns": 429352875.0
+      },
+      "after_over_baseline": 1.0196007021108198
+    },
+    "grep/first-batch-two-roots-warm-cache-4-workers": {
+      "baseline": {
+        "median_ns": 1758792.0,
+        "min_ns": 1653042.0,
+        "max_ns": 1807708.0
+      },
+      "after": {
+        "median_ns": 1704833.0,
+        "min_ns": 1668834.0,
+        "max_ns": 1766708.0
+      },
+      "after_over_baseline": 0.9693204199245846
+    },
+    "grep/sparse-later-root-first-callback-warm-cache-4-workers": {
+      "baseline": {
+        "median_ns": 297461167.0,
+        "min_ns": 237249667.0,
+        "max_ns": 333721875.0
+      },
+      "after": {
+        "median_ns": 320558875.0,
+        "min_ns": 267014375.00000003,
+        "max_ns": 388765584.0
+      },
+      "after_over_baseline": 1.077649490294644
+    },
+    "grep/sparse-later-root-complete-warm-cache-4-workers": {
+      "baseline": {
+        "median_ns": 357002708.0,
+        "min_ns": 348366750.0,
+        "max_ns": 384986167.0
+      },
+      "after": {
+        "median_ns": 360719583.0,
+        "min_ns": 349943750.0,
+        "max_ns": 421367542.0
+      },
+      "after_over_baseline": 1.0104113355913256
+    }
+  }
+}

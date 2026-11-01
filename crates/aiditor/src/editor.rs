@@ -92,6 +92,16 @@ impl Editor {
         // The launch's messages ran before there was a watcher to send their watch set to.
         watcher.set(core.watch_set());
         let (clock, clock_task) = Self::start_clock(clock::read, cx);
+        let recovery = args.recovery_dir.map(|dir| {
+            let runtime = tokio::runtime::Handle::current();
+            let tx = tx.clone();
+            recovery::spawn(dir, move |msg| {
+                let tx = tx.clone();
+                runtime.spawn(async move {
+                    _ = tx.send(msg).await;
+                });
+            })
+        });
         Editor {
             core,
             benchmark: None,
@@ -105,7 +115,7 @@ impl Editor {
             terminals: terminal::Terminals::new(args.zsh_dir),
             agents: agents::Agents::default(),
             watcher,
-            recovery: args.recovery_dir.map(recovery::spawn),
+            recovery,
             debug: args.debug.then(Stats::default),
             marked: None,
             painted: Vec::new(),
@@ -185,8 +195,15 @@ impl Editor {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
                 Effect::Recovery(op) => {
-                    if let Some((tx, _)) = &self.recovery {
-                        _ = tx.send(op);
+                    let failure = if let Some((tx, _)) = &self.recovery {
+                        tx.send(op)
+                            .err()
+                            .and_then(|e| e.0.failed("Recovery service closed".into()))
+                    } else {
+                        op.failed("Recovery service unavailable".into())
+                    };
+                    if let Some(msg) = failure {
+                        self.handle(msg, cx);
                     }
                 }
                 Effect::Quit => {
@@ -1425,6 +1442,8 @@ mod tests {
     #[gpui::test]
     fn recovery_files_are_written_and_removed_on_quit(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
             recovery_dir: Some(dir.path().to_owned()),
@@ -1436,7 +1455,6 @@ mod tests {
         let path = source.path().join("t.txt");
         std::fs::write(&path, "").unwrap();
         core.open(&path, files::read(&path).unwrap());
-        // No Tokio runtime here for the file's repository lookup.
         core.handle(Instant::now(), Msg::Tick);
         let (editor, cx) =
             cx.add_window_view(|window, cx| Editor::new(core, args, channel, window, cx));
@@ -1452,12 +1470,101 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(count(), 1);
+        cx.simulate_input("y");
+        let mut persisted = false;
+        for _ in 0..500 {
+            cx.run_until_parked();
+            editor.update(cx, |e, cx| e.handle(Msg::AutoSave, cx));
+            persisted = recovery::list(dir.path()).iter().any(|r| r.text == "xy");
+            if persisted {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            persisted,
+            "the GUI must receive the first completion to enqueue newer text"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         editor.update(cx, |e, cx| e.handle(Msg::Quit, cx));
         cx.simulate_input("no");
         cx.simulate_keystrokes("enter");
         cx.simulate_input("yes");
         cx.simulate_keystrokes("enter");
         assert_eq!(count(), 0);
+    }
+
+    #[gpui::test]
+    fn long_swiper_rows_reach_gpui_as_bounded_text_and_valid_selected_runs(
+        cx: &mut TestAppContext,
+    ) {
+        let _native = crate::native::lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            let text = format!("//é🙂{}\n", "x".repeat(1_000_000)).repeat(10);
+            e.core.open(
+                std::path::Path::new("/long.rs"),
+                Some((text.into_bytes(), 0)),
+            );
+            cx.notify();
+        });
+        cx.simulate_keystrokes("ctrl-s");
+        for columns in [10, 2, 0, 80] {
+            editor.update_in(cx, |e, window, _| {
+                e.core.handle(
+                    Instant::now(),
+                    Msg::Resize {
+                        width: 24. + columns as f32 * 8.,
+                        height: 600.,
+                        cell_width: 8.,
+                    },
+                );
+                let mb = e.core.frame().minibuffer.unwrap();
+                assert_eq!(mb.candidates.len(), 10);
+                assert_eq!(mb.selected, Some(0));
+                let font = e.font(window).0;
+                let theme = &e.core.settings().theme;
+                for (i, text) in mb.candidates.iter().enumerate() {
+                    assert_eq!(text.chars().count(), columns);
+                    let selected =
+                        (i == 0).then(|| theme.face(FaceName::CompletionSelected).bg.unwrap());
+                    let runs = completion_runs(
+                        text.len(),
+                        &mb.syntax[i],
+                        Face::default(),
+                        selected,
+                        &font,
+                        theme,
+                    );
+                    assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
+                    if let Some(bg) = selected {
+                        let mut start = 0;
+                        for run in &runs {
+                            let end = start + run.len;
+                            if mb.syntax[i]
+                                .iter()
+                                .any(|(r, _)| r.start < end && r.end > start)
+                            {
+                                assert_eq!(run.background_color, Some(rgb(bg).into()));
+                            }
+                            start = end;
+                        }
+                    }
+                    let line = window.text_system().shape_line(
+                        text.clone().into(),
+                        px(e.core.settings().font_size),
+                        &runs,
+                        None,
+                    );
+                    assert_eq!(line.text.as_ref(), text);
+                }
+            });
+        }
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
     }
 
     #[gpui::test]

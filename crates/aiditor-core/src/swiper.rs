@@ -27,16 +27,23 @@ pub(crate) struct Search {
 }
 
 impl crate::display::Search for Search {
-    fn matches(&self, text: &str) -> Vec<Range<usize>> {
+    fn matches(&self, text: &str, displayed: &[Range<usize>]) -> Vec<crate::display::SearchMatch> {
         if self.negative.iter().any(|r| r.is_match(text)) {
             return Vec::new();
         }
-        self.positive
+        let mut matches = Vec::new();
+        let end = displayed.last().map_or(0, |r| r.end);
+        for (i, m) in self
+            .positive
             .iter()
             .flat_map(|r| r.find_iter(text))
             .filter(|m| !m.is_empty())
-            .map(|m| m.range())
-            .collect()
+            .take_while(|m| m.start() < end)
+            .enumerate()
+        {
+            crate::display::retain_match(m.range(), i == 0, displayed, &mut matches);
+        }
+        matches
     }
 }
 
@@ -82,9 +89,29 @@ impl Search {
         format!("{:<width$} {}", line + 1, content)
     }
 
+    fn displayed_end(&self, line: usize, columns: usize) -> usize {
+        let range = &self.lines[line];
+        let room = columns.saturating_sub(self.lines.len().to_string().len() + 1);
+        self.snapshot[range.clone()]
+            .char_indices()
+            .nth(room)
+            .map_or(range.end, |(at, _)| range.start + at)
+    }
+
+    pub(crate) fn presentation(&self, line: usize, columns: usize) -> String {
+        let width = self.lines.len().to_string().len();
+        let mut text: String = format!("{:<width$} ", line + 1)
+            .chars()
+            .take(columns)
+            .collect();
+        text.push_str(&self.snapshot[self.lines[line].start..self.displayed_end(line, columns)]);
+        text
+    }
+
     pub(crate) fn highlights(
         &self,
         lines: &[usize],
+        columns: usize,
         palette: &BTreeMap<String, Face>,
     ) -> Vec<Vec<(Range<usize>, Face)>> {
         let Some((text, syntax)) = &self.syntax else {
@@ -94,7 +121,7 @@ impl Search {
             .iter()
             .map(|&line| {
                 let bytes = &self.lines[line];
-                text.byte_to_char(bytes.start)..text.byte_to_char(bytes.end)
+                text.byte_to_char(bytes.start)..text.byte_to_char(self.displayed_end(line, columns))
             })
             .collect();
         let drawn: Vec<_> = ranges.iter().filter(|r| !r.is_empty()).cloned().collect();
@@ -245,16 +272,111 @@ mod tests {
             ("^", vec![]),
         ] {
             search.filter(query);
-            let actual: Vec<_> = search.matches(text).into_iter().map(|r| &text[r]).collect();
+            let actual: Vec<_> = search
+                .matches(text, &[0..text.len()])
+                .into_iter()
+                .map(|m| &text[m.range])
+                .collect();
             assert_eq!(actual, expected, "{query}");
         }
         search.filter("a(");
-        assert_eq!(search.matches("a(b a(b"), [0..2, 4..6]);
+        assert_eq!(
+            search
+                .matches("a(b a(b", &[0..7])
+                .into_iter()
+                .map(|m| m.range)
+                .collect::<Vec<_>>(),
+            [0..2, 4..6]
+        );
+    }
+
+    #[test]
+    fn preview_retains_only_displayed_intersections_and_original_first_identity() {
+        use crate::display::Search as _;
+        let mut search = super::Search::new(&ropey::Rope::from_str(""), None);
+        search.filter("x");
+        for size in [1_000, 1_000_000] {
+            let text = "x".repeat(size);
+            let matches = search.matches(&text, &[20..30, 50..55]);
+            assert_eq!(matches.len(), 15);
+            assert!(matches.iter().all(|m| !m.first && m.range.len() == 1));
+        }
+        search.filter("^été.*end$");
+        let matches = search.matches("été x end", &[2..5]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].range, 2..5);
+        assert!(matches[0].first);
+        search.filter("été !end");
+        assert!(search.matches("été x end", &[0..5]).is_empty());
+    }
+
+    #[test]
+    #[ignore = "release diagnostic separating full-line input/scan work from retained spans"]
+    fn preview_work_diagnostic() {
+        use crate::display::Search as _;
+        use std::hint::black_box;
+        use std::time::Instant;
+        let median = |mut samples: Vec<std::time::Duration>| {
+            samples.sort();
+            samples[2]
+        };
+        for size in [100_000, 1_000_000] {
+            let text = "x".repeat(size);
+            let rope = ropey::Rope::from_str(&text);
+            let mut search = super::Search::new(&rope, None);
+            search.filter("x !missing");
+            let mut copy = Vec::new();
+            let mut exclusion = Vec::new();
+            let mut retained = Vec::new();
+            let mut converted = Vec::new();
+            let mut wrapped = Vec::new();
+            let mut buffers = crate::buffer::Buffers::default();
+            let id = buffers.create_for_file(std::path::Path::new("/preview.txt"), &text);
+            let mut window = crate::window::Window::new(&mut buffers, id);
+            window.set_cols(120);
+            for _ in 0..5 {
+                let start = Instant::now();
+                black_box(rope.line(0).to_string());
+                copy.push(start.elapsed());
+                let start = Instant::now();
+                assert!(!search.negative[0].is_match(black_box(&text)));
+                exclusion.push(start.elapsed());
+                let start = Instant::now();
+                let spans = search.matches(black_box(&text), &[0..120]);
+                retained.push(start.elapsed());
+                assert_eq!(spans.len(), 120);
+                let start = Instant::now();
+                black_box(
+                    spans
+                        .iter()
+                        .map(|m| rope.byte_to_char(m.range.start)..rope.byte_to_char(m.range.end))
+                        .collect::<Vec<_>>(),
+                );
+                converted.push(start.elapsed());
+                let start = Instant::now();
+                black_box(window.row_starts(buffers.get(id).unwrap(), 0));
+                wrapped.push(start.elapsed());
+            }
+            println!(
+                "{size}: copy={:?} full_line_exclusion={:?} bounded_match_including_exclusion={:?} convert_120={:?} word_wrap_layout_once={:?}",
+                median(copy),
+                median(exclusion),
+                median(retained),
+                median(converted),
+                median(wrapped)
+            );
+        }
     }
 
     use crate::Msg;
     use crate::buffer::Face;
-    use crate::harness::{Harness, line_start, mark, on};
+    use crate::harness::{Harness, line_start, mark};
+
+    fn on(text: &str) -> Harness {
+        let mut h = crate::harness::on(text);
+        h.frame(800., 600.);
+        h
+    }
 
     fn result_face(h: &mut Harness, row: usize, token: &str) -> Face {
         let mb = h.core.frame().minibuffer.unwrap();
@@ -305,11 +427,20 @@ mod tests {
             ),
         ] {
             let mut h = Harness::new(&[(file, text)]);
+            h.frame(800., 600.);
             h.open(file).keys("C-s");
             h.send(Msg::Insert {
                 text: query.into(),
                 replace: None,
             });
+            let canonical = h.core.prompts.selected_candidate().unwrap();
+            let end = canonical.find(token).unwrap() + token.len();
+            let columns = canonical[..end].chars().count();
+            let frame = h.frame(24. + columns as f32 * 8., 600.);
+            assert_eq!(
+                frame.minibuffer.unwrap().candidates[0].chars().count(),
+                columns
+            );
             let expected = h.core.settings().theme.syntax[capture];
             assert_eq!(result_face(&mut h, 0, token), expected, "{file} {token}");
         }
@@ -321,6 +452,7 @@ mod tests {
             .map(|i| format!("const value{i} = \"é🙂\";\n"))
             .collect();
         let mut h = Harness::new(&[("a.js", &text)]);
+        h.frame(800., 600.);
         h.open("a.js").keys("C-s C-u 12 C-n");
         let mb = h.core.frame().minibuffer.unwrap();
         assert_eq!(mb.candidates.len(), 10);
@@ -365,6 +497,7 @@ mod tests {
     #[test]
     fn result_syntax_freezes_pending_edits_and_survives_origin_changes() {
         let mut h = Harness::new(&[("a.js", "const value = \"é🙂\";\n")]);
+        h.frame(800., 600.);
         h.open("a.js");
         let buffer = h.core.windows.window.buffer();
         h.send(Msg::Insert {
@@ -415,6 +548,7 @@ mod tests {
     #[test]
     fn result_syntax_keeps_blank_rows_plain() {
         let mut h = Harness::new(&[("a.js", "\nconst value = 1;\n\n")]);
+        h.frame(800., 600.);
         h.open("a.js").keys("C-s");
         assert_eq!(
             h.core.frame().minibuffer.unwrap().candidates,
@@ -523,7 +657,7 @@ mod tests {
         h.keys("C-s needle");
         assert_eq!(
             listed(&mut h).0,
-            [format!("2 {long}"), "3 last needle".into()]
+            [format!("2 {}", "x".repeat(95)), "3 last needle".into()]
         );
         let expected = 6 + long.chars().count();
         assert_eq!(origin_point(&h), expected);
@@ -531,6 +665,40 @@ mod tests {
         assert_eq!(h.point(), expected);
         h.keys("C-s last RET");
         assert_eq!(h.point(), expected + 1 + 4);
+    }
+
+    #[test]
+    fn result_width_and_unicode_styles_change_without_changing_navigation() {
+        let source = format!("//é🙂{} needle\n", "x".repeat(1_000));
+        let mut h = Harness::new(&[("a.js", &source)]);
+        h.open("a.js").keys("C-s needle");
+        for columns in [10, 0, 1, 5, 20] {
+            let mb = h.frame(24. + columns as f32 * 8., 600.).minibuffer.unwrap();
+            assert_eq!(mb.candidates[0].chars().count(), columns);
+            assert_eq!(mb.selected, Some(0));
+            for (range, _) in &mb.syntax[0] {
+                assert!(range.start < range.end && range.end <= mb.candidates[0].len());
+                assert!(mb.candidates[0].is_char_boundary(range.start));
+                assert!(mb.candidates[0].is_char_boundary(range.end));
+            }
+            if columns == 5 {
+                assert_eq!(mb.candidates[0], "1 //é");
+            }
+        }
+        h.send(Msg::Resize {
+            width: 104.,
+            height: 600.,
+            cell_width: 16.,
+        });
+        assert_eq!(
+            h.core.frame().minibuffer.unwrap().candidates[0]
+                .chars()
+                .count(),
+            5
+        );
+        assert_eq!(origin_point(&h), source.trim_end().chars().count());
+        h.keys("RET");
+        assert_eq!(h.point(), source.trim_end().chars().count());
     }
 
     #[test]

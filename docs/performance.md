@@ -17,10 +17,11 @@ Direct Cargo invocations remain available:
 
 ```sh
 cargo bench --locked -p aiditor-core --bench core
+cargo bench --locked -p aiditor-core --bench hot_paths
 cargo bench --locked -p aiditor-services --bench services
 ```
 
-Set `BENCH_OUTPUT` to a separate absolute TSV path for each invocation to retain its results. Ordinary `cargo test` does not run these targets; `cargo clippy --all-targets` compiles them on Linux and macOS.
+Set `BENCH_OUTPUT` to a separate absolute TSV path for each invocation to retain its results. `hot_paths` is a separate focused suite; the local runner's default still runs `core` and `services`. Ordinary `cargo test` does not run these targets; `cargo clippy --all-targets` compiles them on Linux and macOS.
 
 ## Core workloads
 
@@ -121,6 +122,16 @@ These 2026-10-31 synthetic runs have no matching sparse baseline in the previous
 Reusable operations warm up by doubling the iteration count until a batch takes at least 10 ms, then measure 21 equal-sized batches. Revert application and terminal resize require fresh state: they use three warm-ups followed by 21 single-operation batches, with setup and teardown outside timing. First-batch grep also uses this single-operation sampling mode.
 
 Results are median/minimum/maximum batch averages in ns/op. These ranges are not per-event latency percentiles or statistical confidence intervals. Self-checks inside an operation contribute to its timing. No timing threshold fails ordinary CI. Avoid other builds and heavy applications when collecting results for comparison.
+
+## Editor hot paths, 2026-11-01
+
+The [matched report](measurements/2026-11-01-hot-paths/README.md) retains before/after TSV for 69 core, 14 focused and nine service cases on the same Apple M5 Pro/macOS/Rust 1.99.0 host. The two obsolete Swiper count assertions and finder settle predicate were repaired before measuring the baseline; existing fixtures, names and sampling helpers are unchanged. The three supplied main-baseline artifacts remain unchanged.
+
+The separate `hot_paths` target measures first and cached frames after scoped edits at 10k/100k lines, dense 100k/1m-match previews, shown/hidden clean and dirty streams plus first show, and ten one-million-character Swiper rows. On this run the 100k-line scoped edit/undo pair fell from 920.4 to 13.6 ms, hidden dirty frames from 49.5 to 0.013 ms, and long result-row construction from 38.1 to 2.9 ms. These are core timings, excluding GPUI shaping and painting.
+
+The scope diagnostic rebuilt one scope at both sizes, retaining unrelated scope analyses. Initial parsing, shared binding environments and changed parse/injection boundaries can still require broader work. Preview match storage and coordinate conversion now follow displayed intersections, but complete-line regex input and word-wrap layout remain: the one-million-match wrapped frame still took 74.6 ms. Hidden streamed-message parsing is deferred until shown or finalized; first show still took about 50 ms. Swiper filters and navigation retain the complete source snapshot while presentation is clipped before allocation and syntax painting.
+
+The report separates these costs, includes all comparisons and the remaining GUI tail variation, and maps the specification scenarios to tests and inspection. Its real-window baseline/yes/cat runs each contain 120 input-to-paint samples; those event percentiles remain separate from headless batch averages. No CI timing gate is added.
 
 ## GUI input during terminal floods
 

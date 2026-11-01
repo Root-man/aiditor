@@ -50,14 +50,21 @@ pub(crate) struct ProjectGrep {
 }
 
 impl crate::display::Search for ProjectGrep {
-    fn matches(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+    fn matches(
+        &self,
+        text: &str,
+        displayed: &[std::ops::Range<usize>],
+    ) -> Vec<crate::display::SearchMatch> {
         let mut ranges = Vec::new();
+        let end = displayed.last().map_or(0, |r| r.end);
+        let mut first = true;
         if let Some(pattern) = &self.pattern {
             let _ = pattern.find_iter(text.as_bytes(), |m| {
                 if !m.is_empty() {
-                    ranges.push(m.start()..m.end());
+                    crate::display::retain_match(m.start()..m.end(), first, displayed, &mut ranges);
+                    first = false;
                 }
-                true
+                m.start() < end
             });
         }
         ranges
