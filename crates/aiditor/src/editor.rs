@@ -702,7 +702,7 @@ mod tests {
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.md");
-        let text = "*italic* **bold** `code` [docs](https://x.dev)\n\n```rust\nfn main() {}\n```\n";
+        let text = "*italic* **bold** `code` [docs](https://x.dev)\n\n```rust\nfn main(value: i32) { value; value; }\n```\n";
         std::fs::write(&path, text).unwrap();
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
@@ -733,13 +733,29 @@ mod tests {
             let span = lines[3].spans.iter().find(|s| s.text == "fn").unwrap();
             let run = text_run(span.text.len(), span.face, false, &font, theme);
             assert_eq!(run.color, rgb(theme.syntax["keyword"].fg.unwrap()).into());
+            let parameters: Vec<_> = lines[3]
+                .spans
+                .iter()
+                .filter(|s| s.text == "value")
+                .collect();
+            assert_eq!(parameters.len(), 3);
+            for span in parameters {
+                let run = text_run(span.text.len(), span.face, false, &font, theme);
+                assert_eq!(
+                    run.color,
+                    rgb(theme.syntax["variable.parameter"].fg.unwrap()).into()
+                );
+            }
         });
         cx.simulate_keystrokes("ctrl-n ctrl-n ctrl-n ctrl-a");
         cx.simulate_input("// ");
         cx.run_until_parked();
         editor.update(cx, |e, _| {
             let line = e.core.frame().windows.remove(0).display.lines.remove(3);
-            assert_eq!(line.spans[0].text, "// fn main() {}");
+            assert_eq!(
+                line.spans[0].text,
+                "// fn main(value: i32) { value; value; }"
+            );
             assert_eq!(
                 line.spans[0].face,
                 e.core.settings().theme.syntax["comment"]

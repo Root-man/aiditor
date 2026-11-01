@@ -1203,6 +1203,30 @@ mod tests {
         assert_eq!((face.fg, face.italic), (Some(7), true));
     }
 
+    #[test]
+    fn rust_parameter_faces_reach_every_use_and_follow_reverts() {
+        let mut h = Harness::new(&[("a.rs", "fn f(value: i32) { value; value; }")]);
+        h.core.settings = Settings::parse(Some(
+            "[themes.default.syntax]\n\"variable.parameter\" = { fg = 7, italic = true }",
+        ))
+        .unwrap();
+        h.open("a.rs");
+        let expected = h.core.settings().theme.syntax["variable.parameter"];
+        let parameters = |h: &mut Harness| {
+            h.display(1)
+                .lines
+                .into_iter()
+                .flat_map(|l| l.spans)
+                .filter(|s| s.face == expected)
+                .map(|s| s.text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(parameters(&mut h), ["value", "value", "value"]);
+        h.prepare_revert("a.rs", Some(b"fn f(other: i32) { other; }"));
+        h.keys("M-x revert-buffer RET y RET");
+        assert_eq!(parameters(&mut h), ["other", "other"]);
+    }
+
     /// Each span of the first `rows` lines, as (text, foreground).
     fn colors(h: &mut Harness, rows: usize) -> Vec<(String, Option<u32>)> {
         (h.display(rows).lines.into_iter())

@@ -16,6 +16,7 @@ use tree_sitter::{
 struct Grammar {
     language: Language,
     highlights: Query,
+    locals: Option<Query>,
 }
 
 /// Compiles `queries` joined, later patterns overriding earlier ones, as Zed and Helix extend
@@ -25,6 +26,15 @@ fn grammar(language: Language, queries: &[&str]) -> Grammar {
     Grammar {
         language,
         highlights,
+        locals: None,
+    }
+}
+
+impl Grammar {
+    fn with_locals(mut self, queries: &[&str]) -> Self {
+        self.locals =
+            Some(Query::new(&self.language, &queries.concat()).expect("bundled locals compile"));
+        self
     }
 }
 
@@ -32,21 +42,36 @@ const JS: &str = tree_sitter_javascript::HIGHLIGHT_QUERY;
 const JSX: &str = tree_sitter_javascript::JSX_HIGHLIGHT_QUERY;
 const TS: &str = tree_sitter_typescript::HIGHLIGHTS_QUERY;
 
-static JAVASCRIPT: LazyLock<Grammar> =
-    LazyLock::new(|| grammar(tree_sitter_javascript::LANGUAGE.into(), &[JS, JSX]));
+static JAVASCRIPT: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(tree_sitter_javascript::LANGUAGE.into(), &[JS, JSX])
+        .with_locals(&[tree_sitter_javascript::LOCALS_QUERY])
+});
 static TYPESCRIPT: LazyLock<Grammar> = LazyLock::new(|| {
     grammar(
         tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         &[JS, TS],
     )
+    .with_locals(&[
+        tree_sitter_javascript::LOCALS_QUERY,
+        tree_sitter_typescript::LOCALS_QUERY,
+    ])
 });
-static TSX: LazyLock<Grammar> =
-    LazyLock::new(|| grammar(tree_sitter_typescript::LANGUAGE_TSX.into(), &[JS, JSX, TS]));
+static TSX: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(tree_sitter_typescript::LANGUAGE_TSX.into(), &[JS, JSX, TS]).with_locals(&[
+        tree_sitter_javascript::LOCALS_QUERY,
+        tree_sitter_typescript::LOCALS_QUERY,
+    ])
+});
 static RUST: LazyLock<Grammar> = LazyLock::new(|| {
     grammar(
         tree_sitter_rust::LANGUAGE.into(),
-        &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+        &[
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
+            "(let_declaration pattern: (identifier) @variable)
+           (closure_parameters (identifier) @variable.parameter)",
+        ],
     )
+    .with_locals(&[include_str!("../queries/rust/locals.scm")])
 });
 static ELIXIR: LazyLock<Grammar> = LazyLock::new(|| {
     grammar(
@@ -111,6 +136,7 @@ pub(crate) struct Syntax {
     stale: bool,
     /// The last highlights: their ranges, palette and runs, reused while the tree is unchanged.
     cache: RefCell<Option<Highlights>>,
+    locals: RefCell<Option<Locals>>,
 }
 
 type Runs = Vec<(Range<usize>, Face)>;
@@ -120,6 +146,7 @@ struct Injection {
     grammar: &'static Grammar,
     ranges: Vec<tree_sitter::Range>,
     tree: Tree,
+    locals: RefCell<Option<Locals>>,
 }
 
 fn content_ranges(node: Node) -> Vec<tree_sitter::Range> {
@@ -200,6 +227,7 @@ fn markdown_injections(text: &Rope, tree: &Tree, old: Vec<Injection>) -> Vec<Inj
             grammar,
             ranges,
             tree,
+            locals: RefCell::default(),
         });
     }
     injections.sort_by_key(|i| i.ranges[0].start_byte);
@@ -225,6 +253,138 @@ fn parse(parser: &mut Parser, text: &Rope, old: Option<&Tree>) -> Tree {
         .expect("a parse without timeout or cancellation finishes")
 }
 
+type NodeRange = (usize, usize);
+type Locals = BTreeMap<NodeRange, Option<u32>>;
+
+fn local_pattern(query: &Query, pattern: usize, local: bool) -> bool {
+    query
+        .property_predicates(pattern)
+        .iter()
+        .all(|(p, positive)| p.key.as_ref() != "local" || local == *positive)
+}
+
+fn locals(grammar: &Grammar, tree: &Tree, text: &Rope) -> Locals {
+    let Some(query) = &grammar.locals else {
+        return Locals::new();
+    };
+    enum Kind {
+        Scope(bool),
+        Definition(usize),
+        Reference,
+    }
+    struct Scope {
+        end: usize,
+        inherits: bool,
+        definitions: BTreeMap<String, Vec<(usize, Option<u32>)>>,
+    }
+    let mut cursor = QueryCursor::new();
+    let source = |node: Node| {
+        text.byte_slice(node.byte_range())
+            .chunks()
+            .map(str::as_bytes)
+    };
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    let mut events = Vec::new();
+    while let Some(m) = matches.next() {
+        let value_end = m
+            .captures()
+            .iter()
+            .find_map(|c| {
+                (query.capture_names()[c.index as usize] == "local.definition-value")
+                    .then_some(c.node.end_byte())
+            })
+            .unwrap_or(0);
+        for c in m.captures() {
+            let kind = match query.capture_names()[c.index as usize] {
+                "local.scope" => {
+                    Kind::Scope(!query.property_settings(m.pattern_index).iter().any(|p| {
+                        p.key.as_ref() == "local.scope-inherits"
+                            && p.value.as_deref() == Some("false")
+                    }))
+                }
+                "local.definition" => Kind::Definition(value_end),
+                "local.reference" => Kind::Reference,
+                _ => continue,
+            };
+            events.push((c.node.byte_range(), kind));
+        }
+    }
+    events.sort_by_key(|(r, kind)| {
+        (
+            r.start,
+            Reverse(r.end),
+            match kind {
+                Kind::Scope(_) => 0,
+                Kind::Definition(_) => 1,
+                Kind::Reference => 2,
+            },
+        )
+    });
+    let mut scopes = vec![Scope {
+        end: usize::MAX,
+        inherits: false,
+        definitions: BTreeMap::new(),
+    }];
+    let mut locals = Locals::new();
+    let mut highlights = QueryCursor::new();
+    for (range, kind) in events {
+        while range.start >= scopes.last().unwrap().end {
+            scopes.pop();
+        }
+        let key = (range.start, range.end);
+        match kind {
+            Kind::Scope(inherits) => scopes.push(Scope {
+                end: range.end,
+                inherits,
+                definitions: BTreeMap::new(),
+            }),
+            Kind::Definition(value_end) => {
+                highlights.set_byte_range(range.clone());
+                let mut matches = highlights.matches(&grammar.highlights, tree.root_node(), source);
+                let mut capture = None;
+                while let Some(m) = matches.next() {
+                    if local_pattern(&grammar.highlights, m.pattern_index, true) {
+                        for c in m.captures() {
+                            if c.node.byte_range() == range
+                                && capture.is_none_or(|(p, _)| p <= m.pattern_index)
+                            {
+                                capture = Some((m.pattern_index, c.index));
+                            }
+                        }
+                    }
+                }
+                let capture = capture.map(|(_, index)| index);
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .definitions
+                    .entry(text.byte_slice(range).to_string())
+                    .or_default()
+                    .push((value_end, capture));
+                locals.insert(key, capture);
+            }
+            Kind::Reference if !locals.contains_key(&key) => {
+                let name = text.byte_slice(range.clone()).to_string();
+                for scope in scopes.iter().rev() {
+                    if let Some((_, capture)) = scope
+                        .definitions
+                        .get(&name)
+                        .and_then(|defs| defs.iter().rev().find(|(end, _)| range.start >= *end))
+                    {
+                        locals.insert(key, *capture);
+                        break;
+                    }
+                    if !scope.inherits {
+                        break;
+                    }
+                }
+            }
+            Kind::Reference => {}
+        }
+    }
+    locals
+}
+
 fn paint(
     grammar: &Grammar,
     tree: &Tree,
@@ -232,8 +392,14 @@ fn paint(
     bytes: Range<usize>,
     palette: &BTreeMap<String, Face>,
     painted: &mut [Option<Face>],
-    compose: bool,
+    locals: &RefCell<Option<Locals>>,
 ) {
+    if locals.borrow().is_none() {
+        *locals.borrow_mut() = Some(self::locals(grammar, tree, text));
+    }
+    let locals = locals.borrow();
+    let locals = locals.as_ref().unwrap();
+    let compose = std::ptr::eq(grammar, &*MARKDOWN_INLINE);
     let query = &grammar.highlights;
     let faces: Vec<_> = query
         .capture_names()
@@ -251,9 +417,22 @@ fn paint(
     let mut captures = Vec::new();
     while let Some(m) = matches.next() {
         for capture in m.captures() {
+            let key = (capture.node.start_byte(), capture.node.end_byte());
+            if !local_pattern(query, m.pattern_index, locals.contains_key(&key)) {
+                continue;
+            }
             if let Some(face) = faces[capture.index as usize] {
                 captures.push((capture.node.byte_range(), m.pattern_index, face));
             }
+        }
+    }
+    for (&(start, end), capture) in locals
+        .range(..(bytes.end, 0))
+        .rev()
+        .take_while(|((_, end), _)| *end > bytes.start)
+    {
+        if let Some(face) = capture.and_then(|c| faces[c as usize]) {
+            captures.push((start..end, usize::MAX, face));
         }
     }
     // Painted in order, so the innermost node wins, then the later pattern on one node.
@@ -316,6 +495,7 @@ impl Syntax {
             injections,
             stale: false,
             cache: RefCell::default(),
+            locals: RefCell::default(),
         })
     }
 
@@ -343,6 +523,7 @@ impl Syntax {
         }
         self.stale = true;
         self.cache.take();
+        self.locals.take();
     }
 
     /// Reparses `text`, reusing the old tree, if it was edited since the last parse.
@@ -358,8 +539,8 @@ impl Syntax {
     }
 
     /// The faces `palette` gives the chars of sorted, disjoint `ranges` of `text`, as sorted,
-    /// disjoint char ranges. Each range is queried alone, so a long line's unseen chars cost
-    /// nothing, while nodes reaching in from outside it still colour it.
+    /// disjoint char ranges. Painting queries each range alone; local bindings and definition
+    /// captures are cached across the whole tree, including definitions outside the window.
     pub(crate) fn highlights(
         &self,
         text: &Rope,
@@ -383,7 +564,7 @@ impl Syntax {
                 bytes.clone(),
                 palette,
                 &mut painted,
-                false,
+                &self.locals,
             );
             let first = self
                 .injections
@@ -416,7 +597,7 @@ impl Syntax {
                         start..end,
                         palette,
                         painted,
-                        inline,
+                        &injection.locals,
                     );
                 }
             }
@@ -584,6 +765,128 @@ mod tests {
 
     fn face_at(text: &str, faces: &[Face], needle: &str) -> Face {
         faces[text[..text.find(needle).unwrap()].chars().count()]
+    }
+
+    fn local_faces(file: &str, text: &str, name: &str) -> Vec<Option<u32>> {
+        let rope = Rope::from_str(text);
+        let syntax = Syntax::for_file(Path::new(file), &rope).unwrap();
+        let p = palette(&[
+            ("variable.parameter", 1),
+            ("variable", 2),
+            ("variable.builtin", 3),
+            ("function", 4),
+            ("function.builtin", 5),
+        ]);
+        let runs = syntax.highlights(&rope, &[0..rope.len_chars()], &p);
+        text.match_indices(name)
+            .map(|(byte, _)| {
+                let at = rope.byte_to_char(byte);
+                runs.iter()
+                    .find(|(r, _)| r.contains(&at))
+                    .and_then(|(_, f)| f.fg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rust_parameters_and_shadowed_locals_keep_their_definition_faces() {
+        let text = "fn f(value: i32) { value; { let value = value; value; } value; let value = value; value; } fn g() { value; }";
+        assert_eq!(
+            local_faces("a.rs", text, "value"),
+            [
+                Some(1),
+                Some(1),
+                Some(2),
+                Some(1),
+                Some(2),
+                Some(1),
+                Some(2),
+                Some(1),
+                Some(2),
+                None
+            ]
+        );
+        let text = "fn f(value: i32) { let f = || value; let g = |value| value; value; fn nested() { value; } }";
+        assert_eq!(
+            local_faces("a.rs", text, "value"),
+            [Some(1), Some(1), Some(1), Some(1), Some(1), None]
+        );
+    }
+
+    #[test]
+    fn typescript_parameters_and_javascript_builtins_resolve_locally() {
+        for ext in ["ts", "tsx"] {
+            let text = "function f(console: number) { console; { let console = 1; console; } console; } console;";
+            assert_eq!(
+                local_faces(&format!("a.{ext}"), text, "console"),
+                [Some(1), Some(1), Some(2), Some(2), Some(1), Some(3)]
+            );
+        }
+        let text = "console; function f(console) { console; } console; { let require = 1; require(); } require();";
+        assert_eq!(
+            local_faces("a.js", text, "console"),
+            [Some(3), Some(2), Some(2), Some(3)]
+        );
+        assert_eq!(
+            local_faces("a.js", text, "require"),
+            [Some(2), Some(2), Some(5)]
+        );
+    }
+
+    #[test]
+    fn offscreen_local_definitions_use_the_current_palette_and_partial_ranges() {
+        let text = "// é\nfn f(value: i32) {\n value;\n value;\n}";
+        let rope = Rope::from_str(text);
+        let syntax = Syntax::for_file(Path::new("a.rs"), &rope).unwrap();
+        let start = rope.byte_to_char(text.rfind("value").unwrap()) + 1;
+        for p in [
+            palette(&[("variable.parameter", 1)]),
+            palette(&[("variable", 2)]),
+        ] {
+            assert_eq!(
+                syntax.highlights(&rope, &[start..start + 3], &p),
+                [(start..start + 3, p.values().next().copied().unwrap())]
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_fences_have_separate_local_bindings() {
+        let text = "```rust\nfn f(value: i32) { value; }\n```\n\n```rust\nfn g() { value; }\n```";
+        assert_eq!(local_faces("a.md", text, "value"), [Some(1), Some(1), None]);
+    }
+
+    #[test]
+    fn local_bindings_follow_unicode_edits_undo_and_redo() {
+        for (file, text) in [
+            ("/a.rs", "fn f(été: i32) { été; }"),
+            ("/a.md", "```rust\nfn f(été: i32) { été; }\n```"),
+        ] {
+            let mut buffers = crate::buffer::Buffers::default();
+            let id = buffers.create_for_file(Path::new(file), text);
+            let b = buffers.get_mut(id).unwrap();
+            let p = palette(&[("variable.parameter", 1)]);
+            let reference = text[..text.rfind("été").unwrap()].chars().count();
+            let check = |b: &mut crate::buffer::Buffer, start, expected| {
+                b.reparse();
+                let mut faces = [Face::default(); 3];
+                for (range, face) in b.highlights(&[start..start + 3], &p) {
+                    faces[range.start - start..range.end - start].fill(face);
+                }
+                assert_eq!(faces, [expected; 3]);
+            };
+            check(b, reference, fg(1));
+            let definition = text[..text.find("été").unwrap()].chars().count();
+            b.undo_boundary(0);
+            b.delete(definition..definition + 3).unwrap();
+            b.insert(definition, "étéx").unwrap();
+            b.undo_boundary(0);
+            check(b, reference + 1, Face::default());
+            b.undo();
+            check(b, reference, fg(1));
+            b.redo();
+            check(b, reference + 1, Face::default());
+        }
     }
 
     #[test]
