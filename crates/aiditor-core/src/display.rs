@@ -1195,12 +1195,32 @@ mod tests {
 
     #[test]
     fn syntax_entries_are_whole_faces() {
-        let mut h = Harness::new(&[("a.js", "// x")]);
-        let settings = "[themes.default.syntax]\ncomment = { fg = 7, italic = true }";
-        h.core.settings = Settings::parse(Some(settings)).unwrap();
+        let mut h = Harness::new(&[("a.js", "// x\nconst x = 1;")]);
         h.open("a.js");
-        let face = h.display(1).lines.remove(0).spans[0].face;
-        assert_eq!((face.fg, face.italic), (Some(7), true));
+        for styled in [true, false] {
+            let settings = format!(
+                "theme = 'mine'\n[themes.default.syntax]\ncomment = {{ fg = 7, italic = true }}\nkeyword = {{ fg = 8, bold = true }}\n[themes.mine.syntax]\ncomment = {{ italic = {styled} }}\nkeyword = {{ bold = {styled} }}"
+            );
+            h.send(crate::Msg::SettingsLoaded(Ok(Some(settings))));
+            let display = h.display(2);
+            let comment = display.lines[0].spans[0].face;
+            let keyword = display.lines[1].spans[0].face;
+            assert_eq!((comment.fg, comment.italic), (Some(7), styled));
+            assert_eq!((keyword.fg, keyword.bold), (Some(8), styled));
+        }
+        for theme in ["default", "unused"] {
+            let before = h.core.settings().clone();
+            h.send(crate::Msg::SettingsLoaded(Ok(Some(format!(
+                "[themes.{theme}.syntax]\ncomment = 0x928374"
+            )))));
+            assert_eq!(h.core.settings(), &before);
+            assert!(
+                h.core
+                    .message()
+                    .unwrap()
+                    .contains(&format!("themes.{theme}"))
+            );
+        }
     }
 
     #[test]
