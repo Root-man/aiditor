@@ -1182,6 +1182,7 @@ mod tests {
 
     #[gpui::test]
     fn the_workspace_modeline_sits_above_the_windows(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 3");
         let (tops, bar) = editor.read_with(cx, |e, _| {
@@ -1218,6 +1219,7 @@ mod tests {
     fn the_workspace_clock_stays_at_the_right_inset_and_wakes_without_keys(
         cx: &mut TestAppContext,
     ) {
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let mut reads = 0;
