@@ -1018,8 +1018,10 @@ pub fn decode(bytes: &[u8]) -> Result<(String, bool, bool), &'static str> {
     }
     let text =
         std::str::from_utf8(&bytes[if bom { 3 } else { 0 }..]).map_err(|_| "not valid UTF-8")?;
-    // The first line break sets the ending; lone CRs stay in the text.
-    let crlf = text.find('\n').is_some_and(|i| text[..i].ends_with('\r'));
+    let crlf = text.contains('\n')
+        && text
+            .match_indices('\n')
+            .all(|(i, _)| text[..i].ends_with('\r'));
     let text = match crlf {
         true => text.replace("\r\n", "\n"),
         false => text.to_string(),
@@ -1157,6 +1159,13 @@ mod tests {
         assert_eq!(decode(b""), Ok((String::new(), false, false)));
         assert_eq!(decode(b"a\0b"), Err("binary file"));
         assert_eq!(decode(b"caf\xE9"), Err("not valid UTF-8"));
+        for (bytes, expected, crlf) in [
+            (&b"a\r\nb\n"[..], "a\r\nb\n", false),
+            (&b"a\r\nb"[..], "a\nb", true),
+        ] {
+            assert_eq!(decode(bytes), Ok((expected.into(), crlf, false)));
+            assert_eq!(encode(&Rope::from_str(expected), crlf, false), bytes);
+        }
         // A NUL past the first 8 KB is valid UTF-8 text.
         let late = [vec![b'a'; 8192], vec![0]].concat();
         assert!(decode(&late).is_ok());

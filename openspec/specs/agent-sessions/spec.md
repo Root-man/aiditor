@@ -68,13 +68,6 @@ An agent's exit or failed start SHALL end only its own session: other sessions, 
 - **WHEN** two sessions are ready and the first agent exits
 - **THEN** the second session is still live and no kill is sent to its agent
 
-### Requirement: Session updates are kept
-Each `session/update` notification from a session's agent SHALL be kept in that session, in order, and SHALL NOT change any buffer's text. Updates for an unknown or ended session SHALL be dropped.
-
-#### Scenario: An update is kept
-- **WHEN** a ready agent sends an agent message chunk update
-- **THEN** the session holds that update and no buffer's text changed
-
 ### Requirement: Killing the session buffer stops the agent
 Killing a live session's session buffer SHALL first ask `Buffer <name> has a running process; kill it? `, completing over `no` then `yes`, as for a live terminal; on `yes` the buffer SHALL be killed and the agent stopped, with no crash note. An ended session's buffer SHALL be killed without asking. Killing a workspace SHALL stop the agents of the session buffers it kills.
 
@@ -138,3 +131,14 @@ A new session's first prompt SHALL carry, before the user's text and as its own 
 #### Scenario: Nothing to list
 - **WHEN** the first prompt is sent in a project with no other roots and no role line on the primary
 - **THEN** its request holds only the user's text
+
+### Requirement: Updates for unknown or ended sessions are dropped
+A `session/update` notification for an unknown or ended session SHALL be dropped without changing any buffer's text.
+
+#### Scenario: An update after the session ended
+- **WHEN** an agent's session has ended and an agent message chunk update arrives for it
+- **THEN** no buffer's text changes
+
+#### Scenario: An update for an unknown session
+- **WHEN** an agent message chunk update arrives for an agent id the core does not know
+- **THEN** no buffer's text changes

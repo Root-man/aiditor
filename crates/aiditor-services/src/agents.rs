@@ -248,8 +248,20 @@ impl Agents {
             tx.clone(),
         ));
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut reader = BufReader::new(stderr);
+            let mut bytes = Vec::new();
+            while let Ok(count) = reader.read_until(b'\n', &mut bytes).await {
+                if count == 0 {
+                    break;
+                }
+                if bytes.last() == Some(&b'\n') {
+                    bytes.pop();
+                    if bytes.last() == Some(&b'\r') {
+                        bytes.pop();
+                    }
+                }
+                let line = String::from_utf8_lossy(&bytes).into_owned();
+                bytes.clear();
                 if tx.send(Msg::AgentStderr { id, line }).await.is_err() {
                     break;
                 }

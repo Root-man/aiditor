@@ -203,7 +203,7 @@ Closing a previewing minibuffer in any way (`C-g`, `RET`, switching workspace) S
 - **THEN** the command runs with the candidate, from the window as it was before the prompt
 
 ### Requirement: A preview can show a file not yet visited
-A preview SHALL be able to name a file. A file visited in the current workspace SHALL show its buffer. Any other file SHALL be read and prepared as text off the core thread into a hidden, read-only preview buffer, the window keeping what it showed until the read answers. Only the current preview request of the same prompt session SHALL be allowed to install its result; a reply from a closed prompt or an obsolete selection SHALL be dropped, even if a later prompt selects the same path. A file that is missing, binary or unreadable SHALL show the window as it was.
+A preview SHALL be able to name a file. A file visited in the current workspace SHALL show its buffer. Any other file SHALL be read and prepared as text off the core thread into a hidden, read-only preview buffer, the window keeping what it showed until the read answers. Only the current preview request of the same prompt session SHALL be allowed to install its result; a reply from a closed prompt or an obsolete selection SHALL be dropped, even if a later prompt selects the same path. A file that is missing, binary, unreadable, not a regular file, or larger than 10 MiB SHALL show the window as it was, and a device or pipe SHALL NOT be read.
 
 #### Scenario: Previewing an unvisited file
 - **GIVEN** a previewing prompt is open
@@ -219,6 +219,20 @@ A preview SHALL be able to name a file. A file visited in the current workspace 
 - **GIVEN** a preview read belongs to a prompt that has closed
 - **WHEN** a new prompt selects the same path before the old read answers
 - **THEN** the new prompt uses its own current request and the old result leaves its window unchanged
+
+#### Scenario: Selecting a device
+- **GIVEN** `C-x C-f` lists `/dev/`
+- **WHEN** `zero` is selected
+- **THEN** no bytes are read from it and the window shows what it showed before the prompt
+
+#### Scenario: Selecting a named pipe
+- **GIVEN** a previewing prompt lists a named pipe and a text file
+- **WHEN** the pipe is selected, then the text file
+- **THEN** the window shows the text file's text
+
+#### Scenario: A file over the limit
+- **WHEN** a previewing prompt selects a file larger than 10 MiB that no buffer visits
+- **THEN** the file is not read for the preview, the window shows what it showed before and `RET` still visits it
 
 ### Requirement: One preview buffer at a time
 There SHALL be at most one preview buffer. It SHALL be killed when another file is read for preview and when the minibuffer closes, so `RET` visits the file as it would without a preview.
@@ -267,7 +281,7 @@ A filtering prompt SHALL add the typed text to its history instead of the select
 - **THEN** the text is `b`
 
 ### Requirement: Preview requests coalesce to the current selection
-The editor SHALL keep at most one preview file read active and one latest pending request, including across prompt closures and reopenings. A selection change SHALL replace an obsolete pending request. Closing a prompt SHALL cancel its queued request and invalidate its active result. Preparation of preview text SHALL leave the editor able to process input. Existing preview restoration, visited-buffer reuse, full-file display, and normal file visitation on `RET` SHALL remain in effect.
+The editor SHALL keep at most one preview file read active and one latest pending request, including across prompt closures and reopenings. A selection change SHALL replace an obsolete pending request. Closing a prompt SHALL cancel its queued request and invalidate its active result. Preparation of preview text SHALL leave the editor able to process input. Existing preview restoration, visited-buffer reuse, full-file display of files within the preview limit, and normal file visitation on `RET` SHALL remain in effect.
 
 #### Scenario: Moving quickly through candidates
 - **GIVEN** file `a` is being read and file `b` is queued for preview

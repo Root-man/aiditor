@@ -840,7 +840,7 @@ impl Ctx<'_> {
                 result,
             } => self.auto_saved(buffer, request, tick, result),
             Msg::Recover(files) if !files.is_empty() => {
-                self.core.recovered.extend(files);
+                self.core.autosave.recovered.extend(files);
                 self.call("recover-buffers", Args::default());
             }
             Msg::Recover(_) => {}
@@ -1001,20 +1001,8 @@ pub struct Core {
     quitting: Vec<BufferId>,
     /// The workspace to kill rather than quit once the saves in `quitting` succeed.
     then_kill: Option<WorkspaceId>,
-    /// Pending and persisted recovery snapshots, including accepted earlier-session copies.
-    autosaved: HashMap<BufferId, autosave::State>,
-    next_autosave: u64,
-    autosave_retry: Option<TimerId>,
-    autosave_stopped: bool,
-    /// The auto-save timers: restarted by each edit, and started by the first edit after a write.
-    autosave_idle: Option<TimerId>,
-    autosave_max: Option<TimerId>,
-    /// Earlier sessions' recovery files not yet recovered or discarded, oldest first.
-    recovered: Vec<Recovered>,
-    /// The watch set last sent to the watcher.
-    watching: WatchSet,
-    watch_refresh: bool,
-    watch_refusals: BTreeMap<ProjectId, (usize, usize, usize)>,
+    autosave: autosave::Autosave,
+    watch: watching::Watch,
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
     focused: BufferId,
@@ -1097,16 +1085,8 @@ impl Default for Core {
             message: None,
             quitting: Vec::new(),
             then_kill: None,
-            autosaved: HashMap::new(),
-            next_autosave: 0,
-            autosave_retry: None,
-            autosave_stopped: false,
-            autosave_idle: None,
-            autosave_max: None,
-            recovered: Vec::new(),
-            watching: WatchSet::default(),
-            watch_refresh: false,
-            watch_refusals: BTreeMap::new(),
+            autosave: autosave::Autosave::default(),
+            watch: watching::Watch::default(),
             focused: scratch,
             terminals: BTreeMap::new(),
             next_terminal: 0,

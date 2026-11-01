@@ -99,8 +99,9 @@ pub fn run(op: FileOp) -> Msg {
             }
         }
         FileOp::Preview(request) => {
-            let result = match fs::read(&request.path) {
-                Ok(bytes) => prepare_preview(&bytes).map(Some).map_err(str::to_string),
+            let result = match preview(&request.path) {
+                Ok(Some(bytes)) => prepare_preview(&bytes).map(Some).map_err(str::to_string),
+                Ok(None) => Ok(None),
                 Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
                 Err(err) => Err(err.to_string()),
             }
@@ -218,11 +219,28 @@ pub fn head(path: &Path) -> Option<Head> {
 }
 
 /// Whether git reports `path` as changed or untracked; no if git can't say.
-// shortcut: one process per file, so a commit with many buffers open runs many; ask once per repository if that shows.
+// shortcut: two processes per file, so a commit with many buffers open runs many; ask once per repository if that shows.
 fn changed(path: &Path) -> bool {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return false;
     };
+    let filters = Command::new("git")
+        .args(["config", "--show-scope", "--get-regexp", "^filter\\."])
+        .current_dir(dir)
+        .stderr(Stdio::null())
+        .output();
+    match filters {
+        Ok(output) if output.status.success() => {
+            if String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| !matches!(line.split_whitespace().next(), Some("global" | "system")))
+            {
+                return false;
+            }
+        }
+        Ok(output) if output.status.code() == Some(1) => {}
+        _ => return false,
+    }
     // Without `--no-optional-locks` status rewrites the index, whose report would run it again.
     // A repository's `core.fsmonitor` is a command, and opening a file mustn't run it.
     let status = Command::new("git")
@@ -237,7 +255,7 @@ fn changed(path: &Path) -> bool {
 
 /// The file's bytes and their hash, or `None` when there is no file.
 pub fn read(path: &Path) -> io::Result<Option<(Vec<u8>, u64)>> {
-    match fs::read(path) {
+    match checked_metadata(path).and_then(|_| fs::read(path)) {
         Ok(bytes) => {
             let h = hash(&bytes);
             Ok(Some((bytes, h)))
@@ -245,6 +263,23 @@ pub fn read(path: &Path) -> io::Result<Option<(Vec<u8>, u64)>> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
+}
+
+const PREVIEW_LIMIT: u64 = 10 * 1024 * 1024;
+
+fn checked_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    Ok(metadata)
+}
+
+fn preview(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    if checked_metadata(path)?.len() > PREVIEW_LIMIT {
+        return Ok(None);
+    }
+    fs::read(path).map(Some)
 }
 
 /// Directory entries sorted by name, with subdirectories followed by `/`.
@@ -385,29 +420,28 @@ pub(crate) fn searchable_file(entry: &DirEntry) -> bool {
 /// left out, hidden ones in, `.git` never, symlinked directories not followed, in path order.
 pub(crate) fn walker(dir: &Path, root: &Path, patterns: &Patterns) -> WalkBuilder {
     let mut walk = WalkBuilder::new(dir);
-    configure_walker(&mut walk, vec![root.to_path_buf()], patterns);
+    configure_walker(&mut walk, root, patterns);
     walk.sort_by_file_name(|a, b| a.cmp(b));
     walk
 }
 
 pub(crate) fn grep_walker(root: &Path, patterns: &Patterns, workers: usize) -> WalkBuilder {
     let mut walk = WalkBuilder::new(root);
-    configure_walker(&mut walk, vec![root.to_path_buf()], patterns);
+    configure_walker(&mut walk, root, patterns);
     walk.threads(workers);
     walk
 }
 
-fn configure_walker(walk: &mut WalkBuilder, roots: Vec<PathBuf>, patterns: &Patterns) {
+fn configure_walker(walk: &mut WalkBuilder, root: &Path, patterns: &Patterns) {
+    let root = root.to_path_buf();
     let patterns = patterns.clone();
     walk.hidden(false)
         .require_git(false)
         .filter_entry(move |e| {
             e.file_name() != ".git"
-                && !roots.iter().any(|root| {
-                    e.path().strip_prefix(root).is_ok_and(|rel| {
-                        let dir = e.file_type().is_some_and(|t| t.is_dir());
-                        patterns.ignored(rel, dir)
-                    })
+                && !e.path().strip_prefix(&root).is_ok_and(|rel| {
+                    let dir = e.file_type().is_some_and(|t| t.is_dir());
+                    patterns.ignored(rel, dir)
                 })
         });
 }
@@ -525,11 +559,16 @@ pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u6
             }
         }
     }
-    // A missing file or a dangling symlink: nothing to keep, and fs::write creates it through the link.
+    // A missing file or a dangling symlink: nothing to keep; create it through the link.
     let Ok(target) = fs::canonicalize(path) else {
-        fs::write(path, bytes).map_err(err)?;
+        write_synced(path, bytes).map_err(err)?;
         return Ok(hash(bytes));
     };
+    if let Err(e) = OpenOptions::new().write(true).open(&target)
+        && e.kind() == ErrorKind::PermissionDenied
+    {
+        return Err(err(e));
+    }
     let meta = fs::metadata(&target).map_err(err)?;
     let in_place = meta.nlink() > 1
         || match replace(&target, bytes, meta.permissions()) {
@@ -538,9 +577,15 @@ pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u6
             Err(e) => return Err(err(e)),
         };
     if in_place {
-        fs::write(&target, bytes).map_err(err)?;
+        write_synced(&target, bytes).map_err(err)?;
     }
     Ok(hash(bytes))
+}
+
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// Writes a temp file beside `target` with `perms` and renames it over `target`.
@@ -1261,6 +1306,72 @@ mod tests {
     }
 
     #[test]
+    fn repository_filters_are_skipped_but_global_filters_work() {
+        const CHILD: &str = "AIDITOR_TEST_GLOBAL_FILTER";
+        if let Some(path) = std::env::var_os(CHILD) {
+            assert!(head(Path::new(&path)).unwrap().changed);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        fs::write(dir.path().join(".gitattributes"), "file filter=x\n").unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, "old\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "initial",
+        ]);
+        git(&["config", "filter.x.clean", "touch marker; cat"]);
+        fs::write(&path, "new\n").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(10);
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(!head(&path).unwrap().changed);
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            3,
+            "file, attributes and .git; no marker"
+        );
+        git(&["config", "--remove-section", "filter.x"]);
+        let global = dir.path().join("global-config");
+        fs::write(&global, "[filter \"x\"]\n clean = cat\n").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "files::tests::repository_filters_are_skipped_but_global_filters_work",
+            ])
+            .env(CHILD, &path)
+            .env("GIT_CONFIG_GLOBAL", global)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
     fn a_file_outside_a_repository_has_no_head() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join(".git")).unwrap();
@@ -1273,6 +1384,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read(&dir.path().join("none")).unwrap(), None);
         assert!(read(dir.path()).is_err());
+    }
+
+    #[test]
+    fn refuses_a_fifo_before_opening_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(read(&path).unwrap_err().to_string(), "not a regular file");
+        assert_eq!(
+            preview(&path).unwrap_err().to_string(),
+            "not a regular file"
+        );
+        assert_eq!(
+            read(dir.path()).unwrap_err().raw_os_error(),
+            fs::read(dir.path()).unwrap_err().raw_os_error()
+        );
+    }
+
+    #[test]
+    fn previews_files_up_to_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(PREVIEW_LIMIT + 1).unwrap();
+        assert_eq!(preview(&path).unwrap(), None);
+        fs::write(&path, vec![b'x'; PREVIEW_LIMIT as usize]).unwrap();
+        let Msg::Previewed { result, .. } = run(FileOp::Preview(aiditor_core::PreviewRequest {
+            session: 1,
+            revision: 1,
+            path,
+        })) else {
+            panic!("not previewed")
+        };
+        assert_eq!(result.unwrap().unwrap().len_bytes() as u64, PREVIEW_LIMIT);
     }
 
     #[test]
@@ -1317,6 +1468,22 @@ mod tests {
         fs::hard_link(&a, &b).unwrap();
         write(&a, b"new", WriteExpectation::Update(hash_of(&a))).unwrap();
         assert_eq!(fs::read_to_string(&b).unwrap(), "new");
+    }
+
+    #[test]
+    fn refuses_to_replace_a_read_only_file() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("readonly");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o444)).unwrap();
+        let result = write(&path, b"new", WriteExpectation::Update(hash_of(&path)));
+        assert!(
+            matches!(result, Err(WriteFailure::Io(e)) if e.kind() == ErrorKind::PermissionDenied)
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
     }
 
     #[test]

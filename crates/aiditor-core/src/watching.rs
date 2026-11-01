@@ -7,6 +7,13 @@ use crate::file_index::scope;
 use crate::project::{Entry, ProjectId};
 use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, Head, WatchSet};
 
+#[derive(Default)]
+pub(crate) struct Watch {
+    pub(crate) watching: WatchSet,
+    pub(crate) refresh: bool,
+    pub(crate) refusals: std::collections::BTreeMap<ProjectId, (usize, usize, usize)>,
+}
+
 impl Core {
     /// A project with `watch = true`: its kept files and directories, as a walk of its current
     /// roots and patterns counted them without an error, and its `max_watched_files`.
@@ -75,15 +82,15 @@ impl Core {
             .filter(|(_, (files, dirs, limit))| files.max(dirs) > limit)
             .collect();
         for (name, &(files, directories, limit)) in &refusals {
-            if self.watch_refusals.get(name) != Some(&(files, directories, limit)) {
+            if self.watch.refusals.get(name) != Some(&(files, directories, limit)) {
                 let name = self.project_name(*name);
                 self.report(format!("Project {name} is unwatched: files = {files}, directories = {directories}; max_watched_files = {limit} exceeded"));
             }
         }
-        self.watch_refusals = refusals;
+        self.watch.refusals = refusals;
         let set = self.watch_set();
-        if std::mem::take(&mut self.watch_refresh) || set != self.watching {
-            self.watching = set.clone();
+        if std::mem::take(&mut self.watch.refresh) || set != self.watch.watching {
+            self.watch.watching = set.clone();
             effects.push(Effect::Watch(set));
         }
     }

@@ -231,31 +231,17 @@ impl Ctx<'_> {
     /// then quits once those saves succeed.
     pub(crate) fn save_buffers_kill_terminal(&mut self, mut args: Args) -> Result<(), String> {
         let command = "save-buffers-kill-terminal";
-        // Marks the processes answer, the last string, so `save_some`'s pairs don't shift.
-        const PROCESSES: &str = "\0processes";
-        let n = args.strings.len();
-        let processes = (n >= 2 && args.strings[n - 2] == PROCESSES).then(|| {
-            let answer = args.strings.pop();
-            args.strings.pop();
-            answer.expect("two strings")
-        });
+        let processes = self.process_answer(&mut args);
         let Some(saving) = self.save_some(command, args.clone(), 0, |_| true, "exit")? else {
             return Ok(());
         };
-        if !self.core.terminals.is_empty() || self.core.live_agents() {
-            match processes {
-                None => {
-                    args.strings.push(PROCESSES.into());
-                    let prompt = "Active processes exist; kill them and exit anyway? ".into();
-                    let command = self.core.commands[command];
-                    return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
-                }
-                Some(answer) if answer.eq_ignore_ascii_case("yes") => {}
-                Some(_) => {
-                    // As declining to exit anyway, the buffers answered `Yes` are still saved.
-                    return saving.iter().try_for_each(|&id| self.save(id));
-                }
+        let live = !self.core.terminals.is_empty() || self.core.live_agents();
+        let answered = processes.is_some();
+        if !self.confirm_processes(command, args, live, processes, "exit")? {
+            if !answered {
+                return Ok(());
             }
+            return saving.iter().try_for_each(|&id| self.save(id));
         }
         for &id in &saving {
             self.save(id)?;
@@ -265,6 +251,40 @@ impl Ctx<'_> {
             false => (self.core.quitting, self.core.then_kill) = (saving, None),
         }
         Ok(())
+    }
+
+    pub(crate) fn process_answer(&self, args: &mut Args) -> Option<String> {
+        let n = args.strings.len();
+        (n >= 2 && args.strings[n - 2] == "\0processes").then(|| {
+            let answer = args.strings.pop().expect("two strings");
+            args.strings.pop();
+            answer
+        })
+    }
+
+    pub(crate) fn confirm_processes(
+        &mut self,
+        command: &'static str,
+        mut args: Args,
+        live: bool,
+        answer: Option<String>,
+        verb: &str,
+    ) -> Result<bool, String> {
+        if !live {
+            return Ok(true);
+        }
+        if let Some(answer) = answer {
+            return Ok(answer.eq_ignore_ascii_case("yes"));
+        }
+        args.strings.push("\0processes".into());
+        let prompt = format!("Active processes exist; kill them and {verb} anyway? ");
+        self.read_string(
+            self.core.commands[command],
+            args,
+            prompt,
+            Some(&["No", "Yes"]),
+        )?;
+        Ok(false)
     }
 
     /// Asks `command`'s questions about the modified file buffers `of` takes: whether to save
@@ -992,6 +1012,16 @@ mod tests {
         h.keys("x C-x C-s");
         assert!(h.core.current().modified());
         assert_eq!(h.core.current().disk, None);
+    }
+
+    #[test]
+    fn saving_mixed_line_endings_changes_only_the_edit() {
+        let mut h = Harness::new(&[("mixed.txt", "a\r\nb\n")]);
+        h.open("mixed.txt");
+        assert_eq!(h.text(), "a\r\nb\n");
+        h.save_reply("a\r\nb\nx\n");
+        h.keys("M-> x C-x C-s");
+        assert_eq!(h.submitted("mixed.txt"), "a\r\nb\nx\n");
     }
 
     #[test]

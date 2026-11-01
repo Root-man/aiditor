@@ -44,7 +44,9 @@ pub(crate) struct ProjectGrep {
     /// The project's ignore patterns.
     ignore: Vec<String>,
     /// The listed hits with their labels, kept after the prompt closes for its handler.
-    hits: Vec<(String, Hit)>,
+    hits: Vec<(String, Hit, usize)>,
+    groups: HashMap<(PathBuf, PathBuf), usize>,
+    line_number_width: usize,
     pattern: Option<RegexMatcher>,
     pending_pattern: Option<RegexMatcher>,
 }
@@ -91,8 +93,12 @@ impl ProjectGrep {
     pub(crate) fn hit(&self, label: &str) -> Option<&Hit> {
         self.hits
             .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, hit)| hit)
+            .find(|(l, _, _)| l == label)
+            .map(|(_, hit, _)| hit)
+    }
+
+    pub(crate) fn hit_at(&self, index: usize) -> Option<&Hit> {
+        self.hits.get(index).map(|(_, hit, _)| hit)
     }
 
     pub(crate) fn file_label(&self, hit: &Hit) -> String {
@@ -105,12 +111,7 @@ impl ProjectGrep {
     }
 
     pub(crate) fn line_number_width(&self) -> usize {
-        self.hits
-            .iter()
-            .map(|(_, h)| (h.line + 1).to_string().len())
-            .max()
-            .unwrap_or(0)
-            .max(3)
+        self.line_number_width.max(3)
     }
 
     /// `<root name>/<path>:<1-based line>:<text>`.
@@ -127,8 +128,8 @@ impl ProjectGrep {
 }
 
 /// The selected hit's file at its match.
-pub(crate) fn preview(core: &Core, label: &str) -> Option<Preview> {
-    let hit = core.grep.hit(label)?;
+pub(crate) fn preview(core: &Core, _label: &str) -> Option<Preview> {
+    let hit = core.grep.hit_at(core.prompts.selected_index()?)?;
     Some(Preview::FileAt(hit.root.join(&hit.path), hit.line, hit.col))
 }
 
@@ -167,6 +168,8 @@ impl Core {
                 effects.push(Effect::Grep(GrepOp::Cancel));
             }
             grep.hits.clear();
+            grep.groups.clear();
+            grep.line_number_width = 0;
             grep.pattern = None;
             grep.pending_pattern = None;
             return self.set_items("project-grep", Vec::new(), true);
@@ -199,21 +202,24 @@ impl Core {
         let replace = !std::mem::replace(&mut grep.answered, true);
         if replace {
             grep.hits.clear();
+            grep.groups.clear();
+            grep.line_number_width = 0;
             grep.pattern = grep.pending_pattern.take();
         }
         match hits {
             Ok(hits) => {
-                let labels: Vec<String> = hits.iter().map(|hit| grep.label(hit)).collect();
-                grep.hits.extend(labels.into_iter().zip(hits));
-                let mut files = HashMap::new();
-                for (_, hit) in &grep.hits {
-                    let next = files.len();
-                    files
+                for hit in hits {
+                    let label = grep.label(&hit);
+                    let next = grep.groups.len();
+                    let group = *grep
+                        .groups
                         .entry((hit.root.clone(), hit.path.clone()))
                         .or_insert(next);
+                    grep.line_number_width =
+                        grep.line_number_width.max((hit.line + 1).to_string().len());
+                    grep.hits.push((label, hit, group));
                 }
-                grep.hits
-                    .sort_by_cached_key(|(_, hit)| files[&(hit.root.clone(), hit.path.clone())]);
+                grep.hits.sort_by_key(|(_, _, group)| *group);
                 grep.no_matches = done && grep.hits.is_empty();
             }
             Err(err) => {
@@ -221,11 +227,12 @@ impl Core {
                 self.echo(err.lines().last().unwrap_or_default().to_string());
             }
         }
+        // shortcut: set_items still clones every label per batch; share them if streaming labels becomes costly.
         let labels = self
             .grep
             .hits
             .iter()
-            .map(|(label, _)| label.clone())
+            .map(|(label, _, _)| label.clone())
             .collect();
         self.set_items("project-grep", labels, replace);
     }
@@ -486,6 +493,7 @@ mod tests {
     /// The current workspace's project at `app`, with `lib` as a second root.
     fn grepping(files: &[(&str, &str)], hits: &[(&str, &str, usize, usize, &str)]) -> Harness {
         let mut h = Harness::new(files);
+        h.frame(800., 600.);
         h.grep_reply(hits);
         let (app, lib) = (h.path("app"), h.path("lib"));
         let project = &mut h.core.projects[0].project;
@@ -498,8 +506,8 @@ mod tests {
     }
 
     fn listed(h: &mut Harness) -> Vec<String> {
-        h.core
-            .minibuffer()
+        h.frame(800., 600.)
+            .minibuffer
             .expect("the minibuffer is open")
             .candidates
     }
@@ -880,6 +888,26 @@ mod tests {
         h.keys("DEL DEL").advance(WAIT);
         assert_eq!(listed(&mut h), Vec::<String>::new());
         assert_eq!(h.greps.len(), 1, "too short searches nothing");
+    }
+
+    #[test]
+    fn listed_lines_are_cut_but_accept_reaches_the_full_match() {
+        for prefix in [
+            "short".to_string(),
+            "x".repeat(1_000_000),
+            "été".repeat(300),
+        ] {
+            let text = format!("{prefix}needle");
+            let col = prefix.chars().count();
+            let mut h = grepping(&[("app/a.rs", &text)], &[("app", "a.rs", 0, col, &text)]);
+            h.frame(664., 600.);
+            h.keys("C-x p g needle").advance(WAIT);
+            let mb = h.core.minibuffer().unwrap();
+            let row = mb.candidates[0].strip_prefix("  1: ").unwrap();
+            assert_eq!(row, text.chars().take(80).collect::<String>());
+            h.keys("RET");
+            assert_eq!(h.core.point(), col);
+        }
     }
 
     #[test]

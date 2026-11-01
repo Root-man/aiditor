@@ -144,7 +144,7 @@ impl Core {
             .collect();
         self.render_streams(&shown);
         let origin = self.prompts.minibuffer.as_ref().map(|mb| mb.from);
-        let search = self.prompts.preview_search(&self.grep);
+        let search = self.prompts.preview_search(&self.grep, &self.commands);
         let windows = (panes.into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;

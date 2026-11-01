@@ -32,6 +32,7 @@ pub(crate) struct Editor {
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
     clock: String,
+    title: String,
     _clock_task: Task<()>,
     /// Where the user's settings and keymap files are, if known.
     config_dir: Option<PathBuf>,
@@ -88,7 +89,13 @@ impl Editor {
             spawn_heartbeat(cx);
         }
         let reports = tx.clone();
-        let watcher = watcher::Watcher::spawn(move |msg| _ = reports.blocking_send(msg));
+        #[cfg(test)]
+        let stopped = tests::watcher_lifetime();
+        let watcher = watcher::Watcher::spawn(move |msg| {
+            #[cfg(test)]
+            let _stopped = &stopped;
+            _ = reports.blocking_send(msg);
+        });
         // The launch's messages ran before there was a watcher to send their watch set to.
         watcher.set(core.watch_set());
         let (clock, clock_task) = Self::start_clock(clock::read, cx);
@@ -109,6 +116,7 @@ impl Editor {
             tx,
             timer: None,
             clock,
+            title: String::new(),
             _clock_task: clock_task,
             config_dir: args.config_dir,
             grep: grep::Grep::default(),
@@ -121,6 +129,281 @@ impl Editor {
             painted: Vec::new(),
             reported: Default::default(),
         }
+    }
+
+    fn hint_rows(
+        &self,
+        hint: Option<aiditor_core::display::Hint>,
+        cell: Pixels,
+    ) -> Option<gpui::Div> {
+        let line_height = px(self.core.settings().line_height());
+        let inset = px(TEXT_INSET);
+        let line = || {
+            div()
+                .h(line_height)
+                .line_height(line_height)
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        hint.map(|hint| {
+            // Keys right-aligned so the colons line up, as Emacs's which-key.
+            let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
+            let keys = keys.max().unwrap_or(0);
+            let entries: Vec<String> = (hint.entries.iter())
+                .map(|(key, what)| format!("{key:>keys$} : {what}"))
+                .collect();
+            let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
+            let column = cell * width as f32;
+            div()
+                .flex()
+                .flex_wrap()
+                .px(inset)
+                .child(line().w_full().child(format!("{}-", hint.keys)))
+                .children(entries.into_iter().map(|e| line().w(column).child(e)))
+        })
+    }
+
+    fn echo_area(
+        &self,
+        minibuffer: Option<aiditor_core::display::Minibuffer>,
+        message: Option<String>,
+        font: &Font,
+        cell: Pixels,
+        window: &Window,
+    ) -> gpui::Div {
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let line_height = px(settings.line_height());
+        let mode_line_height = px(settings.mode_line_height());
+        let inset = px(TEXT_INSET);
+        let row = |height: Pixels| {
+            div()
+                .h(height)
+                .line_height(height)
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        let line = || row(line_height);
+        let cursor_fg = theme
+            .face(FaceName::Cursor)
+            .fg
+            .unwrap_or(theme.background());
+        let message = message.unwrap_or_default();
+        match minibuffer {
+            // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
+            Some(mb) => {
+                let (text, byte) = echo_line(&mb, &message);
+                // Shaped whole, the cursor laid over it, so moving it never shifts the text (#11).
+                let run = text_run(text.len(), Face::default(), false, font, theme);
+                let shaped = (window.text_system()).shape_line(
+                    text.clone().into(),
+                    px(settings.font_size),
+                    &[run],
+                    None,
+                );
+                let (x, width, under) = block(&shaped, byte, cell);
+                let cursor = div()
+                    .debug_selector(|| "minibuffer-cursor".into())
+                    .absolute()
+                    .top_0()
+                    .left(x)
+                    .w(width)
+                    .h(mode_line_height)
+                    .bg(rgb(theme.cursor()))
+                    .text_color(rgb(cursor_fg))
+                    .child(under.to_string());
+                let status = mb.status.map(|status| {
+                    div()
+                        .debug_selector(|| "grep-status".into())
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bg(rgb(theme.background()))
+                        .text_color(rgb(theme
+                            .face(FaceName::Annotation)
+                            .fg
+                            .unwrap_or(theme.foreground())))
+                        .child(status)
+                });
+                let prompt = row(mode_line_height)
+                    .debug_selector(|| "minibuffer-prompt".into())
+                    .relative()
+                    .child(text)
+                    .child(cursor)
+                    .children(status);
+                let prompt = div().px(inset).child(prompt);
+                let padding = (mb.candidates.len() + mb.groups.len()..mb.rows).map(|_| line());
+                let selected = theme
+                    .face(FaceName::CompletionSelected)
+                    .bg
+                    .unwrap_or(theme.background());
+                let grep = !mb.groups.is_empty();
+                let mut groups = mb.groups.into_iter().peekable();
+                let rows = mb
+                    .candidates
+                    .into_iter()
+                    .zip(mb.highlights)
+                    .zip(mb.annotations)
+                    .enumerate();
+                let candidates = rows.flat_map(|(i, ((c, highlights), note))| {
+                    let header = if groups.peek().is_some_and(|(at, _)| *at == i) {
+                        let (_, label) = groups.next().unwrap();
+                        let rule = || {
+                            div().h(px(1.)).bg(rgb(theme
+                                .face(FaceName::Separator)
+                                .fg
+                                .unwrap_or(theme.foreground())))
+                        };
+                        let run = text_run(
+                            label.len(),
+                            theme.face(FaceName::GrepFile),
+                            false,
+                            font,
+                            theme,
+                        );
+                        Some(
+                            line()
+                                .debug_selector(|| format!("grep-header-{i}"))
+                                .flex()
+                                .items_center()
+                                .gap(cell)
+                                .px(inset)
+                                .child(
+                                    rule()
+                                        .w(cell * 2.)
+                                        .flex_shrink_0()
+                                        .debug_selector(|| format!("grep-rule-before-{i}")),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(StyledText::new(label).with_runs(vec![run])),
+                                )
+                                .child(
+                                    rule()
+                                        .flex_1()
+                                        .debug_selector(|| format!("grep-rule-after-{i}")),
+                                ),
+                        )
+                    } else {
+                        None
+                    };
+                    let runs = if grep {
+                        grep_runs(&c, font, theme)
+                    } else {
+                        let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
+                        faces.extend(
+                            highlights
+                                .into_iter()
+                                .map(|range| (range, theme.face(FaceName::CompletionMatch))),
+                        );
+                        completion_runs(
+                            c.len(),
+                            &faces,
+                            if mb.files && c.ends_with('/') {
+                                theme.face(FaceName::Directory)
+                            } else {
+                                Face::default()
+                            },
+                            (Some(i) == mb.selected).then_some(selected),
+                            font,
+                            theme,
+                        )
+                    };
+                    let text = div()
+                        .debug_selector(|| format!("completion-name-{i}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(StyledText::new(c).with_runs(runs));
+                    let text = if mb.files { text.flex_1() } else { text };
+                    let note = (!note.is_empty()).then(|| {
+                        let face = if mb.files {
+                            theme.face(FaceName::Annotation)
+                        } else {
+                            Face::default()
+                        };
+                        let run = text_run(note.len(), face, false, font, theme);
+                        let note = div()
+                            .debug_selector(|| format!("completion-annotation-{i}"))
+                            .ml(cell * 2.)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .child(StyledText::new(note).with_runs(vec![run])),
+                            );
+                        if mb.files { note } else { note.opacity(0.6) }
+                    });
+                    let candidate = line()
+                        .debug_selector(|| format!("completion-{i}"))
+                        .flex()
+                        .overflow_hidden()
+                        .px(inset)
+                        .child(text)
+                        .children(note);
+                    let candidate = match Some(i) == mb.selected {
+                        true => candidate.bg(rgb(selected)),
+                        false => candidate,
+                    };
+                    header.into_iter().chain(Some(candidate))
+                });
+                div().child(prompt).children(candidates).children(padding)
+            }
+            None => div().child(row(mode_line_height).px(inset).child(message)),
+        }
+    }
+
+    fn workspace_bar(
+        &self,
+        workspaces: Vec<aiditor_core::display::Span>,
+        font: &Font,
+        cell: Pixels,
+    ) -> gpui::Div {
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let inset = px(TEXT_INSET);
+        let row = |height: Pixels| {
+            div()
+                .h(height)
+                .line_height(height)
+                .whitespace_nowrap()
+                .overflow_hidden()
+        };
+        let bar = theme.face(FaceName::WorkspaceBar);
+        let workspace_text: String = workspaces.iter().map(|s| s.text.as_str()).collect();
+        let runs = workspaces
+            .iter()
+            .map(|s| text_run(s.text.len(), s.face, false, font, theme))
+            .collect();
+        let workspaces = StyledText::new(workspace_text).with_runs(runs);
+        let workspace_gap = cell * (2. * settings.workspace_font_size() / settings.font_size);
+        row(px(settings.workspace_modeline_height()))
+            .flex()
+            .flex_none()
+            .px(inset)
+            .text_size(px(settings.workspace_font_size()))
+            .debug_selector(|| "workspace-modeline".into())
+            .bg(rgb(bar.bg.unwrap_or(theme.background())))
+            .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .debug_selector(|| "workspace-entries".into())
+                    .child(workspaces),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .ml(workspace_gap)
+                    .debug_selector(|| "workspace-clock".into())
+                    .child(self.clock.clone()),
+            )
     }
 
     fn start_clock(
@@ -342,13 +625,11 @@ impl Render for Editor {
         let frame = self.core.frame();
         let settings = self.core.settings();
         let theme = &settings.theme;
-        let cursor_fg = theme
-            .face(FaceName::Cursor)
-            .fg
-            .unwrap_or(theme.background());
         let line_height = px(settings.line_height());
-        window.set_window_title(&frame.title);
-        let mode_line_height = px(settings.mode_line_height());
+        if self.title != frame.title {
+            window.set_window_title(&frame.title);
+            self.title = frame.title.clone();
+        }
         let inset = px(TEXT_INSET);
         let row = |height: Pixels| {
             (div().h(height).line_height(height))
@@ -356,198 +637,9 @@ impl Render for Editor {
                 .overflow_hidden()
         };
         let line = || row(line_height);
-        let hint = frame.hint.map(|hint| {
-            // Keys right-aligned so the colons line up, as Emacs's which-key.
-            let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
-            let keys = keys.max().unwrap_or(0);
-            let entries: Vec<String> = (hint.entries.iter())
-                .map(|(key, what)| format!("{key:>keys$} : {what}"))
-                .collect();
-            let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
-            let column = cell * width as f32;
-            div()
-                .flex()
-                .flex_wrap()
-                .px(inset)
-                .child(line().w_full().child(format!("{}-", hint.keys)))
-                .children(entries.into_iter().map(|e| line().w(column).child(e)))
-        });
-        let message = frame.message.unwrap_or_default();
-        let echo = match frame.minibuffer {
-            // shortcut: IME marked text is not drawn at a prompt; splice it in at the cursor when prompts take composed input.
-            Some(mb) => {
-                let (text, byte) = echo_line(&mb, &message);
-                // Shaped whole, the cursor laid over it, so moving it never shifts the text (#11).
-                let run = text_run(text.len(), Face::default(), false, &font, theme);
-                let shaped = (window.text_system()).shape_line(
-                    text.clone().into(),
-                    px(settings.font_size),
-                    &[run],
-                    None,
-                );
-                let (x, width, under) = block(&shaped, byte, cell);
-                let cursor = div()
-                    .debug_selector(|| "minibuffer-cursor".into())
-                    .absolute()
-                    .top_0()
-                    .left(x)
-                    .w(width)
-                    .h(mode_line_height)
-                    .bg(rgb(theme.cursor()))
-                    .text_color(rgb(cursor_fg))
-                    .child(under.to_string());
-                let status = mb.status.map(|status| {
-                    div()
-                        .debug_selector(|| "grep-status".into())
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bg(rgb(theme.background()))
-                        .text_color(rgb(theme
-                            .face(FaceName::Annotation)
-                            .fg
-                            .unwrap_or(theme.foreground())))
-                        .child(status)
-                });
-                let prompt = row(mode_line_height)
-                    .debug_selector(|| "minibuffer-prompt".into())
-                    .relative()
-                    .child(text)
-                    .child(cursor)
-                    .children(status);
-                let prompt = div().px(inset).child(prompt);
-                let padding = (mb.candidates.len() + mb.groups.len()..mb.rows).map(|_| line());
-                let selected = theme
-                    .face(FaceName::CompletionSelected)
-                    .bg
-                    .unwrap_or(theme.background());
-                let grep = !mb.groups.is_empty();
-                let mut groups = mb.groups.into_iter().peekable();
-                let rows = mb
-                    .candidates
-                    .into_iter()
-                    .zip(mb.highlights)
-                    .zip(mb.annotations)
-                    .enumerate();
-                let candidates = rows.flat_map(|(i, ((c, highlights), note))| {
-                    let header = if groups.peek().is_some_and(|(at, _)| *at == i) {
-                        let (_, label) = groups.next().unwrap();
-                        let rule = || {
-                            div().h(px(1.)).bg(rgb(theme
-                                .face(FaceName::Separator)
-                                .fg
-                                .unwrap_or(theme.foreground())))
-                        };
-                        let run = text_run(
-                            label.len(),
-                            theme.face(FaceName::GrepFile),
-                            false,
-                            &font,
-                            theme,
-                        );
-                        Some(
-                            line()
-                                .debug_selector(|| format!("grep-header-{i}"))
-                                .flex()
-                                .items_center()
-                                .gap(cell)
-                                .px(inset)
-                                .child(
-                                    rule()
-                                        .w(cell * 2.)
-                                        .flex_shrink_0()
-                                        .debug_selector(|| format!("grep-rule-before-{i}")),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(StyledText::new(label).with_runs(vec![run])),
-                                )
-                                .child(
-                                    rule()
-                                        .flex_1()
-                                        .debug_selector(|| format!("grep-rule-after-{i}")),
-                                ),
-                        )
-                    } else {
-                        None
-                    };
-                    let runs = if grep {
-                        grep_runs(&c, &font, theme)
-                    } else {
-                        let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
-                        faces.extend(
-                            highlights
-                                .into_iter()
-                                .map(|range| (range, theme.face(FaceName::CompletionMatch))),
-                        );
-                        completion_runs(
-                            c.len(),
-                            &faces,
-                            if mb.files && c.ends_with('/') {
-                                theme.face(FaceName::Directory)
-                            } else {
-                                Face::default()
-                            },
-                            (Some(i) == mb.selected).then_some(selected),
-                            &font,
-                            theme,
-                        )
-                    };
-                    let text = div()
-                        .debug_selector(|| format!("completion-name-{i}"))
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(StyledText::new(c).with_runs(runs));
-                    let text = if mb.files { text.flex_1() } else { text };
-                    let note = (!note.is_empty()).then(|| {
-                        let face = if mb.files {
-                            theme.face(FaceName::Annotation)
-                        } else {
-                            Face::default()
-                        };
-                        let run = text_run(note.len(), face, false, &font, theme);
-                        let note = div()
-                            .debug_selector(|| format!("completion-annotation-{i}"))
-                            .ml(cell * 2.)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .flex()
-                            .justify_end()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .child(StyledText::new(note).with_runs(vec![run])),
-                            );
-                        if mb.files { note } else { note.opacity(0.6) }
-                    });
-                    let candidate = line()
-                        .debug_selector(|| format!("completion-{i}"))
-                        .flex()
-                        .overflow_hidden()
-                        .px(inset)
-                        .child(text)
-                        .children(note);
-                    let candidate = match Some(i) == mb.selected {
-                        true => candidate.bg(rgb(selected)),
-                        false => candidate,
-                    };
-                    header.into_iter().chain(Some(candidate))
-                });
-                div().child(prompt).children(candidates).children(padding)
-            }
-            None => div().child(row(mode_line_height).px(inset).child(message)),
-        };
-        let bar = theme.face(FaceName::WorkspaceBar);
-        let workspace_text: String = frame.workspaces.iter().map(|s| s.text.as_str()).collect();
-        let runs = frame
-            .workspaces
-            .iter()
-            .map(|s| text_run(s.text.len(), s.face, false, &font, theme))
-            .collect();
-        let workspaces = StyledText::new(workspace_text).with_runs(runs);
-        let workspace_gap = cell * (2. * settings.workspace_font_size() / settings.font_size);
+        let hint = self.hint_rows(frame.hint, cell);
+        let echo = self.echo_area(frame.minibuffer, frame.message, &font, cell, window);
+        let workspaces = self.workspace_bar(frame.workspaces, &font, cell);
         let root = div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
@@ -560,31 +652,7 @@ impl Render for Editor {
             .font(font)
             .text_size(px(settings.font_size))
             .children(stats.map(|s| line().px(inset).child(s)))
-            .child(
-                row(px(settings.workspace_modeline_height()))
-                    .flex()
-                    .flex_none()
-                    .px(inset)
-                    .text_size(px(settings.workspace_font_size()))
-                    .debug_selector(|| "workspace-modeline".into())
-                    .bg(rgb(bar.bg.unwrap_or(theme.background())))
-                    .text_color(rgb(bar.fg.unwrap_or(theme.foreground())))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .debug_selector(|| "workspace-entries".into())
-                            .child(workspaces),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .ml(workspace_gap)
-                            .debug_selector(|| "workspace-clock".into())
-                            .child(self.clock.clone()),
-                    ),
-            )
+            .child(workspaces)
             .child(div().flex_1().flex().overflow_hidden().child(FrameElement {
                 editor: cx.entity(),
                 windows: frame.windows,
@@ -608,19 +676,71 @@ mod tests {
     use gpui::{Bounds, EntityInputHandler, ShapedLine};
     use gpui::{TestAppContext, VisualTestContext};
 
+    thread_local! {
+        static WATCHERS: std::cell::RefCell<Vec<std::sync::mpsc::Receiver<()>>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+        static DIRECTORIES: std::cell::RefCell<Vec<std::sync::Arc<tempfile::TempDir>>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    fn tempdir() -> std::sync::Arc<tempfile::TempDir> {
+        let dir = std::sync::Arc::new(tempfile::tempdir().unwrap());
+        DIRECTORIES.with(|dirs| dirs.borrow_mut().push(dir.clone()));
+        dir
+    }
+
+    pub(super) fn watcher_lifetime() -> std::sync::mpsc::Sender<()> {
+        let (stopped, receiver) = std::sync::mpsc::channel();
+        WATCHERS.with(|watchers| watchers.borrow_mut().push(receiver));
+        stopped
+    }
+
+    struct NativeTest {
+        cx: TestAppContext,
+        _lock: Option<std::sync::MutexGuard<'static, ()>>,
+    }
+
+    impl NativeTest {
+        fn new(cx: &TestAppContext) -> Self {
+            Self {
+                cx: cx.clone(),
+                _lock: crate::native::lock(),
+            }
+        }
+    }
+
+    impl Drop for NativeTest {
+        fn drop(&mut self) {
+            // GPUI's macro shuts down after the body returns, after a local lock would be released.
+            self.cx.quit();
+            self.cx.run_until_parked();
+            WATCHERS.with(|watchers| {
+                for stopped in watchers.take() {
+                    assert_eq!(
+                        stopped.recv_timeout(Duration::from_secs(30)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+                        "watcher reporter must close before the next native fixture starts"
+                    );
+                }
+            });
+            DIRECTORIES.with(|dirs| drop(dirs.take()));
+        }
+    }
+
     fn editor<'a>(
         cx: &'a mut TestAppContext,
         text: &str,
     ) -> (gpui::Entity<Editor>, &'a mut VisualTestContext) {
         let (editor, cx) = cx.add_window_view(|window, cx| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let path = dir.path().join("t.txt");
             std::fs::write(&path, text).unwrap();
             let mut core = Core::default();
             core.open(&path, files::read(&path).unwrap());
             // The fixture has no Tokio runtime for the file's repository lookup.
             core.handle(Instant::now(), Msg::Tick);
-            cx.on_release(move |_, _| drop(dir)).detach();
             Editor::new(
                 core,
                 Args::default(),
@@ -680,7 +800,7 @@ mod tests {
 
     #[gpui::test]
     fn every_bundled_binding_reaches_the_core(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         // `C-x C-s` hands the save to Tokio's blocking pool.
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
@@ -709,7 +829,7 @@ mod tests {
 
     #[gpui::test]
     fn typing_goes_through_the_text_input(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("aB");
         cx.simulate_keystrokes("ctrl-u 3 x ctrl-x u");
@@ -721,10 +841,10 @@ mod tests {
 
     #[gpui::test]
     fn syntax_styles_reach_font_runs_after_settings_reload(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("a.js");
         std::fs::write(&path, "// comment\nconst value = 1;\n").unwrap();
         let (editor, cx) = editor(cx, "");
@@ -788,10 +908,10 @@ mod tests {
 
     #[gpui::test]
     fn markdown_injections_reach_font_runs_and_follow_input(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("a.md");
         let text = "*italic* **bold** `code` [docs](https://x.dev)\n\n```rust\nfn main(value: i32) { value; value; }\n```\n";
         std::fs::write(&path, text).unwrap();
@@ -869,10 +989,10 @@ mod tests {
 
     #[gpui::test]
     fn swiper_results_render_source_faces_and_keep_selection(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let path = dir.path().join("a.js");
         std::fs::write(&path, "// é🙂 comment\nconst value = \"é🙂\";\n").unwrap();
         let (editor, cx) = editor(cx, "");
@@ -983,7 +1103,7 @@ mod tests {
 
     #[gpui::test]
     fn swiper_input_produces_match_background_runs_and_cleans_up(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "été Foo foo\nfoo bar\n");
         for close in ["ctrl-g", "enter"] {
             cx.simulate_keystrokes("alt-< ctrl-s");
@@ -1033,7 +1153,7 @@ mod tests {
 
     #[gpui::test]
     fn the_window_title_follows_the_current_workspace(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         let shown = cx.window_title().unwrap();
         assert!(shown.starts_with("t.txt | "), "{shown}");
@@ -1062,6 +1182,7 @@ mod tests {
 
     #[gpui::test]
     fn the_workspace_modeline_sits_above_the_windows(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 3");
         let (tops, bar) = editor.read_with(cx, |e, _| {
@@ -1098,6 +1219,7 @@ mod tests {
     fn the_workspace_clock_stays_at_the_right_inset_and_wakes_without_keys(
         cx: &mut TestAppContext,
     ) {
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let mut reads = 0;
@@ -1140,7 +1262,7 @@ mod tests {
 
     #[gpui::test]
     fn closing_the_window_offers_to_save(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
         let path = editor.read_with(cx, |e, _| e.core.current().file.clone().unwrap());
@@ -1151,10 +1273,10 @@ mod tests {
 
     #[gpui::test]
     fn startup_indexes_before_watching_and_applies_ignores(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path();
         std::fs::create_dir(root.join("ignored")).unwrap();
         std::fs::write(root.join("x"), "").unwrap();
@@ -1196,10 +1318,10 @@ mod tests {
 
     #[gpui::test]
     fn c_x_c_r_reloads_projects(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let args = Args {
             config_dir: Some(dir.path().to_owned()),
             ..Args::default()
@@ -1251,14 +1373,14 @@ mod tests {
 
     #[gpui::test]
     fn integrated_finders_visits_saves_and_directory_recovery(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .max_blocking_threads(1)
             .enable_all()
             .build()
             .unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().canonicalize().unwrap().join("repo");
         std::fs::create_dir_all(root.join("sub")).unwrap();
         for name in ["a", "b", "c"] {
@@ -1441,17 +1563,17 @@ mod tests {
 
     #[gpui::test]
     fn recovery_files_are_written_and_removed_on_quit(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let args = Args {
             recovery_dir: Some(dir.path().to_owned()),
             ..Args::default()
         };
         let channel = aiditor_services::channel();
         let mut core = Core::default();
-        let source = tempfile::tempdir().unwrap();
+        let source = tempdir();
         let path = source.path().join("t.txt");
         std::fs::write(&path, "").unwrap();
         core.open(&path, files::read(&path).unwrap());
@@ -1498,7 +1620,7 @@ mod tests {
     fn long_swiper_rows_reach_gpui_as_bounded_text_and_valid_selected_runs(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (editor, cx) = editor(cx, "");
@@ -1569,7 +1691,7 @@ mod tests {
 
     #[gpui::test]
     fn a_prompt_reads_typed_text(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             e.core.register(Command {
@@ -1597,7 +1719,7 @@ mod tests {
 
     #[gpui::test]
     fn the_echo_line_is_one_string_with_point_in_it(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("abc");
@@ -1617,10 +1739,10 @@ mod tests {
     fn multi_root_grep_prioritizes_the_current_file_and_prefix_selects_one_root(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let base = dir.path().canonicalize().unwrap();
         for name in ["app", "lib", "docs"] {
             std::fs::create_dir(base.join(name)).unwrap();
@@ -1790,7 +1912,7 @@ mod tests {
 
     #[gpui::test]
     fn grep_status_keeps_the_echo_cursor_with_the_input(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x p g");
         cx.simulate_input("needle");
@@ -1860,7 +1982,7 @@ mod tests {
 
     #[gpui::test]
     fn m_x_runs_a_command_by_name(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "abc");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("forward-char");
@@ -1874,8 +1996,8 @@ mod tests {
 
     #[gpui::test]
     fn find_file_draws_unselected_entries_and_aligned_metadata(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
-        let dir = tempfile::tempdir().unwrap();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
         std::fs::create_dir(dir.path().join("a-directory")).unwrap();
         for name in [
             "b.txt",
@@ -1979,8 +2101,8 @@ mod tests {
     fn project_file_metadata_uses_the_file_columns_without_initial_preview(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
-        let dir = tempfile::tempdir().unwrap();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
         for name in ["a.txt", "b.txt", &format!("c{}.txt", "long".repeat(40))] {
             std::fs::write(dir.path().join(name), [b'x'; 41]).unwrap();
         }
@@ -2086,7 +2208,7 @@ mod tests {
 
     #[gpui::test]
     fn fuzzy_completion_input_uses_the_themes_match_face(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("pff");
@@ -2174,7 +2296,7 @@ mod tests {
 
     #[gpui::test]
     fn a_completing_prompt_filters_and_picks(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             e.core.register(Command {
@@ -2220,7 +2342,7 @@ mod tests {
 
     #[gpui::test]
     fn input_methods_compose_and_replace(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "😀");
         cx.simulate_keystrokes("ctrl-e");
         let state = |cx: &mut VisualTestContext| {
@@ -2255,7 +2377,7 @@ mod tests {
 
     #[gpui::test]
     fn copy_and_paste_go_through_the_clipboard(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "ab");
         let (copy, paste) = if cfg!(target_os = "macos") {
             ("cmd-c", "cmd-v")
@@ -2285,7 +2407,7 @@ mod tests {
 
     #[gpui::test]
     fn a_full_channel_lets_other_ui_work_run(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         let (tx, rx) = mpsc::channel(1000);
         for _ in 0..1000 {
@@ -2313,7 +2435,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_cells_sit_on_the_grid(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let (id, _) = e.core.create_terminal("term", 3, 20);
@@ -2342,7 +2464,7 @@ mod tests {
 
     #[gpui::test]
     fn a_line_number_ends_before_the_text_and_the_toggle_takes_it_away(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a\nb");
         let gutter = |cx: &mut VisualTestContext| {
             editor.read_with(cx, |e, _| {
@@ -2369,7 +2491,7 @@ mod tests {
 
     #[gpui::test]
     fn the_zoom_keys_lay_the_frame_out_again(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a\nb");
         let laid_out = |cx: &mut VisualTestContext| {
             editor.read_with(cx, |e, _| {
@@ -2398,7 +2520,7 @@ mod tests {
 
     #[gpui::test]
     fn windows_reach_the_frame_edges_with_their_text_inset(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a");
         cx.simulate_keystrokes("alt-x");
         cx.simulate_input("display-line-numbers-mode");
@@ -2420,7 +2542,7 @@ mod tests {
     fn the_echo_line_is_as_high_as_a_mode_line_and_never_moves_the_windows(
         cx: &mut TestAppContext,
     ) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "a");
         let (bottom, height) = editor.read_with(cx, |e, _| {
             let settings = e.core.settings();
@@ -2441,7 +2563,7 @@ mod tests {
 
     #[gpui::test]
     fn side_by_side_windows_leave_a_pixel_for_the_divider(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 3");
         cx.run_until_parked();
@@ -2477,7 +2599,7 @@ mod tests {
 
     #[gpui::test]
     fn a_session_mode_line_paints_its_title_and_exit_status(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let settings = "[agents.fake]\ncommand = 'unused'";
@@ -2520,8 +2642,8 @@ mod tests {
 
     #[gpui::test]
     fn a_file_mode_line_paints_its_declared_language_version(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
-        let dir = tempfile::tempdir().unwrap();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
         let path = dir.path().join("a.rs");
         std::fs::write(&path, "fn main() {}\n").unwrap();
         std::fs::write(dir.path().join(".tool-versions"), "rust 1.99.0").unwrap();
@@ -2554,7 +2676,7 @@ mod tests {
 
     #[gpui::test]
     fn a_mode_lines_right_group_ends_at_the_right_inset(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.run_until_parked();
         let (x, width, right) = editor.read_with(cx, |e, _| {
@@ -2571,7 +2693,7 @@ mod tests {
 
     #[gpui::test]
     fn only_an_inactive_mode_line_has_a_rule(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("ctrl-x 2");
         cx.run_until_parked();
@@ -2599,7 +2721,7 @@ mod tests {
 
     #[gpui::test]
     fn ligatures_are_off_for_all_text(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         let calt =
             cx.update(|window, cx| editor.read(cx).font(window).0.features.is_calt_enabled());
@@ -2608,7 +2730,7 @@ mod tests {
 
     #[gpui::test]
     fn the_cursor_is_drawn_over_the_whole_line(cx: &mut TestAppContext) {
-        let _native = crate::native::lock();
+        let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "hello world");
         let cursor = |cx: &mut VisualTestContext| {
             let (bounds, rows) = painted(&editor, cx, 0);

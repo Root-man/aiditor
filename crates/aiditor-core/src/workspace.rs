@@ -262,15 +262,27 @@ impl Core {
 impl Ctx<'_> {
     /// Kills the workspace named by the first string once its modified file buffers are saved
     /// or confirmed, asking as `C-x C-c` does.
-    pub(crate) fn kill_workspace(&mut self, args: Args) -> Result<(), String> {
+    pub(crate) fn kill_workspace(&mut self, mut args: Args) -> Result<(), String> {
         let id = self.core.workspace_named(&args.strings[0])?;
         if self.core.workspaces.len() == 1 {
             return Err("Attempt to delete the sole workspace".into());
         }
+        let processes = self.process_answer(&mut args);
         let mine = |b: &crate::buffer::Buffer| b.workspace == Some(id);
-        let Some(saving) = self.save_some("workspace-kill", args, 1, mine, "kill")? else {
+        let Some(saving) = self.save_some("workspace-kill", args.clone(), 1, mine, "kill")? else {
             return Ok(());
         };
+        let live = self.core.buffers.recent().any(|(buffer, b)| {
+            b.workspace == Some(id)
+                && (self.core.live_terminal(buffer) || self.core.live_agent(buffer))
+        });
+        let answered = processes.is_some();
+        if !self.confirm_processes("workspace-kill", args, live, processes, "the workspace")? {
+            if !answered {
+                return Ok(());
+            }
+            return saving.iter().try_for_each(|&buffer| self.save(buffer));
+        }
         for &buffer in &saving {
             self.save(buffer)?;
         }
@@ -851,6 +863,74 @@ mod tests {
             (vec![launch.as_str()], launch.as_str())
         );
         assert_eq!(h.core.minibuffer(), None);
+    }
+
+    #[test]
+    fn killing_a_workspace_confirms_its_live_terminal() {
+        for command in ["C-x t 0", "C-x t k RET"] {
+            let mut h = Harness::new(&[]);
+            let id = h.new_workspace("b", "home");
+            h.keys("M-x vterm RET");
+            h.keys(command);
+            assert_eq!(
+                h.core.minibuffer().unwrap().prompt,
+                "Active processes exist; kill them and the workspace anyway? "
+            );
+            assert_eq!(listed(&mut h).0, ["No", "Yes"]);
+            h.keys("yes RET");
+            assert_eq!(h.core.workspaces.len(), 1);
+            assert!(h.core.workspaces.iter().all(|w| w.id != id));
+            assert!(
+                h.terminal_ops
+                    .iter()
+                    .any(|op| matches!(op, crate::TerminalOp::Kill { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn declining_keeps_the_session_workspace_and_agent() {
+        let mut h = Harness::new(&[]);
+        let id = h.new_workspace("b", "home");
+        h.keys("M-x agent-start RET claude RET");
+        let buffer = h.core.windows.window.buffer();
+        h.keys("C-x t 0 RET");
+        assert_eq!(h.core.workspace(), id);
+        assert_eq!(h.core.windows.window.buffer(), buffer);
+        assert!(h.core.live_agent(buffer));
+    }
+
+    #[test]
+    fn declining_process_kill_still_saves_the_yes_buffers() {
+        let mut h = modified();
+        let id = h.core.workspace();
+        h.keys("M-x vterm RET C-x t 0 RET");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "Active processes exist; kill them and the workspace anyway? "
+        );
+        h.save_reply("x\n");
+        h.keys("RET");
+        assert_eq!(h.submitted("f.txt"), "x\n");
+        assert_eq!(h.core.workspace(), id);
+    }
+
+    #[test]
+    fn other_workspaces_processes_and_ended_sessions_need_no_question() {
+        let mut h = Harness::new(&[]);
+        h.keys("M-x vterm RET");
+        h.new_workspace("b", "home");
+        h.keys("C-x t 0");
+        assert_eq!(h.core.workspaces.len(), 1);
+        h.new_workspace("b", "home");
+        h.keys("M-x agent-start RET claude RET");
+        h.send(Msg::AgentExited {
+            id: crate::AgentId(0),
+            code: 0,
+            signal: None,
+        });
+        h.keys("C-x t 0");
+        assert_eq!(h.core.workspaces.len(), 1);
     }
 
     #[test]

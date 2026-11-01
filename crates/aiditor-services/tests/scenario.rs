@@ -218,7 +218,7 @@ async fn an_agent_reply_and_write_reach_the_editor_and_its_workspace_kill_stops_
     .await;
     assert!(!app.core.current().modified());
 
-    app.keys("C-x t 0");
+    app.keys("C-x t 0 yes RET");
     app.until("the agent to exit", |app| app.exited).await;
     let pid = app.pid.expect("the agent reported its pid");
     let deadline = Instant::now() + Duration::from_secs(5);

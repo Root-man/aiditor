@@ -200,6 +200,44 @@ async fn stderr_then_exit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn invalid_stderr_bytes_keep_streaming_through_exit() {
+    for count in [1, 2000] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut steps = vec![serde_json::json!({"stderrBytes": [99, 97, 102, 233, 10]})];
+        steps.extend((0..count).map(|_| serde_json::json!({"stderr": "next".repeat(100)})));
+        steps.push(serde_json::json!({"exit": 3}));
+        let (key, path) = script(
+            dir.path(),
+            &serde_json::json!({"session": steps}).to_string(),
+        );
+        let mut agents = Agents::default();
+        let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[(key, &path)]);
+        let msgs = rest(&mut rx).await;
+        let lines: Vec<_> = msgs
+            .iter()
+            .filter_map(|msg| match msg {
+                Msg::AgentStderr { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "caf\u{fffd}")
+            .unwrap();
+        assert_eq!(lines.len() - start, count + 1);
+        assert!(
+            lines[start + 1..]
+                .iter()
+                .all(|line| *line == "next".repeat(100))
+        );
+        assert!(matches!(
+            msgs.last(),
+            Some(Msg::AgentExited { code: 3, .. })
+        ));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_core_cancels_permission_requests_without_a_session() {
     let dir = tempfile::tempdir().unwrap();
     let ask = r#"{"toolCall": {"toolCallId": "call-1"},
@@ -695,7 +733,7 @@ async fn killing_the_workspace_stops_its_agent() {
     let mut live = Live::new(dir.path(), "{}");
     live.keys("C-x t 2 RET f i x RET");
     live.start().await;
-    live.keys("C-x t 0");
+    live.keys("C-x t 0 yes RET");
     live.gone().await;
 }
 
