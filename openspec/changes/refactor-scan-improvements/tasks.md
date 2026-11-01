@@ -63,9 +63,9 @@
 
 ## 11. Integration
 
-- [ ] 11.1 Verify `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --check` all pass locally on macOS. Linux is verified through the draft-PR CI in 11.3.
+- [x] 11.1 Verify `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --check` all pass locally on macOS. Linux is verified through the draft-PR CI in 11.3.
 - [x] 11.2 Verify `openspec validate refactor-scan-improvements --strict` passes, and that `crates/aiditor-core` still has no gpui or tokio dependency.
-- [ ] 11.3 Open a draft pull request and verify Linux and macOS CI pass, since this work is done on macOS.
+- [x] 11.3 Open a draft pull request and verify Linux and macOS CI pass, since this work is done on macOS.
 
 ## Workflow follow-up
 
