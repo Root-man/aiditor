@@ -1241,6 +1241,42 @@ mod tests {
     }
 
     #[test]
+    fn markdown_injections_follow_edit_history_and_reverts() {
+        let mut h = Harness::new(&[(
+            "a.md",
+            "*é* **bold** `code` [docs](https://x.dev)\n\n```rust\nfn main() {}\n```\n",
+        )]);
+        h.open("a.md");
+        let p = h.core.settings().theme.syntax.clone();
+        let lines = h.display(6).lines;
+        let inline = &lines[0].spans;
+        assert!(inline.iter().any(|s| s.text == "*é*" && s.face.italic));
+        assert!(inline.iter().any(|s| s.text == "**bold**" && s.face.bold));
+        for (text, name) in [
+            ("`code`", "text.literal"),
+            ("docs", "text.reference"),
+            ("https://x.dev", "text.uri"),
+        ] {
+            assert!(
+                inline.iter().any(|s| s.text == text && s.face == p[name]),
+                "{text}: {inline:?}"
+            );
+        }
+        let original = colors(&mut h, 6);
+        assert!(original.contains(&("fn".into(), p["keyword"].fg)));
+        assert!(original.contains(&("main".into(), p["function"].fg)));
+        h.keys("C-n C-n C-n C-a / / SPC");
+        assert!(colors(&mut h, 6).contains(&("// fn main() {}".into(), p["comment"].fg)));
+        h.keys("C-/");
+        assert_eq!(colors(&mut h, 6), original);
+        h.keys("C-?");
+        assert!(colors(&mut h, 6).contains(&("// fn main() {}".into(), p["comment"].fg)));
+        h.prepare_revert("a.md", Some(b"```elixir\ndefmodule Foo do end\n```\n"));
+        h.keys("M-x revert-buffer RET y RET");
+        assert!(colors(&mut h, 3).contains(&("defmodule".into(), p["keyword"].fg)));
+    }
+
+    #[test]
     fn other_files_and_the_region_over_code() {
         let mut h = Harness::new(&[("a.txt", "if (x) f(1);"), ("b.ts", "let x")]);
         h.open("a.txt");

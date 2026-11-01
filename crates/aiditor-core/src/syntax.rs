@@ -72,6 +72,21 @@ static MARKDOWN: LazyLock<Grammar> = LazyLock::new(|| {
         &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
     )
 });
+static MARKDOWN_INLINE: LazyLock<Grammar> = LazyLock::new(|| {
+    grammar(
+        tree_sitter_md::INLINE_LANGUAGE.into(),
+        &[tree_sitter_md::HIGHLIGHT_QUERY_INLINE],
+    )
+});
+static MARKDOWN_INJECTIONS: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &MARKDOWN.language,
+        "[(inline) (pipe_table_cell)] @content
+         (fenced_code_block (info_string (language) @language)
+                            (code_fence_content) @content)",
+    )
+    .expect("bundled queries compile")
+});
 static TOML: LazyLock<Grammar> = LazyLock::new(|| {
     grammar(
         tree_sitter_toml_ng::LANGUAGE.into(),
@@ -91,6 +106,7 @@ pub(crate) struct Syntax {
     grammar: &'static Grammar,
     parser: Parser,
     tree: Tree,
+    injections: Vec<Injection>,
     /// Edits since the last parse.
     stale: bool,
     /// The last highlights: their ranges, palette and runs, reused while the tree is unchanged.
@@ -99,6 +115,96 @@ pub(crate) struct Syntax {
 
 type Runs = Vec<(Range<usize>, Face)>;
 type Highlights = (Vec<Range<usize>>, BTreeMap<String, Face>, Runs);
+
+struct Injection {
+    grammar: &'static Grammar,
+    ranges: Vec<tree_sitter::Range>,
+    tree: Tree,
+}
+
+fn content_ranges(node: Node) -> Vec<tree_sitter::Range> {
+    let mut range = node.range();
+    let mut ranges = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "block_continuation" {
+            if range.start_byte < child.start_byte() {
+                ranges.push(tree_sitter::Range {
+                    end_byte: child.start_byte(),
+                    end_point: child.start_position(),
+                    ..range
+                });
+            }
+            range.start_byte = child.end_byte();
+            range.start_point = child.end_position();
+        }
+    }
+    if range.start_byte < range.end_byte {
+        ranges.push(range);
+    }
+    ranges
+}
+
+fn markdown_injections(text: &Rope, tree: &Tree, old: Vec<Injection>) -> Vec<Injection> {
+    let mut old: BTreeMap<_, _> = old
+        .into_iter()
+        .map(|i| (i.ranges[0].start_byte, i))
+        .collect();
+    let mut parser = Parser::new();
+    let mut cursor = QueryCursor::new();
+    let source = |node: Node| {
+        text.byte_slice(node.byte_range())
+            .chunks()
+            .map(str::as_bytes)
+    };
+    let mut matches = cursor.matches(&MARKDOWN_INJECTIONS, tree.root_node(), source);
+    let mut injections = Vec::new();
+    while let Some(m) = matches.next() {
+        let mut content = None;
+        let mut grammar: Option<&Grammar> = Some(&MARKDOWN_INLINE);
+        for c in m.captures() {
+            match MARKDOWN_INJECTIONS.capture_names()[c.index as usize] {
+                "content" => content = Some(c.node),
+                "language" => {
+                    grammar = match text.byte_slice(c.node.byte_range()).to_string().as_str() {
+                        "rust" => Some(&RUST),
+                        "elixir" => Some(&ELIXIR),
+                        "js" => Some(&JAVASCRIPT),
+                        "ts" => Some(&TYPESCRIPT),
+                        "yaml" => Some(&YAML),
+                        "toml" => Some(&TOML),
+                        _ => None,
+                    };
+                }
+                _ => unreachable!(),
+            }
+        }
+        let (Some(content), Some(grammar)) = (content, grammar) else {
+            continue;
+        };
+        let ranges = content_ranges(content);
+        let Some(first) = ranges.first() else {
+            continue;
+        };
+        let previous = old
+            .remove(&first.start_byte)
+            .filter(|i| std::ptr::eq(i.grammar, grammar) && i.ranges == ranges);
+        parser
+            .set_language(&grammar.language)
+            .expect("bundled grammar");
+        parser
+            .set_included_ranges(&ranges)
+            .expect("ordered content ranges");
+        let tree = parse(&mut parser, text, previous.as_ref().map(|i| &i.tree));
+        injections.push(Injection {
+            grammar,
+            ranges,
+            tree,
+        });
+    }
+    injections.sort_by_key(|i| i.ranges[0].start_byte);
+    injections
+}
 
 /// The byte offset and tree-sitter point of char `char_idx`.
 pub(crate) fn position(text: &Rope, char_idx: usize) -> (usize, Point) {
@@ -117,6 +223,51 @@ fn parse(parser: &mut Parser, text: &Rope, old: Option<&Tree>) -> Tree {
     };
     (parser.parse_with_options(&mut read, old, None))
         .expect("a parse without timeout or cancellation finishes")
+}
+
+fn paint(
+    grammar: &Grammar,
+    tree: &Tree,
+    text: &Rope,
+    bytes: Range<usize>,
+    palette: &BTreeMap<String, Face>,
+    painted: &mut [Option<Face>],
+    compose: bool,
+) {
+    let query = &grammar.highlights;
+    let faces: Vec<_> = query
+        .capture_names()
+        .iter()
+        .map(|name| face(palette, name))
+        .collect();
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(bytes.clone());
+    let source = |node: Node| {
+        text.byte_slice(node.byte_range())
+            .chunks()
+            .map(str::as_bytes)
+    };
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    let mut captures = Vec::new();
+    while let Some(m) = matches.next() {
+        for capture in m.captures() {
+            if let Some(face) = faces[capture.index as usize] {
+                captures.push((capture.node.byte_range(), m.pattern_index, face));
+            }
+        }
+    }
+    // Painted in order, so the innermost node wins, then the later pattern on one node.
+    captures.sort_by_key(|(r, pattern, _)| (Reverse(r.len()), *pattern));
+    for (r, _, face) in captures {
+        let clamp = |b: usize| b.clamp(bytes.start, bytes.end) - bytes.start;
+        for under in &mut painted[clamp(r.start)..clamp(r.end).max(clamp(r.start))] {
+            *under = Some(if compose {
+                face.over(under.unwrap_or_default())
+            } else {
+                face
+            });
+        }
+    }
 }
 
 /// `name`'s face in `palette`, or that of its longest dotted prefix there.
@@ -152,11 +303,17 @@ impl Syntax {
         let mut parser = Parser::new();
         (parser.set_language(&grammar.language)).expect("bundled grammars suit this tree-sitter");
         let tree = parse(&mut parser, text, None);
+        let injections = if std::ptr::eq(grammar, &*MARKDOWN) {
+            markdown_injections(text, &tree, Vec::new())
+        } else {
+            Vec::new()
+        };
         Some(Syntax {
             name,
             grammar,
             parser,
             tree,
+            injections,
             stale: false,
             cache: RefCell::default(),
         })
@@ -169,14 +326,21 @@ impl Syntax {
         old_end: (usize, Point),
         new_end: (usize, Point),
     ) {
-        self.tree.edit(&InputEdit {
+        let edit = InputEdit {
             start_byte: start.0,
             old_end_byte: old_end.0,
             new_end_byte: new_end.0,
             start_position: start.1,
             old_end_position: old_end.1,
             new_end_position: new_end.1,
-        });
+        };
+        self.tree.edit(&edit);
+        for injection in &mut self.injections {
+            injection.tree.edit(&edit);
+            for range in &mut injection.ranges {
+                edit.edit_range(range);
+            }
+        }
         self.stale = true;
         self.cache.take();
     }
@@ -185,6 +349,10 @@ impl Syntax {
     pub(crate) fn reparse(&mut self, text: &Rope) {
         if std::mem::take(&mut self.stale) {
             self.tree = parse(&mut self.parser, text, Some(&self.tree));
+            if std::ptr::eq(self.grammar, &*MARKDOWN) {
+                self.injections =
+                    markdown_injections(text, &self.tree, std::mem::take(&mut self.injections));
+            }
             self.cache.take();
         }
     }
@@ -204,35 +372,53 @@ impl Syntax {
         {
             return runs.clone();
         }
-        let query = &self.grammar.highlights;
-        let faces: Vec<_> = (query.capture_names().iter())
-            .map(|name| face(palette, name))
-            .collect();
-        let mut cursor = QueryCursor::new();
         let mut runs: Runs = Vec::new();
         for range in ranges {
             let bytes = text.char_to_byte(range.start)..text.char_to_byte(range.end);
-            cursor.set_byte_range(bytes.clone());
-            let source = |node: Node| {
-                text.byte_slice(node.byte_range())
-                    .chunks()
-                    .map(str::as_bytes)
-            };
-            let mut matches = cursor.matches(query, self.tree.root_node(), source);
-            let mut captures = Vec::new();
-            while let Some(m) = matches.next() {
-                for capture in m.captures() {
-                    if let Some(face) = faces[capture.index as usize] {
-                        captures.push((capture.node.byte_range(), m.pattern_index, face));
-                    }
-                }
-            }
-            // Painted in order, so the innermost node wins, then the later pattern on one node.
-            captures.sort_by_key(|(r, pattern, _)| (Reverse(r.len()), *pattern));
             let mut painted = vec![None; bytes.len()];
-            for (r, _, face) in captures {
-                let clamp = |b: usize| b.clamp(bytes.start, bytes.end) - bytes.start;
-                painted[clamp(r.start)..clamp(r.end).max(clamp(r.start))].fill(Some(face));
+            paint(
+                self.grammar,
+                &self.tree,
+                text,
+                bytes.clone(),
+                palette,
+                &mut painted,
+                false,
+            );
+            let first = self
+                .injections
+                .partition_point(|i| i.ranges.last().unwrap().end_byte <= bytes.start);
+            for injection in self.injections[first..]
+                .iter()
+                .take_while(|i| i.ranges[0].start_byte < bytes.end)
+            {
+                let inline = std::ptr::eq(injection.grammar, &*MARKDOWN_INLINE);
+                let first = injection
+                    .ranges
+                    .partition_point(|r| r.end_byte <= bytes.start);
+                for included in injection.ranges[first..]
+                    .iter()
+                    .take_while(|r| r.start_byte < bytes.end)
+                {
+                    let start = included.start_byte.max(bytes.start);
+                    let end = included.end_byte.min(bytes.end);
+                    if start >= end {
+                        continue;
+                    }
+                    let painted = &mut painted[start - bytes.start..end - bytes.start];
+                    if !inline {
+                        painted.fill(None);
+                    }
+                    paint(
+                        injection.grammar,
+                        &injection.tree,
+                        text,
+                        start..end,
+                        palette,
+                        painted,
+                        inline,
+                    );
+                }
             }
             let mut byte = 0;
             for (i, c) in text.slice(range.clone()).chars().enumerate() {
@@ -380,6 +566,181 @@ mod tests {
                 ("http://x".into(), 5),
             ]
         );
+    }
+
+    fn faces(file: &str, text: &str) -> Vec<Face> {
+        let rope = Rope::from_str(text);
+        let syntax = Syntax::for_file(Path::new(file), &rope).unwrap();
+        let mut faces = vec![Face::default(); rope.len_chars()];
+        for (range, face) in syntax.highlights(
+            &rope,
+            &[0..rope.len_chars()],
+            &crate::settings::Settings::default().theme.syntax,
+        ) {
+            faces[range].fill(face);
+        }
+        faces
+    }
+
+    fn face_at(text: &str, faces: &[Face], needle: &str) -> Face {
+        faces[text[..text.find(needle).unwrap()].chars().count()]
+    }
+
+    #[test]
+    fn markdown_inline_faces_keep_markup_and_heading_context() {
+        let text = "# é *one **two** three* `code` [docs](https://x.dev)\n";
+        let faces = faces("a.md", text);
+        let p = crate::settings::Settings::default().theme.syntax;
+        assert_eq!(
+            face_at(text, &faces, "one"),
+            p["text.emphasis"].over(p["text.title"])
+        );
+        assert_eq!(
+            face_at(text, &faces, "two"),
+            p["text.strong"].over(p["text.emphasis"].over(p["text.title"]))
+        );
+        assert_eq!(
+            face_at(text, &faces, "*"),
+            p["text.emphasis"].over(p["text.title"])
+        );
+        assert_eq!(
+            face_at(text, &faces, "`code`"),
+            p["text.literal"].over(p["text.title"])
+        );
+        assert_eq!(
+            face_at(text, &faces, "docs"),
+            p["text.reference"].over(p["text.title"])
+        );
+        assert_eq!(
+            face_at(text, &faces, "https"),
+            p["text.uri"].over(p["text.title"])
+        );
+    }
+
+    #[test]
+    fn markdown_fences_use_each_languages_faces() {
+        for (language, file, code) in [
+            ("rust", "a.rs", "fn main() { let s = \"é\"; }\n"),
+            (
+                "elixir",
+                "a.ex",
+                "defmodule Foo do\n  def run, do: :ok\nend\n",
+            ),
+            ("js", "a.js", "const f = (x) => x + 1;\n"),
+            ("ts", "a.ts", "const x: number = 1;\n"),
+            ("yaml", "a.yaml", "a: true\n"),
+            ("toml", "a.toml", "[package]\nname = \"é\"\n"),
+        ] {
+            let prefix = format!("é\n\n```{language} extra\n");
+            let text = format!("{prefix}{code}```\n");
+            let highlighted = faces("a.md", &text);
+            let start = prefix.chars().count();
+            assert_eq!(
+                &highlighted[start..start + code.chars().count()],
+                faces(file, code),
+                "{language}"
+            );
+            let literal = crate::settings::Settings::default().theme.syntax["text.literal"];
+            assert_eq!(face_at(&text, &highlighted, "```"), literal);
+            assert_eq!(highlighted[highlighted.len() - 2], literal);
+        }
+    }
+
+    #[test]
+    fn markdown_unknown_unlabeled_and_empty_fences() {
+        let literal = crate::settings::Settings::default().theme.syntax["text.literal"];
+        for label in ["unknown", "", "rusty"] {
+            let text = format!("```{label}\nfn main() {{}} *plain*\n```\n");
+            assert_eq!(faces("a.md", &text), vec![literal; text.chars().count()]);
+        }
+        let text = "```rust\n```\n\n*after*\n";
+        assert!(face_at(text, &faces("a.md", text), "after").italic);
+    }
+
+    #[test]
+    fn markdown_continuations_tables_and_list_fences() {
+        let text = "> *é\n> continued*\n\n| Header |\n| --- |\n| **cell** |\n\n- ```rust\n  fn main() {}\n  ```\n\n> ```rust\n> let s = \"é\n> continued\";\n> ```\n";
+        let highlighted = faces("a.md", text);
+        let p = crate::settings::Settings::default().theme.syntax;
+        assert_eq!(
+            face_at(text, &highlighted, "continued*"),
+            p["text.emphasis"]
+        );
+        assert_eq!(
+            face_at(text, &highlighted, "> continued*"),
+            p["punctuation.special"]
+        );
+        assert_eq!(face_at(text, &highlighted, "cell"), p["text.strong"]);
+        assert_eq!(face_at(text, &highlighted, "fn"), p["keyword"]);
+        assert_eq!(face_at(text, &highlighted, "continued\""), p["string"]);
+        assert_eq!(
+            face_at(text, &highlighted, "> continued\""),
+            p["punctuation.special"]
+        );
+    }
+
+    #[test]
+    fn markdown_visible_ranges_keep_injected_string_context() {
+        let text = "```rust\nlet s = \"é\ncontinued\";\n```\n";
+        let rope = Rope::from_str(text);
+        let syntax = Syntax::for_file(Path::new("a.md"), &rope).unwrap();
+        let start = text[..text.find("continued").unwrap()].chars().count();
+        let p = crate::settings::Settings::default().theme.syntax;
+        assert_eq!(
+            syntax.highlights(&rope, &[start..start + 3, start + 4..start + 7], &p),
+            [
+                (start..start + 3, p["string"]),
+                (start + 4..start + 7, p["string"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_edits_match_fresh_parses() {
+        let mut buffers = crate::buffer::Buffers::default();
+        let path = Path::new("/a.md");
+        let id = buffers.create_for_file(path, "é *one*\n\n```rust\nfn main() {}\n```\n");
+        let b = buffers.get_mut(id).unwrap();
+        let p = crate::settings::Settings::default().theme.syntax;
+        let check = |b: &mut crate::buffer::Buffer| {
+            b.reparse();
+            let fresh = Syntax::for_file(path, b.text()).unwrap();
+            assert_eq!(
+                b.highlights(&[0..b.len_chars()], &p),
+                fresh.highlights(b.text(), &[0..b.len_chars()], &p),
+                "{}",
+                b.text()
+            );
+        };
+        check(b);
+        for (from, to) in [
+            ("é", "😀\n\n"),
+            ("one", "two **bold**"),
+            ("fn main() {}", "fn main() { let s = \"é\"; }"),
+            ("rust", "unknown"),
+            ("unknown", "elixir"),
+            ("fn main() { let s = \"é\"; }", "defmodule Foo do end"),
+            ("```elixir", "elixir"),
+            ("elixir", "~~~js"),
+            ("~~~js", "```rust"),
+        ] {
+            let text = b.text().to_string();
+            let start = text[..text.find(from).unwrap()].chars().count();
+            b.undo_boundary(0);
+            b.delete(start..start + from.chars().count()).unwrap();
+            b.insert(start, to).unwrap();
+            b.undo_boundary(0);
+            check(b);
+            b.undo();
+            check(b);
+            b.redo();
+            check(b);
+        }
+        b.delete(0..b.len_chars()).unwrap();
+        check(b);
+        b.insert(0, "```ts\nconst x: number = 1;\n```\n\n*new*\n")
+            .unwrap();
+        check(b);
     }
 
     #[test]

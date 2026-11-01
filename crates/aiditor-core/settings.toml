@@ -111,6 +111,8 @@ string = { fg = 0xce9178 }
 "string.special" = { fg = 0xd16969 }
 tag = { fg = 0x569cd6 }
 "text.literal" = { fg = 0xce9178 }
+"text.emphasis" = { italic = true }
+"text.strong" = { bold = true }
 "text.reference" = { fg = 0x9cdcfe }
 "text.title" = { fg = 0x569cd6 }
 "text.uri" = { fg = 0xce9178 }

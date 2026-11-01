@@ -696,6 +696,71 @@ mod tests {
     }
 
     #[gpui::test]
+    fn markdown_injections_reach_font_runs_and_follow_input(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        let text = "*italic* **bold** `code` [docs](https://x.dev)\n\n```rust\nfn main() {}\n```\n";
+        std::fs::write(&path, text).unwrap();
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.open(&path, files::read(&path).unwrap());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            painted(&editor, cx, 0).1[0].text.as_ref(),
+            "*italic* **bold** `code` [docs](https://x.dev)"
+        );
+        editor.update_in(cx, |e, window, _| {
+            let lines = e.core.frame().windows.remove(0).display.lines;
+            let font = e.font(window).0;
+            let theme = &e.core.settings().theme;
+            for (text, style, weight) in [
+                (
+                    "*italic*",
+                    gpui::FontStyle::Italic,
+                    gpui::FontWeight::NORMAL,
+                ),
+                ("**bold**", gpui::FontStyle::Normal, gpui::FontWeight::BOLD),
+            ] {
+                let span = lines[0].spans.iter().find(|s| s.text == text).unwrap();
+                let run = text_run(span.text.len(), span.face, false, &font, theme);
+                assert_eq!((run.font.style, run.font.weight), (style, weight));
+            }
+            let span = lines[3].spans.iter().find(|s| s.text == "fn").unwrap();
+            let run = text_run(span.text.len(), span.face, false, &font, theme);
+            assert_eq!(run.color, rgb(theme.syntax["keyword"].fg.unwrap()).into());
+        });
+        cx.simulate_keystrokes("ctrl-n ctrl-n ctrl-n ctrl-a");
+        cx.simulate_input("// ");
+        cx.run_until_parked();
+        editor.update(cx, |e, _| {
+            let line = e.core.frame().windows.remove(0).display.lines.remove(3);
+            assert_eq!(line.spans[0].text, "// fn main() {}");
+            assert_eq!(
+                line.spans[0].face,
+                e.core.settings().theme.syntax["comment"]
+            );
+        });
+        cx.simulate_keystrokes("ctrl-x u");
+        cx.run_until_parked();
+        editor.update(cx, |e, _| {
+            let line = e.core.frame().windows.remove(0).display.lines.remove(3);
+            assert_eq!(line.spans[0].text, "fn");
+            assert_eq!(
+                line.spans[0].face,
+                e.core.settings().theme.syntax["keyword"]
+            );
+        });
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn swiper_input_produces_match_background_runs_and_cleans_up(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let (editor, cx) = editor(cx, "été Foo foo\nfoo bar\n");
@@ -1532,6 +1597,18 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        // The matcher's OS threads finish separately from GPUI's test executor.
+        for _ in 0..100 {
+            let ready = editor.update(cx, |e, _| {
+                e.core.frame().minibuffer.unwrap().candidates.len() == 5
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
         editor.update_in(cx, |e, window, _| {
             let mb = e.core.frame().minibuffer.unwrap();
             assert_eq!((mb.count.trim(), mb.selected), ("*/5", None));
