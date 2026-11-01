@@ -6,7 +6,7 @@ Opening a file named on the command line into a buffer and writing the buffer ba
 ## Requirements
 
 ### Requirement: A file named on the command line opens in a buffer
-When the app is started with a file path, it SHALL read that file and make a buffer visiting it current, with point at the start and the buffer unmodified. A UTF-8 byte-order mark SHALL be left out of the buffer's text, and when the file's first line break is CRLF every CRLF SHALL become LF in the buffer. The buffer SHALL remember the BOM, the line ending and the file's content as loaded.
+When the app is started with a file path, it SHALL read that file and make a buffer visiting it current, with point at the start and the buffer unmodified. A UTF-8 byte-order mark SHALL be left out of the buffer's text, and when every line break in the file is CRLF each SHALL become LF in the buffer. The buffer SHALL remember the BOM, the line ending and the file's content as loaded.
 
 #### Scenario: Existing file
 - **WHEN** the app starts with the path of a file containing `hello`
@@ -31,6 +31,10 @@ When the app is started with a file path, it SHALL read that file and make a buf
 #### Scenario: Unreadable file
 - **WHEN** the file exists but cannot be read, for example for lack of permission
 - **THEN** the app exits with an error message naming the file and does not open a window
+
+#### Scenario: A device or pipe
+- **WHEN** the app starts with the path of a device or named pipe
+- **THEN** the app exits with an error message naming the file, without reading it, and does not open a window
 
 ### Requirement: C-x C-s saves the current buffer to its file
 `C-x C-s` SHALL write the current buffer's text to the file it visits, with the BOM and line ending the file was loaded with, and a final newline added to the buffer first when its non-empty text lacks one. The write SHALL be refused, with a message naming the file, when the file on disk differs from what the buffer last loaded or saved, including a file that appeared since. A file that is gone from disk SHALL be written back, since nothing on disk is lost. A buffer in the deleted state SHALL be written even when unmodified. The buffer SHALL become unmodified, and leave the deleted state, only after the write succeeds, and only if it was not edited while the write ran; the echo area SHALL then say `Wrote <path>`. A failed write SHALL show its error in the echo area.
@@ -76,7 +80,7 @@ When the app is started with a file path, it SHALL read that file and make a buf
 - **THEN** neither key edits the buffer and nothing is saved
 
 ### Requirement: Saves keep the file's mode and links
-A save SHALL replace an existing file atomically, so a crash mid-save leaves the old or the new content, never a truncated file, and SHALL give the new file the old file's permissions. Saving through a symlink SHALL replace the link's target and keep the link. A file with more than one hard link, or in a directory where no temp file can be made, SHALL be written in place so links stay shared.
+A save SHALL replace an existing file atomically, so a crash mid-save leaves the old or the new content, never a truncated file, and SHALL give the new file the old file's permissions. Saving through a symlink SHALL replace the link's target and keep the link. A file with more than one hard link, or in a directory where no temp file can be made, SHALL be written in place so links stay shared. A file the user has no write permission for SHALL NOT be replaced: the save SHALL fail with an error naming the file.
 
 #### Scenario: Permissions survive
 - **WHEN** a file with mode 0754 is saved
@@ -89,6 +93,11 @@ A save SHALL replace an existing file atomically, so a crash mid-save leaves the
 #### Scenario: Hard link
 - **WHEN** a file with a second hard link is saved
 - **THEN** both names show the new text
+
+#### Scenario: A file without write permission
+- **GIVEN** a file with mode 0444 in a writable directory
+- **WHEN** its edited buffer is saved
+- **THEN** the file keeps its content, the echo area shows the error and the buffer stays modified
 
 ### Requirement: Read-only buffers refuse edits
 An edit to a read-only buffer SHALL fail with the message `Buffer is read-only` and leave the text unchanged.
@@ -128,7 +137,7 @@ When a buffer of the current workspace already visits the named path, `find-file
 - **THEN** there are two buffers visiting it, one per workspace, and the new workspace's is current
 
 ### Requirement: find-file refuses files it cannot visit
-A binary or non-UTF-8 file SHALL NOT be visited; the echo area SHALL name the file and the reason. A file that cannot be read, or a directory, SHALL show the error in the echo area. In each case the current buffer SHALL stay as it was.
+A binary or non-UTF-8 file SHALL NOT be visited; the echo area SHALL name the file and the reason. A file that cannot be read, a directory, or anything else that is not a regular file SHALL show the error in the echo area, and a device or pipe SHALL NOT be read. In each case the current buffer SHALL stay as it was.
 
 #### Scenario: Binary file
 - **WHEN** `find-file` names a file with a NUL byte
@@ -137,6 +146,14 @@ A binary or non-UTF-8 file SHALL NOT be visited; the echo area SHALL name the fi
 #### Scenario: Directory
 - **WHEN** `find-file` names a directory
 - **THEN** no buffer is made and the echo area shows the error
+
+#### Scenario: A device
+- **WHEN** `find-file` names `/dev/zero`
+- **THEN** no buffer is made, no bytes are read from it and the echo area shows the error
+
+#### Scenario: A named pipe
+- **WHEN** `find-file` names a named pipe no program writes to
+- **THEN** no buffer is made, the read does not wait for a writer and the echo area shows the error
 
 ### Requirement: The file prompt completes over directory entries
 The `Find file: ` prompt SHALL list the entries of the directory named by the text up to its last `/`, sorted by name, each subdirectory's name followed by `/`, fuzzy-matched against the text after the last `/`. The listing SHALL be read without blocking the editor, the list SHALL fill when it arrives, and it SHALL follow the text into another directory. A directory that cannot be listed SHALL show the error in the echo area and list nothing. Only the listing the open prompt last asked for SHALL fill its list: a listing asked for by a closed prompt, or by the same prompt before its text left that directory and came back, SHALL be ignored when it arrives, even when it names the same directory.
@@ -277,3 +294,25 @@ Filesystem completion entries SHALL show Unix type and permission bits, decimal 
 - **GIVEN** a directory contains a dangling symlink
 - **WHEN** the directory is listed
 - **THEN** the link remains a candidate with link mode bits
+
+### Requirement: Files with mixed line endings round-trip
+A file whose line breaks are not all CRLF SHALL be treated as LF: its `\r` chars SHALL stay in the buffer's text and a save SHALL write them back unchanged.
+
+#### Scenario: CRLF first, then LF
+- **WHEN** a file holding `a\r\nb\n` is visited
+- **THEN** the buffer holds `a\r\nb\n` and the mode line does not show `CRLF`
+
+#### Scenario: A save changes only the edit
+- **WHEN** a file holding `a\r\nb\n` is visited, `x` is typed at the end of the buffer and the buffer is saved
+- **THEN** the file holds `a\r\nb\nx\n`
+
+### Requirement: A reported save has reached the disk
+Every save, whether it replaces the file, writes it in place or creates it, SHALL flush the file's content to stable storage before the buffer becomes unmodified and `Wrote <path>` is shown, so its recovery file is not deleted while the text exists only in memory.
+
+#### Scenario: A new file
+- **WHEN** a buffer visiting a file that does not exist yet is saved
+- **THEN** the content is flushed before `Wrote <path>` is shown
+
+#### Scenario: A hard-linked file
+- **WHEN** a file with a second hard link is saved
+- **THEN** the content is flushed before `Wrote <path>` is shown, and both names show it

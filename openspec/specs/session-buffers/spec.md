@@ -307,7 +307,7 @@ When `C-c C-c` sends `session/cancel`, every pending permission request of the s
 ### Requirement: Command output shows in its tool call
 A `tool_call`, or a call started from an update, SHALL open a terminal for the call when its `_meta.terminal_info` names a `terminal_id` or a content item is a terminal, the first of these naming the terminal's id; a call keeps the terminal it opened when later updates replace its content. Every `tool_call` and `tool_call_update` SHALL append the `data` string of `_meta.terminal_output` and of `_meta.terminal_output_delta`, in that order, to the output of the terminal their `terminal_id` names, whichever call announced it. `_meta.terminal_exit` SHALL record that terminal's exit: `signal <signal>` when `signal` is a string, else `exit <code>` when `exit_code` is a non-zero number, else none. Data or an exit for a terminal no shown call opened SHALL be dropped.
 
-The call's own terminal SHALL show as `Output:` and its output in a fenced code block, with ANSI escape sequences and carriage returns removed, in the place of `rawOutput` in the content, and its `terminal` content item SHALL NOT show as `Terminal <id>`. A terminal without output yet SHALL show nothing. The exit, when recorded, SHALL follow the status in the header, `session-thought` like it. An update that changes only a terminal's output or exit SHALL re-render that call when the next frame is built, once however many such updates came, and an update with fields SHALL rewrite the call at once.
+The call's own terminal SHALL show as `Output:` and its output in a fenced code block, with ANSI escape sequences and carriage returns removed, in the place of `rawOutput` in the content, and its `terminal` content item SHALL NOT show as `Terminal <id>`. A terminal without output yet SHALL show nothing. The exit, when recorded, SHALL follow the status in the header, `session-thought` like it. An update that changes only a terminal's output or exit SHALL re-render that call when the next frame showing its session is built, once however many such updates came, and an update with fields SHALL rewrite the call at once. Frames that do not show the session SHALL defer that rendering while retaining the output and exit. A session is shown as for streamed messages.
 
 The SGR escapes removed from the terminal output and from text content items SHALL become faces on the chars they precede, shown when the call is open: foreground (`30`–`37`, `90`–`97`, `38;5;<n>` for n below 16) and background (`40`–`47`, `100`–`107`, `48;5;<n>`) in the theme's ANSI colours, bold (`1`), underline (`4`), and their resets (`0`, `39`, `49`, `22`, `24`). Other colours SHALL show in the default colour, and other attributes and escapes SHALL be ignored. The buffer's text SHALL hold no escapes, so copying the output yields plain text.
 
@@ -354,6 +354,16 @@ The SGR escapes removed from the terminal output and from text content items SHA
 #### Scenario: Streaming through the fake agent
 - **WHEN** the fake agent's turn sends a terminal tool call, output chunks under both keys and a failing exit
 - **THEN** after the turn the session buffer's call reads `(execute, failed, exit 1)` and its output holds every chunk in order
+
+#### Scenario: Hidden command output catches up
+- **GIVEN** a session is hidden behind another buffer or belongs to an inactive workspace
+- **WHEN** output-only updates arrive for its call while frames show other buffers
+- **THEN** its block is unchanged until the first frame showing the session, which holds every chunk in order without needing another update
+
+#### Scenario: Open and folded calls agree
+- **GIVEN** two calls receive the same chunks, one open and one folded
+- **WHEN** the frame is built and the folded call is opened
+- **THEN** both blocks hold the same text and faces
 
 ### Requirement: The session buffer is named after the session's title
 A `session_info_update` whose `title` is a string SHALL rename the session buffer to `*<agent>: <title>*<<workspace>>`, made unique, where `<title>` is the title's first line with surrounding whitespace trimmed, cut to its first 40 chars with `…` appended when longer. A title that is empty after trimming, or a `title` that is null, SHALL rename the buffer back to `*<agent>*<<workspace>>`, made unique. An update without `title` SHALL leave the name alone. `<agent>` and `<workspace>` SHALL be the names the buffer was started with. Every titled update SHALL rename again; an update after the session has ended SHALL be ignored.
@@ -477,3 +487,11 @@ The core SHALL retain the latest `usage_update`'s `used` and `size` and show `ct
 - **GIVEN** a session receiving usage
 - **WHEN** size is zero, then used is greater than a positive size
 - **THEN** context is first omitted and then shown as `ctx 100%`
+
+### Requirement: Folded output layout skips hidden lines
+Laying out a folded tool call SHALL jump across its hidden lines rather than repeatedly expanding the viewport through them, so a fixed appended chunk does not make folded redisplay grow with retained output.
+
+#### Scenario: A large folded output before visible text
+- **GIVEN** a folded call hides many lines and a visible line follows it
+- **WHEN** a frame showing the call is built
+- **THEN** the folded header and following line are shown with their faces, without walking the hidden lines in viewport-sized batches
