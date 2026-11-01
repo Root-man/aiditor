@@ -79,6 +79,16 @@ static ELIXIR: LazyLock<Grammar> = LazyLock::new(|| {
         &[tree_sitter_elixir::HIGHLIGHTS_QUERY],
     )
 });
+static ELIXIR_INJECTIONS: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &ELIXIR.language,
+        "((sigil (sigil_name) @_name (quoted_content) @content) (#eq? @_name \"H\"))",
+    )
+    .expect("bundled queries compile")
+});
+static HEEX_INJECTIONS: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(&HEEX.language, tree_sitter_heex::INJECTIONS_QUERY).expect("bundled queries compile")
+});
 static HEEX: LazyLock<Grammar> = LazyLock::new(|| {
     grammar(
         tree_sitter_heex::LANGUAGE.into(),
@@ -146,6 +156,7 @@ struct Injection {
     grammar: &'static Grammar,
     ranges: Vec<tree_sitter::Range>,
     tree: Tree,
+    children: Vec<Injection>,
     locals: RefCell<Option<Locals>>,
 }
 
@@ -172,7 +183,21 @@ fn content_ranges(node: Node) -> Vec<tree_sitter::Range> {
     ranges
 }
 
-fn markdown_injections(text: &Rope, tree: &Tree, old: Vec<Injection>) -> Vec<Injection> {
+fn injections(
+    host: &'static Grammar,
+    text: &Rope,
+    tree: &Tree,
+    old: Vec<Injection>,
+) -> Vec<Injection> {
+    let (query, default): (&Query, &Grammar) = if std::ptr::eq(host, &*MARKDOWN) {
+        (&MARKDOWN_INJECTIONS, &MARKDOWN_INLINE)
+    } else if std::ptr::eq(host, &*ELIXIR) {
+        (&ELIXIR_INJECTIONS, &HEEX)
+    } else if std::ptr::eq(host, &*HEEX) {
+        (&HEEX_INJECTIONS, &ELIXIR)
+    } else {
+        return Vec::new();
+    };
     let mut old: BTreeMap<_, _> = old
         .into_iter()
         .map(|i| (i.ranges[0].start_byte, i))
@@ -184,14 +209,16 @@ fn markdown_injections(text: &Rope, tree: &Tree, old: Vec<Injection>) -> Vec<Inj
             .chunks()
             .map(str::as_bytes)
     };
-    let mut matches = cursor.matches(&MARKDOWN_INJECTIONS, tree.root_node(), source);
-    let mut injections = Vec::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    let included = tree.included_ranges();
+    let mut regions = Vec::new();
+    let mut combined = BTreeMap::<usize, Vec<tree_sitter::Range>>::new();
     while let Some(m) = matches.next() {
         let mut content = None;
-        let mut grammar: Option<&Grammar> = Some(&MARKDOWN_INLINE);
+        let mut grammar: Option<&Grammar> = Some(default);
         for c in m.captures() {
-            match MARKDOWN_INJECTIONS.capture_names()[c.index as usize] {
-                "content" => content = Some(c.node),
+            match query.capture_names()[c.index as usize] {
+                "content" | "injection.content" => content = Some(c.node),
                 "language" => {
                     grammar = match text.byte_slice(c.node.byte_range()).to_string().as_str() {
                         "rust" => Some(&RUST),
@@ -203,13 +230,40 @@ fn markdown_injections(text: &Rope, tree: &Tree, old: Vec<Injection>) -> Vec<Inj
                         _ => None,
                     };
                 }
-                _ => unreachable!(),
+                _ => {}
             }
         }
         let (Some(content), Some(grammar)) = (content, grammar) else {
             continue;
         };
-        let ranges = content_ranges(content);
+        let ranges = content_ranges(content)
+            .into_iter()
+            .flat_map(|r| {
+                included.iter().filter_map(move |parent| {
+                    let start_byte = r.start_byte.max(parent.start_byte);
+                    let end_byte = r.end_byte.min(parent.end_byte);
+                    (start_byte < end_byte).then_some(tree_sitter::Range {
+                        start_byte,
+                        end_byte,
+                        start_point: r.start_point.max(parent.start_point),
+                        end_point: r.end_point.min(parent.end_point),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        if query
+            .property_settings(m.pattern_index)
+            .iter()
+            .any(|p| p.key.as_ref() == "injection.combined")
+        {
+            combined.entry(m.pattern_index).or_default().extend(ranges);
+        } else {
+            regions.push((grammar, ranges));
+        }
+    }
+    regions.extend(combined.into_values().map(|ranges| (default, ranges)));
+    let mut injections = Vec::new();
+    for (grammar, ranges) in regions {
         let Some(first) = ranges.first() else {
             continue;
         };
@@ -223,15 +277,77 @@ fn markdown_injections(text: &Rope, tree: &Tree, old: Vec<Injection>) -> Vec<Inj
             .set_included_ranges(&ranges)
             .expect("ordered content ranges");
         let tree = parse(&mut parser, text, previous.as_ref().map(|i| &i.tree));
+        let children = self::injections(
+            grammar,
+            text,
+            &tree,
+            previous.map_or_else(Vec::new, |i| i.children),
+        );
         injections.push(Injection {
             grammar,
             ranges,
             tree,
+            children,
             locals: RefCell::default(),
         });
     }
     injections.sort_by_key(|i| i.ranges[0].start_byte);
     injections
+}
+
+impl Injection {
+    fn edit(&mut self, edit: &InputEdit) {
+        self.tree.edit(edit);
+        for range in &mut self.ranges {
+            edit.edit_range(range);
+        }
+        for child in &mut self.children {
+            child.edit(edit);
+        }
+    }
+}
+
+fn paint_injections(
+    injections: &[Injection],
+    text: &Rope,
+    bytes: Range<usize>,
+    palette: &BTreeMap<String, Face>,
+    painted: &mut [Option<Face>],
+) {
+    // Combined directives can surround other expressions, so sibling ends are not sorted.
+    for injection in injections
+        .iter()
+        .take_while(|i| i.ranges[0].start_byte < bytes.end)
+        .filter(|i| i.ranges.last().unwrap().end_byte > bytes.start)
+    {
+        let first = injection
+            .ranges
+            .partition_point(|r| r.end_byte <= bytes.start);
+        for included in injection.ranges[first..]
+            .iter()
+            .take_while(|r| r.start_byte < bytes.end)
+        {
+            let start = included.start_byte.max(bytes.start);
+            let end = included.end_byte.min(bytes.end);
+            if start >= end {
+                continue;
+            }
+            let painted = &mut painted[start - bytes.start..end - bytes.start];
+            if !std::ptr::eq(injection.grammar, &*MARKDOWN_INLINE) {
+                painted.fill(None);
+            }
+            paint(
+                injection.grammar,
+                &injection.tree,
+                text,
+                start..end,
+                palette,
+                painted,
+                &injection.locals,
+            );
+            paint_injections(&injection.children, text, start..end, palette, painted);
+        }
+    }
 }
 
 /// The byte offset and tree-sitter point of char `char_idx`.
@@ -482,11 +598,7 @@ impl Syntax {
         let mut parser = Parser::new();
         (parser.set_language(&grammar.language)).expect("bundled grammars suit this tree-sitter");
         let tree = parse(&mut parser, text, None);
-        let injections = if std::ptr::eq(grammar, &*MARKDOWN) {
-            markdown_injections(text, &tree, Vec::new())
-        } else {
-            Vec::new()
-        };
+        let injections = injections(grammar, text, &tree, Vec::new());
         Some(Syntax {
             name,
             grammar,
@@ -516,10 +628,7 @@ impl Syntax {
         };
         self.tree.edit(&edit);
         for injection in &mut self.injections {
-            injection.tree.edit(&edit);
-            for range in &mut injection.ranges {
-                edit.edit_range(range);
-            }
+            injection.edit(&edit);
         }
         self.stale = true;
         self.cache.take();
@@ -530,10 +639,12 @@ impl Syntax {
     pub(crate) fn reparse(&mut self, text: &Rope) {
         if std::mem::take(&mut self.stale) {
             self.tree = parse(&mut self.parser, text, Some(&self.tree));
-            if std::ptr::eq(self.grammar, &*MARKDOWN) {
-                self.injections =
-                    markdown_injections(text, &self.tree, std::mem::take(&mut self.injections));
-            }
+            self.injections = injections(
+                self.grammar,
+                text,
+                &self.tree,
+                std::mem::take(&mut self.injections),
+            );
             self.cache.take();
         }
     }
@@ -566,41 +677,7 @@ impl Syntax {
                 &mut painted,
                 &self.locals,
             );
-            let first = self
-                .injections
-                .partition_point(|i| i.ranges.last().unwrap().end_byte <= bytes.start);
-            for injection in self.injections[first..]
-                .iter()
-                .take_while(|i| i.ranges[0].start_byte < bytes.end)
-            {
-                let inline = std::ptr::eq(injection.grammar, &*MARKDOWN_INLINE);
-                let first = injection
-                    .ranges
-                    .partition_point(|r| r.end_byte <= bytes.start);
-                for included in injection.ranges[first..]
-                    .iter()
-                    .take_while(|r| r.start_byte < bytes.end)
-                {
-                    let start = included.start_byte.max(bytes.start);
-                    let end = included.end_byte.min(bytes.end);
-                    if start >= end {
-                        continue;
-                    }
-                    let painted = &mut painted[start - bytes.start..end - bytes.start];
-                    if !inline {
-                        painted.fill(None);
-                    }
-                    paint(
-                        injection.grammar,
-                        &injection.tree,
-                        text,
-                        start..end,
-                        palette,
-                        painted,
-                        &injection.locals,
-                    );
-                }
-            }
+            paint_injections(&self.injections, text, bytes.clone(), palette, &mut painted);
             let mut byte = 0;
             for (i, c) in text.slice(range.clone()).chars().enumerate() {
                 let at = range.start + i;
@@ -765,6 +842,173 @@ mod tests {
 
     fn face_at(text: &str, faces: &[Face], needle: &str) -> Face {
         faces[text[..text.find(needle).unwrap()].chars().count()]
+    }
+
+    #[test]
+    fn heex_sigils_and_standalone_templates_have_elixir_expressions() {
+        let template = r#"<div class="a" id={String.upcase("é")}><%= if true do %>
+          <.card value={%{count: 42}} /> plain
+          <%= String.downcase("VALUE") %><% end %><!-- comment --></div>"#;
+        let p = crate::settings::Settings::default().theme.syntax;
+        for (file, text) in [
+            ("a.heex", template.to_string()),
+            (
+                "a.ex",
+                format!("def render(assigns) do\n~H\"\"\"\n{template}\n\"\"\"\nend"),
+            ),
+            (
+                "a.md",
+                format!(
+                    "> ```elixir\n> ~H\"\"\"\n> {}\n> \"\"\"\n> ```\n",
+                    template.replace('\n', "\n> ")
+                ),
+            ),
+        ] {
+            let highlighted = faces(file, &text);
+            for (needle, name) in [
+                ("div", "tag"),
+                ("class", "attribute"),
+                ("\"a\"", "string"),
+                ("String", "module"),
+                ("upcase", "function"),
+                ("\"é\"", "string"),
+                ("if", "keyword"),
+                ("true", "constant"),
+                ("do", "keyword"),
+                ("card", "function"),
+                ("42", "number"),
+                ("downcase", "function"),
+                ("end %>", "keyword"),
+                ("<!-- comment -->", "comment"),
+                ("{String", "punctuation.bracket"),
+                ("<%=", "punctuation.bracket"),
+            ] {
+                assert_eq!(
+                    face_at(&text, &highlighted, needle),
+                    face(&p, name).unwrap_or_default(),
+                    "{file}: {needle}"
+                );
+            }
+            assert_eq!(face_at(&text, &highlighted, "plain"), Face::default());
+            if file == "a.md" {
+                assert_eq!(
+                    face_at(&text, &highlighted, ">           <.card"),
+                    p["punctuation.special"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heex_sigils_keep_delimiters_and_separate_template_contexts() {
+        let p = crate::settings::Settings::default().theme.syntax;
+        for sigil in ["~H", "~s", "~h"] {
+            let text = format!("{sigil}|<div>plain</div>|");
+            let highlighted = faces("a.ex", &text);
+            let sigil_face = if sigil == "~s" {
+                "string"
+            } else {
+                "string.special"
+            };
+            assert_eq!(face_at(&text, &highlighted, "|"), p[sigil_face]);
+            assert_eq!(
+                face_at(&text, &highlighted, "div"),
+                p[if sigil == "~H" { "tag" } else { sigil_face }]
+            );
+        }
+        let text = "~H|<%= \"unclosed %>|\n~H|<span><%= String.upcase(\"ok\") %></span>|";
+        let highlighted = faces("a.ex", text);
+        assert_eq!(face_at(text, &highlighted, "span"), p["tag"]);
+        assert_eq!(face_at(text, &highlighted, "String"), p["module"]);
+        assert_eq!(face_at(text, &highlighted, "upcase"), p["function"]);
+        assert_eq!(face_at(text, &highlighted, "\"ok\""), p["string"]);
+    }
+
+    #[test]
+    fn heex_visible_ranges_keep_expression_context_and_current_palette() {
+        let text =
+            "~H\"\"\"\n<div><%= if true do %>\n<%= \"é\ncontinued\" %>\n<% end %></div>\n\"\"\"";
+        let rope = Rope::from_str(text);
+        let syntax = Syntax::for_file(Path::new("a.ex"), &rope).unwrap();
+        for (needle, name) in [("continued", "string"), ("end", "keyword")] {
+            let start = text[..text.find(needle).unwrap()].chars().count();
+            for color in [1, 2] {
+                let p = palette(&[(name, color)]);
+                let ranges = if needle.len() == 3 {
+                    vec![start..start + 3]
+                } else {
+                    vec![start..start + 3, start + 4..start + needle.len()]
+                };
+                let expected: Vec<_> = ranges.iter().cloned().map(|r| (r, fg(color))).collect();
+                assert_eq!(syntax.highlights(&rope, &ranges, &p), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn heex_nested_edits_match_fresh_parses() {
+        for (file, original) in [
+            (
+                "/a.ex",
+                "é = ~H|<div>{String.upcase(\"é\")}</div>|\n~H|<p><%= 42 %></p>|",
+            ),
+            (
+                "/a.heex",
+                "<div>{String.upcase(\"é\")}</div>\n<p><%= 42 %></p>",
+            ),
+            (
+                "/a.md",
+                "> ```elixir\n> é = ~H|<div>{String.upcase(\"é\")}</div>|\n> ```",
+            ),
+        ] {
+            let path = Path::new(file);
+            let mut buffers = crate::buffer::Buffers::default();
+            let id = buffers.create_for_file(path, original);
+            let b = buffers.get_mut(id).unwrap();
+            let p = crate::settings::Settings::default().theme.syntax;
+            let check = |b: &mut crate::buffer::Buffer| {
+                b.reparse();
+                let fresh = Syntax::for_file(path, b.text()).unwrap();
+                assert_eq!(
+                    b.highlights(&[0..b.len_chars()], &p),
+                    fresh.highlights(b.text(), &[0..b.len_chars()], &p),
+                    "{file}: {}",
+                    b.text()
+                );
+            };
+            check(b);
+            for (from, to) in [
+                ("é", "😀\n"),
+                ("upcase", "downcase"),
+                ("(\"é\")", "(42)"),
+                ("{String", "String"),
+                ("~H", "~s"),
+                ("<div>", "<%= if true do %><div>"),
+                ("</div>", "</div><% end %>"),
+                ("|<", "|\n<"),
+            ] {
+                let text = b.text().to_string();
+                let Some(byte) = text.find(from) else {
+                    continue;
+                };
+                let start = text[..byte].chars().count();
+                b.undo_boundary(0);
+                b.delete(start..start + from.chars().count()).unwrap();
+                b.insert(start, to).unwrap();
+                b.undo_boundary(0);
+                check(b);
+                b.undo();
+                check(b);
+                b.redo();
+                check(b);
+                b.undo();
+                check(b);
+            }
+            b.delete(0..b.len_chars()).unwrap();
+            check(b);
+            b.insert(0, original).unwrap();
+            check(b);
+        }
     }
 
     fn local_faces(file: &str, text: &str, name: &str) -> Vec<Option<u32>> {
