@@ -696,6 +696,73 @@ mod tests {
     }
 
     #[gpui::test]
+    fn syntax_styles_reach_font_runs_after_settings_reload(cx: &mut TestAppContext) {
+        let _native = crate::native::lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.js");
+        std::fs::write(&path, "// comment\nconst value = 1;\n").unwrap();
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.open(&path, files::read(&path).unwrap());
+            cx.notify();
+        });
+        for styled in [true, false] {
+            let settings = format!(
+                "theme = 'mine'\n[themes.default.syntax]\ncomment = {{ fg = 0x928374, italic = true }}\nkeyword = {{ fg = 0xff0000, bold = true }}\n[themes.mine.syntax]\ncomment = {{ italic = {styled} }}\nkeyword = {{ bold = {styled} }}"
+            );
+            editor.update(cx, |e, cx| {
+                e.handle(Msg::SettingsLoaded(Ok(Some(settings))), cx)
+            });
+            cx.run_until_parked();
+            editor.update_in(cx, |e, window, _| {
+                let display = e.core.frame().windows.remove(0).display;
+                let font = e.font(window).0;
+                for (line, text, color, style, weight) in [
+                    (
+                        0,
+                        "// comment",
+                        0x928374,
+                        if styled {
+                            gpui::FontStyle::Italic
+                        } else {
+                            gpui::FontStyle::Normal
+                        },
+                        gpui::FontWeight::NORMAL,
+                    ),
+                    (
+                        1,
+                        "const",
+                        0xff0000,
+                        gpui::FontStyle::Normal,
+                        if styled {
+                            gpui::FontWeight::BOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        },
+                    ),
+                ] {
+                    let span = &display.lines[line].spans[0];
+                    assert_eq!(span.text, text);
+                    let run = text_run(
+                        span.text.len(),
+                        span.face,
+                        false,
+                        &font,
+                        &e.core.settings().theme,
+                    );
+                    assert_eq!(run.color, rgb(color).into());
+                    assert_eq!((run.font.style, run.font.weight), (style, weight));
+                }
+            });
+        }
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn markdown_injections_reach_font_runs_and_follow_input(cx: &mut TestAppContext) {
         let _native = crate::native::lock();
         let runtime = tokio::runtime::Runtime::new().unwrap();

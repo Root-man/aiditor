@@ -395,6 +395,34 @@ mod tests {
     }
 
     #[test]
+    fn syntax_overrides_merge_attributes_and_can_disable_inherited_styles() {
+        let defaults = "theme = 'mine'\n[themes.default.syntax]\ncomment = { italic = true }\nkeyword = { bold = true }\n";
+        for (overrides, italic, bold) in [
+            ("comment = { fg = 7 }\nkeyword = { fg = 8 }", true, true),
+            (
+                "comment = { fg = 7, italic = false }\nkeyword = { fg = 8, bold = false }",
+                false,
+                false,
+            ),
+        ] {
+            let settings = format!("{defaults}[themes.mine.syntax]\n{overrides}");
+            let theme = Settings::parse(Some(&settings)).unwrap().theme;
+            assert_eq!(
+                (theme.syntax["comment"].fg, theme.syntax["comment"].italic),
+                (Some(7), italic)
+            );
+            assert_eq!(
+                (theme.syntax["keyword"].fg, theme.syntax["keyword"].bold),
+                (Some(8), bold)
+            );
+            assert_eq!(
+                theme.syntax["string"],
+                Settings::default().theme.syntax["string"]
+            );
+        }
+    }
+
+    #[test]
     fn the_theme_key_picks_a_table_merged_over_default() {
         let s = Settings::parse(Some(
             "theme = \"mine\"\n[themes.mine.faces]\ndefault = { bg = 1 }",
