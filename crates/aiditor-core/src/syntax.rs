@@ -152,6 +152,7 @@ pub(crate) struct Syntax {
 type Runs = Vec<(Range<usize>, Face)>;
 type Highlights = (Vec<Range<usize>>, BTreeMap<String, Face>, Runs);
 
+#[derive(Clone)]
 struct Injection {
     grammar: &'static Grammar,
     ranges: Vec<tree_sitter::Range>,
@@ -576,6 +577,23 @@ pub(crate) fn face(palette: &BTreeMap<String, Face>, mut name: &str) -> Option<F
 }
 
 impl Syntax {
+    pub(crate) fn snapshot(&self) -> Self {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&self.grammar.language)
+            .expect("bundled grammar");
+        Self {
+            name: self.name,
+            grammar: self.grammar,
+            parser,
+            tree: self.tree.clone(),
+            injections: self.injections.clone(),
+            stale: false,
+            cache: RefCell::default(),
+            locals: self.locals.clone(),
+        }
+    }
+
     /// `text` parsed in the language `path`'s extension names, if aiditor has its grammar.
     pub(crate) fn for_file(path: &Path, text: &Rope) -> Option<Syntax> {
         let mut ext = path.extension()?.to_str()?;

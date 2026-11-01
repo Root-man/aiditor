@@ -1479,6 +1479,25 @@ milestones:
               - "Nothing stays highlighted after the prompt closes or is aborted"
               - "A test checks a previewed window's match faces"
             blocked_by: [m5-highlight-matches]
+          - key: m5-swiper-syntax
+            title: "Preserve source syntax highlighting in Swiper results"
+            labels: [text, frontend]
+            design: "#commands-and-keymaps"
+            body: |
+              Swiper (`C-s`) currently lists source lines as plain text, losing the source buffer's syntax colours. Preserve its syntax faces in the result list, including bold and italic attributes, as in Emacs Swiper. This is separate from #339's search-match overlays in the previewed window and #201's fuzzy completion matches.
+
+              Reuse the existing syntax engine and theme for the displayed result ranges, retaining the full source context for multiline constructs, injected languages and local references. Carry syntax faces through the completion display to the frontend, accounting for the line-number prefix and Unicode offsets. Faces must correspond to the text actually displayed: Swiper retains a snapshot, while its origin buffer can change or revert during the prompt. Keep this task scoped to Swiper result syntax colouring.
+            acceptance:
+              - "Given a highlighted source buffer, when C-s lists its lines, then result text retains the source syntax colours and bold and italic attributes while line-number prefixes retain their ordinary face."
+              - "Given results inside multiline strings or comments, Markdown language fences or HEEx templates, or referring to offscreen local definitions, when those rows appear, then their syntax faces retain the complete source context."
+              - "Given filtering or scrolling changes the visible results, when the list redraws, then each row retains the syntax faces of its displayed source text and the selected row keeps its selection background."
+              - "Given an open Swiper prompt, when the theme is successfully reloaded, then visible results use the current syntax palette and font styles."
+              - "Given Unicode text or an origin buffer edited or reverted during search, when results redraw, then syntax faces remain aligned with the displayed snapshot text."
+              - "Given a buffer without syntax highlighting, when C-s lists its lines, then the result text uses the ordinary face."
+              - "Reuse the existing syntax engine and face renderer, and query only the displayed result ranges."
+              - "Core tests cover syntax faces, source context, Unicode, theme reload and snapshot alignment; a frontend test covers rendered faces and the selected-row background."
+              - "Update the line-search specification and docs/editor.md to describe Swiper result syntax highlighting."
+            blocked_by: [m1-swiper, m5-highlight-js, m5-ts-font-styles]
           - key: m5-grep-roots
             title: "Grep large multi-root projects"
             body: |

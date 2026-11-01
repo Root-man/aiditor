@@ -445,20 +445,24 @@ pub(crate) fn text_run(
 
 pub(crate) fn completion_runs(
     len: usize,
-    highlights: &[std::ops::Range<usize>],
+    faces: &[(std::ops::Range<usize>, Face)],
     face: Face,
+    selected_bg: Option<u32>,
     font: &Font,
     theme: &Theme,
 ) -> Vec<TextRun> {
     let mut runs = Vec::new();
     let mut start = 0;
-    for range in highlights {
+    for (range, matched) in faces {
         if start < range.start {
             runs.push(text_run(range.start - start, face, false, font, theme));
         }
         runs.push(text_run(
             range.len(),
-            theme.face(FaceName::CompletionMatch),
+            Face {
+                bg: selected_bg.or(matched.bg),
+                ..*matched
+            },
             false,
             font,
             theme,

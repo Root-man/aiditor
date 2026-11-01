@@ -62,6 +62,7 @@ Some(
         files: false,
         candidates: [],
         highlights: [],
+        syntax: [],
         annotations: [],
         groups: [],
         selected: None,

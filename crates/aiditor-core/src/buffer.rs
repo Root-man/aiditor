@@ -815,6 +815,11 @@ impl Buffer {
         self.syntax.is_some()
     }
 
+    pub(crate) fn syntax_snapshot(&mut self) -> Option<Syntax> {
+        self.reparse();
+        self.syntax.as_ref().map(Syntax::snapshot)
+    }
+
     /// The syntax faces `palette` gives the chars of sorted, disjoint `ranges`, as sorted,
     /// disjoint char ranges.
     pub(crate) fn highlights(

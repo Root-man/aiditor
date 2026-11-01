@@ -306,8 +306,11 @@ impl Ctx<'_> {
             // A filtering prompt lists even no candidates, so it still requires a match.
             (Some(filter), None) => {
                 let items = candidates.take().unwrap_or_default();
-                let mut swiper = matches!(filter, Filter::Swiper)
-                    .then(|| crate::swiper::Search::new(core.current().text()));
+                let mut swiper = matches!(filter, Filter::Swiper).then(|| {
+                    let buffer = core.current_mut();
+                    let syntax = buffer.syntax_snapshot();
+                    crate::swiper::Search::new(buffer.text(), syntax)
+                });
                 let matched = match (&mut swiper, filter) {
                     (Some(search), _) => search.filter(""),
                     (_, Filter::Items(filter)) => filter("", &items),
@@ -704,6 +707,7 @@ impl Core {
         let status = if grep { self.grep.status() } else { None };
         let (mut candidates, mut annotations, mut selected) = (Vec::new(), Vec::new(), None);
         let mut highlights = Vec::new();
+        let mut syntax = Vec::new();
         let mut groups = Vec::new();
         let (mut count, mut shown) = (String::new(), 0);
         if let Some(completion) = &mut mb.completion {
@@ -759,6 +763,10 @@ impl Core {
                         }
                     }
                     highlights.resize_with(candidates.len(), Vec::new);
+                    if let Some(search) = &f.swiper {
+                        syntax = search
+                            .highlights(&f.matched[rows.clone()], &self.settings.theme.syntax);
+                    }
                     (f.matched.len(), rows)
                 }
                 (None, Some(matcher)) => {
@@ -849,6 +857,7 @@ impl Core {
             files: mb.finder.is_some() || mb.completion.as_ref().is_some_and(|c| c.dir.is_some()),
             candidates,
             highlights,
+            syntax,
             annotations,
             groups,
             selected,
