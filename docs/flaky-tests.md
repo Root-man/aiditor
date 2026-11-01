@@ -10,4 +10,4 @@ notification delays and PTY allocation by unrelated processes remain OS constrai
 
 | Test | Where it fails | Why |
 | --- | --- | --- |
-| `crates/aiditor/src/editor.rs:1105` — `integrated_finders_visits_saves_and_directory_recovery` | macOS full app/workspace suite, at `native watcher never ready` | FSEvents sometimes supplies no notifications within the 30 s readiness probe; the same test passes alone and on suite reruns without changes to watcher logic. Native test bodies are serialized, but watcher shutdown is asynchronous and GPUI fixtures can outlive the native-test lock, leaving stream startup/shutdown overlap possible. |
+| `crates/aiditor/src/editor.rs:1170` — `integrated_finders_visits_saves_and_directory_recovery` | macOS full app/workspace suite, at `native watcher never ready` | FSEvents sometimes supplies no notifications within the 30 s readiness probe; the same test passes alone and on suite reruns without changes to watcher logic. Native test bodies are serialized, but watcher shutdown is asynchronous and GPUI fixtures can outlive the native-test lock, leaving stream startup/shutdown overlap possible. |
