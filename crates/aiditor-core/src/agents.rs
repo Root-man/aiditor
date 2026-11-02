@@ -2,20 +2,20 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, ClientResponse, ContentBlock, Error, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, Plan, PlanEntry, PromptRequest, RequestId, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent, ToolCallId,
-    ToolCallUpdate, ToolCallUpdateFields,
+    AgentRequest, ClientResponse, ContentBlock, Error, MessageId, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, Plan, PlanEntry, PromptRequest, RequestId,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOption,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent,
+    ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
 use alacritty_terminal::vte::ansi::{Attr, Color, Handler, Processor};
 use serde_json::{Map, Value};
 
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
 use crate::command::Args;
@@ -77,6 +77,8 @@ pub(crate) struct Session {
     turn: bool,
     /// The last block above the prompt line, while an agent message or thought streams into it.
     stream: Option<Stream>,
+    /// The agent and user messages, in transcript order.
+    messages: Vec<Message>,
     /// The tool calls shown, by id.
     tools: HashMap<ToolCallId, Tool>,
     /// The plan's block: where it starts and its length in chars, the blank line after it not
@@ -156,6 +158,20 @@ fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
 }
 
 impl Session {
+    /// The buffer lines of the message at `point`, the last one starting at or before it.
+    pub(crate) fn message_lines(
+        &self,
+        buffer: &Buffer,
+        point: usize,
+    ) -> Option<RangeInclusive<usize>> {
+        let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
+        let after = self.messages.partition_point(|m| start(m) <= point);
+        let message = &self.messages[after.checked_sub(1)?];
+        let first = start(message);
+        let last = first + message.len.saturating_sub(1);
+        Some(buffer.text().char_to_line(first)..=buffer.text().char_to_line(last))
+    }
+
     pub(crate) fn activity(&self) -> Option<Activity> {
         if self.ended {
             Some(Activity::Failed)
@@ -307,20 +323,42 @@ struct Ask {
     len: usize,
 }
 
+/// What a block above the prompt line holds. A chunk joins a streamed block of its own kind, so
+/// a new `messageId` starts a block.
+#[derive(Clone, Debug, PartialEq)]
+enum Block {
+    /// A line of the session's own, like a turn's end.
+    Line,
+    Message(Option<MessageId>),
+    Thought(Option<MessageId>),
+    User(Option<MessageId>),
+}
+
+/// An agent or user message's block. Prompts sent live have no `id`.
+#[derive(Debug)]
+struct Message {
+    // Nothing reads it yet; timings and forking will.
+    #[allow(dead_code)]
+    id: Option<MessageId>,
+    start: MarkerId,
+    /// Its length in chars, the blank line after it not counted.
+    len: usize,
+}
+
 /// A block being streamed.
 struct Stream {
     /// Where the block starts.
     start: MarkerId,
-    thought: bool,
+    block: Block,
     /// Chunks arrived since it was last rendered.
     dirty: bool,
 }
 
 impl Core {
     /// Puts `text` above session `id`'s prompt line: as a new block followed by a blank line, or,
-    /// for a chunk of the kind streaming (`Some(thought)`), at the end of the streamed block. A
-    /// chunk's block is rendered as markdown by the next frame.
-    fn output(&mut self, id: AgentId, text: &str, chunk: Option<bool>) {
+    /// for a chunk of the kind streaming, at the end of the streamed block. A chunk's block is
+    /// rendered as markdown by the next frame.
+    fn output(&mut self, id: AgentId, text: &str, block: Block) {
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -329,30 +367,41 @@ impl Core {
         };
         let end = buffer.prompt_start() - PROMPT.len();
         if let Some(stream) = &mut session.stream
-            && Some(stream.thought) == chunk
+            && stream.block == block
         {
             buffer.insert_output(end - "\n\n".len(), text);
             stream.dirty = true;
+            if let (Block::Message(_), Some(message)) = (&block, session.messages.last_mut()) {
+                message.len += text.chars().count();
+            }
             return;
         }
         self.end_stream(id);
         let session = self.agents.get_mut(&id).expect("found above");
         let buffer = self.buffers.get_mut(session.buffer).expect("found above");
         buffer.insert_output(end, &format!("{text}\n\n"));
-        session.stream = chunk.map(|thought| Stream {
-            start: buffer
-                .add_marker(end, InsertionType::Stay)
-                .expect("in the text"),
-            thought,
-            dirty: true,
-        });
+        let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
+        if let Block::Message(message) | Block::User(message) = &block {
+            session.messages.push(Message {
+                id: message.clone(),
+                start: marker(),
+                len: text.chars().count(),
+            });
+        }
+        if let Block::Message(_) | Block::Thought(_) = block {
+            session.stream = Some(Stream {
+                start: marker(),
+                block,
+                dirty: true,
+            });
+        }
     }
 
     /// Puts a replayed user message above session `id`'s prompt line as a sent prompt shows.
     // shortcut: one block per chunk, as both adapters send whole messages; join chunks by
     // `messageId` if one ever splits a message.
-    fn show_user(&mut self, id: AgentId, text: &str) {
-        self.output(id, &format!("{PROMPT}{text}"), None);
+    fn show_user(&mut self, id: AgentId, text: &str, message: Option<MessageId>) {
+        self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
         let session = self.agents.get(&id);
         let Some(buffer) = session.and_then(|s| self.buffers.get_mut(s.buffer)) else {
             return;
@@ -560,7 +609,8 @@ impl Core {
         if std::mem::take(&mut stream.dirty) {
             let start = buffer.marker(stream.start).expect("live while streaming");
             let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
-            render(buffer, start..end, stream.thought);
+            let thought = matches!(stream.block, Block::Thought(_));
+            render(buffer, start..end, thought);
         }
     }
 
@@ -792,6 +842,7 @@ impl Ctx<'_> {
             ended: false,
             turn: false,
             stream: None,
+            messages: Vec::new(),
             tools: HashMap::new(),
             plan: None,
             asks: Vec::new(),
@@ -912,17 +963,17 @@ impl Ctx<'_> {
         match update.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(text) = chunk.content {
-                    core.output(id, &text.text, Some(false));
+                    core.output(id, &text.text, Block::Message(chunk.message_id));
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let ContentBlock::Text(text) = chunk.content {
-                    core.output(id, &text.text, Some(true));
+                    core.output(id, &text.text, Block::Thought(chunk.message_id));
                 }
             }
             SessionUpdate::UserMessageChunk(chunk) => {
                 if let ContentBlock::Text(text) = chunk.content {
-                    core.show_user(id, &text.text);
+                    core.show_user(id, &text.text, chunk.message_id);
                 }
             }
             SessionUpdate::ToolCall(call) => {
@@ -1093,15 +1144,36 @@ impl Ctx<'_> {
         render(b, start..start + input.chars().count(), false);
         let end = b.len_chars();
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
+        let echo = start - PROMPT.len();
+        let message = Message {
+            id: None,
+            start: b.add_marker(echo, InsertionType::Stay)?,
+            len: PROMPT.len() + input.chars().count(),
+        };
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
         let session = core.agents.get_mut(&id).expect("found above");
+        session.messages.push(message);
         session.turn = true;
         let blocks = session.preamble.take().into_iter().chain([input]);
         let request = PromptRequest::new(session_id, blocks.map(Into::into).collect());
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
         self.goto(end)
+    }
+
+    /// Moves point to the `n`th message's start after point, before it when `n` is negative, or
+    /// the farthest one when fewer exist.
+    pub(crate) fn agent_next_message(&mut self, n: i64) -> Result<(), String> {
+        let core = &mut *self.core;
+        let point = core.point();
+        let (id, _) = core.current_session()?;
+        let buffer = core.current();
+        let starts: Vec<usize> = (core.agents[&id].messages.iter())
+            .map(|m| buffer.marker(m.start).expect("live with its session"))
+            .collect();
+        let at = crate::motion::nth_mark(&starts, point, n).ok_or("No message found")?;
+        self.goto(at)
     }
 
     /// `agent-toggle-tool-call`: shows or hides the content of the tool call whose header point
@@ -1191,7 +1263,7 @@ impl Ctx<'_> {
             Ok(reason) => format!("Turn ended: {reason:?}"),
             Err(err) => format!("Error: {err}"),
         };
-        core.output(id, &line, None);
+        core.output(id, &line, Block::Line);
     }
 
     /// Shows the mode the agent's answer to `session/set_config_option` reports, or notes why it
@@ -1861,6 +1933,123 @@ mod tests {
         assert_eq!(b, Some(("b".into(), Prop::Named(code))));
     }
 
+    /// Session 0's messages as their ids and text.
+    fn message_list(h: &Harness) -> Vec<(Option<String>, String)> {
+        let session = &h.core.agents[&AgentId(0)];
+        let buffer = h.core.buffers.get(session.buffer).unwrap();
+        (session.messages.iter())
+            .map(|m| {
+                let start = buffer.marker(m.start).unwrap();
+                let text = buffer.text().slice(start..start + m.len).to_string();
+                (m.id.as_ref().map(|id| id.0.to_string()), text)
+            })
+            .collect()
+    }
+
+    fn agent_chunk(h: &mut Harness, id: &str, text: &str) {
+        let chunk = ContentChunk::new(text.into()).message_id(id);
+        update(h, 0, SessionUpdate::AgentMessageChunk(chunk));
+    }
+
+    #[test]
+    fn message_ids_are_kept_and_a_new_id_starts_a_block() {
+        let mut h = session();
+        agent_chunk(&mut h, "m1", "a");
+        agent_chunk(&mut h, "m1", "b");
+        agent_chunk(&mut h, "m2", "c");
+        assert_eq!(h.core.text(), "ab\n\nc\n\n> ");
+        assert_eq!(
+            message_list(&h),
+            [
+                (Some("m1".into()), "ab".into()),
+                (Some("m2".into()), "c".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn replayed_user_messages_keep_their_ids_in_order() {
+        let mut h = session();
+        let user = ContentChunk::new("hi".into()).message_id("u1");
+        update(&mut h, 0, SessionUpdate::UserMessageChunk(user));
+        agent_chunk(&mut h, "m1", "yo");
+        assert_eq!(
+            message_list(&h),
+            [
+                (Some("u1".into()), "> hi".into()),
+                (Some("m1".into()), "yo".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sent_prompt_is_a_message_after_the_last_agent_message() {
+        let mut h = session();
+        agent_chunk(&mut h, "m1", "yo");
+        h.keys("h i RET");
+        assert_eq!(
+            message_list(&h),
+            [(Some("m1".into()), "yo".into()), (None, "> hi".into())]
+        );
+    }
+
+    #[test]
+    fn message_keys_move_past_tool_calls_and_thoughts() {
+        let mut h = session();
+        agent_chunk(&mut h, "m1", "one\ntwo");
+        let call = ToolCall::new("t1", "Read");
+        update(&mut h, 0, SessionUpdate::ToolCall(call));
+        thought(&mut h, "hmm");
+        agent_chunk(&mut h, "m2", "three");
+        let text = h.core.text();
+        let second = text.find("three").unwrap();
+        h.keys("C-c C-p");
+        assert_eq!(h.core.point(), second);
+        h.keys("C-c C-p");
+        assert_eq!(h.core.point(), 0);
+        h.keys("C-c C-p");
+        assert_eq!(h.core.message(), Some("No message found"));
+        assert_eq!(h.core.point(), 0);
+        h.keys("C-c C-n");
+        assert_eq!(h.core.point(), second);
+        h.keys("C-c C-n");
+        assert_eq!(h.core.message(), Some("No message found"));
+        assert_eq!(h.core.point(), second);
+        // From inside a message it goes to that message's start.
+        h.keys("C-f C-c C-p");
+        assert_eq!(h.core.point(), second);
+        // A count stops at the farthest, and a negative one turns back.
+        h.keys("C-u 5 C-c C-p");
+        assert_eq!(h.core.point(), 0);
+        h.keys("C-u - C-c C-p");
+        assert_eq!(h.core.point(), second);
+    }
+
+    #[test]
+    fn the_bar_follows_point_and_each_window_has_its_own() {
+        let bar = Decoration::Bar(FaceName::MessageAtPoint);
+        let barred = |h: &mut Harness, window: usize| -> Vec<usize> {
+            let frame = h.frame(800., 600.);
+            let display = &frame.windows[window].display;
+            (display.lines.iter())
+                .filter(|l| l.decorations.contains(&bar))
+                .map(|l| l.number)
+                .collect()
+        };
+        let mut h = session();
+        assert!(barred(&mut h, 0).is_empty());
+        agent_chunk(&mut h, "m1", "one\ntwo");
+        let call = ToolCall::new("t1", "Read");
+        update(&mut h, 0, SessionUpdate::ToolCall(call.clone()));
+        // Point in the prompt keeps it on the last message, past the tool call.
+        assert_eq!(barred(&mut h, 0), [0, 1]);
+        agent_chunk(&mut h, "m2", "three");
+        assert_eq!(barred(&mut h, 0), [5]);
+        h.keys("C-x 2 C-c C-p C-c C-p");
+        assert_eq!(barred(&mut h, 0), [0, 1]);
+        assert_eq!(barred(&mut h, 1), [5]);
+    }
+
     /// Each property of the current buffer, with the text it covers.
     fn props(h: &Harness) -> Vec<(String, Prop)> {
         let b = h.core.current();
@@ -2116,8 +2305,8 @@ mod tests {
             ["Title", "", "Some bold docs.", "", "", "fn main() {}", ""]
         );
         let code = Decoration::Background(FaceName::SessionBlock);
-        assert!((4..7).all(|i| lines[i].decorations == [code]));
-        assert!(lines[3].decorations.is_empty());
+        assert!((4..7).all(|i| lines[i].decorations.contains(&code)));
+        assert!(!lines[3].decorations.contains(&code));
         // Swiper matches the hidden markup, and copying yields it.
         h.keys("C-s * * b");
         assert_eq!(listed(&mut h).0, ["3 Some **bold** [docs](https://x.dev)."]);
@@ -2774,7 +2963,7 @@ mod tests {
         assert_eq!(h.display(5).mode_line.right[0], waiting);
         h.keys("C-c C-y");
         assert_eq!(h.display(5).mode_line.right[0], waiting);
-        h.keys("C-c C-n");
+        h.keys("C-c C-k");
         assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ● working");
         prompted(&mut h, Ok(StopReason::EndTurn));
         assert_eq!(h.display(5).mode_line.text(), "[auto] │ claude  ");
@@ -3286,7 +3475,7 @@ mod tests {
         ask(&mut h, 3, "c", Some("C"));
         h.keys("C-c C-y");
         assert_eq!(ops(&mut h), ["reply 0 1 allow"]);
-        h.keys("C-c C-n");
+        h.keys("C-c C-k");
         assert_eq!(ops(&mut h), ["reply 0 2 reject"]);
         let c = asked("C");
         assert_eq!(
@@ -3349,7 +3538,7 @@ mod tests {
         });
         h.keys("C-c C-y");
         assert_eq!(h.core.message(), Some("No allow_once option for Run"));
-        h.keys("C-c C-n");
+        h.keys("C-c C-k");
         assert_eq!(h.core.message(), Some("No reject_once option for Run"));
         assert!(ops(&mut h).is_empty());
     }

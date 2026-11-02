@@ -250,7 +250,7 @@ async fn permission_requests_are_answered_from_the_session_buffer() {
     // From the prompt line, three lines up is the second option.
     for (n, keys, outcome) in [
         (1, "C-c C-y", "allow"),
-        (2, "C-c C-n", "reject"),
+        (2, "C-c C-k", "reject"),
         (3, "C-p C-p C-p RET", "always"),
     ] {
         app.until("a permission request", pending).await;

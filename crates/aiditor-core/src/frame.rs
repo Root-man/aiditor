@@ -177,6 +177,11 @@ impl Core {
                 );
                 if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
                     display.mode_line = session.mode_line();
+                    let buffer = buffers.get(window.buffer()).expect("window buffer is live");
+                    let point = window.point(buffers);
+                    if let Some(lines) = session.message_lines(buffer, point) {
+                        display::mark_message(&mut display, lines);
+                    }
                 }
                 if highlighted {
                     display::highlight_line(&mut display);

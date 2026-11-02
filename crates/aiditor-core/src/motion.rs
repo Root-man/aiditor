@@ -3,6 +3,20 @@
 use crate::Ctx;
 use crate::command::Prefix;
 
+/// The `n`th of ascending `marks` after `point`, before it when `n` is negative, or the farthest
+/// one when fewer exist.
+pub(crate) fn nth_mark(marks: &[usize], point: usize, n: i64) -> Option<usize> {
+    let count = n.unsigned_abs() as usize;
+    match n > 0 {
+        true => marks.iter().filter(|&&m| m > point).take(count).last(),
+        false => (marks.iter().rev())
+            .filter(|&&m| m < point)
+            .take(count)
+            .last(),
+    }
+    .copied()
+}
+
 impl Ctx<'_> {
     /// Moves point to `p`, which must be in the buffer.
     pub(crate) fn goto(&mut self, p: usize) -> Result<(), String> {
