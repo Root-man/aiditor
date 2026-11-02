@@ -207,6 +207,7 @@ mod tests {
             bold,
             italic,
             underline,
+            boxed: None,
         }
     }
 

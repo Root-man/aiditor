@@ -9,6 +9,7 @@ WindowDisplay {
             height: 19.6,
             spans: [],
             decorations: [],
+            aligned: false,
         },
     ],
     cursor: Some(

@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::time::Instant;
 
 use aiditor_core::Msg;
@@ -7,10 +8,10 @@ use aiditor_core::display::{
 };
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels, Point,
-    ShapedLine, Style, TextRun, UnderlineStyle, Window, fill, outline, point, prelude::*, px, rgb,
-    size,
+    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
+    Entity, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels,
+    Point, ShapedLine, Style, TextRun, UnderlineStyle, Window, fill, outline, point, prelude::*,
+    px, quad, rgb, size, transparent_black,
 };
 
 use crate::editor::Editor;
@@ -57,7 +58,22 @@ pub(crate) struct Row {
     /// Its label in the gutter, if the window has one, and the label's x from the window's left.
     pub(crate) number: Option<(Pixels, ShapedLine)>,
     pub(crate) text: ShapedLine,
+    pub(crate) boxes: Vec<Boxed>,
 }
+
+/// A boxed run on a row: its x bounds from the text's start, its background and box colours, and
+/// whether it shares the outline with the run on its left or right.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Boxed {
+    pub(crate) x: Range<Pixels>,
+    pub(crate) bg: Option<u32>,
+    pub(crate) color: u32,
+    pub(crate) open_left: bool,
+    pub(crate) open_right: bool,
+}
+
+/// A boxed run's corners, per the design's chip.
+const BOX_RADIUS: f32 = 5.;
 
 /// Draws the core's frame display: every window's lines, cursor and mode line.
 pub(crate) struct FrameElement {
@@ -141,9 +157,10 @@ impl Element for FrameElement {
                     let height = px(line.height);
                     let at = w.display.cursor.filter(|&(l, _)| l == i && w.selected);
                     let marked = at.and(editor.marked.as_deref()).unwrap_or_default();
-                    let (text, runs, byte) =
+                    let (text, runs, byte, boxes) =
                         line_runs(line, at.map(|(_, col)| col), marked, &font, &settings.theme);
                     let text = shape(text, &runs);
+                    let boxes = boxed(&text, boxes);
                     if at.is_some() {
                         let (x, width, under) = block(&text, byte, cell);
                         let origin = bounds.origin + point(text_x + x, top);
@@ -167,6 +184,7 @@ impl Element for FrameElement {
                         decorations: line.decorations.clone(),
                         number,
                         text,
+                        boxes,
                     };
                     top += height;
                     row
@@ -336,6 +354,9 @@ impl Element for FrameElement {
                     row.text
                         .paint_background(origin, row.height, window, cx)
                         .ok();
+                    for b in &row.boxes {
+                        window.paint_quad(box_quad(b, origin, row.height));
+                    }
                     row.text.paint(origin, row.height, window, cx).ok();
                 }
                 for c in &p.cells {
@@ -505,15 +526,63 @@ pub(crate) fn echo_line(mb: &aiditor_core::display::Minibuffer, message: &str) -
     (format!("{prompt}{text}{message}"), prompt.len() + byte)
 }
 
-/// `line`'s text with `marked` spliced in at char column `at`, one run per span, and the byte
-/// offset the cursor goes at: after the marked text.
-fn line_runs(
+/// The boxed `pieces` of `text`, laid out. Touching pieces in one box colour share its outline.
+pub(crate) fn boxed(text: &ShapedLine, pieces: Vec<(Range<usize>, Face)>) -> Vec<Boxed> {
+    let shared = |a: &(Range<usize>, Face), b: &(Range<usize>, Face)| {
+        a.0.end == b.0.start && a.1.boxed == b.1.boxed
+    };
+    (pieces.iter().enumerate())
+        .filter_map(|(i, piece)| {
+            let (range, face) = piece;
+            Some(Boxed {
+                x: text.x_for_index(range.start)..text.x_for_index(range.end),
+                bg: face.bg,
+                color: face.boxed?,
+                open_left: i > 0 && shared(&pieces[i - 1], piece),
+                open_right: pieces.get(i + 1).is_some_and(|next| shared(piece, next)),
+            })
+        })
+        .collect()
+}
+
+/// `b` on a row of `height` whose text starts at `origin`, 1px inside the row at top and bottom,
+/// with no side or corners where it shares the outline.
+pub(crate) fn box_quad(b: &Boxed, origin: Point<Pixels>, height: Pixels) -> gpui::PaintQuad {
+    let top_left = origin + point(b.x.start, px(1.));
+    let bottom_right = origin + point(b.x.end, height - px(1.));
+    let side = |open| px(if open { 0. } else { 1. });
+    let corner = |open| px(if open { 0. } else { BOX_RADIUS });
+    quad(
+        Bounds::from_corners(top_left, bottom_right),
+        Corners {
+            top_left: corner(b.open_left),
+            top_right: corner(b.open_right),
+            bottom_right: corner(b.open_right),
+            bottom_left: corner(b.open_left),
+        },
+        b.bg.map_or(transparent_black(), |bg| rgb(bg).into()),
+        Edges {
+            top: px(1.),
+            right: side(b.open_right),
+            bottom: px(1.),
+            left: side(b.open_left),
+        },
+        rgb(b.color),
+        BorderStyle::Solid,
+    )
+}
+
+/// `line`'s text with `marked` spliced in at char column `at`, one run per span, the byte offset
+/// the cursor goes at, after the marked text, and the boxed pieces' byte ranges, which take their
+/// background from the box instead of their run.
+#[allow(clippy::type_complexity)]
+pub(crate) fn line_runs(
     line: &Line,
     at: Option<usize>,
     marked: &str,
     font: &Font,
     theme: &Theme,
-) -> (String, Vec<TextRun>, usize) {
+) -> (String, Vec<TextRun>, usize, Vec<(Range<usize>, Face)>) {
     let mut pieces: Vec<(&str, Face, bool)> = Vec::new();
     let mut col = at;
     for span in &line.spans {
@@ -539,15 +608,19 @@ fn line_runs(
     if col.is_some() {
         pieces.push((marked, Face::default(), true));
     }
-    let (mut text, mut runs, mut cursor) = (String::new(), Vec::new(), 0);
-    for (piece, face, is_marked) in pieces.into_iter().filter(|p| !p.0.is_empty() || p.2) {
+    let (mut text, mut runs, mut cursor, mut boxes) = (String::new(), Vec::new(), 0, Vec::new());
+    for (piece, mut face, is_marked) in pieces.into_iter().filter(|p| !p.0.is_empty() || p.2) {
         text += piece;
         if is_marked {
             cursor = text.len();
         }
         if !piece.is_empty() {
+            if face.boxed.is_some() {
+                boxes.push((text.len() - piece.len()..text.len(), face));
+                face.bg = None;
+            }
             runs.push(text_run(piece.len(), face, is_marked, font, theme));
         }
     }
-    (text, runs, cursor)
+    (text, runs, cursor, boxes)
 }
