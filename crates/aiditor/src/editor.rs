@@ -1102,6 +1102,114 @@ mod tests {
     }
 
     #[gpui::test]
+    fn boxed_runs_keep_their_cells_and_share_an_outline(cx: &mut TestAppContext) {
+        use crate::element::{boxed, line_runs};
+        use aiditor_core::display::{Line, Span};
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "");
+        let (fg, bg, edge, other) = (
+            Some(0xff0000),
+            Some(0x123456),
+            Some(0x505050),
+            Some(0xabcdef),
+        );
+        let span = |text: &str, face| Span {
+            text: text.into(),
+            face,
+            fold: false,
+        };
+        let chip = Face {
+            bg,
+            boxed: edge,
+            ..Face::default()
+        };
+        let line = Line {
+            number: 0,
+            height: 20.,
+            spans: vec![
+                span("see ", Face::default()),
+                span("▤", Face { fg, ..chip }),
+                span("name", chip),
+                span(
+                    "x",
+                    Face {
+                        boxed: other,
+                        ..chip
+                    },
+                ),
+                span(" end", Face::default()),
+            ],
+            decorations: Vec::new(),
+            aligned: false,
+        };
+        editor.update_in(cx, |e, window, _| {
+            let font = e.font(window).0;
+            let theme = &e.core.settings().theme;
+            let size = px(e.core.settings().font_size);
+            let shape = |text: String, runs: &[gpui::TextRun]| {
+                (window.text_system()).shape_line(text.into(), size, runs, None)
+            };
+            let (text, runs, _, pieces) = line_runs(&line, None, "", &font, theme);
+            assert!(runs[1..4].iter().all(|r| r.background_color.is_none()));
+            let shaped = shape(text.clone(), &runs);
+            let boxes = boxed(&shaped, pieces);
+            assert_eq!(
+                boxes
+                    .iter()
+                    .map(|b| (b.bg, b.color, b.open_left, b.open_right))
+                    .collect::<Vec<_>>(),
+                [
+                    (bg, 0x505050, false, true),
+                    (bg, 0x505050, true, false),
+                    (bg, 0xabcdef, false, false),
+                ]
+            );
+            let plain = text_run(text.len(), Face::default(), false, &font, theme);
+            let plain = shape(text.clone(), &[plain]);
+            for i in text.char_indices().map(|(i, _)| i) {
+                assert_eq!(shaped.x_for_index(i), plain.x_for_index(i));
+            }
+            let name = text.find("name").unwrap();
+            assert_eq!(boxes[0].x.start, shaped.x_for_index(4));
+            assert_eq!(boxes[0].x.end, shaped.x_for_index(name));
+            assert_eq!(boxes[1].x.start, boxes[0].x.end);
+            assert_eq!(boxes[1].x.end, shaped.x_for_index(name + 4));
+
+            // Marked text splits a box, and both sides close around it.
+            let (text, runs, cursor, pieces) = line_runs(&line, Some(6), "mk", &font, theme);
+            let shaped = shape(text, &runs);
+            let boxes = boxed(&shaped, pieces);
+            assert_eq!(boxes.len(), 4);
+            assert_eq!((boxes[1].open_right, boxes[2].open_left), (false, false));
+            assert_eq!(boxes[1].x.end, shaped.x_for_index(cursor - 2));
+            assert_eq!(boxes[2].x.start, shaped.x_for_index(cursor));
+        });
+    }
+
+    #[test]
+    fn a_box_sits_inside_its_row_with_no_side_or_corners_where_it_is_shared() {
+        use crate::element::{Boxed, box_quad};
+        let piece = Boxed {
+            x: px(10.)..px(30.),
+            bg: None,
+            color: 0x505050,
+            open_left: false,
+            open_right: true,
+        };
+        let q = box_quad(&piece, gpui::point(px(100.), px(200.)), px(21.));
+        assert_eq!(q.bounds.origin, gpui::point(px(110.), px(201.)));
+        assert_eq!(q.bounds.size, gpui::size(px(20.), px(19.)));
+        assert_eq!(q.corner_radii.top_left, px(5.));
+        assert_eq!(q.corner_radii.bottom_left, px(5.));
+        assert_eq!(q.corner_radii.top_right, px(0.));
+        assert_eq!(q.corner_radii.bottom_right, px(0.));
+        assert_eq!(q.border_widths.left, px(1.));
+        assert_eq!(q.border_widths.right, px(0.));
+        assert_eq!(q.border_widths.top, px(1.));
+        assert_eq!(q.border_widths.bottom, px(1.));
+    }
+
+    #[gpui::test]
     fn swiper_input_produces_match_background_runs_and_cleans_up(cx: &mut TestAppContext) {
         let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "été Foo foo\nfoo bar\n");

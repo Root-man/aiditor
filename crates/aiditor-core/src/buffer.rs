@@ -356,6 +356,9 @@ pub struct Face {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// The colour of a 1px rounded box around the run, which adds no width.
+    #[serde(rename = "box")]
+    pub boxed: Option<u32>,
 }
 
 impl Face {
@@ -367,6 +370,7 @@ impl Face {
             bold: self.bold || under.bold,
             italic: self.italic || under.italic,
             underline: self.underline || under.underline,
+            boxed: self.boxed.or(under.boxed),
         }
     }
 }
@@ -403,6 +407,9 @@ pub enum Prop {
     Invisible(String),
     /// Applies to every line the range touches.
     Line(Decoration),
+    /// A space drawn wide enough to end the rest of its line in the window's last column, or as
+    /// one space when the line doesn't fit, as Emacs's `(space :align-to right)`.
+    AlignRight,
 }
 
 impl Buffer {

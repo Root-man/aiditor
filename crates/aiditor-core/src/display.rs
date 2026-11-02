@@ -3,6 +3,7 @@
 use crate::buffer::{Buffer, Decoration, Face, Prop};
 use crate::project_commands::root_names;
 use crate::settings::{FaceName, LineNumbers, Settings, Theme};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -297,13 +298,15 @@ pub struct Line {
     pub height: f32,
     pub spans: Vec<Span>,
     pub decorations: Vec<Decoration>,
+    /// Padded to the window's last column, past where a wrapped row would break.
+    pub aligned: bool,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Span {
     pub text: String,
     pub face: Face,
-    /// The placeholder standing in for invisible text.
+    /// The placeholder standing in for invisible text, or the padding of a right-aligned line.
     pub fold: bool,
 }
 
@@ -472,6 +475,28 @@ pub fn build(
         height: settings.line_height(),
         spans: Vec::new(),
         decorations: Vec::new(),
+        aligned: false,
+    };
+    // The face of the char at `at`: its syntax, then its properties, then the region.
+    let face_at = |at: usize| {
+        let i = syntax.partition_point(|(range, _)| range.end <= at);
+        let mut face = (syntax.get(i))
+            .filter(|(range, _)| range.start <= at)
+            .map_or(Face::default(), |(_, face)| *face);
+        for (range, prop) in &props {
+            if !range.contains(&at) {
+                continue;
+            }
+            match prop {
+                Prop::Face(f) => face = f.over(face),
+                Prop::Named(refs) => face = settings.theme.resolve(refs).over(face),
+                _ => {}
+            }
+        }
+        if region.as_ref().is_some_and(|r| r.contains(&at)) {
+            face = settings.theme.face(FaceName::Region).over(face);
+        }
+        face
     };
     let mut lines = Vec::new();
     let mut cursor = None;
@@ -504,6 +529,31 @@ pub fn build(
             .map(|(r, _)| r.start)
             .fold(newline, usize::min)
     };
+    // The columns the rest of the line from `at` draws, folds as their placeholders.
+    let rest = |mut at: usize| {
+        let mut len = 0;
+        loop {
+            let end = stop(at);
+            len += end - at;
+            let fold = props.iter().find_map(|(range, prop)| match prop {
+                Prop::Invisible(placeholder) if range.contains(&end) => {
+                    Some((range.end, placeholder.chars().count()))
+                }
+                _ => None,
+            });
+            let Some((next, chars)) = fold else {
+                return len;
+            };
+            len += chars;
+            at = next;
+        }
+    };
+    // The columns a row holds, none before the width is known, and the window's last column.
+    let (row_width, last_col) = match wrap {
+        Some(w) => (w.width, w.width + 1),
+        None if shown.end == usize::MAX => (0, 0),
+        None => (shown.len().saturating_sub(1), shown.len().saturating_sub(1)),
+    };
     // Display columns of `line` consumed so far, the skipped ones included.
     let mut col: usize = 0;
     let mut positions = search.map(|_| Vec::new());
@@ -514,13 +564,24 @@ pub fn build(
             false => 0..shown.len(),
         };
         let fold = props.iter().find_map(|(range, prop)| match prop {
-            Prop::Invisible(placeholder) if range.contains(&pos) => Some((range.end, placeholder)),
+            Prop::Invisible(placeholder) if range.contains(&pos) => {
+                Some((range.end, Cow::from(placeholder.as_str()), Face::default()))
+            }
+            Prop::AlignRight if range.contains(&pos) => {
+                // A wrapped top line shown from `from` has used those columns too.
+                let before = col + if lines.is_empty() { from } else { 0 };
+                let used = before + 1 + rest(range.end);
+                let fits = used <= row_width;
+                line.aligned |= fits;
+                let spaces = if fits { last_col - used + 1 } else { 1 };
+                Some((range.end, Cow::from(" ".repeat(spaces)), face_at(pos)))
+            }
             _ => None,
         });
-        if point == pos || fold.is_some_and(|(end, _)| point > pos && point < end) {
+        if point == pos || fold.as_ref().is_some_and(|f| point > pos && point < f.0) {
             cursor = Some((lines.len(), col.saturating_sub(range.start)));
         }
-        if let Some((end, placeholder)) = fold {
+        if let Some((end, placeholder, face)) = fold {
             let visible: String = (placeholder.chars().enumerate())
                 .filter(|(i, _)| range.contains(&(col + i)))
                 .map(|(_, c)| c)
@@ -532,7 +593,7 @@ pub fn build(
                 }
                 line.spans.push(Span {
                     text: visible,
-                    face: Face::default(),
+                    face,
                     fold: true,
                 });
             }
@@ -584,23 +645,7 @@ pub fn build(
         if positions.is_some() {
             source_positions.push(Some(pos - 1));
         }
-        let i = syntax.partition_point(|(range, _)| range.end < pos);
-        let mut face = (syntax.get(i))
-            .filter(|(range, _)| range.start < pos)
-            .map_or(Face::default(), |(_, face)| *face);
-        for (range, prop) in &props {
-            if !range.contains(&(pos - 1)) {
-                continue;
-            }
-            match prop {
-                Prop::Face(f) => face = f.over(face),
-                Prop::Named(refs) => face = settings.theme.resolve(refs).over(face),
-                _ => {}
-            }
-        }
-        if region.as_ref().is_some_and(|r| r.contains(&(pos - 1))) {
-            face = settings.theme.face(FaceName::Region).over(face);
-        }
+        let face = face_at(pos - 1);
         match line.spans.last_mut() {
             Some(span) if span.face == face && !span.fold => span.text.push(c),
             _ => line.spans.push(Span {
@@ -892,9 +937,12 @@ fn wrap_lines(
     let mut mapped = positions.as_ref().map(|_| Vec::new());
     for (i, line) in lines.into_iter().enumerate() {
         let chars: Vec<char> = line.spans.iter().flat_map(|s| s.text.chars()).collect();
-        let starts = row_starts(chars.len(), wrap.width, wrap.word, |i| {
-            chars[i].is_whitespace()
-        });
+        let starts = match line.aligned {
+            true => vec![0],
+            false => row_starts(chars.len(), wrap.width, wrap.word, |i| {
+                chars[i].is_whitespace()
+            }),
+        };
         if let (Some(old), Some(mapped)) = (positions.as_ref(), &mut mapped) {
             for (row, &start) in starts.iter().enumerate() {
                 let end = starts.get(row + 1).copied().unwrap_or(old[i].len());
@@ -943,6 +991,7 @@ fn wrap_lines(
                 height: line.height,
                 spans,
                 decorations: line.decorations.clone(),
+                aligned: line.aligned,
             });
         }
     }
@@ -964,6 +1013,7 @@ mod tests {
         bold: false,
         italic: false,
         underline: false,
+        boxed: None,
     };
 
     #[test]
@@ -1019,6 +1069,236 @@ mod tests {
             span.face.bg,
             h.core.settings().theme.face(FaceName::Match).bg
         );
+    }
+
+    const BOXED: Face = Face {
+        fg: None,
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        boxed: Some(0x505050),
+    };
+
+    #[test]
+    fn a_box_reaches_its_span_and_survives_the_region() {
+        let mut h = Harness::new(&[("a.txt", "foo bar baz\n")]);
+        h.open("a.txt");
+        prop(&mut h, 4..7, Prop::Face(BOXED));
+        let line = &h.display(1).lines[0];
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|s| (s.text.as_str(), s.face.boxed))
+                .collect::<Vec<_>>(),
+            [("foo ", None), ("bar", Some(0x505050)), (" baz", None),]
+        );
+        h.keys("C-SPC C-e");
+        let region = h.core.settings().theme.face(FaceName::Region).bg;
+        let line = &h.display(1).lines[0];
+        assert_eq!(line.spans[1].face.boxed, Some(0x505050));
+        assert_eq!(line.spans[1].face.bg, region);
+    }
+
+    #[test]
+    fn a_box_split_across_rows_is_on_each_row() {
+        let mut h = Harness::new(&[("a.txt", "abc def\n")]);
+        h.open("a.txt");
+        prop(&mut h, 0..7, Prop::Face(BOXED));
+        let wrap = super::Wrap {
+            width: 3,
+            word: false,
+            from: 0,
+        };
+        let d = super::build(
+            h.core.current(),
+            0,
+            2,
+            0,
+            None,
+            h.core.settings(),
+            0..30,
+            Some(wrap),
+            &[],
+            None,
+        );
+        let boxed = |l: usize| {
+            (
+                d.lines[l].spans[0].text.as_str(),
+                d.lines[l].spans[0].face.boxed,
+            )
+        };
+        assert_eq!(boxed(0), ("abc", BOXED.boxed));
+        assert_eq!(boxed(1), (" de", BOXED.boxed));
+    }
+
+    #[test]
+    fn the_later_box_colour_wins_and_a_face_without_one_keeps_it() {
+        let top = Face {
+            boxed: Some(1),
+            ..Face::default()
+        };
+        assert_eq!(top.over(BOXED).boxed, Some(1));
+        assert_eq!(RED.over(BOXED).boxed, BOXED.boxed);
+    }
+
+    /// `text` with the space at `space` right-aligned.
+    fn aligned(text: &str, space: usize) -> Harness {
+        let mut h = Harness::new(&[("a.txt", text)]);
+        h.open("a.txt");
+        prop(&mut h, space..space + 1, Prop::AlignRight);
+        h
+    }
+
+    /// The rows drawn `cols` wide, cut or wrapped at words.
+    fn rows_at(h: &Harness, cols: usize, wrap: bool, from: usize) -> Vec<String> {
+        let wrap = wrap.then_some(super::Wrap {
+            width: cols - 1,
+            word: true,
+            from,
+        });
+        let shown = match wrap {
+            Some(_) => 0..10 * cols,
+            None => 0..cols + 1,
+        };
+        let d = super::build(
+            h.core.current(),
+            0,
+            3,
+            usize::MAX,
+            None,
+            h.core.settings(),
+            shown,
+            wrap,
+            &[],
+            None,
+        );
+        (d.lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn right_aligned_text_ends_in_the_last_column() {
+        let h = aligned("ab 12s\nnext\n", 2);
+        let padded = format!("ab{}12s", " ".repeat(15));
+        assert_eq!(rows_at(&h, 20, false, 0)[0], padded);
+        assert_eq!(rows_at(&h, 20, true, 0)[0], padded);
+        assert_eq!(rows_at(&h, 20, true, 0)[1], "next");
+        assert_eq!(rows_at(&h, 30, false, 0)[0].chars().count(), 30);
+    }
+
+    #[test]
+    fn a_line_too_long_keeps_one_space() {
+        // In a row exactly, the one space is all the room there is.
+        let h = aligned("ab 12s\n", 2);
+        assert_eq!(rows_at(&h, 6, false, 0)[0], "ab 12s");
+        assert_eq!(rows_at(&h, 5, false, 0)[0], "ab 12s");
+        // A row holds a column less when wrapped, and it breaks as without the property.
+        let mut plain = Harness::new(&[("a.txt", "ab 12s\n")]);
+        plain.open("a.txt");
+        assert_eq!(rows_at(&h, 6, true, 0), rows_at(&plain, 6, true, 0));
+        assert_eq!(rows_at(&h, 6, true, 0)[..2], ["ab ", "12s"]);
+    }
+
+    #[test]
+    fn a_wrapped_line_shown_from_a_later_row_stays_too_long() {
+        let text = format!("{} ab 12s\n", "x".repeat(18));
+        let h = aligned(&text, 21);
+        let from = 19;
+        assert_eq!(rows_at(&h, 20, true, from)[0], "ab 12s");
+    }
+
+    #[test]
+    fn nothing_pads_before_the_width_is_known() {
+        let h = aligned("ab 12s\n", 2);
+        let d = super::build(
+            h.core.current(),
+            0,
+            1,
+            0,
+            None,
+            h.core.settings(),
+            0..usize::MAX,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(d.lines[0].spans[0].text, "ab");
+        assert_eq!(d.lines[0].spans[1].text, " ");
+    }
+
+    #[test]
+    fn a_fold_after_the_space_counts_as_its_placeholder() {
+        let mut h = aligned("ab 12345s\n", 2);
+        prop(&mut h, 4..8, Prop::Invisible("…".into()));
+        let row = rows_at(&h, 20, false, 0).remove(0);
+        assert_eq!(row, format!("ab{}1…s", " ".repeat(15)));
+    }
+
+    #[test]
+    fn the_padding_takes_the_space_s_face_and_the_cursor_follows_the_text() {
+        let mut h = aligned("ab 12s\n", 2);
+        prop(&mut h, 2..3, Prop::Face(RED));
+        let draw = |h: &Harness, point| {
+            super::build(
+                h.core.current(),
+                0,
+                1,
+                point,
+                None,
+                h.core.settings(),
+                0..11,
+                None,
+                &[],
+                None,
+            )
+        };
+        let d = draw(&h, 3);
+        assert_eq!(d.lines[0].spans[1].text, "     ");
+        assert_eq!(d.lines[0].spans[1].face, RED);
+        assert_eq!(d.cursor, Some((0, 7)));
+        assert_eq!(draw(&h, 2).cursor, Some((0, 2)));
+    }
+
+    #[test]
+    fn a_resize_moves_right_aligned_text_and_the_text_stays_one_space() {
+        let mut h = aligned("ab 12s\n", 2);
+        let row = |h: &mut Harness, width| {
+            let frame = h.frame(width, 400.);
+            let line = &frame.windows[0].display.lines[0];
+            line.spans
+                .iter()
+                .map(|s| s.text.chars().count())
+                .sum::<usize>()
+        };
+        let narrow = row(&mut h, 400.);
+        assert_eq!(row(&mut h, 480.), narrow + 10);
+        assert_eq!(row(&mut h, 64.), "ab ".len());
+        // The property is on a real space: search and kill see that one space.
+        let mut search = crate::swiper::Search::new(h.core.current().text(), None);
+        assert_eq!(search.filter("ab 12s"), [0]);
+        // A match draws where the padding put its text.
+        search.filter("12s");
+        let d = super::build(
+            h.core.current(),
+            0,
+            1,
+            0,
+            None,
+            h.core.settings(),
+            0..11,
+            None,
+            &[],
+            Some(&search),
+        );
+        let spans = &d.lines[0].spans;
+        let hit = spans.iter().position(|s| s.text == "12s").unwrap();
+        assert_ne!(spans[hit].face, Face::default());
+        let before: usize = spans[..hit].iter().map(|s| s.text.chars().count()).sum();
+        assert_eq!(before, 7);
+        h.keys("C-k C-y");
+        assert_eq!(h.text(), "ab 12s\n");
     }
 
     fn prop(h: &mut Harness, range: std::ops::Range<usize>, prop: Prop) {

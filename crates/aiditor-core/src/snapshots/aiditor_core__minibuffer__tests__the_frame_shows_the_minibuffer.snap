@@ -21,11 +21,13 @@ Some(
                                 bold: false,
                                 italic: false,
                                 underline: false,
+                                boxed: None,
                             },
                             fold: false,
                         },
                     ],
                     decorations: [],
+                    aligned: false,
                 },
             ],
             cursor: Some(

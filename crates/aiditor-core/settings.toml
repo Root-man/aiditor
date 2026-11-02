@@ -88,7 +88,7 @@ diff-hunk = { fg = 0x569cd6 }
 key-hint = { fg = 0x1e1e1e, bg = 0xffcc00, bold = true }
 permission = { bg = 0x3c3c3c }
 link = { fg = 0xce9178, underline = true }
-attachment = { bg = 0x3c3c3c }
+attachment = { bg = 0x3c3c3c, box = 0x5a5a5a }
 message-at-point = { fg = 0xffcc00 }
 
 # Code's faces by tree-sitter capture name; one without an entry takes its longest dotted
