@@ -1727,6 +1727,8 @@ mod tests {
             e.handle(Msg::Tick, cx);
         });
         let release = hold();
+        // The watcher can read the file empty mid-write, and the refill leaves point at the end.
+        cx.simulate_keystrokes("alt-<");
         cx.simulate_input("first ");
         cx.simulate_keystrokes("ctrl-x ctrl-s ctrl-x t o");
         cx.simulate_input("second ");
