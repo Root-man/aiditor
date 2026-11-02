@@ -1,3 +1,9 @@
+use std::path::Path;
+
+use agent_client_protocol_schema::v1::{Diff, ToolKind};
+
+use crate::buffer::Icon;
+
 use super::*;
 
 /// Renders `range` of `buffer` as markdown, replacing its properties.
@@ -106,16 +112,86 @@ pub(super) fn first_line(text: &str) -> String {
     line
 }
 
-/// A tool call's header line, `<title> (<kind>, <status>)` with the title's first line and its
-/// terminal's exit after the status, and the title part's length in chars.
-pub(super) fn tool_header(call: &ToolCall, term: Option<&Term>) -> (String, usize) {
-    let title = first_line(&call.title);
-    let (kind, status) = (acp_name(call.kind), acp_name(call.status));
-    let suffix = match term.and_then(|t| t.exit.as_ref()) {
-        Some(exit) => format!(" ({kind}, {status}, {exit})"),
-        None => format!(" ({kind}, {status})"),
+/// The output lines an open command shows.
+const SHOWN_LINES: usize = 20;
+
+/// Where a header's fixed columns end: the fold and status marks with their spaces, and the icon
+/// with the space after it.
+const MARKS: Range<usize> = 0..2;
+const STATUS: Range<usize> = 2..3;
+const ICON: Range<usize> = 4..6;
+const VERB: usize = 7;
+
+/// Whether a call with `status` has finished.
+pub(super) fn finished(status: ToolCallStatus) -> bool {
+    matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+}
+
+/// A kind's icon and its verb, past and present.
+fn kind_parts(kind: ToolKind) -> (Icon, &'static str, &'static str) {
+    match kind {
+        ToolKind::Read => (Icon::Book, "Read", "Reading"),
+        ToolKind::Search => (Icon::Magnifier, "Searched", "Searching"),
+        ToolKind::Edit => (Icon::Pencil, "Edited", "Editing"),
+        ToolKind::Delete => (Icon::Pencil, "Deleted", "Deleting"),
+        ToolKind::Move => (Icon::Pencil, "Moved", "Moving"),
+        ToolKind::Execute => (Icon::Terminal, "Ran", "Running"),
+        ToolKind::Fetch => (Icon::Globe, "Fetched", "Fetching"),
+        _ => (Icon::Wrench, "Used", "Using"),
+    }
+}
+
+/// The verb a call's header shows.
+fn verb(call: &ToolCall) -> &'static str {
+    let (_, past, present) = kind_parts(call.kind);
+    if finished(call.status) { past } else { present }
+}
+
+/// The command a call runs, if its input names one.
+pub(super) fn tool_command<'a>(call: &'a ToolCall, term: Option<&Term>) -> Option<&'a str> {
+    let command = (call.raw_input.as_ref()?.get("command")?.as_str())?;
+    (call.kind == ToolKind::Execute || term.is_some()).then_some(command)
+}
+
+/// What a call acts on: its command, URL or path, else its title. A path under `root` is relative
+/// to it. A location would hide a search's pattern, so a search shows its title.
+pub(super) fn tool_target(call: &ToolCall, term: Option<&Term>, root: &Path) -> String {
+    let input = |key| call.raw_input.as_ref()?.get(key)?.as_str();
+    let path = || {
+        let diff = call.content.iter().find_map(|item| match item {
+            ToolCallContent::Diff(d) => Some(&d.path),
+            _ => None,
+        });
+        let path = call.locations.first().map(|l| &l.path).or(diff)?;
+        Some(
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string(),
+        )
     };
-    (format!("{title}{suffix}"), title.chars().count())
+    let target = match call.kind {
+        ToolKind::Fetch => input("url").map(first_line),
+        ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => path(),
+        _ => None,
+    };
+    let command = tool_command(call, term).map(first_line);
+    command
+        .or(target)
+        .unwrap_or_else(|| first_line(&call.title).trim_matches('`').to_string())
+}
+
+/// A tool call's header line, the time left out: its fold and status marks, spaces for its icon,
+/// its verb and what it acts on.
+pub(super) fn tool_header(call: &ToolCall, term: Option<&Term>, open: bool, root: &Path) -> String {
+    let fold = if open { '▾' } else { '▸' };
+    let status = match call.status {
+        ToolCallStatus::Completed => '✓',
+        ToolCallStatus::Failed => '✗',
+        _ => '●',
+    };
+    let target = tool_target(call, term, root);
+    format!("{fold} {status}    {} {target}", verb(call))
 }
 
 /// A plan entry's line, `<content> (<status>, <priority>)` with the content's first line, and
@@ -200,11 +276,55 @@ pub(super) fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
     buffer.remove_marker(ask.start);
 }
 
-/// Everything a tool call carries, uncut, as markdown: its raw input, its content items without
-/// ANSI escapes, and its terminal's output, or its raw output when no item carries the result;
-/// and the faces of the escapes.
-pub(super) fn tool_content(call: &ToolCall, term: Option<&Term>) -> (String, Faces) {
-    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
+/// A tool call's raw output as text.
+fn raw_text(output: &Value) -> String {
+    match output {
+        Value::String(text) => text.clone(),
+        // Claude's adapter passes a tool result's text blocks through.
+        Value::Array(items) if !items.is_empty() && items.iter().all(|i| i["text"].is_string()) => {
+            let texts: Vec<_> = items.iter().filter_map(|i| i["text"].as_str()).collect();
+            texts.join("\n")
+        }
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    }
+}
+
+/// `d` as a unified diff.
+fn unified(d: &Diff) -> String {
+    let (old, path) = (d.old_text.as_deref().unwrap_or_default(), d.path.display());
+    let path = path.to_string();
+    let diff = similar::TextDiff::from_lines(old, &d.new_text);
+    diff.unified_diff().header(&path, &path).to_string()
+}
+
+/// The `diff-*` faces of a unified diff's lines, which never run across a line's start.
+fn diff_faces(text: &str) -> Faces {
+    let mut at = 0;
+    let lines = text.split('\n').enumerate().map(|(i, line)| {
+        let face = match line.as_bytes().first() {
+            _ if i < 2 || line.starts_with("@@") => Some(FaceName::DiffHunk),
+            Some(b'+') => Some(FaceName::DiffAdded),
+            Some(b'-') => Some(FaceName::DiffRemoved),
+            _ => None,
+        };
+        let len = line.chars().count();
+        at += len + 1;
+        face.map(|f| (at - len - 1..at - 1, vec![FaceRef::Face(f)]))
+    });
+    lines.flatten().collect()
+}
+
+/// A tool call's content as markdown: what it ran or its raw input, its content items without
+/// ANSI escapes, and its terminal's output, or its raw output when no item carries the result.
+pub(super) struct ToolContent {
+    pub(super) text: String,
+    /// The faces of the escapes and diffs.
+    pub(super) faces: Faces,
+    /// Where a command's output lines start.
+    pub(super) output: Option<usize>,
+}
+
+pub(super) fn tool_content(call: &ToolCall, term: Option<&Term>) -> ToolContent {
     let (mut content, mut faces) = (String::new(), Vec::new());
     // Appends a part whose faces start `at` chars into it.
     let mut push = |part: String, part_faces: Faces, at: usize| {
@@ -215,63 +335,118 @@ pub(super) fn tool_content(call: &ToolCall, term: Option<&Term>) -> (String, Fac
         faces.extend((part_faces.into_iter()).map(|(r, f)| (at + r.start..at + r.end, f)));
         content.push_str(&part);
     };
-    if let Some(input) = &call.raw_input {
-        push(
-            format!("Input:\n{}", fenced("json", &pretty(input))),
-            vec![],
-            0,
-        );
+    let command = tool_command(call, term);
+    let diffs = (call.content.iter()).any(|item| matches!(item, ToolCallContent::Diff(_)));
+    if let (None, false, Some(input)) = (command, diffs, &call.raw_input) {
+        let input = serde_json::to_string_pretty(input).unwrap_or_default();
+        push(format!("Input:\n{}", fenced("json", &input)), vec![], 0);
     }
+    let execute = call.kind == ToolKind::Execute;
+    // A command's text items repeat its raw output.
+    let raw_only = term.is_none() && execute && call.raw_output.is_some();
     for item in &call.content {
         if let (ToolCallContent::Terminal(t), Some(term)) = (item, term)
             && *t.terminal_id.0 == *term.id
         {
             continue;
         }
-        let (part, part_faces) = match item {
+        if raw_only && matches!(item, ToolCallContent::Content(_)) {
+            continue;
+        }
+        let (part, part_faces, at) = match item {
             ToolCallContent::Content(c) => match &c.content {
                 // Codex sends a read or list command's output here, colored.
-                ContentBlock::Text(text) => coloured(&text.text),
-                ContentBlock::ResourceLink(link) => (link.uri.clone(), vec![]),
+                ContentBlock::Text(text) => {
+                    let (text, faces) = coloured(&text.text);
+                    (text, faces, 0)
+                }
+                ContentBlock::ResourceLink(link) => (link.uri.clone(), vec![], 0),
                 other => match serde_json::to_value(other) {
-                    Ok(v) => (format!("[{}]", v["type"].as_str().unwrap_or("?")), vec![]),
-                    Err(_) => ("[?]".into(), vec![]),
+                    Ok(v) => (
+                        format!("[{}]", v["type"].as_str().unwrap_or("?")),
+                        vec![],
+                        0,
+                    ),
+                    Err(_) => ("[?]".into(), vec![], 0),
                 },
             },
             ToolCallContent::Diff(d) => {
-                let old = d.old_text.as_deref().unwrap_or_default();
-                let path = d.path.display().to_string();
-                let diff = similar::TextDiff::from_lines(old, &d.new_text);
-                let diff = diff.unified_diff().header(&path, &path).to_string();
-                (format!("{path}\n{}", fenced("diff", &diff)), vec![])
+                let (path, diff) = (d.path.display().to_string(), unified(d));
+                let block = fenced("diff", &diff);
+                let at = path.chars().count() + 1 + block.find('\n').expect("fenced") + 1;
+                (format!("{path}\n{block}"), diff_faces(&diff), at)
             }
-            ToolCallContent::Terminal(t) => (format!("Terminal {}", t.terminal_id), vec![]),
-            _ => ("[?]".into(), vec![]),
+            ToolCallContent::Terminal(t) => (format!("Terminal {}", t.terminal_id), vec![], 0),
+            _ => ("[?]".into(), vec![], 0),
         };
-        push(part, part_faces, 0);
+        push(part, part_faces, at);
     }
-    if let Some(term) = term {
-        if !term.sgr.text.is_empty() {
-            let block = fenced("", &term.sgr.text);
-            // The faces start after `Output:` and the fence line.
-            let at = "Output:\n".len() + block.find('\n').expect("fenced") + 1;
-            push(format!("Output:\n{block}"), term.sgr.faces.clone(), at);
+    let output = match (term, &call.raw_output) {
+        (Some(term), _) => {
+            (!term.sgr.text.is_empty()).then(|| (term.sgr.text.clone(), term.sgr.faces.clone()))
         }
-    } else if let (true, Some(output)) = (call.content.is_empty(), &call.raw_output) {
-        let text = match output {
-            Value::String(text) => text.clone(),
-            // Claude's adapter passes a tool result's text blocks through.
-            Value::Array(items)
-                if !items.is_empty() && items.iter().all(|i| i["text"].is_string()) =>
-            {
-                let texts: Vec<_> = items.iter().filter_map(|i| i["text"].as_str()).collect();
-                texts.join("\n")
-            }
-            other => pretty(other),
-        };
-        push(format!("Output:\n{}", fenced("", &text)), vec![], 0);
+        (None, Some(output)) if call.content.is_empty() || raw_only => {
+            Some((raw_text(output), vec![]))
+        }
+        _ => None,
+    };
+    let mut from_end = None;
+    if output.is_some() || command.is_some() {
+        let (output, output_faces) = output.unwrap_or_default();
+        let above = command.map_or(String::new(), |c| format!("$ {}\n", c.trim_end()));
+        let label = if command.is_some() { "" } else { "Output:\n" };
+        let block = fenced("", &format!("{above}{output}"));
+        // The faces start after the label, the fence line and the command.
+        let at = label.len() + block.find('\n').expect("fenced") + 1 + above.chars().count();
+        let part = format!("{label}{block}");
+        from_end = Some(part.chars().count() - at);
+        push(part, output_faces, at);
     }
-    (content.trim_end_matches('\n').to_string(), faces)
+    let output = from_end.filter(|_| execute || term.is_some());
+    ToolContent {
+        output: output.map(|from_end| content.chars().count() - from_end),
+        text: content,
+        faces,
+    }
+}
+
+/// A tool call's full output, for its own buffer: its terminal's, else its diffs, else its raw
+/// output, else its text items.
+pub(super) fn tool_output(call: &ToolCall, term: Option<&Term>) -> Option<(String, Faces)> {
+    if let Some(term) = term.filter(|t| !t.sgr.text.is_empty()) {
+        return Some((term.sgr.text.clone(), term.sgr.faces.clone()));
+    }
+    let diffs: Vec<_> = (call.content.iter())
+        .filter_map(|item| match item {
+            ToolCallContent::Diff(d) => Some(unified(d)),
+            _ => None,
+        })
+        .collect();
+    if !diffs.is_empty() {
+        let diff = diffs.concat();
+        let faces = diffs.iter().fold((0, Vec::new()), |(at, mut faces), diff| {
+            let shift = |(r, f): (Range<usize>, _)| (at + r.start..at + r.end, f);
+            faces.extend(diff_faces(diff).into_iter().map(shift));
+            (at + diff.chars().count(), faces)
+        });
+        return Some((diff, faces.1));
+    }
+    if let Some(output) = &call.raw_output {
+        return Some((raw_text(output), vec![]));
+    }
+    let (mut text, mut faces) = (String::new(), Vec::new());
+    for item in &call.content {
+        if let ToolCallContent::Content(c) = item
+            && let ContentBlock::Text(t) = &c.content
+        {
+            let (item, item_faces) = coloured(&t.text);
+            let at = text.chars().count();
+            faces.extend((item_faces.into_iter()).map(|(r, f)| (at + r.start..at + r.end, f)));
+            text += &item;
+            text.push('\n');
+        }
+    }
+    (!text.is_empty()).then_some((text, faces))
 }
 
 #[derive(Default)]
@@ -339,31 +514,61 @@ pub(super) fn coloured(text: &str) -> (String, Faces) {
     (sgr.text, sgr.faces)
 }
 
+/// The length of a fence around `text`, longer than any run of backticks in it.
+pub(super) fn fence_len(text: &str) -> usize {
+    let run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    run.max(2) + 1
+}
+
 /// `text` in a fenced code block whose fence is longer than any run of backticks in it.
 pub(super) fn fenced(lang: &str, text: &str) -> String {
-    let run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(run.max(2) + 1);
+    let fence = "`".repeat(fence_len(text));
     let text = text.strip_suffix('\n').unwrap_or(text);
     format!("{fence}{lang}\n{text}\n{fence}")
 }
 
+/// The output lines of `content` past the shown ones when they start at `at`, its closing fence
+/// the last line, and how many there are.
+fn hidden_output(content: &str, at: usize) -> Option<(Range<usize>, usize)> {
+    let ends: Vec<_> = (content.chars().enumerate().skip(at))
+        .filter_map(|(i, c)| (c == '\n').then_some(i))
+        .collect();
+    let lines = ends.len().checked_sub(SHOWN_LINES).filter(|n| *n > 0)?;
+    Some((ends[SHOWN_LINES - 1] + 1..ends[ends.len() - 1], lines))
+}
+
 /// Renders a tool call's block, whose properties were removed: its header with a rule beside it,
-/// then its content as markdown with a rule beside each line, or folded behind ` …`. No property
-/// contains another's end, so starts and ends ascend.
+/// then its content as markdown with a rule beside each line, or folded. An open command's
+/// hidden output gets no properties of its own, so no property contains another's end and starts
+/// and ends ascend.
 pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     let start = buffer.marker(tool.start).expect("live while shown");
-    let (header, title) = tool_header(&tool.call, tool.term.as_ref());
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
+    let status = match tool.call.status {
+        ToolCallStatus::Failed => FaceName::StatusFailed,
+        _ => FaceName::StatusRunning,
+    };
+    let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
+    let verb_end = VERB + verb(&tool.call).chars().count();
+    let (icon, ..) = kind_parts(tool.call.kind);
     // A rule on one char touches only its line and sorts before the faces on it.
-    let mut props = vec![(0..1, rule.clone())];
-    let title: String = header.chars().take(title).collect();
-    props.extend(markdown::render(&title, false));
-    let suffix = header.chars().count();
-    props.push((title.chars().count()..suffix, dim()));
+    let mut props = vec![
+        (0..1, rule.clone()),
+        (MARKS, dim()),
+        (STATUS, face(status)),
+        (ICON, Prop::Icon(icon)),
+        (ICON, dim()),
+        (VERB..verb_end, dim()),
+    ];
     if !tool.time.is_empty() {
-        let face = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
+        let suffix = tool.header - tool.time.chars().count() - 1;
+        let exit = tool.term.as_ref().and_then(|t| t.exit.as_ref());
+        let name = match exit == Some(&tool.time) {
+            true => FaceName::StatusFailed,
+            false => FaceName::Annotation,
+        };
         props.push((suffix..suffix + 1, Prop::AlignRight));
-        props.push((suffix + 1..tool.header, face));
+        props.push((suffix + 1..tool.header, face(name)));
     }
     let body = tool.header + 1..tool.len;
     if tool.open && !body.is_empty() {
@@ -372,17 +577,42 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             .slice(start + body.start..start + body.end)
             .to_string();
         let shifted = |(r, p): (Range<usize>, Prop)| (body.start + r.start..body.start + r.end, p);
-        props.extend(markdown::render(&content, false).into_iter().map(shifted));
+        let cut = tool.output.and_then(|at| hidden_output(&content, at));
+        let hidden = cut.as_ref().map(|(r, _)| r.clone());
+        let visible = hidden.as_ref().map_or(content.clone(), |h| {
+            let tail = content.chars().skip(h.end);
+            content.chars().take(h.start).chain(tail).collect()
+        });
+        // Past the cut, as the closing lines follow the hidden ones in the text.
+        let past = |r: Range<usize>| match &hidden {
+            Some(h) if r.start >= h.start => r.start + h.len()..r.end + h.len(),
+            _ => r,
+        };
+        let markdown = markdown::render(&visible, false).into_iter();
+        props.extend(markdown.map(|(r, p)| (past(r), p)).map(shifted));
         // Sorted with the markdown faces by range; where both apply, the later sorted one wins.
-        let faces = (tool.faces.iter()).map(|(r, f)| (r.clone(), Prop::Named(f.clone())));
+        let faces = tool.faces.iter().filter_map(|(r, f)| {
+            let end = hidden.as_ref().map_or(r.end, |h| r.end.min(h.start));
+            (r.start < end).then(|| (r.start..end, Prop::Named(f.clone())))
+        });
         props.extend(faces.map(shifted));
-        let mut line = body.start;
+        if let Some((hidden, lines)) = cut {
+            let plural = if lines == 1 { "" } else { "s" };
+            let more = format!("… {lines} more line{plural}");
+            props.push(shifted((hidden, Prop::Invisible(more))));
+        }
+        let mut line = 0;
         for l in content.split('\n') {
-            props.push((line..line + 1, rule.clone()));
+            if hidden
+                .as_ref()
+                .is_none_or(|h| line <= h.start || line > h.end)
+            {
+                props.push(shifted((line..line + 1, rule.clone())));
+            }
             line += l.chars().count() + 1;
         }
     } else if !body.is_empty() {
-        props.push((tool.header..tool.len, Prop::Invisible(" …".into())));
+        props.push((tool.header..tool.len, Prop::Invisible(String::new())));
     }
     props.sort_by_key(|(r, _)| (r.start, r.end));
     for (r, prop) in props {
