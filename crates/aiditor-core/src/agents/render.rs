@@ -20,6 +20,75 @@ pub(super) fn rewrite(buffer: &mut Buffer, range: Range<usize>, text: &str) {
     }
 }
 
+/// The dim face of a session's own lines.
+pub(super) fn dim() -> Prop {
+    Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)])
+}
+
+/// `12s`, `2m 05s` or `1h 02m 05s`.
+pub(super) fn long_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    match (s / 3600, s / 60 % 60, s % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s:02}s"),
+        (h, m, s) => format!("{h}h {m:02}m {s:02}s"),
+    }
+}
+
+/// A tool call's duration: tenths under a minute, as `0.3s`.
+pub(super) fn short_duration(d: Duration) -> String {
+    match d.as_secs() {
+        0..60 => format!("{}.{}s", d.as_secs(), d.subsec_millis() / 100),
+        _ => long_duration(d),
+    }
+}
+
+/// A permission wait, as `waiting 0:12`.
+pub(super) fn waiting_text(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("waiting {}:{:02}", s / 60, s % 60)
+}
+
+/// Where the line holding `at` ends.
+pub(super) fn line_end(buffer: &Buffer, at: usize) -> usize {
+    let rest = buffer.text().slice(at..).chars().position(|c| c == '\n');
+    at + rest.unwrap_or(buffer.len_chars() - at)
+}
+
+/// Puts a right-aligned `time` in `annotation` at `at`, a line's end, returning the chars added.
+pub(super) fn put_time(buffer: &mut Buffer, at: usize, time: &str) -> usize {
+    buffer.insert_output(at, &format!(" {time}"));
+    let end = at + 1 + time.chars().count();
+    let face = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
+    (buffer.add_property(at..at + 1, Prop::AlignRight)).expect("just inserted");
+    (buffer.add_property(at + 1..end, face)).expect("just inserted");
+    end - at
+}
+
+/// Replaces the time at `range` with `text`, in `face`, returning its length in chars. Only the
+/// chars that differ change, so point on the line stays.
+pub(super) fn retime(
+    buffer: &mut Buffer,
+    range: Range<usize>,
+    text: &str,
+    face: FaceName,
+) -> usize {
+    let len = text.chars().count();
+    let old = buffer.text().slice(range.clone()).to_string();
+    if old == text {
+        return len;
+    }
+    let same = (old.chars().zip(text.chars()))
+        .take_while(|(a, b)| a == b)
+        .count();
+    buffer.remove_properties(range.clone());
+    let tail: String = text.chars().skip(same).collect();
+    buffer.replace_output(range.start + same..range.end, &tail);
+    let prop = Prop::Named(vec![FaceRef::Face(face)]);
+    (buffer.add_property(range.start..range.start + len, prop)).expect("just replaced");
+    len
+}
+
 /// The ACP name of an enum value, as `in_progress`.
 pub(super) fn acp_name(value: impl serde::Serialize) -> String {
     match serde_json::to_value(value) {
@@ -92,7 +161,7 @@ pub(super) fn rows_text(rows: &[(String, usize)]) -> String {
 /// line and each row's text past its length before the suffix dim.
 pub(super) fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, usize)]) {
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
-    let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
+    let dim = dim();
     let mut props = Vec::new();
     let mut line = 0;
     for (text, content) in rows {
@@ -274,12 +343,17 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     let start = buffer.marker(tool.start).expect("live while shown");
     let (header, title) = tool_header(&tool.call, tool.term.as_ref());
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
-    let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
     // A rule on one char touches only its line and sorts before the faces on it.
     let mut props = vec![(0..1, rule.clone())];
     let title: String = header.chars().take(title).collect();
     props.extend(markdown::render(&title, false));
-    props.push((title.chars().count()..tool.header, dim));
+    let suffix = header.chars().count();
+    props.push((title.chars().count()..suffix, dim()));
+    if !tool.time.is_empty() {
+        let face = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
+        props.push((suffix..suffix + 1, Prop::AlignRight));
+        props.push((suffix + 1..tool.header, face));
+    }
     let body = tool.header + 1..tool.len;
     if tool.open && !body.is_empty() {
         let content = buffer

@@ -715,12 +715,12 @@ async fn the_session_buffer_runs_turns_and_its_kill_stops_the_agent() {
     live.start().await;
     live.keys("h e l l o RET");
     live.turn().await;
-    assert_eq!(live.core.text(), "> hello\n\nHi there\n\n> ");
+    assert_eq!(live.core.text(), "> hello\n\nHi there\n\nWorked 0s\n\n> ");
     live.keys("w a i t RET C-c C-c");
     live.turn().await;
     assert_eq!(
         live.core.text(),
-        "> hello\n\nHi there\n\n> wait\n\nTurn ended: cancelled\n\n> "
+        "> hello\n\nHi there\n\nWorked 0s\n\n> wait\n\nTurn ended: cancelled\n\nWorked 0s\n\n> "
     );
     let name = live.core.current().name.clone();
     live.call("kill-buffer", &[&name, "yes"]);
@@ -847,7 +847,7 @@ async fn command_output_streams_into_its_tool_call() {
     live.core.frame();
     assert_eq!(
         live.core.text(),
-        "> go\n\nmake (execute, failed, exit 1)\nOutput:\n```\none\ntwo\n```\n\n> "
+        "> go\n\nmake (execute, failed, exit 1) 0.0s\nOutput:\n```\none\ntwo\n```\n\nWorked 0s\n\n> "
     );
 }
 

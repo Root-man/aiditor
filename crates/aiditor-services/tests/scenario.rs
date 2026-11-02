@@ -209,7 +209,10 @@ async fn an_agent_reply_and_write_reach_the_editor_and_its_workspace_kill_stops_
     assert_eq!(app.core.current().name, "*fake*<agent>");
     app.keys("edit SPC it RET");
     app.until("the turn", |app| app.prompted).await;
-    assert_eq!(app.core.text(), "> edit it\n\nDone, edited a.txt\n\n> ");
+    assert_eq!(
+        app.core.text(),
+        "> edit it\n\nDone, edited a.txt\n\nWorked 0s\n\n> "
+    );
 
     app.keys(&format!("C-x b {file} RET"));
     app.until("the open buffer to revert", |app| {
@@ -247,11 +250,11 @@ async fn permission_requests_are_answered_from_the_session_buffer() {
                 == n
         }
     };
-    // From the prompt line, three lines up is the second option.
+    // From the prompt line, past the working line, five lines up is the second option.
     for (n, keys, outcome) in [
         (1, "C-c C-y", "allow"),
         (2, "C-c C-k", "reject"),
-        (3, "C-p C-p C-p RET", "always"),
+        (3, "C-p C-p C-p C-p C-p RET", "always"),
     ] {
         app.until("a permission request", pending).await;
         app.keys(keys);
@@ -270,6 +273,6 @@ async fn permission_requests_are_answered_from_the_session_buffer() {
         app.core.text(),
         "> go\n\nChose Yes (allow_once) for Write a.txt\n\n\
          Chose No (reject_once) for Write a.txt\n\n\
-         Chose Always (allow_always) for Write a.txt\n\n> "
+         Chose Always (allow_always) for Write a.txt\n\nWorked 0s\n\n> "
     );
 }
