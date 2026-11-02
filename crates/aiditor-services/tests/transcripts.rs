@@ -419,7 +419,8 @@ async fn committed_transcripts_replay_through_the_core() {
             .filter(|(f, m)| f == "agent" && m["method"] == "session/request_permission")
             .count();
         let text = replay.core.text();
-        assert_eq!(text.matches("\nChose ").count(), asks, "{name}: {text}");
+        let answered = text.matches("\n✓ allowed once\n").count();
+        assert_eq!(answered, asks, "{name}: {text}");
         replay.agents.kill_all();
     }
 }

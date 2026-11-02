@@ -178,14 +178,25 @@ pub(super) fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, us
 }
 
 /// The line a permission request's block becomes when cancelled or dropped.
-pub(super) fn cancelled(ask: &Ask) -> String {
-    format!("Cancelled permission for {}", ask.title)
+pub(super) const CANCELLED: &str = "✗ cancelled";
+
+/// The line a permission request's block becomes once an option of `kind` is picked.
+pub(super) fn answered(kind: PermissionOptionKind) -> &'static str {
+    match kind {
+        PermissionOptionKind::AllowOnce => "✓ allowed once",
+        PermissionOptionKind::AllowAlways => "✓ allowed always",
+        PermissionOptionKind::RejectOnce => "✗ rejected",
+        PermissionOptionKind::RejectAlways => "✗ rejected always",
+        // The enum is non-exhaustive.
+        _ => "answered",
+    }
 }
 
-/// Replaces `ask`'s block with `line`, which stays plain.
+/// Replaces `ask`'s block with the dim `line`.
 pub(super) fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
     let start = buffer.marker(ask.start).expect("live while pending");
     rewrite(buffer, start..start + ask.len, line);
+    (buffer.add_property(start..start + line.chars().count(), dim())).expect("inside the block");
     buffer.remove_marker(ask.start);
 }
 
