@@ -847,7 +847,7 @@ async fn command_output_streams_into_its_tool_call() {
     live.core.frame();
     assert_eq!(
         live.core.text(),
-        "> go\n\nmake (execute, failed, exit 1) 0.0s\nOutput:\n```\none\ntwo\n```\n\nWorked 0s\n\n> "
+        "> go\n\n▸ ✗    Ran make exit 1\nOutput:\n```\none\ntwo\n```\n\nWorked 0s\n\n> "
     );
 }
 

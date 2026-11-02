@@ -16,6 +16,7 @@ use serde_json::{Map, Value};
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
@@ -60,6 +61,8 @@ pub(crate) struct Session {
     workspace: String,
     title: String,
     usage: Option<(u64, u64)>,
+    /// The project's primary root, which tool call paths show relative to.
+    root: PathBuf,
     /// The session buffer, the session's handle: killing it stops the agent.
     pub(crate) buffer: BufferId,
     /// Its stderr log.
@@ -289,8 +292,12 @@ struct Tool {
     term: Option<Term>,
     /// Its terminal changed since the block was last rendered.
     dirty: bool,
-    /// The faces of the SGR escapes in its content, from the content's start.
+    /// The faces of the SGR escapes and diffs in its content, from the content's start.
     faces: Faces,
+    /// Where a command's output lines start in its content.
+    output: Option<usize>,
+    /// The buffer showing its full output.
+    output_buffer: Option<BufferId>,
 }
 
 /// Faces on char ranges.
@@ -504,32 +511,34 @@ impl Core {
         let waited = known.map_or(Duration::ZERO, |t| t.waited);
         let asked = (session.asks.iter()).find(|a| a.tool == call.tool_call_id);
         let waiting = asked.map(|a| now - a.since);
-        let done = matches!(
-            call.status,
-            ToolCallStatus::Completed | ToolCallStatus::Failed
-        );
+        let done = finished(call.status);
         let ran = known.and_then(|t| t.ran).or_else(|| {
             let spent = (now - arrived?).checked_sub(waited + waiting.unwrap_or_default());
             done.then(|| spent.unwrap_or_default())
         });
-        let time = match (waiting, ran) {
-            (Some(wait), _) => waiting_text(wait),
-            (None, Some(ran)) => short_duration(ran),
-            (None, None) => String::new(),
+        let exit = term.as_ref().and_then(|t| t.exit.clone());
+        let time = match (waiting, exit, ran) {
+            (Some(wait), ..) => waiting_text(wait),
+            (None, Some(exit), _) => exit,
+            (None, None, Some(ran)) => short_duration(ran),
+            (None, None, None) => String::new(),
         };
-        let mut header = tool_header(&call, term.as_ref()).0;
+        let open = known.is_some_and(|t| t.open);
+        let mut header = tool_header(&call, term.as_ref(), open, &session.root);
         if !time.is_empty() {
             header += &format!(" {time}");
         }
-        let (content, faces) = tool_content(&call, term.as_ref());
-        let text = match content.is_empty() {
+        let content = tool_content(&call, term.as_ref());
+        let (output, faces) = (content.output, content.faces);
+        let text = match content.text.is_empty() {
             true => header.clone(),
-            false => format!("{header}\n{content}"),
+            false => format!("{header}\n{}", content.text),
         };
         let (header, len) = (header.chars().count(), text.chars().count());
         if let Some(term) = &mut term {
             let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
-            let fence = term.sgr.backticks.max(2) + 1;
+            let command = tool_command(&call, Some(&*term)).map_or(0, fence_len);
+            let fence = (term.sgr.backticks.max(2) + 1).max(command);
             let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
             term.rendered = (!term.sgr.text.is_empty()).then(|| TermRender {
                 bytes: output.len(),
@@ -544,7 +553,7 @@ impl Core {
                 let start = buffer.marker(tool.start).expect("live while shown");
                 rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
-                (tool.term, tool.dirty, tool.faces) = (term, false, faces);
+                (tool.term, tool.dirty, tool.faces, tool.output) = (term, false, faces, output);
                 (tool.ran, tool.time) = (ran, time);
                 tool
             }
@@ -564,6 +573,8 @@ impl Core {
                     term,
                     dirty: false,
                     faces,
+                    output,
+                    output_buffer: None,
                 };
                 session
                     .tools
@@ -1016,7 +1027,7 @@ impl Ctx<'_> {
             id,
             command: agent.command,
             args: agent.args,
-            cwd,
+            cwd: cwd.clone(),
             roots,
             env,
             session: load.clone(),
@@ -1026,6 +1037,7 @@ impl Ctx<'_> {
             None => format!("Starting {name}..."),
         };
         let session = Session {
+            root: cwd,
             agent: name.into(),
             workspace,
             title: session_title,
@@ -1301,13 +1313,59 @@ impl Ctx<'_> {
         })
     }
 
+    /// The tool call whose header point is on.
+    fn tool_at_point(&self) -> Option<(AgentId, ToolCallId)> {
+        let core = &*self.core;
+        let point = core.point();
+        let buffer = core.windows.window.buffer();
+        let b = core.buffers.get(buffer)?;
+        let (&id, session) = core.agents.iter().find(|(_, s)| s.buffer == buffer)?;
+        let tool = (session.tools.iter()).find(|(_, t)| {
+            (b.marker(t.start)).is_some_and(|s| (s..=s + t.header).contains(&point))
+        });
+        tool.map(|(call, _)| (id, call.clone()))
+    }
+
+    /// Shows `call`'s full output in its own read-only buffer, refreshed from the call.
+    // shortcut: a snapshot, not following a running command; RET refreshes it.
+    fn show_tool_output(&mut self, id: AgentId, call: &ToolCallId) -> Result<(), String> {
+        let core = &mut *self.core;
+        let workspace = core.current_workspace().name.clone();
+        let session = core.agents.get_mut(&id).expect("found by the caller");
+        let tool = session.tools.get_mut(call).expect("found by the caller");
+        let term = tool.term.as_ref();
+        let (text, faces) = tool_output(&tool.call, term).ok_or("No output")?;
+        let target = session_title(Some(&tool_target(&tool.call, term, &session.root)));
+        let found = tool
+            .output_buffer
+            .filter(|b| core.buffers.get(*b).is_some());
+        let buffer = found.unwrap_or_else(|| {
+            let name = format!("*{} output: {target}*<{workspace}>", session.agent);
+            let id = core.buffers.create(&name);
+            core.buffers.get_mut(id).expect("just created").read_only = true;
+            id
+        });
+        tool.output_buffer = Some(buffer);
+        let b = core.buffers.get_mut(buffer).expect("live");
+        b.set_text(&text);
+        b.remove_properties(0..b.len_chars());
+        for (r, face) in faces {
+            (b.add_property(r, Prop::Named(face))).expect("inside the text");
+        }
+        self.display_buffer(buffer);
+        Ok(())
+    }
+
     /// `agent-send-input`: on a pending permission request's option line, answers it with that
-    /// option; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
+    /// option; on a tool call's header, shows its full output; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
     /// new prompt line.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
         if let Some((id, at, option)) = self.option_at_point() {
             self.answer_ask(id, at, Some(option));
             return Ok(());
+        }
+        if let Some((id, call)) = self.tool_at_point() {
+            return self.show_tool_output(id, &call);
         }
         let core = &mut *self.core;
         let buffer = core.windows.window.buffer();
@@ -1401,6 +1459,7 @@ impl Ctx<'_> {
         tool.open = !tool.open && tool.len > tool.header;
         let start = b.marker(tool.start).expect("live while shown");
         b.remove_properties(start..start + tool.len);
+        b.replace_output(start..start + 1, if tool.open { "▾" } else { "▸" });
         render_tool(b, tool);
         if point > start + tool.header {
             return self.goto(start);
@@ -1531,11 +1590,11 @@ impl Ctx<'_> {
 mod tests {
     use agent_client_protocol_schema::v1::{
         ConfigOptionUpdate, ContentChunk, ImageContent, PlanEntryPriority, PlanEntryStatus,
-        SessionConfigSelectOption, SessionUpdate, ToolCallUpdateFields, ToolKind,
+        SessionConfigSelectOption, SessionUpdate, ToolCallLocation, ToolCallUpdateFields, ToolKind,
     };
 
     use super::*;
-    use crate::buffer::{Face, Prop};
+    use crate::buffer::{Face, Icon, Prop};
     use crate::harness::{Harness, listed, name};
     use crate::project::Root;
     use crate::settings::Agent;
@@ -2212,7 +2271,7 @@ mod tests {
         thought(&mut h, "hmm");
         agent_chunk(&mut h, "m2", "three");
         let text = h.core.text();
-        let second = text.find("three").unwrap();
+        let second = text[..text.find("three").unwrap()].chars().count();
         h.keys("C-c C-p");
         assert_eq!(h.core.point(), second);
         h.keys("C-c C-p");
@@ -2568,7 +2627,7 @@ mod tests {
             .raw_input(serde_json::json!({"command": "ls"}))
     }
 
-    const LS_INPUT: &str = "Input:\n```json\n{\n  \"command\": \"ls\"\n}\n```";
+    const LS_INPUT: &str = "```\n$ ls\n```";
 
     #[test]
     fn a_tool_call_starts_folded_and_updates_in_place() {
@@ -2578,13 +2637,11 @@ mod tests {
         tool(&mut h, ls());
         assert_eq!(
             h.core.text(),
-            format!(
-                "> a\n\nLet me look.\n\n`ls` (execute, pending)\n{LS_INPUT}\n\nWorking for 0s\n\n> "
-            )
+            format!("> a\n\nLet me look.\n\n▸ ●    Running ls\n{LS_INPUT}\n\nWorking for 0s\n\n> ")
         );
         assert_eq!(
             shown(&mut h, 10)[..5],
-            ["> a", "", "Let me look.", "", "ls (execute, pending) …"]
+            ["> a", "", "Let me look.", "", "▸ ●   Running ls"]
         );
         // A message after the call, then updates: the call's block changes where it is.
         chunk(&mut h, "Done.");
@@ -2597,15 +2654,10 @@ mod tests {
         );
         assert_eq!(
             h.core.text(),
-            format!(
-                "> a\n\nLet me look.\n\n`ls` (execute, completed) 0.0s\n{LS_INPUT}\n\n\
-                 Output:\n```\na.rs\nb.rs\n```\n\nDone.\n\nWorking for 0s\n\n> "
-            )
+            "> a\n\nLet me look.\n\n▸ ✓    Ran ls 0.0s\n```\n$ ls\na.rs\nb.rs\n```\n\n\
+             Done.\n\nWorking for 0s\n\n> "
         );
-        assert_eq!(
-            shown(&mut h, 12)[4..7],
-            ["ls (execute, completed) 0.0s …", "", "Done."]
-        );
+        assert_eq!(shown(&mut h, 12)[4..7], ["▸ ✓   Ran ls 0.0s", "", "Done."]);
         // Props stay in order, so the display can bisect them.
         let props: Vec<_> = h.core.current().properties().map(|(r, _)| r).collect();
         assert!(
@@ -2613,32 +2665,31 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
         );
-        // The header carries the rule, the suffix is dim.
+        // The header carries the rule and its icon, the verb is dim and the target isn't.
         let frame = h.frame(800., 600.);
         let header = &frame.windows[0].display.lines[4];
         let dim = FaceName::SessionThought;
         assert_eq!(header.decorations, [Decoration::Rule(dim)]);
-        let suffix = header
-            .spans
-            .iter()
-            .find(|s| s.text.contains("execute"))
-            .unwrap();
-        assert_eq!(suffix.face.fg, h.core.settings().theme.face(dim).fg);
+        assert_eq!(header.icons, [(4, Icon::Terminal)]);
+        let span = |text: &str| header.spans.iter().find(|s| s.text.contains(text)).unwrap();
+        let theme = &h.core.settings().theme;
+        assert_eq!(span("Ran").face.fg, theme.face(dim).fg);
+        assert_ne!(span("ls").face.fg, theme.face(dim).fg);
     }
 
     #[test]
     fn a_tool_call_without_content_is_its_header() {
         let mut h = session();
         tool(&mut h, ToolCall::new("t", "Think"));
-        assert_eq!(h.core.text(), "Think (other, pending)\n\n> ");
-        assert_eq!(shown(&mut h, 5)[0], "Think (other, pending)");
+        assert_eq!(h.core.text(), "▸ ●    Using Think\n\n> ");
+        assert_eq!(shown(&mut h, 5)[0], "▸ ●   Using Think");
         // An update for an unknown call without a title shows nothing.
         let fields = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
         tool_update(&mut h, "u", fields.clone());
-        assert_eq!(h.core.text(), "Think (other, pending)\n\n> ");
+        assert_eq!(h.core.text(), "▸ ●    Using Think\n\n> ");
         // With a title it starts a block.
         tool_update(&mut h, "u", fields.title("Grep".to_string()));
-        assert!(h.core.text().ends_with("Grep (other, failed) 0.0s\n\n> "));
+        assert!(h.core.text().ends_with("▸ ✗    Used Grep 0.0s\n\n> "));
     }
 
     #[test]
@@ -2648,33 +2699,23 @@ mod tests {
         h.keys("TAB");
         assert_eq!(h.core.message(), Some("No tool call here"));
         h.keys("M-< C-e TAB");
-        let open = [
-            "ls (execute, pending)",
-            "Input:",
-            "",
-            "{",
-            "  \"command\": \"ls\"",
-            "}",
-            "",
-            "",
-            "> ",
-        ];
-        assert_eq!(shown(&mut h, 10)[..9], open);
+        let open = ["▾ ●   Running ls", "", "$ ls", "", "", "> "];
+        assert_eq!(shown(&mut h, 10)[..6], open);
         let frame = h.frame(800., 600.);
         let lines = &frame.windows[0].display.lines;
         let rule = Decoration::Rule(FaceName::SessionThought);
         assert!(
-            (0..7).all(|i| lines[i].decorations.contains(&rule)),
+            (0..4).all(|i| lines[i].decorations.contains(&rule)),
             "{lines:?}"
         );
-        assert!(!lines[7].decorations.contains(&rule));
+        assert!(!lines[4].decorations.contains(&rule));
         // An update keeps it open.
         let output = ToolCallUpdateFields::new().raw_output(serde_json::json!("a.rs"));
         tool_update(&mut h, "t", output);
-        assert_eq!(shown(&mut h, 12)[8..12], ["Output:", "", "a.rs", ""]);
+        assert_eq!(shown(&mut h, 12)[1..5], ["", "$ ls", "a.rs", ""]);
         // TAB inside the open content folds it, point going to the header.
         h.keys("C-n C-n C-n TAB");
-        assert_eq!(shown(&mut h, 5)[..3], ["ls (execute, pending) …", "", "> "]);
+        assert_eq!(shown(&mut h, 5)[..3], ["▸ ●   Running ls", "", "> "]);
         assert_eq!(h.core.point(), 0);
     }
 
@@ -2684,16 +2725,17 @@ mod tests {
         let output: String = (0..50).map(|i| format!("line {i}\n")).collect();
         tool(&mut h, ls().raw_output(serde_json::json!(output)));
         // The window keeps the header in view above the prompt line.
-        assert_eq!(shown(&mut h, 5)[..3], ["ls (execute, pending) …", "", "> "]);
+        assert_eq!(shown(&mut h, 5)[..3], ["▸ ●   Running ls", "", "> "]);
         h.keys("M-< C-n");
-        assert_eq!(h.core.current().line_col(h.core.point()), Ok((61, 0)));
+        assert_eq!(h.core.current().line_col(h.core.point()), Ok((54, 0)));
         h.keys("C-p");
         assert_eq!(h.core.point(), 0);
         h.keys("TAB C-n");
         assert_eq!(h.core.current().line_col(h.core.point()), Ok((1, 0)));
-        // Open, all of the output shows.
+        // Open, its first lines show and the rest is counted.
         let lines = shown(&mut h, 70);
-        assert!((0..50).all(|i| lines.contains(&format!("line {i}"))));
+        assert!((0..20).all(|i| lines.contains(&format!("line {i}"))));
+        assert!(lines.contains(&"… 30 more lines".to_string()));
     }
 
     #[test]
@@ -2702,29 +2744,351 @@ mod tests {
         tool(&mut h, ls());
         h.keys("M-< C-e TAB");
         tool(&mut h, ls().status(ToolCallStatus::Completed));
-        assert_eq!(h.core.text().matches("`ls`").count(), 1);
-        assert_eq!(
-            shown(&mut h, 3)[..2],
-            ["ls (execute, completed) 0.0s", "Input:"]
-        );
+        assert_eq!(h.core.text().matches("Ran ls").count(), 1);
+        assert_eq!(shown(&mut h, 3)[..2], ["▾ ✓   Ran ls 0.0s", ""]);
         assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
         // TAB on a call without content leaves it folded.
         tool(&mut h, ToolCall::new("e", "Empty"));
         h.keys("M-> C-p C-p TAB");
         let content = ToolCallUpdateFields::new().raw_output(serde_json::json!("x"));
         tool_update(&mut h, "e", content);
-        assert!(shown(&mut h, 20).contains(&"Empty (other, pending) …".to_string()));
+        assert!(shown(&mut h, 20).contains(&"▸ ●   Using Empty".to_string()));
+    }
+
+    /// `ls` finished with `lines` lines of output, opened, point on its header.
+    fn long_ls(lines: usize) -> Harness {
+        let mut h = session();
+        let output: String = (1..=lines).map(|i| format!("line {i}\n")).collect();
+        let call = ls().status(ToolCallStatus::Completed);
+        tool(&mut h, call.raw_output(serde_json::json!(output)));
+        h.keys("M-< C-e TAB");
+        h
+    }
+
+    #[test]
+    fn headers_name_the_kind_and_its_target() {
+        let header = |call: ToolCall| {
+            let mut h = session();
+            tool(&mut h, call);
+            let lines = h.core.text();
+            lines.lines().next().unwrap().to_string()
+        };
+        let at = |path: &str| vec![ToolCallLocation::new(path)];
+        let read = ToolCall::new("t", "Read File").kind(ToolKind::Read);
+        let path = read.clone().locations(at("/aiditor-test/app/src/a.rs"));
+        assert_eq!(header(path.clone()), "▸ ●    Reading src/a.rs");
+        let done = path.status(ToolCallStatus::Completed);
+        assert_eq!(header(done), "▸ ✓    Read src/a.rs 0.0s");
+        // Outside the primary root the path stays whole, and without one the title shows.
+        assert_eq!(
+            header(read.clone().locations(at("/etc/hosts"))),
+            "▸ ●    Reading /etc/hosts"
+        );
+        assert_eq!(header(read), "▸ ●    Reading Read File");
+        // A diff's path stands in for a location.
+        let diff = agent_client_protocol_schema::v1::Diff::new("/aiditor-test/app/a.rs", "b\n");
+        let edit = ToolCall::new("t", "Editing files").kind(ToolKind::Edit);
+        let edit = edit.content(vec![ToolCallContent::Diff(diff)]);
+        assert_eq!(header(edit), "▸ ●    Editing a.rs");
+        // A search keeps its pattern, whatever it found.
+        let search = ToolCall::new("t", "grep x").kind(ToolKind::Search);
+        assert_eq!(
+            header(search.locations(at("/x"))),
+            "▸ ●    Searching grep x"
+        );
+        let fetch = ToolCall::new("t", "Fetch").kind(ToolKind::Fetch);
+        let fetch = fetch.raw_input(serde_json::json!({"url": "https://x.dev"}));
+        assert_eq!(header(fetch), "▸ ●    Fetching https://x.dev");
+        let two = ToolCall::new("t", "`a`").kind(ToolKind::Execute);
+        let two = two.raw_input(serde_json::json!({"command": "a\nb"}));
+        assert_eq!(header(two.clone()), "▸ ●    Running a …");
+        // Backticks in a title go; a pending delete still has its verb.
+        assert_eq!(header(ToolCall::new("t", "`rm`")), "▸ ●    Using rm");
+        let gone = ToolCall::new("t", "x").kind(ToolKind::Delete);
+        assert_eq!(header(gone.locations(at("/y"))), "▸ ●    Deleting /y");
+        let moved = ToolCall::new("t", "x").kind(ToolKind::Move);
+        let moved = moved.status(ToolCallStatus::Failed).locations(at("/y"));
+        assert_eq!(header(moved), "▸ ✗    Moved /y 0.0s");
+    }
+
+    #[test]
+    fn each_kind_has_its_icon() {
+        for (kind, icon) in [
+            (ToolKind::Read, Icon::Book),
+            (ToolKind::Search, Icon::Magnifier),
+            (ToolKind::Edit, Icon::Pencil),
+            (ToolKind::Delete, Icon::Pencil),
+            (ToolKind::Move, Icon::Pencil),
+            (ToolKind::Execute, Icon::Terminal),
+            (ToolKind::Fetch, Icon::Globe),
+            (ToolKind::Other, Icon::Wrench),
+        ] {
+            let mut h = session();
+            tool(&mut h, ToolCall::new("t", "x").kind(kind));
+            let frame = h.frame(800., 600.);
+            assert_eq!(frame.windows[0].display.lines[0].icons, [(4, icon)]);
+        }
+    }
+
+    #[test]
+    fn a_failed_header_marks_its_status_and_exit() {
+        let mut h = session();
+        tool(&mut h, command());
+        tool_update(
+            &mut h,
+            "t",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
+        );
+        let exit = serde_json::json!({
+            "terminal_exit": {"terminal_id": "t", "exit_code": 2, "signal": null}
+        });
+        meta_update(&mut h, ToolCallUpdateFields::new(), exit);
+        let frame = h.frame(800., 600.);
+        let line = &frame.windows[0].display.lines[0];
+        let span = |text: &str| line.spans.iter().find(|s| s.text.contains(text)).unwrap();
+        let failed = h.core.settings().theme.face(FaceName::StatusFailed).fg;
+        assert_eq!(span("✗").face.fg, failed);
+        assert_eq!(span("exit 2").face.fg, failed);
+        // A running call's mark is in its own face, and a finished one's dim.
+        let mut h = session();
+        tool(&mut h, ls());
+        let face = |h: &mut Harness, mark: &str| {
+            let frame = h.frame(800., 600.);
+            let line = &frame.windows[0].display.lines[0];
+            (line.spans.iter())
+                .find(|s| s.text.contains(mark))
+                .unwrap()
+                .face
+                .fg
+        };
+        let theme = h.core.settings().theme.clone();
+        assert_eq!(face(&mut h, "●"), theme.face(FaceName::StatusRunning).fg);
+        tool(&mut h, ls().status(ToolCallStatus::Completed));
+        assert_eq!(face(&mut h, "✓"), theme.face(FaceName::SessionThought).fg);
+    }
+
+    #[test]
+    fn tab_changes_the_fold_marker_and_point_stays() {
+        let mut h = session();
+        tool(&mut h, ls());
+        h.keys("M-<");
+        h.keys("TAB");
+        assert!(h.core.text().starts_with("▾ ●"));
+        assert_eq!(h.core.point(), 0);
+        h.keys("C-e TAB");
+        assert!(h.core.text().starts_with("▸ ●"));
+        assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
+        assert!(h.core.point() > 0);
+    }
+
+    #[test]
+    fn an_open_command_shows_twenty_lines_and_counts_the_rest() {
+        let mut h = long_ls(50);
+        let lines = shown(&mut h, 30);
+        assert_eq!(
+            lines[..3],
+            ["▾ ✓   Ran ls 0.0s".to_string(), "".into(), "$ ls".into()]
+        );
+        assert_eq!(
+            (lines[3].as_str(), lines[22].as_str()),
+            ("line 1", "line 20")
+        );
+        assert_eq!(lines[23], "… 30 more lines");
+        assert_eq!(lines[24..27], ["", "", "> "]);
+        // The rest stays in the text, and props stay in order for bisecting.
+        assert!(h.core.text().contains("line 50\n"));
+        let props: Vec<_> = h.core.current().properties().map(|(r, _)| r).collect();
+        assert!(
+            props
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
+        );
+        // The count's line keeps the rule and the block's background.
+        let frame = h.frame(800., 700.);
+        let more = &frame.windows[0].display.lines[23];
+        assert!(
+            more.decorations
+                .contains(&Decoration::Rule(FaceName::SessionThought))
+        );
+        assert!(
+            more.decorations
+                .contains(&Decoration::Background(FaceName::SessionBlock))
+        );
+        // Motion passes the count, and one line more reads singular.
+        let mut h = long_ls(21);
+        assert_eq!(shown(&mut h, 30)[23], "… 1 more line");
+        h.keys("M-> C-p C-p C-p C-p");
+        assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 22);
+    }
+
+    #[test]
+    fn twenty_lines_show_whole() {
+        let mut h = long_ls(20);
+        let lines = shown(&mut h, 30);
+        assert_eq!(lines[22], "line 20");
+        assert!(!lines.iter().any(|l| l.contains("more line")));
+    }
+
+    #[test]
+    fn output_streams_past_the_cut_of_an_open_call() {
+        let mut h = session();
+        tool(
+            &mut h,
+            command().raw_input(serde_json::json!({"command": "make"})),
+        );
+        output(&mut h, "terminal_output", "t", "first\n");
+        h.frame(800., 600.);
+        h.keys("M-< TAB");
+        let more: String = (2..=25)
+            .map(|i| format!("\u{1b}[31mline {i}\u{1b}[0m\n"))
+            .collect();
+        output(&mut h, "terminal_output", "t", &more);
+        let lines = shown(&mut h, 30);
+        assert_eq!(
+            (lines[3].as_str(), lines[22].as_str()),
+            ("first", "line 20")
+        );
+        assert_eq!(lines[23], "… 5 more lines");
+        output(&mut h, "terminal_output", "t", "line 26\n");
+        assert_eq!(shown(&mut h, 30)[23], "… 6 more lines");
+        // A folded call's tail goes the short way and opens the same.
+        h.keys("TAB");
+        output(&mut h, "terminal_output", "t", "line 27\n");
+        h.frame(800., 600.);
+        h.keys("TAB");
+        assert_eq!(shown(&mut h, 30)[23], "… 7 more lines");
+    }
+
+    #[test]
+    fn backticks_in_a_command_and_its_output_stay_fenced() {
+        let mut h = session();
+        let call = command().raw_input(serde_json::json!({"command": "echo ````"}));
+        tool(&mut h, call);
+        output(&mut h, "terminal_output", "t", "ok\n");
+        h.frame(800., 600.);
+        output(&mut h, "terminal_output", "t", "more\n");
+        h.frame(800., 600.);
+        let text = h.core.text();
+        assert!(
+            text.contains("\n`````\n$ echo ````\nok\nmore\n`````\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn other_kinds_stay_uncut_and_edits_show_their_diff() {
+        let mut h = session();
+        let output: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        let read = ToolCall::new("t", "x").kind(ToolKind::Read);
+        tool(&mut h, read.raw_output(serde_json::json!(output)));
+        h.keys("M-< TAB");
+        let lines = shown(&mut h, 60);
+        assert!(lines.contains(&"Output:".to_string()) && lines.contains(&"line 50".to_string()));
+        let mut h = session();
+        let diff = agent_client_protocol_schema::v1::Diff::new("a.rs", "b\nc\n");
+        let edit = ToolCall::new("t", "Edit")
+            .kind(ToolKind::Edit)
+            .content(vec![ToolCallContent::Diff(
+                diff.old_text("b\n".to_string()),
+            )]);
+        tool(
+            &mut h,
+            edit.raw_input(serde_json::json!({"file_path": "a.rs"})),
+        );
+        h.keys("M-< TAB");
+        assert!(!h.core.text().contains("Input:"));
+        let added = drawn(&mut h, "+c").fg;
+        let theme = &h.core.settings().theme;
+        assert_eq!(added, theme.face(FaceName::DiffAdded).fg);
+        assert_eq!(
+            drawn(&mut h, "@@ -1 +1,2 @@").fg,
+            h.core.settings().theme.face(FaceName::DiffHunk).fg
+        );
+    }
+
+    #[test]
+    fn ret_on_a_header_opens_the_full_output() {
+        let other = |h: &Harness| h.core.windows.others.values().next().map(|w| w.buffer());
+        let mut h = session();
+        let call = command().raw_input(serde_json::json!({"command": "make"}));
+        tool(&mut h, call);
+        output(&mut h, "terminal_output", "t", "\u{1b}[31mred\u{1b}[0m\n");
+        h.frame(800., 600.);
+        ops(&mut h);
+        h.keys("x M-< RET");
+        assert!(ops(&mut h).is_empty(), "nothing is sent");
+        let id = other(&h).expect("shown in another window");
+        let buffer = h.core.buffers.get(id).unwrap();
+        assert!(buffer.read_only);
+        assert_eq!(buffer.name, "*claude output: make*<work>");
+        assert_eq!(buffer.text().to_string(), "red\n");
+        assert_eq!(buffer.properties().count(), 1);
+        // RET again refreshes that buffer.
+        output(&mut h, "terminal_output", "t", "more\n");
+        h.frame(800., 600.);
+        h.keys("RET");
+        let text = h.core.buffers.get(id).unwrap().text().to_string();
+        assert_eq!((other(&h), text.as_str()), (Some(id), "red\nmore\n"));
+        // A killed one comes back.
+        h.keys("C-x o C-x k RET C-x o");
+        assert!(h.core.buffers.get(id).is_none());
+        h.keys("M-< RET");
+        let again = other(&h).unwrap();
+        assert_ne!(again, id);
+        assert_eq!(
+            h.core.buffers.get(again).unwrap().text().to_string(),
+            "red\nmore\n"
+        );
+    }
+
+    #[test]
+    fn ret_on_a_header_works_during_a_turn_and_after_the_session_ended() {
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, ls().raw_output(serde_json::json!("x")));
+        h.keys("M-< C-n C-n RET");
+        assert_eq!(h.core.message(), None);
+        let other = |h: &Harness| h.core.windows.others.values().next().map(|w| w.buffer());
+        let id = other(&h).expect("shown during the turn");
+        h.keys("C-x 1");
+        exited(&mut h, 0, 0);
+        h.keys("RET");
+        assert_eq!(other(&h), Some(id));
+    }
+
+    #[test]
+    fn ret_on_a_call_without_output_echoes() {
+        let mut h = session();
+        tool(&mut h, ToolCall::new("t", "Think"));
+        h.keys("M-< RET");
+        assert_eq!(h.core.message(), Some("No output"));
+    }
+
+    #[test]
+    fn full_output_prefers_diffs_then_raw_output_then_text() {
+        let diff = agent_client_protocol_schema::v1::Diff::new("a", "b\n");
+        let edit = ToolCall::new("t", "Edit").content(vec![ToolCallContent::Diff(diff)]);
+        let (text, faces) = tool_output(&edit, None).unwrap();
+        assert!(text.contains("+b"));
+        assert!(!faces.is_empty());
+        let raw = ToolCall::new("t", "x")
+            .content(vec!["seen".into()])
+            .raw_output(serde_json::json!("all"));
+        assert_eq!(tool_output(&raw, None).unwrap().0, "all");
+        let item = ToolCall::new("t", "x").content(vec!["seen".into()]);
+        assert_eq!(tool_output(&item, None).unwrap().0, "seen\n");
+        assert!(tool_output(&ToolCall::new("t", "x"), None).is_none());
     }
 
     #[test]
     fn tool_content_is_uncut_in_long_enough_fences() {
         let mut call = ToolCall::new("t", "Run\nmore");
         assert_eq!(
-            tool_header(&call, None),
-            ("Run … (other, pending)".into(), 5)
+            tool_header(&call, None, false, "/x".as_ref()),
+            "▸ ●    Using Run …"
         );
         // A list of text blocks shows as their text; other output as JSON.
-        let content = |call: &ToolCall| tool_content(call, None).0;
+        let content = |call: &ToolCall| tool_content(call, None).text;
         call.raw_output = Some(serde_json::json!([{"type": "text", "text": "x ``` y"}]));
         assert_eq!(content(&call), "Output:\n````\nx ``` y\n````");
         call.raw_output = Some(serde_json::json!({"code": 0}));
@@ -2745,13 +3109,9 @@ mod tests {
         call.raw_input = Some(serde_json::json!(1));
         call.content = vec!["\u{1b}[34mfile\u{1b}[0m".into()];
         let blue = vec![FaceRef::Fg(4)];
-        assert_eq!(
-            tool_content(&call, None),
-            (
-                "Input:\n```json\n1\n```\n\nfile".into(),
-                vec![(22..26, blue)]
-            )
-        );
+        let content = tool_content(&call, None);
+        assert_eq!(content.text, "Input:\n```json\n1\n```\n\nfile");
+        assert_eq!(content.faces, vec![(22..26, blue)]);
     }
 
     #[test]
@@ -2809,15 +3169,15 @@ mod tests {
     fn terminal_output_streams_into_its_call_once_per_frame() {
         let mut h = session();
         tool(&mut h, command());
-        assert_eq!(h.core.text(), "make (execute, in_progress)\n\n> ");
+        assert_eq!(h.core.text(), "▸ ●    Running make\n\n> ");
         output(&mut h, "terminal_output_delta", "t", "\u{1b}[31mre");
         output(&mut h, "terminal_output", "t", "d\u{1b}[0m\r\n");
         output(&mut h, "terminal_output", "other", "lost");
-        assert_eq!(h.core.text(), "make (execute, in_progress)\n\n> ");
+        assert_eq!(h.core.text(), "▸ ●    Running make\n\n> ");
         h.frame(800., 600.);
         assert_eq!(
             h.core.text(),
-            "make (execute, in_progress)\nOutput:\n```\nred\n```\n\n> "
+            "▸ ●    Running make\nOutput:\n```\nred\n```\n\n> "
         );
         // Its colour shows once the call is open.
         h.keys("M-< C-e TAB");
@@ -2846,7 +3206,9 @@ mod tests {
                 output(h, "terminal_output_delta", "t", text);
                 h.frame(800., 600.);
             }
-            assert_eq!(folded.core.text(), open.core.text());
+            // Past the fold marker, the one difference.
+            let text = |h: &Harness| h.core.text().chars().skip(1).collect::<String>();
+            assert_eq!(text(&folded), text(&open));
             let faces = |h: &Harness| {
                 h.core.agents[&AgentId(0)]
                     .tools
@@ -2898,7 +3260,7 @@ mod tests {
         let call = ToolCall::new("x", "ls").content(vec!["\u{1b}[34mfile\u{1b}[0m".into()]);
         tool(&mut h, call);
         h.keys("M-< C-e TAB");
-        assert_eq!(h.core.text(), "ls (other, pending)\nfile\n\n> ");
+        assert_eq!(h.core.text(), "▾ ●    Using ls\nfile\n\n> ");
         let blue = h.core.settings().theme.ansi[4];
         assert_eq!(drawn(&mut h, "file").fg, Some(blue));
     }
@@ -2937,19 +3299,16 @@ mod tests {
         };
         let failed = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
         meta_update(&mut h, failed, exit(2.into(), Value::Null));
-        assert_eq!(header(&mut h), "make (execute, failed, exit 2) 0.0s");
+        assert_eq!(header(&mut h), "▸ ✗    Ran make exit 2");
         meta_update(
             &mut h,
             ToolCallUpdateFields::new(),
             exit(Value::Null, "SIGTERM".into()),
         );
-        assert_eq!(
-            header(&mut h),
-            "make (execute, failed, signal SIGTERM) 0.0s"
-        );
+        assert_eq!(header(&mut h), "▸ ✗    Ran make signal SIGTERM");
         let completed = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
         meta_update(&mut h, completed, exit(0.into(), Value::Null));
-        assert_eq!(header(&mut h), "make (execute, completed) 0.0s");
+        assert_eq!(header(&mut h), "▸ ✓    Ran make 0.0s");
     }
 
     #[test]
@@ -2961,7 +3320,7 @@ mod tests {
         h.frame(800., 600.);
         assert_eq!(
             h.core.text(),
-            "make (other, pending)\nOutput:\n```\nok\n```\n\n> "
+            "▸ ●    Using make\nOutput:\n```\nok\n```\n\n> "
         );
     }
 
@@ -2975,7 +3334,7 @@ mod tests {
         h.frame(800., 600.);
         assert_eq!(
             h.core.text(),
-            "make (execute, in_progress)\nOutput:\n```\nok\n```\n\n> "
+            "▸ ●    Running make\nOutput:\n```\nok\n```\n\n> "
         );
     }
 
@@ -3525,17 +3884,13 @@ mod tests {
         ask(&mut h, 1, "t", None);
         h.advance(secs(12));
         h.core.frame();
-        assert!(
-            h.core
-                .text()
-                .contains("`ls` (execute, pending) waiting 0:12\n")
-        );
+        assert!(h.core.text().contains("Running ls waiting 0:12\n"));
         h.keys("C-c C-y");
-        assert!(h.core.text().contains("`ls` (execute, pending)\n"));
+        assert!(h.core.text().contains("Running ls\n"));
         h.advance(Duration::from_millis(1300));
         let done = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
         tool_update(&mut h, "t", done);
-        assert!(h.core.text().contains("`ls` (execute, completed) 2.3s\n"));
+        assert!(h.core.text().contains("Ran ls 2.3s\n"));
         // Later updates keep it, and a long one reads as minutes.
         h.advance(secs(9));
         tool_update(
@@ -3543,7 +3898,7 @@ mod tests {
             "t",
             ToolCallUpdateFields::new().title("ls".to_string()),
         );
-        assert!(h.core.text().contains("ls (execute, completed) 2.3s\n"));
+        assert!(h.core.text().contains("Ran ls 2.3s\n"));
         assert_eq!(short_duration(secs(125)), "2m 05s");
     }
 
@@ -3558,13 +3913,13 @@ mod tests {
         for n in 1..=3 {
             h.advance(secs(1));
             h.core.frame();
-            let want = format!("`ls` (execute, pending) waiting 0:0{n}\n");
+            let want = format!("Running ls waiting 0:0{n}\n");
             assert!(h.core.text().contains(&want));
         }
         h.keys("M-<");
-        assert_eq!(shown(&mut h, 20)[2], "ls (execute, pending) waiting 0:03 …");
+        assert_eq!(shown(&mut h, 20)[2], "▸ ●   Running ls waiting 0:03");
         h.keys("C-c C-c");
-        assert!(h.core.text().contains("`ls` (execute, pending)\n"));
+        assert!(h.core.text().contains("Running ls\n"));
     }
 
     #[test]
@@ -3660,16 +4015,13 @@ mod tests {
         tool(&mut h, ls().status(ToolCallStatus::Completed));
         assert_eq!(
             h.core.text(),
-            format!("> old\n\nhmm\n\nreply\n\n`ls` (execute, completed)\n{LS_INPUT}\n\n> ")
+            format!("> old\n\nhmm\n\nreply\n\n▸ ✓    Ran ls\n{LS_INPUT}\n\n> ")
         );
         ready(&mut h, 0);
         h.advance(secs(1));
         let later = ToolCallUpdateFields::new().title("ls".to_string());
         tool_update(&mut h, "t", later);
-        assert!(
-            h.core.text().contains("ls (execute, completed)\n"),
-            "no arrival, no time"
-        );
+        assert!(h.core.text().contains("Ran ls\n"), "no arrival, no time");
         chunk(&mut h, "live");
         h.keys("a RET");
         assert!(h.core.text().contains("live 14:01\n"));
