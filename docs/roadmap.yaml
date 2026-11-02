@@ -1983,7 +1983,7 @@ milestones:
   # ───────────────────────────────────────────── M8 ─────────────────────────────────────────────
   - key: m8
     title: "M8 · Editing polish"
-    description: "TAB indentation, formatters, registers and macros, navigation, editable grep, other encodings, the $EDITOR client and the remaining editing commands."
+    description: "TAB indentation, formatters, registers and macros, navigation, editable grep, other encodings, the $EDITOR client, the remaining editing commands and the workspace list redesign."
     gate: "Daily driver for real work, without LSP (knowingly deferred)."
     epics:
       - key: m5-indent
@@ -2157,3 +2157,63 @@ milestones:
               - "Killing the buffer or quitting while git waits makes git abort, not hang"
               - "Core tests cover finish, abort and kill-buffer replies"
             blocked_by: [m2-edit-server, m2-term-buffers]
+      - key: m8-workspace-list
+        title: "Workspace list redesign"
+        labels: [core, project]
+        design: "#workspaces"
+        body: |
+          Bring `workspace-list` (`C-x t l`) up to frames 13 to 13d of the visual direction canvas: every project listed, project and workspace rows folded with TAB, columns for where a row lives and what it is doing, and key hints in the echo line, with room for more actions later. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m8-workspace-list-projects
+            title: "Workspace list: every project, and project rows point can stop on"
+            body: |
+              List every project, not only those with a workspace. Projects with no workspace come last, sorted by name, with their primary root and `no workspaces`. Every project row shows its root, so equal names need no special case. `n`/`p`, `C-n`/`C-p` and arrows stop on project and workspace rows; buffer rows stay informational. `RET` on a project runs what `project-switch` does: show its most recently shown workspace or make one. The mode line becomes `*Workspaces* │ 5 projects, 4 workspaces`, with the position among the rows point can stop on at the right.
+            acceptance:
+              - "A project with no workspace is listed last, by name, and `RET` on it makes a workspace"
+              - "`RET` on a project with workspaces shows its most recently shown one"
+              - "`n` and `p` stop on project and workspace rows and skip buffer rows"
+              - "The mode line shows the counts and `2/8`-style position"
+              - "`RET` on a buffer row reports `Select a project or workspace row`"
+              - "Spec updated in docs/editor.md and openspec/specs/workspaces/spec.md"
+          - key: m8-workspace-list-columns
+            title: "Workspace list: where and state columns"
+            body: |
+              Lay rows out in frame 13's three columns: name, where, state. Workspace rows show their buffer and unsaved counts, and the workspace modeline's most urgent agent state with its word. Buffer rows drop their `<workspace>` suffix and show a file's directory (as its mode line), a terminal's directory or a session's model and effort, with the state words their own mode lines use: `● unsaved`, `⊘ read-only`, `[deleted]`, `◉ command`, `exit n`, `● working`, `● awaiting permission`, `● exited`. Faces are in frame 13b; none are new. Point sits on the row's name, not at column 0. The list stays a snapshot.
+            acceptance:
+              - "Each row kind matches frame 13b, in both themes"
+              - "A workspace's state matches its dot in the workspace modeline"
+              - "`<workspace>` suffixes are gone from the list, and escaped names still can't fabricate a row"
+              - "Core tests cover the rows' text and faces"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-workspace-list-projects]
+          - key: m8-workspace-list-fold
+            title: "Workspace list: fold projects and workspaces with TAB"
+            body: |
+              `TAB` folds or unfolds the project or workspace row at point, with the `▾` and `▸` markers of frame 6's tool groups; rows with nothing to fold have no marker. The list opens with projects unfolded and workspaces folded, except the current workspace. A folded project shows its workspace count and most urgent state. Running `workspace-list` again keeps the folds of an open list; dismissing it resets them. Replace the box-drawn tree with indentation, and leave a blank row after each open project.
+            acceptance:
+              - "`TAB` on a project or workspace row toggles its children, and point stays on the row"
+              - "`TAB` on a project with no workspace does nothing"
+              - "A refresh keeps folds; a new list opens in the default state"
+              - "`n`/`p`, the position count and `RET` follow the rows that are visible"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-workspace-list-columns]
+          - key: m8-workspace-list-hints
+            title: "Workspace list: key hints in the echo line"
+            body: |
+              Remove the header row and show the list's keys in the echo line while it is selected: `n/p move  RET switch  TAB fold  q quit`, keys bold as in frame 6d's hint row. A message replaces the hints until the next key. Build the hints from one table so adding an action is one entry, and wrap to a second row when they don't fit, as frame 13b draws.
+            acceptance:
+              - "The hints show while the list is selected and go when another window is selected"
+              - "A message such as `Select a project or workspace row` shows, then the hints return on the next key"
+              - "Hints too wide for the frame wrap to a second row, and the windows give up the height"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-workspace-list-fold]
+          - key: m8-workspace-list-narrow
+            title: "Workspace list: fit narrow windows"
+            body: |
+              In a narrow window (frame 13c), the where column goes first, leaving project roots, a state word collapses to its glyph, a long name is cut with `…`, a root loses its start to `…`, and the mode line drops its counts before its name. Fitting uses the mode lines' shared rules where they apply, and re-runs when the window's width changes.
+            acceptance:
+              - "The list at half of a 900px frame matches frame 13c"
+              - "Resizing the window refits the rows without refreshing the snapshot"
+              - "Core tests cover the cuts at several widths"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-workspace-list-fold]
