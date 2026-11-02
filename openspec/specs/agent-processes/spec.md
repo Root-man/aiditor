@@ -55,7 +55,7 @@ Each request the agent sends to the client SHALL reach the core as a message wit
 - **THEN** the core replies with the `cancelled` outcome, and the agent receives it
 
 #### Scenario: A permission request is answered
-- **WHEN** a session started with `agent-start` gets a permission request from the fake agent and `C-c C-y`, `C-c C-n` or `RET` on an option line answers it
+- **WHEN** a session started with `agent-start` gets a permission request from the fake agent and `C-c C-y`, `C-c C-k` or `RET` on an option line answers it
 - **THEN** the agent receives the `selected` outcome with that option's id
 
 ### Requirement: Killing an agent
