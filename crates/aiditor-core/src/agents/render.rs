@@ -545,7 +545,6 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     let start = buffer.marker(tool.start).expect("live while shown");
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
     let status = match tool.call.status {
-        ToolCallStatus::Completed => FaceName::SessionThought,
         ToolCallStatus::Failed => FaceName::StatusFailed,
         _ => FaceName::StatusRunning,
     };

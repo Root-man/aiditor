@@ -2849,7 +2849,7 @@ mod tests {
         let failed = h.core.settings().theme.face(FaceName::StatusFailed).fg;
         assert_eq!(span("✗").face.fg, failed);
         assert_eq!(span("exit 2").face.fg, failed);
-        // A running call's mark is in its own face, and a finished one's dim.
+        // Running and finished calls share the green status face.
         let mut h = session();
         tool(&mut h, ls());
         let face = |h: &mut Harness, mark: &str| {
@@ -2864,7 +2864,7 @@ mod tests {
         let theme = h.core.settings().theme.clone();
         assert_eq!(face(&mut h, "●"), theme.face(FaceName::StatusRunning).fg);
         tool(&mut h, ls().status(ToolCallStatus::Completed));
-        assert_eq!(face(&mut h, "✓"), theme.face(FaceName::SessionThought).fg);
+        assert_eq!(face(&mut h, "✓"), theme.face(FaceName::StatusRunning).fg);
     }
 
     #[test]
