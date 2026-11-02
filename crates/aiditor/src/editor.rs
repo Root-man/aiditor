@@ -99,6 +99,7 @@ impl Editor {
         // The launch's messages ran before there was a watcher to send their watch set to.
         watcher.set(core.watch_set());
         let (clock, clock_task) = Self::start_clock(clock::read, cx);
+        _ = tx.try_send(Msg::Clock(clock.clone()));
         let recovery = args.recovery_dir.map(|dir| {
             let runtime = tokio::runtime::Handle::current();
             let tx = tx.clone();
@@ -418,8 +419,8 @@ impl Editor {
                 delay = next;
                 if this
                     .update(cx, |editor, cx| {
-                        editor.clock = text;
-                        cx.notify();
+                        editor.clock = text.clone();
+                        editor.handle(Msg::Clock(text), cx);
                     })
                     .is_err()
                 {
@@ -1353,6 +1354,10 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(1));
         cx.run_until_parked();
         assert_eq!(editor.read_with(cx, |e, _| e.clock.clone()), "20:42");
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.clock().map(String::from)),
+            Some("20:42".into())
+        );
         let clock = cx.debug_bounds("workspace-clock").unwrap();
         let entries = cx.debug_bounds("workspace-entries").unwrap();
         let width = cx.update(|window, _| window.viewport_size().width);

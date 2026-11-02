@@ -87,6 +87,8 @@ pub struct FileEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
     Key(Key),
+    /// The local time as `HH:MM`, sent as the frontend's clock changes; the core stamps with it.
+    Clock(String),
     /// Text from the platform's text input, each char typed as a plain key. `replace`, in UTF-16
     /// code units, is text an input method rewrites, deleted first.
     Insert {
@@ -850,6 +852,7 @@ impl Ctx<'_> {
                 result,
                 direnv,
             } => self.environment_captured(project, request, result, direnv),
+            Msg::Clock(text) => self.core.clock = Some(text),
             Msg::Tick => {}
         }
     }
@@ -960,6 +963,12 @@ pub struct Core {
     pending: Vec<Key>,
     /// The timer that shows the hint for `pending`.
     hint_timer: Option<TimerId>,
+    /// The frontend's clock, `HH:MM`, once it has sent one.
+    clock: Option<String>,
+    /// The time of the last `handle`, for what happens outside it, like a frame.
+    now: Option<Instant>,
+    /// The repeating timer that wakes the core while a shown session has something ticking.
+    session_tick: Option<TimerId>,
     /// Whether the hint for `pending` is shown.
     hint_shown: bool,
     /// The command the current key sequence runs, while it runs.
@@ -1059,6 +1068,9 @@ impl Default for Core {
             transient: None,
             pending: Vec::new(),
             hint_timer: None,
+            clock: None,
+            now: None,
+            session_tick: None,
             hint_shown: false,
             this_command: None,
             last_command: None,
@@ -1136,6 +1148,7 @@ impl Core {
 
     /// Handles `msg` at `now`, then fires the timers due by then.
     pub fn handle(&mut self, now: Instant, msg: Msg) -> Effects {
+        self.now = Some(now);
         let input = matches!(msg, Msg::Key(_) | Msg::Insert { .. });
         let mut ctx = Ctx {
             core: self,
@@ -1160,6 +1173,7 @@ impl Core {
         self.watch(&mut effects);
         self.sync_terminals(&mut effects);
         self.sync_agents(&mut effects);
+        self.sync_session_tick(now);
         self.sync_session_lists();
         effects
     }
@@ -1182,6 +1196,11 @@ impl Core {
     /// When the app must wake the core with `Msg::Tick`, if any timer is live.
     pub fn next_deadline(&self) -> Option<Instant> {
         self.timers.next_deadline()
+    }
+
+    /// The clock text the frontend last sent.
+    pub fn clock(&self) -> Option<&str> {
+        self.clock.as_deref()
     }
 
     pub fn current(&self) -> &Buffer {

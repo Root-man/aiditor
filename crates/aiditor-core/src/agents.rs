@@ -9,13 +9,14 @@ use agent_client_protocol_schema::v1::{
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOption,
     SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use alacritty_terminal::vte::ansi::{Attr, Color, Handler, Processor};
 use serde_json::{Map, Value};
 
 use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
+use std::time::{Duration, Instant};
 
 use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
 use crate::command::Args;
@@ -23,7 +24,7 @@ use crate::display::ModeLine;
 use crate::markdown;
 use crate::project::{Project, ProjectId};
 use crate::settings::FaceName;
-use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Request};
+use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 
 mod render;
 use render::*;
@@ -32,6 +33,8 @@ use render::*;
 const PROMPT: &str = "> ";
 /// The session buffer's major mode.
 pub(crate) const MODE: &str = "agent-session-mode";
+/// How often a shown session's working line and waiting counters tick.
+const TICK: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Activity {
@@ -73,8 +76,8 @@ pub(crate) struct Session {
     mode_sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
-    /// A `session/prompt` waits for its answer.
-    turn: bool,
+    /// A `session/prompt` waits for its answer; its working line is the last block.
+    turn: Option<Turn>,
     /// The last block above the prompt line, while an agent message or thought streams into it.
     stream: Option<Stream>,
     /// The agent and user messages, in transcript order.
@@ -158,6 +161,16 @@ fn values(select: &SessionConfigSelect) -> Vec<&SessionConfigValueId> {
 }
 
 impl Session {
+    /// Whether updates are live, not `session/load` replaying history before its answer.
+    fn live(&self) -> bool {
+        self.load.is_none() || self.session.is_some()
+    }
+
+    /// Where the transcript's next block goes: before the working line and the prompt line.
+    fn end(&self, buffer: &Buffer) -> usize {
+        buffer.prompt_start() - PROMPT.len() - self.turn.as_ref().map_or(0, |t| t.len)
+    }
+
     /// The buffer lines of the message at `point`, the last one starting at or before it.
     pub(crate) fn message_lines(
         &self,
@@ -177,7 +190,7 @@ impl Session {
             Some(Activity::Failed)
         } else if !self.asks.is_empty() {
             Some(Activity::Waiting)
-        } else if self.turn {
+        } else if self.turn.is_some() {
             Some(Activity::Working)
         } else {
             None
@@ -264,6 +277,14 @@ struct Tool {
     len: usize,
     /// Whether its content shows.
     open: bool,
+    /// When it arrived; `None` when replayed.
+    arrived: Option<Instant>,
+    /// Its closed permission waits.
+    waited: Duration,
+    /// How long it ran, once it finished.
+    ran: Option<Duration>,
+    /// What its header shows at the right, the last part of the header.
+    time: String,
     /// The terminal it announced, whose output it shows.
     term: Option<Term>,
     /// Its terminal changed since the block was last rendered.
@@ -315,6 +336,9 @@ fn terminal_tool<'a>(
 /// A permission request's block, waiting for its answer.
 struct Ask {
     request: RequestId,
+    /// The tool call it asks about, which shows the wait.
+    tool: ToolCallId,
+    since: Instant,
     /// The tool call's title, for the block and its answer line.
     title: String,
     options: Vec<PermissionOption>,
@@ -352,6 +376,15 @@ struct Stream {
     block: Block,
     /// Chunks arrived since it was last rendered.
     dirty: bool,
+    /// When its first chunk arrived and the clock then; `None` when replayed.
+    began: Option<(Instant, Option<String>)>,
+}
+
+/// A running turn.
+struct Turn {
+    start: Instant,
+    /// The working line's length in chars, the blank line after it counted.
+    len: usize,
 }
 
 impl Core {
@@ -359,13 +392,15 @@ impl Core {
     /// for a chunk of the kind streaming, at the end of the streamed block. A chunk's block is
     /// rendered as markdown by the next frame.
     fn output(&mut self, id: AgentId, text: &str, block: Block) {
+        let now = self.now();
+        let clock = self.clock.clone();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        let end = buffer.prompt_start() - PROMPT.len();
+        let end = session.end(buffer);
         if let Some(stream) = &mut session.stream
             && stream.block == block
         {
@@ -379,6 +414,7 @@ impl Core {
         self.end_stream(id);
         let session = self.agents.get_mut(&id).expect("found above");
         let buffer = self.buffers.get_mut(session.buffer).expect("found above");
+        let end = session.end(buffer);
         buffer.insert_output(end, &format!("{text}\n\n"));
         let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
         if let Block::Message(message) | Block::User(message) = &block {
@@ -393,6 +429,7 @@ impl Core {
                 start: marker(),
                 block,
                 dirty: true,
+                began: session.live().then_some((now, clock)),
             });
         }
     }
@@ -402,12 +439,20 @@ impl Core {
     // `messageId` if one ever splits a message.
     fn show_user(&mut self, id: AgentId, text: &str, message: Option<MessageId>) {
         self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
-        let session = self.agents.get(&id);
-        let Some(buffer) = session.and_then(|s| self.buffers.get_mut(s.buffer)) else {
+        let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
-        let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let end = session.end(buffer) - "\n\n".len();
         render(buffer, end - text.chars().count()..end, false);
+        if let (true, Some(clock), Some(message)) =
+            (session.live(), &self.clock, session.messages.last_mut())
+        {
+            let at = line_end(buffer, end - text.chars().count());
+            message.len += put_time(buffer, at, clock);
+        }
     }
 
     /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
@@ -453,7 +498,29 @@ impl Core {
                     exit: None,
                 })
             });
-        let header = tool_header(&call, term.as_ref()).0;
+        let now = self.now.expect("set by handle");
+        let known = session.tools.get(&call.tool_call_id);
+        let arrived = known.map_or(session.live().then_some(now), |t| t.arrived);
+        let waited = known.map_or(Duration::ZERO, |t| t.waited);
+        let asked = (session.asks.iter()).find(|a| a.tool == call.tool_call_id);
+        let waiting = asked.map(|a| now - a.since);
+        let done = matches!(
+            call.status,
+            ToolCallStatus::Completed | ToolCallStatus::Failed
+        );
+        let ran = known.and_then(|t| t.ran).or_else(|| {
+            let spent = (now - arrived?).checked_sub(waited + waiting.unwrap_or_default());
+            done.then(|| spent.unwrap_or_default())
+        });
+        let time = match (waiting, ran) {
+            (Some(wait), _) => waiting_text(wait),
+            (None, Some(ran)) => short_duration(ran),
+            (None, None) => String::new(),
+        };
+        let mut header = tool_header(&call, term.as_ref()).0;
+        if !time.is_empty() {
+            header += &format!(" {time}");
+        }
         let (content, faces) = tool_content(&call, term.as_ref());
         let text = match content.is_empty() {
             true => header.clone(),
@@ -478,10 +545,11 @@ impl Core {
                 rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
                 (tool.term, tool.dirty, tool.faces) = (term, false, faces);
+                (tool.ran, tool.time) = (ran, time);
                 tool
             }
             None => {
-                let end = buffer.prompt_start() - PROMPT.len();
+                let end = session.end(buffer);
                 buffer.insert_output(end, &format!("{text}\n\n"));
                 let tool = Tool {
                     start: (buffer.add_marker(end, InsertionType::Stay)).expect("in the text"),
@@ -489,6 +557,10 @@ impl Core {
                     header,
                     len,
                     open: false,
+                    arrived,
+                    waited,
+                    ran,
+                    time,
                     term,
                     dirty: false,
                     faces,
@@ -558,7 +630,7 @@ impl Core {
                 start
             }
             None => {
-                let end = buffer.prompt_start() - PROMPT.len();
+                let end = session.end(buffer);
                 buffer.insert_output(end, &format!("{text}\n\n"));
                 let marker = buffer.add_marker(end, InsertionType::Stay);
                 session.plan = Some((marker.expect("in the text"), len));
@@ -572,6 +644,7 @@ impl Core {
     /// pending until answered.
     fn show_ask(&mut self, id: AgentId, request: RequestId, ask: RequestPermissionRequest) {
         self.end_stream(id);
+        let now = self.now();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -584,16 +657,43 @@ impl Core {
             .map_or_else(|| call.tool_call_id.to_string(), |t| first_line(t));
         let rows = ask_rows(&title, &ask.options);
         let text = rows_text(&rows);
-        let end = buffer.prompt_start() - PROMPT.len();
+        let end = session.end(buffer);
         buffer.insert_output(end, &format!("{text}\n\n"));
         render_rows(buffer, end, &rows);
+        let tool = ask.tool_call.tool_call_id;
+        let shown = session.tools.get(&tool).map(|t| t.call.clone());
         session.asks.push(Ask {
+            tool,
+            since: now,
             request,
             title,
             options: ask.options,
             start: (buffer.add_marker(end, InsertionType::Stay)).expect("in the text"),
             len: text.chars().count(),
         });
+        if let Some(call) = shown {
+            self.show_tool(id, call);
+        }
+    }
+
+    /// Adds `ask`'s wait, just closed, to its tool call and shows the call without it.
+    // shortcut: overlapping asks on one call each add their wait, so the run time can read low;
+    // both adapters ask once per call.
+    fn close_wait(&mut self, id: AgentId, ask: &Ask) {
+        let now = self.now();
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        if let Some(tool) = session.tools.get_mut(&ask.tool) {
+            tool.waited += now - ask.since;
+            let call = tool.call.clone();
+            self.show_tool(id, call);
+        }
+    }
+
+    /// The time of the last `handle`.
+    fn now(&self) -> Instant {
+        self.now.expect("set by handle")
     }
 
     /// Renders session `id`'s streamed block if chunks arrived since it was last rendered.
@@ -601,29 +701,126 @@ impl Core {
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
-        let (Some(stream), Some(buffer)) =
-            (&mut session.stream, self.buffers.get_mut(session.buffer))
-        else {
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        if session.stream.is_none() {
+            return;
+        }
+        let end = session.end(buffer) - "\n\n".len();
+        let Some(stream) = &mut session.stream else {
             return;
         };
         if std::mem::take(&mut stream.dirty) {
             let start = buffer.marker(stream.start).expect("live while streaming");
-            let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
             let thought = matches!(stream.block, Block::Thought(_));
             render(buffer, start..end, thought);
         }
     }
 
-    /// Renders and ends session `id`'s stream, if any.
+    /// Renders and ends session `id`'s stream, if any, writing its time: a message's clock time
+    /// or a thought's header. They wait until now as its first line may still be growing.
     fn end_stream(&mut self, id: AgentId) {
         self.render_stream(id);
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
-        if let (Some(stream), Some(buffer)) =
+        let (Some(stream), Some(buffer)) =
             (session.stream.take(), self.buffers.get_mut(session.buffer))
-        {
-            buffer.remove_marker(stream.start);
+        else {
+            return;
+        };
+        let start = buffer.marker(stream.start).expect("live while streaming");
+        buffer.remove_marker(stream.start);
+        let Some((began, clock)) = stream.began else {
+            return;
+        };
+        match (stream.block, clock, session.messages.last_mut()) {
+            (Block::Thought(_), ..) => {
+                let elapsed = self.now.expect("set by handle") - began;
+                let header = format!("Thought for {}s", elapsed.as_secs());
+                buffer.insert_output(start, &format!("{header}\n"));
+                let end = start + header.chars().count();
+                (buffer.add_property(start..end, dim())).expect("just inserted");
+            }
+            (Block::Message(_), Some(clock), Some(message)) => {
+                message.len += put_time(buffer, line_end(buffer, start), &clock);
+            }
+            _ => {}
+        }
+    }
+
+    /// Ends session `id`'s turn, turning its working line into `Worked` in place.
+    fn settle_turn(&mut self, id: AgentId) {
+        self.end_stream(id);
+        let now = self.now();
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let (Some(turn), Some(buffer)) =
+            (session.turn.take(), self.buffers.get_mut(session.buffer))
+        else {
+            return;
+        };
+        let end = session.end(buffer) - "\n\n".len();
+        let text = format!("Worked {}", long_duration(now - turn.start));
+        let start = end + "\n\n".len() - turn.len;
+        let len = retime(buffer, start..end, &text, FaceName::SessionThought);
+        if let Some(clock) = &self.clock {
+            put_time(buffer, start + len, clock);
+        }
+    }
+
+    /// Brings session `id`'s working line and waiting counters up to the last `handle`.
+    fn tick_session(&mut self, id: AgentId) {
+        let now = self.now();
+        let session = self.agents.get_mut(&id).expect("known session");
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        if let Some(turn) = &mut session.turn {
+            let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
+            let text = format!("Working for {}", long_duration(now - turn.start));
+            let start = end + "\n\n".len() - turn.len;
+            let len = retime(buffer, start..end, &text, FaceName::SessionThought);
+            turn.len = len + "\n\n".len();
+        }
+        for (at, ask) in session.asks.iter().enumerate() {
+            // Its tool's oldest ask counts.
+            let oldest = session.asks.iter().position(|a| a.tool == ask.tool);
+            let Some(tool) = session
+                .tools
+                .get_mut(&ask.tool)
+                .filter(|_| oldest == Some(at))
+            else {
+                continue;
+            };
+            let text = waiting_text(now - ask.since);
+            let (old, start) = (tool.time.chars().count(), buffer.marker(tool.start));
+            let end = start.expect("live while shown") + tool.header;
+            let len = retime(buffer, end - old..end, &text, FaceName::Annotation);
+            tool.header = tool.header - old + len;
+            tool.len = tool.len - old + len;
+            tool.time = text;
+        }
+    }
+
+    /// Wakes the core each second while a shown session has something ticking, and not otherwise,
+    /// so a hidden session costs no redraws.
+    pub(crate) fn sync_session_tick(&mut self, now: Instant) {
+        let shown = self.shown_buffers();
+        let ticking = (self.agents.values())
+            .any(|s| shown.contains(&s.buffer) && (s.turn.is_some() || !s.asks.is_empty()));
+        match (ticking, self.session_tick) {
+            (true, None) => {
+                let tick = self.timers.start(now, TICK, Some(TICK), Msg::Tick);
+                self.session_tick = Some(tick);
+            }
+            (false, Some(tick)) => {
+                self.timers.cancel(tick);
+                self.session_tick = None;
+            }
+            _ => {}
         }
     }
 
@@ -644,6 +841,7 @@ impl Core {
                     self.show_tool(id, self.agents[&id].tools[&call].call.clone());
                 }
             }
+            self.tick_session(id);
         }
     }
 
@@ -736,7 +934,7 @@ impl Core {
             "[starting]"
         } else if !s.asks.is_empty() {
             "[waiting]"
-        } else if s.turn {
+        } else if s.turn.is_some() {
             "[working]"
         } else {
             "[idle]"
@@ -840,7 +1038,7 @@ impl Ctx<'_> {
             load: load.map(|id| (id, from)),
             mode_sent: None,
             ended: false,
-            turn: false,
+            turn: None,
             stream: None,
             messages: Vec::new(),
             tools: HashMap::new(),
@@ -1058,6 +1256,7 @@ impl Ctx<'_> {
         if let Some(b) = core.buffers.get_mut(session.buffer) {
             settle(b, &ask, &line);
         }
+        core.close_wait(id, &ask);
         let response = RequestPermissionResponse::new(outcome);
         self.effects.push(Effect::Agent(AgentOp::Reply {
             id,
@@ -1119,7 +1318,7 @@ impl Ctx<'_> {
         let buffer = core.windows.window.buffer();
         let (id, session) = core.current_session()?;
         let agent = &session.agent;
-        let ready = match (&session.session, session.ended, session.turn) {
+        let ready = match (&session.session, session.ended, session.turn.is_some()) {
             (_, true, _) => Err(format!("{agent} session has ended")),
             (None, ..) => Err(format!("{agent} is not ready")),
             (_, _, true) => Err(format!("{agent} is busy")),
@@ -1130,8 +1329,7 @@ impl Ctx<'_> {
             .buffers
             .get_mut(buffer)
             .expect("current buffer is live");
-        let start = b.prompt_start();
-        let input = b.text().slice(start..).to_string();
+        let input = b.text().slice(b.prompt_start()..).to_string();
         if input.trim().is_empty() {
             return Ok(());
         }
@@ -1140,21 +1338,32 @@ impl Ctx<'_> {
             .buffers
             .get_mut(buffer)
             .expect("current buffer is live");
-        b.append(&format!("\n\n{PROMPT}"));
+        let start = b.prompt_start();
+        let working = format!("Working for {}", long_duration(Duration::ZERO));
+        b.append(&format!("\n\n{working}\n\n{PROMPT}"));
         render(b, start..start + input.chars().count(), false);
         let end = b.len_chars();
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
+        let line = start + input.chars().count() + "\n\n".len();
+        (b.add_property(line..line + working.chars().count(), dim())).expect("just appended");
         let echo = start - PROMPT.len();
-        let message = Message {
+        let mut message = Message {
             id: None,
             start: b.add_marker(echo, InsertionType::Stay)?,
             len: PROMPT.len() + input.chars().count(),
         };
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
+        if let Some(clock) = &core.clock {
+            message.len += put_time(b, line_end(b, start), clock);
+        }
+        let end = b.len_chars();
         let session = core.agents.get_mut(&id).expect("found above");
         session.messages.push(message);
-        session.turn = true;
+        session.turn = Some(Turn {
+            start: self.now,
+            len: working.chars().count() + "\n\n".len(),
+        });
         let blocks = session.preamble.take().into_iter().chain([input]);
         let request = PromptRequest::new(session_id, blocks.map(Into::into).collect());
         self.effects
@@ -1208,7 +1417,7 @@ impl Ctx<'_> {
     /// permission requests `cancelled`, as ACP requires.
     pub(crate) fn agent_cancel(&mut self) -> Result<(), String> {
         let (id, session) = self.core.current_session()?;
-        let ready = session.session.as_ref().filter(|_| session.turn);
+        let ready = session.session.as_ref().filter(|_| session.turn.is_some());
         let asks = session.asks.len();
         let session = ready.ok_or("No turn is running")?.session_id.clone();
         (self.effects).push(Effect::Agent(AgentOp::Cancel { id, session }));
@@ -1250,20 +1459,22 @@ impl Ctx<'_> {
     /// Ends the turn, with a line saying why unless it ended normally.
     pub(crate) fn agent_prompted(&mut self, id: AgentId, result: Result<StopReason, String>) {
         let core = &mut *self.core;
-        let Some(session) = core.agents.get_mut(&id).filter(|s| s.turn) else {
+        if core.agents.get(&id).is_none_or(|s| s.turn.is_none()) {
             return;
-        };
-        session.turn = false;
+        }
         let line = match result {
-            Ok(StopReason::EndTurn) => return,
-            Ok(StopReason::MaxTokens) => "Turn ended: max_tokens".into(),
-            Ok(StopReason::MaxTurnRequests) => "Turn ended: max_turn_requests".into(),
-            Ok(StopReason::Refusal) => "Turn ended: refusal".into(),
-            Ok(StopReason::Cancelled) => "Turn ended: cancelled".into(),
-            Ok(reason) => format!("Turn ended: {reason:?}"),
-            Err(err) => format!("Error: {err}"),
+            Ok(StopReason::EndTurn) => None,
+            Ok(StopReason::MaxTokens) => Some("Turn ended: max_tokens".into()),
+            Ok(StopReason::MaxTurnRequests) => Some("Turn ended: max_turn_requests".into()),
+            Ok(StopReason::Refusal) => Some("Turn ended: refusal".into()),
+            Ok(StopReason::Cancelled) => Some("Turn ended: cancelled".into()),
+            Ok(reason) => Some(format!("Turn ended: {reason:?}")),
+            Err(err) => Some(format!("Error: {err}")),
         };
-        core.output(id, &line, Block::Line);
+        if let Some(line) = line {
+            core.output(id, &line, Block::Line);
+        }
+        core.settle_turn(id);
     }
 
     /// Shows the mode the agent's answer to `session/set_config_option` reports, or notes why it
@@ -1294,16 +1505,17 @@ impl Ctx<'_> {
     /// Ends the session after its agent exited, noting a crash, and releases the agent's handle.
     pub(crate) fn agent_exited(&mut self, id: AgentId, code: u32, signal: Option<String>) {
         let core = &mut *self.core;
+        core.settle_turn(id);
         let Some(session) = core.agents.get_mut(&id) else {
             return;
         };
-        session.turn = false;
         // The agent is gone with its requests, so only the blocks change.
+        let asks = std::mem::take(&mut session.asks);
         if let Some(b) = core.buffers.get_mut(session.buffer) {
-            for ask in std::mem::take(&mut session.asks) {
-                settle(b, &ask, &cancelled(&ask));
-            }
+            asks.iter().for_each(|ask| settle(b, ask, &cancelled(ask)));
         }
+        asks.iter().for_each(|ask| core.close_wait(id, ask));
+        let session = core.agents.get_mut(&id).expect("found above");
         if !std::mem::replace(&mut session.ended, true) {
             let agent = &session.agent;
             let line = match signal {
@@ -1320,11 +1532,10 @@ impl Ctx<'_> {
 mod tests {
     use agent_client_protocol_schema::v1::{
         ConfigOptionUpdate, ContentChunk, ImageContent, PlanEntryPriority, PlanEntryStatus,
-        SessionConfigSelectOption, SessionUpdate, ToolCallStatus, ToolCallUpdateFields, ToolKind,
+        SessionConfigSelectOption, SessionUpdate, ToolCallUpdateFields, ToolKind,
     };
 
     use super::*;
-    use crate::Msg;
     use crate::buffer::{Face, Prop};
     use crate::harness::{Harness, listed, name};
     use crate::project::Root;
@@ -1809,7 +2020,7 @@ mod tests {
             SessionUpdate::AgentMessageChunk(ContentChunk::new("x".into())),
         );
         // The thought is a block of its own, between two message blocks.
-        assert_eq!(h.core.text(), "Hi\n\nhmm\n\n there\n\n> ");
+        assert_eq!(h.core.text(), "Hi\n\nThought for 0s\nhmm\n\n there\n\n> ");
         assert_eq!(h.core.point(), h.core.text().chars().count());
         assert_eq!(log_text(&h, "*claude stderr*<work>"), before);
         exited(&mut h, 0, 0);
@@ -1847,19 +2058,19 @@ mod tests {
         h.keys("h e l l o RET");
         // No other roots and no role line: nothing to list, so no preamble.
         assert_eq!(ops(&mut h), [r#"prompt 0 s "hello""#]);
-        assert_eq!(h.core.text(), "> hello\n\n> ");
-        assert_eq!(h.core.point(), 11);
+        assert_eq!(h.core.text(), "> hello\n\nWorking for 0s\n\n> ");
+        assert_eq!(h.core.point(), 27);
         chunk(&mut h, "Hi");
         chunk(&mut h, " there");
         prompted(&mut h, Ok(StopReason::EndTurn));
-        assert_eq!(h.core.text(), "> hello\n\nHi there\n\n> ");
+        assert_eq!(h.core.text(), "> hello\n\nHi there\n\nWorked 0s\n\n> ");
         // The turn ended, so the next prompt goes out.
         h.keys("a g a i n RET");
         assert_eq!(ops(&mut h), [r#"prompt 0 s "again""#]);
         chunk(&mut h, "Again");
         assert_eq!(
             h.core.text(),
-            "> hello\n\nHi there\n\n> again\n\nAgain\n\n> "
+            "> hello\n\nHi there\n\nWorked 0s\n\n> again\n\nAgain\n\nWorking for 0s\n\n> "
         );
     }
 
@@ -1897,7 +2108,7 @@ mod tests {
             h.path("docs").display()
         );
         assert_eq!(ops(&mut h), [format!(r#"prompt 0 s {preamble:?} "hi""#)]);
-        assert_eq!(h.core.text(), "> hi\n\n> ");
+        assert_eq!(h.core.text(), "> hi\n\nWorking for 0s\n\n> ");
         prompted(&mut h, Ok(StopReason::EndTurn));
         h.keys("a g a i n RET");
         assert_eq!(ops(&mut h), [r#"prompt 0 s "again""#]);
@@ -2144,12 +2355,16 @@ mod tests {
 
     #[test]
     fn a_streamed_block_renders_when_the_frame_is_built() {
+        let rendered = |h: &Harness| {
+            let own = |t: &String| t.starts_with("Work");
+            (props(h).into_iter().filter(|(t, _)| !own(t))).collect::<Vec<_>>()
+        };
         let mut h = session();
         h.keys("a RET");
         chunk(&mut h, "**a");
         chunk(&mut h, "b**");
-        assert_eq!(h.core.text(), "> a\n\n**ab**\n\n> ");
-        assert!(props(&h).is_empty(), "nothing rendered before the frame");
+        assert_eq!(h.core.text(), "> a\n\n**ab**\n\nWorking for 0s\n\n> ");
+        assert!(rendered(&h).is_empty(), "nothing rendered before the frame");
         h.core.frame();
         let bold = Prop::Named(vec![FaceRef::Bold]);
         let hidden = Prop::Invisible(String::new());
@@ -2158,12 +2373,12 @@ mod tests {
             ("ab".into(), bold),
             ("**".into(), hidden.clone()),
         ];
-        assert_eq!(props(&h), first);
+        assert_eq!(rendered(&h), first);
         // The next reply renders on its own; the first keeps its properties.
         prompted(&mut h, Ok(StopReason::EndTurn));
         h.keys("b RET");
         chunk(&mut h, "*c*");
-        assert_eq!(props(&h), first);
+        assert_eq!(rendered(&h), first);
         h.core.frame();
         let italic = Prop::Named(vec![FaceRef::Italic]);
         let all = [
@@ -2175,9 +2390,9 @@ mod tests {
             ],
         ]
         .concat();
-        assert_eq!(props(&h), all);
+        assert_eq!(rendered(&h), all);
         h.core.frame();
-        assert_eq!(props(&h), all, "a frame without chunks changes nothing");
+        assert_eq!(rendered(&h), all, "a frame without chunks changes nothing");
     }
 
     #[test]
@@ -2283,7 +2498,7 @@ mod tests {
     fn the_echoed_prompt_renders_as_markdown() {
         let mut h = session();
         h.keys("* * h i * * RET");
-        assert_eq!(h.core.text(), "> **hi**\n\n> ");
+        assert_eq!(h.core.text(), "> **hi**\n\nWorking for 0s\n\n> ");
         let bold = Prop::Named(vec![FaceRef::Bold]);
         assert!(props(&h).contains(&("hi".into(), bold)));
     }
@@ -2335,7 +2550,15 @@ mod tests {
         let height = rows as f32 * settings.line_height() + settings.mode_line_height();
         let frame = h.frame(800., height);
         (frame.windows[0].display.lines.iter())
-            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .map(|l| {
+                // Right-aligning padding reads as the one space it is in the text.
+                let padding = |s: &str| s.len() > 1 && s.trim().is_empty();
+                let text = |s: &crate::display::Span| match padding(&s.text) {
+                    true => " ".to_string(),
+                    false => s.text.clone(),
+                };
+                l.spans.iter().map(text).collect()
+            })
             .collect()
     }
 
@@ -2356,7 +2579,9 @@ mod tests {
         tool(&mut h, ls());
         assert_eq!(
             h.core.text(),
-            format!("> a\n\nLet me look.\n\n`ls` (execute, pending)\n{LS_INPUT}\n\n> ")
+            format!(
+                "> a\n\nLet me look.\n\n`ls` (execute, pending)\n{LS_INPUT}\n\nWorking for 0s\n\n> "
+            )
         );
         assert_eq!(
             shown(&mut h, 10)[..5],
@@ -2374,13 +2599,13 @@ mod tests {
         assert_eq!(
             h.core.text(),
             format!(
-                "> a\n\nLet me look.\n\n`ls` (execute, completed)\n{LS_INPUT}\n\n\
-                 Output:\n```\na.rs\nb.rs\n```\n\nDone.\n\n> "
+                "> a\n\nLet me look.\n\n`ls` (execute, completed) 0.0s\n{LS_INPUT}\n\n\
+                 Output:\n```\na.rs\nb.rs\n```\n\nDone.\n\nWorking for 0s\n\n> "
             )
         );
         assert_eq!(
-            shown(&mut h, 10)[4..7],
-            ["ls (execute, completed) …", "", "Done."]
+            shown(&mut h, 12)[4..7],
+            ["ls (execute, completed) 0.0s …", "", "Done."]
         );
         // Props stay in order, so the display can bisect them.
         let props: Vec<_> = h.core.current().properties().map(|(r, _)| r).collect();
@@ -2414,7 +2639,7 @@ mod tests {
         assert_eq!(h.core.text(), "Think (other, pending)\n\n> ");
         // With a title it starts a block.
         tool_update(&mut h, "u", fields.title("Grep".to_string()));
-        assert!(h.core.text().ends_with("Grep (other, failed)\n\n> "));
+        assert!(h.core.text().ends_with("Grep (other, failed) 0.0s\n\n> "));
     }
 
     #[test]
@@ -2479,7 +2704,10 @@ mod tests {
         h.keys("M-< C-e TAB");
         tool(&mut h, ls().status(ToolCallStatus::Completed));
         assert_eq!(h.core.text().matches("`ls`").count(), 1);
-        assert_eq!(shown(&mut h, 3)[..2], ["ls (execute, completed)", "Input:"]);
+        assert_eq!(
+            shown(&mut h, 3)[..2],
+            ["ls (execute, completed) 0.0s", "Input:"]
+        );
         assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
         // TAB on a call without content leaves it folded.
         tool(&mut h, ToolCall::new("e", "Empty"));
@@ -2710,16 +2938,19 @@ mod tests {
         };
         let failed = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
         meta_update(&mut h, failed, exit(2.into(), Value::Null));
-        assert_eq!(header(&mut h), "make (execute, failed, exit 2)");
+        assert_eq!(header(&mut h), "make (execute, failed, exit 2) 0.0s");
         meta_update(
             &mut h,
             ToolCallUpdateFields::new(),
             exit(Value::Null, "SIGTERM".into()),
         );
-        assert_eq!(header(&mut h), "make (execute, failed, signal SIGTERM)");
+        assert_eq!(
+            header(&mut h),
+            "make (execute, failed, signal SIGTERM) 0.0s"
+        );
         let completed = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
         meta_update(&mut h, completed, exit(0.into(), Value::Null));
-        assert_eq!(header(&mut h), "make (execute, completed)");
+        assert_eq!(header(&mut h), "make (execute, completed) 0.0s");
     }
 
     #[test]
@@ -3229,6 +3460,222 @@ mod tests {
         assert!(ops(&mut h).is_empty());
     }
 
+    fn working(h: &mut Harness) -> String {
+        h.core.frame();
+        let text = h.core.text();
+        let mut lines = text.lines().filter(|l| l.starts_with("Work"));
+        lines.next_back().unwrap_or_default().to_owned()
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn messages_show_their_clock_times_and_the_turn_its_length() {
+        let mut h = session();
+        h.send(Msg::Clock("14:01".into()));
+        h.keys("h i RET");
+        h.send(Msg::Clock("14:03".into()));
+        h.advance(secs(5));
+        agent_chunk(&mut h, "m", "Hi\nthere");
+        h.send(Msg::Clock("14:04".into()));
+        h.advance(secs(120));
+        // Stamped when it arrived; the line goes in when the block ends.
+        agent_chunk(&mut h, "m", "!");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert_eq!(
+            h.core.text(),
+            "> hi 14:01\n\nHi 14:03\nthere!\n\nWorked 2m 05s 14:04\n\n> "
+        );
+        assert_eq!(
+            props(&h)
+                .iter()
+                .filter(|(_, p)| *p == Prop::AlignRight)
+                .count(),
+            3
+        );
+        let annotation = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
+        assert!(props(&h).contains(&("14:03".into(), annotation)));
+        // The message's lines still cover its whole block.
+        assert_eq!(message_list(&h)[1].1, "Hi 14:03\nthere!");
+    }
+
+    #[test]
+    fn a_thought_gets_a_header_when_it_ends() {
+        let mut h = session();
+        h.keys("a RET");
+        thought(&mut h, "hmm");
+        h.advance(Duration::from_millis(4200));
+        chunk(&mut h, "So.");
+        assert_eq!(
+            h.core.text(),
+            "> a\n\nThought for 4s\nhmm\n\nSo.\n\nWorking for 0s\n\n> "
+        );
+        let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
+        assert!(props(&h).contains(&("Thought for 4s".into(), dim)));
+    }
+
+    #[test]
+    fn a_tool_call_shows_how_long_it_ran_without_its_permission_wait() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        tool(&mut h, ls());
+        h.advance(secs(1));
+        ask(&mut h, 1, "t", None);
+        h.advance(secs(12));
+        h.core.frame();
+        assert!(
+            h.core
+                .text()
+                .contains("`ls` (execute, pending) waiting 0:12\n")
+        );
+        h.keys("C-c C-y");
+        assert!(h.core.text().contains("`ls` (execute, pending)\n"));
+        h.advance(Duration::from_millis(1300));
+        let done = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
+        tool_update(&mut h, "t", done);
+        assert!(h.core.text().contains("`ls` (execute, completed) 2.3s\n"));
+        // Later updates keep it, and a long one reads as minutes.
+        h.advance(secs(9));
+        tool_update(
+            &mut h,
+            "t",
+            ToolCallUpdateFields::new().title("ls".to_string()),
+        );
+        assert!(h.core.text().contains("ls (execute, completed) 2.3s\n"));
+        assert_eq!(short_duration(secs(125)), "2m 05s");
+    }
+
+    #[test]
+    fn the_waiting_counter_keeps_folds_and_an_unshown_call_has_none() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        tool(&mut h, ls());
+        ask(&mut h, 1, "t", None);
+        ask(&mut h, 2, "unknown", Some("U"));
+        for n in 1..=3 {
+            h.advance(secs(1));
+            h.core.frame();
+            let want = format!("`ls` (execute, pending) waiting 0:0{n}\n");
+            assert!(h.core.text().contains(&want));
+        }
+        h.keys("M-<");
+        assert_eq!(shown(&mut h, 20)[2], "ls (execute, pending) waiting 0:03 …");
+        h.keys("C-c C-c");
+        assert!(h.core.text().contains("`ls` (execute, pending)\n"));
+    }
+
+    #[test]
+    fn the_working_line_ticks_below_output_and_keeps_the_prompt() {
+        let mut h = session();
+        h.keys("a RET d r a f t");
+        let point = h.core.point();
+        h.advance(secs(1));
+        assert_eq!(working(&mut h), "Working for 1s");
+        assert_eq!(h.core.point(), point, "same length");
+        h.advance(secs(135));
+        assert_eq!(working(&mut h), "Working for 2m 16s");
+        assert!(h.core.text().ends_with("\n\n> draft"));
+        assert_eq!(h.core.point(), h.core.text().chars().count());
+        chunk(&mut h, "out");
+        h.keys("X");
+        assert!(
+            h.core
+                .text()
+                .ends_with("out\n\nWorking for 2m 16s\n\n> draftX")
+        );
+        // Ticks leave the prompt area's undo alone.
+        h.advance(secs(1));
+        h.core.frame();
+        h.keys("C-/");
+        assert!(h.core.text().ends_with("Working for 2m 17s\n\n> "));
+        assert_eq!(long_duration(secs(3725)), "1h 02m 05s");
+    }
+
+    #[test]
+    fn the_line_settles_however_the_turn_ends() {
+        for (end, line) in [
+            (Some(Ok(StopReason::EndTurn)), ""),
+            (Some(Ok(StopReason::Cancelled)), "Turn ended: cancelled\n\n"),
+            (Some(Err("boom")), "Error: boom\n\n"),
+            (None, ""),
+        ] {
+            let mut h = session();
+            h.keys("a RET");
+            h.advance(secs(3));
+            match end {
+                Some(result) => prompted(&mut h, result),
+                None => exited(&mut h, 0, 1),
+            }
+            assert_eq!(h.core.text(), format!("> a\n\n{line}Worked 3s\n\n> "));
+            assert_eq!(h.core.next_deadline(), None);
+        }
+    }
+
+    #[test]
+    fn a_hidden_session_wakes_nothing_and_is_current_when_shown() {
+        let mut h = session();
+        h.keys("a RET");
+        assert!(h.core.next_deadline().is_some());
+        h.keys("C-x b * M e s s a g e s * RET");
+        assert_eq!(h.core.next_deadline(), None);
+        h.advance(secs(60));
+        let session = h.core.agents[&AgentId(0)].buffer;
+        let text = |h: &Harness| h.core.buffers.get(session).unwrap().text().to_string();
+        assert!(
+            text(&h).contains("Working for 0s"),
+            "untouched while hidden"
+        );
+        h.keys("C-x b RET");
+        assert!(h.core.next_deadline().is_some());
+        assert_eq!(working(&mut h), "Working for 1m 00s");
+    }
+
+    #[test]
+    fn a_hidden_turn_end_settles_at_once() {
+        let mut h = session();
+        h.keys("a RET C-x b * M e s s a g e s * RET");
+        h.advance(secs(7));
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        let session = h.core.agents[&AgentId(0)].buffer;
+        let text = h.core.buffers.get(session).unwrap().text().to_string();
+        assert_eq!(text, "> a\n\nWorked 7s\n\n> ");
+    }
+
+    #[test]
+    fn replayed_history_shows_no_times_and_later_updates_do() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        h.send(Msg::Clock("14:01".into()));
+        let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
+        loading.load = Some(("old".into(), loading.buffer));
+        let user = ContentChunk::new("old".into());
+        update(&mut h, 0, SessionUpdate::UserMessageChunk(user));
+        thought(&mut h, "hmm");
+        h.advance(secs(5));
+        chunk(&mut h, "reply");
+        tool(&mut h, ls().status(ToolCallStatus::Completed));
+        assert_eq!(
+            h.core.text(),
+            format!("> old\n\nhmm\n\nreply\n\n`ls` (execute, completed)\n{LS_INPUT}\n\n> ")
+        );
+        ready(&mut h, 0);
+        h.advance(secs(1));
+        let later = ToolCallUpdateFields::new().title("ls".to_string());
+        tool_update(&mut h, "t", later);
+        assert!(
+            h.core.text().contains("ls (execute, completed)\n"),
+            "no arrival, no time"
+        );
+        chunk(&mut h, "live");
+        h.keys("a RET");
+        assert!(h.core.text().contains("live 14:01\n"));
+    }
+
     #[test]
     fn ret_sends_only_a_ready_idle_session_with_input() {
         let mut h = work();
@@ -3242,7 +3689,7 @@ mod tests {
         h.keys("y RET");
         assert_eq!(h.core.message(), Some("claude is busy"));
         assert!(ops(&mut h).is_empty());
-        assert_eq!(h.core.text(), "> x\n\n> y");
+        assert_eq!(h.core.text(), "> x\n\nWorking for 0s\n\n> y");
         prompted(&mut h, Ok(StopReason::EndTurn));
         h.keys("DEL SPC C-j RET");
         assert!(ops(&mut h).is_empty());
@@ -3264,18 +3711,25 @@ mod tests {
         let mut h = session();
         h.keys("a RET");
         prompted(&mut h, Ok(StopReason::Refusal));
-        assert_eq!(h.core.text(), "> a\n\nTurn ended: refusal\n\n> ");
+        assert_eq!(
+            h.core.text(),
+            "> a\n\nTurn ended: refusal\n\nWorked 0s\n\n> "
+        );
         h.keys("b RET");
         chunk(&mut h, "B");
         prompted(&mut h, Err("Internal error"));
         assert!(
             h.core
                 .text()
-                .ends_with("> b\n\nB\n\nError: Internal error\n\n> ")
+                .ends_with("> b\n\nB\n\nError: Internal error\n\nWorked 0s\n\n> ")
         );
         // A late answer, with no turn running, adds nothing.
         prompted(&mut h, Ok(StopReason::MaxTokens));
-        assert!(h.core.text().ends_with("Error: Internal error\n\n> "));
+        assert!(
+            h.core
+                .text()
+                .ends_with("Error: Internal error\n\nWorked 0s\n\n> ")
+        );
     }
 
     #[test]
@@ -3286,7 +3740,10 @@ mod tests {
         h.keys("a RET C-c C-c");
         assert_eq!(ops(&mut h), [r#"prompt 0 s "a""#, "cancel 0 s"]);
         prompted(&mut h, Ok(StopReason::Cancelled));
-        assert_eq!(h.core.text(), "> a\n\nTurn ended: cancelled\n\n> ");
+        assert_eq!(
+            h.core.text(),
+            "> a\n\nTurn ended: cancelled\n\nWorked 0s\n\n> "
+        );
     }
 
     #[test]
@@ -3302,10 +3759,13 @@ mod tests {
         assert_eq!(h.core.text(), transcript);
         h.keys("d r a f t DEL");
         chunk(&mut h, " there");
-        assert_eq!(h.core.text(), "> a\n\nHi there\n\n> draf");
+        assert_eq!(h.core.text(), "> a\n\nHi there\n\nWorking for 0s\n\n> draf");
         assert_eq!(h.core.point(), h.core.text().chars().count());
         h.keys("C-/");
-        assert_eq!(h.core.text(), "> a\n\nHi there\n\n> draft");
+        assert_eq!(
+            h.core.text(),
+            "> a\n\nHi there\n\nWorking for 0s\n\n> draft"
+        );
     }
 
     #[test]
@@ -3432,7 +3892,10 @@ mod tests {
         ask(&mut h, 4, "c", Some("Edit a.txt"));
         assert!(ops(&mut h).is_empty(), "nothing answered yet");
         let block = asked("Edit a.txt");
-        assert_eq!(h.core.text(), format!("> a\n\nEditing.\n\n{block}\n\n> "));
+        assert_eq!(
+            h.core.text(),
+            format!("> a\n\nEditing.\n\n{block}\n\nWorking for 0s\n\n> ")
+        );
         let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
         let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
         let props: Vec<_> = (props(&h).into_iter())
@@ -3448,7 +3911,8 @@ mod tests {
                 "2",
                 " (allow_always)",
                 "3",
-                " (reject_once)"
+                " (reject_once)",
+                "Working for 0s"
             ]
         );
     }
@@ -3481,7 +3945,7 @@ mod tests {
         assert_eq!(
             h.core.text(),
             format!(
-                "> a\n\nChose Yes (allow_once) for A\n\nChose No (reject_once) for B\n\n{c}\n\n> "
+                "> a\n\nChose Yes (allow_once) for A\n\nChose No (reject_once) for B\n\n{c}\n\nWorking for 0s\n\n> "
             )
         );
         h.keys("C-c C-y");
@@ -3499,7 +3963,7 @@ mod tests {
         ask(&mut h, 1, "a", Some("A"));
         ask(&mut h, 2, "b", Some("B"));
         // The newer request's second option, then the older one's header, which sends nothing.
-        h.keys("C-p C-p C-p RET");
+        h.keys("C-p C-p C-p C-p C-p RET");
         assert_eq!(ops(&mut h), ["reply 0 2 always"]);
         assert!(
             h.core
@@ -3512,7 +3976,7 @@ mod tests {
         assert_eq!(ops(&mut h), ["reply 0 1 reject"]);
         assert_eq!(
             h.core.text(),
-            "> a\n\nChose No (reject_once) for A\n\nChose Always (allow_always) for B\n\n> "
+            "> a\n\nChose No (reject_once) for A\n\nChose Always (allow_always) for B\n\nWorking for 0s\n\n> "
         );
     }
 
@@ -3556,16 +4020,23 @@ mod tests {
             ["cancel 0 s", "reply 0 1 cancelled", "reply 0 2 cancelled"]
         );
         let cancelled = "Cancelled permission for A\n\nCancelled permission for B";
-        assert_eq!(h.core.text(), format!("> a\n\n{cancelled}\n\n> "));
+        assert_eq!(
+            h.core.text(),
+            format!("> a\n\n{cancelled}\n\nWorking for 0s\n\n> ")
+        );
         prompted(&mut h, Ok(StopReason::Cancelled));
-        let ended = format!("> a\n\n{cancelled}\n\nTurn ended: cancelled\n\n> ");
+        let ended = format!("> a\n\n{cancelled}\n\nTurn ended: cancelled\n\nWorked 0s\n\n> ");
         assert_eq!(h.core.text(), ended);
         h.keys("b RET");
         ops(&mut h);
         ask(&mut h, 3, "c", Some("C"));
         exited(&mut h, 0, 1);
         assert_eq!(ops(&mut h), ["kill 0"]);
-        assert!(h.core.text().ends_with("Cancelled permission for C\n\n> "));
+        assert!(
+            h.core
+                .text()
+                .ends_with("Cancelled permission for C\n\nWorked 0s\n\n> ")
+        );
         h.keys("C-c C-y");
         assert_eq!(h.core.message(), Some("No permission request is pending"));
         // A request after the exit is cancelled and not shown.
