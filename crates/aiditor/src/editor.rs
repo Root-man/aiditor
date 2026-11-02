@@ -1103,6 +1103,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn icons_take_their_runs_colour_and_their_two_cells(cx: &mut TestAppContext) {
+        use crate::element::{icon_bounds, icons, line_runs};
+        use aiditor_core::buffer::Icon;
+        use aiditor_core::display::{Line, Span};
+        use aiditor_core::settings::Settings;
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "");
+        let red = Face {
+            fg: Some(0xff0000),
+            ..Face::default()
+        };
+        let span = |text: &str, face| Span {
+            text: text.into(),
+            face,
+            fold: false,
+        };
+        let line = Line {
+            number: 0,
+            height: 20.,
+            spans: vec![
+                span("✓", Face::default()),
+                span("  ", red),
+                span("a  b", Face::default()),
+            ],
+            decorations: Vec::new(),
+            aligned: false,
+            icons: vec![(1, Icon::Book), (4, Icon::Globe)],
+        };
+        editor.update_in(cx, |e, window, _| {
+            let (font, cell) = e.font(window);
+            let theme = &e.core.settings().theme;
+            let size = px(e.core.settings().font_size);
+            let shape = |text: String, runs: &[gpui::TextRun]| {
+                (window.text_system()).shape_line(text.into(), size, runs, None)
+            };
+            let (text, runs, _, _) = line_runs(&line, None, "", &font, theme);
+            let shaped = shape(text, &runs);
+            let laid = icons(&line, None, "", &shaped, &runs);
+            let foreground = gpui::Hsla::from(gpui::rgb(theme.foreground()));
+            assert_eq!(laid[0].color, gpui::Hsla::from(gpui::rgb(0xff0000)));
+            assert_eq!(laid[1].color, foreground);
+            assert_eq!(
+                laid[0].x,
+                shaped.x_for_index("✓".len())..shaped.x_for_index("✓  ".len())
+            );
+            assert!((laid[0].x.end - laid[0].x.start - cell * 2.).abs() < px(0.01));
+
+            // Another theme changes only what the run takes from it.
+            let light = "theme = 'light'\n[themes.light.faces]\ndefault = { fg = 0x3c3836 }";
+            let light = Settings::parse(Some(light)).unwrap().theme;
+            let (text, runs, _, _) = line_runs(&line, None, "", &font, &light);
+            let colours = icons(&line, None, "", &shape(text, &runs), &runs);
+            assert_eq!(colours[0].color, laid[0].color);
+            assert_eq!(colours[1].color, gpui::Hsla::from(gpui::rgb(0x3c3836)));
+
+            // Marked text moves what's past it and leaves the rest.
+            let (text, runs, _, _) = line_runs(&line, Some(3), "mk", &font, theme);
+            let spliced = shape(text, &runs);
+            let moved = icons(&line, Some(3), "mk", &spliced, &runs);
+            assert_eq!(moved[0].x, laid[0].x);
+            assert_eq!(moved[1].x.start, spliced.x_for_index("✓  mka".len()));
+            assert_eq!(moved[1].color, foreground);
+
+            // Centred on its cells and its row, no wider than they are.
+            let bounds = icon_bounds(&laid[0], gpui::point(px(10.), px(40.)), px(20.), px(100.));
+            let width = laid[0].x.end - laid[0].x.start;
+            assert_eq!(bounds.size, gpui::size(width, width));
+            assert_eq!(bounds.center().x, px(10.) + laid[0].x.start + width / 2.);
+            assert_eq!(bounds.center().y, px(50.));
+        });
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn boxed_runs_keep_their_cells_and_share_an_outline(cx: &mut TestAppContext) {
         use crate::element::{boxed, line_runs};
         use aiditor_core::display::{Line, Span};
@@ -1142,6 +1218,7 @@ mod tests {
             ],
             decorations: Vec::new(),
             aligned: false,
+            icons: Vec::new(),
         };
         editor.update_in(cx, |e, window, _| {
             let font = e.font(window).0;

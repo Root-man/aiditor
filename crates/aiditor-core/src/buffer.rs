@@ -399,6 +399,17 @@ pub enum Decoration {
     Bar(FaceName),
 }
 
+/// An icon from the set bundled with the frontend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    Book,
+    Magnifier,
+    Pencil,
+    Terminal,
+    Globe,
+    Wrench,
+}
+
 /// A text property on a char range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prop {
@@ -412,6 +423,8 @@ pub enum Prop {
     /// A space drawn wide enough to end the rest of its line in the window's last column, or as
     /// one space when the line doesn't fit, as Emacs's `(space :align-to right)`.
     AlignRight,
+    /// An icon painted over the range's two spaces, which stay plain text.
+    Icon(Icon),
 }
 
 impl Buffer {

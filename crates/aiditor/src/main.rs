@@ -17,6 +17,7 @@ use editor::Editor;
 mod editor;
 mod element;
 mod emoji;
+mod icons;
 mod input;
 
 #[cfg(test)]
@@ -178,7 +179,8 @@ fn main() {
     let _guard = runtime.enter();
     tracing::info!("starting");
 
-    Application::new().run(|cx: &mut App| {
+    let app = Application::new().with_assets(icons::Assets);
+    app.run(|cx: &mut App| {
         emoji::drop_undrawable(cx);
         // The app id matches the Linux desktop entry, so the launcher groups the window under it.
         let options = WindowOptions {

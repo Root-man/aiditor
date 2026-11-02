@@ -36,5 +36,6 @@ expression: h.display(1).lines
         ],
         decorations: [],
         aligned: false,
+        icons: [],
     },
 ]

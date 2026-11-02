@@ -1,6 +1,6 @@
 //! The display model: what the core shows for a window, for the frontend to draw.
 
-use crate::buffer::{Buffer, Decoration, Face, Prop};
+use crate::buffer::{Buffer, Decoration, Face, Icon, Prop};
 use crate::project_commands::root_names;
 use crate::settings::{FaceName, LineNumbers, Settings, Theme};
 use std::borrow::Cow;
@@ -300,6 +300,8 @@ pub struct Line {
     pub decorations: Vec<Decoration>,
     /// Padded to the window's last column, past where a wrapped row would break.
     pub aligned: bool,
+    /// The icons on it, each with the char column of the first of its two cells.
+    pub icons: Vec<(usize, Icon)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -483,6 +485,7 @@ pub fn build(
         spans: Vec::new(),
         decorations: Vec::new(),
         aligned: false,
+        icons: Vec::new(),
     };
     // The face of the char at `at`: its syntax, then its properties, then the region.
     let face_at = |at: usize| {
@@ -651,6 +654,13 @@ pub fn build(
         }
         if positions.is_some() {
             source_positions.push(Some(pos - 1));
+        }
+        let icon = props.iter().find_map(|(r, prop)| match prop {
+            Prop::Icon(icon) if r.start == pos - 1 && r.len() == 2 => Some(*icon),
+            _ => None,
+        });
+        if let Some(icon) = icon.filter(|_| range.contains(&col)) {
+            line.icons.push((col - 1 - range.start, icon));
         }
         let face = face_at(pos - 1);
         match line.spans.last_mut() {
@@ -984,8 +994,16 @@ fn wrap_lines(
                 split[row].push(Span { text, ..span });
             }
         }
+        let mut icons: Vec<Vec<(usize, Icon)>> = starts.iter().map(|_| Vec::new()).collect();
+        for &(col, icon) in line
+            .icons
+            .iter()
+            .filter(|(c, _)| row_of(*c) == row_of(c + 1))
+        {
+            icons[row_of(col)].push((col - starts[row_of(col)], icon));
+        }
         let last = split.len() - 1;
-        for (row, mut spans) in split.into_iter().enumerate() {
+        for (row, (mut spans, icons)) in split.into_iter().zip(icons).enumerate() {
             if !wrap.word && row < last {
                 spans.push(Span {
                     text: "\\".into(),
@@ -999,6 +1017,7 @@ fn wrap_lines(
                 spans,
                 decorations: line.decorations.clone(),
                 aligned: line.aligned,
+                icons,
             });
         }
     }
@@ -1010,7 +1029,7 @@ fn wrap_lines(
 #[cfg(test)]
 mod tests {
     use super::{ModeLine, Span};
-    use crate::buffer::{Decoration, Face, Prop};
+    use crate::buffer::{Decoration, Face, Icon, Prop};
     use crate::harness::Harness;
     use crate::settings::{FaceName, Settings};
 
@@ -1159,6 +1178,14 @@ mod tests {
 
     /// The rows drawn `cols` wide, cut or wrapped at words.
     fn rows_at(h: &Harness, cols: usize, wrap: bool, from: usize) -> Vec<String> {
+        let d = built(h, cols, wrap, from);
+        (d.lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    }
+
+    /// The display `cols` wide, cut or wrapped at words.
+    fn built(h: &Harness, cols: usize, wrap: bool, from: usize) -> super::WindowDisplay {
         let wrap = wrap.then_some(super::Wrap {
             width: cols - 1,
             word: true,
@@ -1168,7 +1195,7 @@ mod tests {
             Some(_) => 0..10 * cols,
             None => 0..cols + 1,
         };
-        let d = super::build(
+        super::build(
             h.core.current(),
             0,
             3,
@@ -1179,10 +1206,94 @@ mod tests {
             wrap,
             &[],
             None,
-        );
-        (d.lines.iter())
-            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
-            .collect()
+        )
+    }
+
+    /// `text` in a buffer with the book icon on the two chars from `at`.
+    fn with_icon(text: &str, at: usize) -> Harness {
+        let mut h = Harness::new(&[("a.txt", text)]);
+        h.open("a.txt");
+        prop(&mut h, at..at + 2, Prop::Icon(Icon::Book));
+        h
+    }
+
+    /// Each row's icons `cols` wide, wrapped at words.
+    fn wrapped_icons(h: &Harness, cols: usize) -> Vec<Vec<(usize, Icon)>> {
+        let lines = built(h, cols, true, 0).lines;
+        lines.into_iter().map(|l| l.icons).collect()
+    }
+
+    #[test]
+    fn a_row_places_its_icon_over_plain_spaces() {
+        let mut h = with_icon("a  b\n", 1);
+        let line = h.display(2).lines.remove(0);
+        assert_eq!(line.icons, [(1, Icon::Book)]);
+        assert_eq!(line.spans[0].text, "a  b");
+    }
+
+    #[test]
+    fn a_wrapped_row_places_the_icon_at_its_own_column() {
+        let h = with_icon("aaaa bb  c\n", 7);
+        assert_eq!(rows_at(&h, 6, true, 0)[1], "bb  c");
+        assert_eq!(wrapped_icons(&h, 6)[..2], [vec![], vec![(2, Icon::Book)]]);
+    }
+
+    #[test]
+    fn a_row_break_between_its_cells_drops_the_icon() {
+        // A row holds 4 chars, so the word break comes after the icon's first space.
+        let h = with_icon("aaaa  bbbbbb\n", 4);
+        assert_eq!(rows_at(&h, 5, true, 0)[0], "aaaa ");
+        assert!(wrapped_icons(&h, 5).iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn horizontal_scrolling_shifts_or_cuts_the_icon() {
+        let h = with_icon("a  bcdef\n", 1);
+        let settings = h.core.settings();
+        let icons = |shown| {
+            let buffer = h.core.current();
+            let lines = super::build(buffer, 0, 1, 0, None, settings, shown, None, &[], None).lines;
+            lines[0].icons.clone()
+        };
+        assert_eq!(icons(1..8), [(0, Icon::Book)]);
+        assert_eq!(icons(2..8), []);
+        assert_eq!(icons(0..2), []);
+    }
+
+    #[test]
+    fn a_face_splitting_its_cells_keeps_one_icon() {
+        let h = with_icon("a  b\n", 1);
+        let (buffer, settings) = (h.core.current(), h.core.settings());
+        let d = super::build(buffer, 0, 1, 2, Some(0), settings, 0..9, None, &[], None);
+        assert!(d.lines[0].spans.len() > 1);
+        assert_eq!(d.lines[0].icons, [(1, Icon::Book)]);
+    }
+
+    #[test]
+    fn an_icon_whose_range_lost_a_char_is_dropped() {
+        let mut h = with_icon("a  b\n", 1);
+        h.keys("C-f C-d");
+        assert_eq!(h.text(), "a b\n");
+        assert_eq!(h.display(2).lines[0].icons, []);
+    }
+
+    #[test]
+    fn motion_search_and_kill_see_an_icons_spaces() {
+        let mut h = with_icon("xy\nab  cd\n", 5);
+        h.keys("M-< C-n C-f C-f C-f");
+        assert_eq!(h.point(), 6);
+        h.keys("C-f");
+        assert_eq!(h.point(), 7);
+        h.keys("C-b C-b C-SPC C-f C-f C-w");
+        assert_eq!(h.text(), "xy\nabcd\n");
+        h.keys("M-> C-y");
+        assert_eq!(h.text(), "xy\nabcd\n  ");
+        let icon = |p: &Prop| matches!(p, Prop::Icon(_));
+        assert!(!h.core.current().properties().any(|(_, p)| icon(p)));
+
+        let mut h = with_icon("xy\nab  cd\n", 5);
+        h.keys("C-s b SPC SPC c RET");
+        assert_eq!(h.core.current().line_col(h.point()).unwrap().0, 1);
     }
 
     #[test]
