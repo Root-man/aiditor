@@ -395,6 +395,8 @@ pub enum Decoration {
     Background(FaceName),
     /// A rule beside the line, like the one beside tool calls.
     Rule(FaceName),
+    /// A bar in the left margin, wider than a rule, like the one beside the message at point.
+    Bar(FaceName),
 }
 
 /// A text property on a char range.

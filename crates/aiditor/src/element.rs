@@ -339,6 +339,7 @@ impl Element for FrameElement {
                         let (width, color) = match *decoration {
                             Decoration::Background(name) => (width, theme.face(name).bg),
                             Decoration::Rule(name) => (px(2.), theme.face(name).fg),
+                            Decoration::Bar(name) => (px(3.), theme.face(name).fg),
                         };
                         if let Some(color) = color {
                             let bounds = Bounds::new(origin, size(width, row.height));

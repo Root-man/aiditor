@@ -132,7 +132,9 @@
 "TAB" = "agent-toggle-tool-call"
 "S-TAB" = "agent-cycle-mode"
 "C-c C-y" = "agent-allow-once"
-"C-c C-n" = "agent-reject-once"
+"C-c C-k" = "agent-reject-once"
+"C-c C-p" = "agent-previous-message"
+"C-c C-n" = "agent-next-message"
 
 # The read-only list of an agent's past sessions.
 [agent-sessions-mode]

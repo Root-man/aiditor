@@ -749,6 +749,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_cycle_mode(),
         },
         Command {
+            name: "agent-previous-message",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.agent_next_message(args.count().saturating_neg()),
+        },
+        Command {
+            name: "agent-next-message",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.agent_next_message(args.count()),
+        },
+        Command {
             name: "agent-allow-once",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.agent_allow_once(),

@@ -703,17 +703,7 @@ impl Ctx<'_> {
         let mut prompts: Vec<usize> = core.current().commands.iter().map(|c| c.input).collect();
         prompts.sort_unstable();
         prompts.dedup();
-        let count = n.unsigned_abs() as usize;
-        let target = match n > 0 {
-            true => prompts.iter().filter(|&&p| p > point).take(count).last(),
-            false => prompts
-                .iter()
-                .rev()
-                .filter(|&&p| p < point)
-                .take(count)
-                .last(),
-        };
-        let at = *target.ok_or("No prompt found")?;
+        let at = crate::motion::nth_mark(&prompts, point, n).ok_or("No prompt found")?;
         core.windows.window.set_point(&mut core.buffers, at)?;
         Ok(())
     }

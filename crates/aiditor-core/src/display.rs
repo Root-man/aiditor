@@ -5,7 +5,7 @@ use crate::project_commands::root_names;
 use crate::settings::{FaceName, LineNumbers, Settings, Theme};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 /// Intersections of nonempty matches on the complete source line with displayed byte intervals.
@@ -366,6 +366,13 @@ pub(crate) fn highlight_line(display: &mut WindowDisplay) {
     };
     for line in display.lines.iter_mut().filter(|l| l.number == number) {
         (line.decorations).insert(0, Decoration::Background(FaceName::HlLine));
+    }
+}
+
+/// Puts the `message-at-point` bar beside every row of buffer lines `lines`.
+pub(crate) fn mark_message(display: &mut WindowDisplay, lines: RangeInclusive<usize>) {
+    for line in (display.lines.iter_mut()).filter(|l| lines.contains(&l.number)) {
+        (line.decorations).push(Decoration::Bar(FaceName::MessageAtPoint));
     }
 }
 
