@@ -28,6 +28,10 @@ The approved designs are on the [aiditor visual direction canvas](https://claude
 - **10 · Gruvbox light:** the light theme, with swiper.
 - **11 · Narrow frame:** truncation and the `↪` continuation marker at 900×600.
 - **12 · Faces and spacing:** every named face in both themes, the spacing scale and type sizes.
+- **13 · Workspace list:** `*Workspaces*` with every project, `TAB` folding, name, where and state columns, and key hints in the echo line.
+- **13b · Workspace list study:** every row kind and state, where each piece comes from, keys and rules.
+- **13c · Workspace list in a split:** the list in a narrow window, beside a file.
+- **13d · Workspace list, Gruvbox light:** the folded list in the light theme, with point away from the current workspace.
 
 Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those.
 
