@@ -189,3 +189,10 @@ A run in a window's text rows whose face has a box colour SHALL be drawn with a 
 
 - **WHEN** a theme gives a face `box = 0x504945`
 - **THEN** that face's runs are boxed in that colour
+
+### Requirement: The core gets the wall clock from the frontend
+The frontend SHALL give the core the workspace clock's `HH:MM` text at startup and at each minute wakeup, so the core never reads the wall clock.
+
+#### Scenario: A minute passes
+- **WHEN** the workspace clock changes from `20:41` to `20:42`
+- **THEN** a message stamped afterwards shows `20:42`
