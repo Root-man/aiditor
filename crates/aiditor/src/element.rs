@@ -2,16 +2,16 @@ use std::ops::Range;
 use std::time::Instant;
 
 use aiditor_core::Msg;
-use aiditor_core::buffer::{Decoration, Face};
+use aiditor_core::buffer::{Decoration, Face, Icon};
 use aiditor_core::display::{
     CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, Span, TEXT_INSET, Terminal,
 };
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
-    Entity, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels,
-    Point, ShapedLine, Style, TextRun, UnderlineStyle, Window, fill, outline, point, prelude::*,
-    px, quad, rgb, size, transparent_black,
+    Entity, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, LayoutId,
+    Pixels, Point, ShapedLine, Style, TextRun, TransformationMatrix, UnderlineStyle, Window, fill,
+    outline, point, prelude::*, px, quad, rgb, size, transparent_black,
 };
 
 use crate::editor::Editor;
@@ -59,6 +59,7 @@ pub(crate) struct Row {
     pub(crate) number: Option<(Pixels, ShapedLine)>,
     pub(crate) text: ShapedLine,
     pub(crate) boxes: Vec<Boxed>,
+    pub(crate) icons: Vec<RowIcon>,
 }
 
 /// A boxed run on a row: its x bounds from the text's start, its background and box colours, and
@@ -70,6 +71,14 @@ pub(crate) struct Boxed {
     pub(crate) color: u32,
     pub(crate) open_left: bool,
     pub(crate) open_right: bool,
+}
+
+/// An icon on a row: its two cells' x bounds from the text's start, and its run's foreground.
+#[derive(Debug, PartialEq)]
+pub(crate) struct RowIcon {
+    pub(crate) icon: Icon,
+    pub(crate) x: Range<Pixels>,
+    pub(crate) color: Hsla,
 }
 
 /// A boxed run's corners, per the design's chip.
@@ -161,6 +170,7 @@ impl Element for FrameElement {
                         line_runs(line, at.map(|(_, col)| col), marked, &font, &settings.theme);
                     let text = shape(text, &runs);
                     let boxes = boxed(&text, boxes);
+                    let icons = icons(line, at.map(|(_, col)| col), marked, &text, &runs);
                     if at.is_some() {
                         let (x, width, under) = block(&text, byte, cell);
                         let origin = bounds.origin + point(text_x + x, top);
@@ -185,6 +195,7 @@ impl Element for FrameElement {
                         number,
                         text,
                         boxes,
+                        icons,
                     };
                     top += height;
                     row
@@ -318,6 +329,7 @@ impl Element for FrameElement {
         let focus = editor.focus.clone();
         let theme = editor.core.settings().theme.clone();
         let line_height = px(editor.core.settings().line_height());
+        let font_size = px(editor.core.settings().font_size);
         let mode_line_height = px(editor.core.settings().mode_line_height());
         window.handle_input(
             &focus,
@@ -359,6 +371,12 @@ impl Element for FrameElement {
                         window.paint_quad(box_quad(b, origin, row.height));
                     }
                     row.text.paint(origin, row.height, window, cx).ok();
+                    for i in &row.icons {
+                        let bounds = icon_bounds(i, origin, row.height, font_size);
+                        let path = crate::icons::path(i.icon).into();
+                        let unit = TransformationMatrix::unit();
+                        window.paint_svg(bounds, path, unit, i.color, cx).ok();
+                    }
                 }
                 for c in &p.cells {
                     if let Some((bounds, color)) = c.background {
@@ -368,6 +386,7 @@ impl Element for FrameElement {
                 for c in &p.cells {
                     c.text.paint(c.origin, line_height, window, cx).ok();
                 }
+                // After the rows, so a block cursor covers text and icons alike.
                 if let Some(cursor) = p.cursor.filter(|_| p.hollow) {
                     window.paint_quad(outline(cursor, rgb(theme.cursor()), BorderStyle::Solid));
                 } else if let Some(cursor) = p.cursor {
@@ -571,6 +590,57 @@ pub(crate) fn box_quad(b: &Boxed, origin: Point<Pixels>, height: Pixels) -> gpui
         rgb(b.color),
         BorderStyle::Solid,
     )
+}
+
+/// `line`'s icons on its shaped `text`, which has `marked` spliced in at char column `at`, in the
+/// colours of `text`'s `runs`.
+pub(crate) fn icons(
+    line: &Line,
+    at: Option<usize>,
+    marked: &str,
+    text: &ShapedLine,
+    runs: &[TextRun],
+) -> Vec<RowIcon> {
+    let spliced = marked.chars().count();
+    (line.icons.iter())
+        .map(|&(col, icon)| {
+            let col = col
+                + if at.is_some_and(|a| a <= col) {
+                    spliced
+                } else {
+                    0
+                };
+            let byte = text
+                .text
+                .char_indices()
+                .nth(col)
+                .map_or(text.len(), |(b, _)| b);
+            let mut end = 0;
+            let run = runs.iter().find(|r| {
+                end += r.len;
+                end > byte
+            });
+            RowIcon {
+                icon,
+                x: text.x_for_index(byte)..text.x_for_index(byte + 2),
+                color: run.expect("an icon's spaces are in the text").color,
+            }
+        })
+        .collect()
+}
+
+/// Where `i` is painted on a row of `height` whose text starts at `origin`: a square centred on
+/// its cells, as big as the font or the cells' width, whichever is less.
+pub(crate) fn icon_bounds(
+    i: &RowIcon,
+    origin: Point<Pixels>,
+    height: Pixels,
+    font_size: Pixels,
+) -> Bounds<Pixels> {
+    let width = i.x.end - i.x.start;
+    let side = font_size.min(width);
+    let at = point(i.x.start + (width - side) / 2., (height - side) / 2.);
+    Bounds::new(origin + at, size(side, side))
 }
 
 /// `line`'s text with `marked` spliced in at char column `at`, one run per span, the byte offset

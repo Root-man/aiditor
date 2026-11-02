@@ -28,6 +28,7 @@ Some(
                     ],
                     decorations: [],
                     aligned: false,
+                    icons: [],
                 },
             ],
             cursor: Some(

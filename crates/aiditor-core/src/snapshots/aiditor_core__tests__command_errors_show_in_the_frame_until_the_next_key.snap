@@ -27,6 +27,7 @@ FrameDisplay {
                             ),
                         ],
                         aligned: false,
+                        icons: [],
                     },
                 ],
                 cursor: Some(
