@@ -271,8 +271,6 @@ async fn permission_requests_are_answered_from_the_session_buffer() {
     app.until("the turn", |app| app.prompted).await;
     assert_eq!(
         app.core.text(),
-        "> go\n\nChose Yes (allow_once) for Write a.txt\n\n\
-         Chose No (reject_once) for Write a.txt\n\n\
-         Chose Always (allow_always) for Write a.txt\n\nWorked 0s\n\n> "
+        "> go\n\n✓ allowed once\n\n✗ rejected\n\n✓ allowed always\n\nWorked 0s\n\n> "
     );
 }

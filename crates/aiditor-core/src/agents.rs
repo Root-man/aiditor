@@ -339,7 +339,7 @@ struct Ask {
     /// The tool call it asks about, which shows the wait.
     tool: ToolCallId,
     since: Instant,
-    /// The tool call's title, for the block and its answer line.
+    /// The tool call's title, for the block.
     title: String,
     options: Vec<PermissionOption>,
     /// Where the block starts and its length in chars, the blank line after it not counted.
@@ -1244,17 +1244,12 @@ impl Ctx<'_> {
                 RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                     o.option_id.clone(),
                 )),
-                format!(
-                    "Chose {} ({}) for {}",
-                    first_line(&o.name),
-                    acp_name(o.kind),
-                    ask.title
-                ),
+                answered(o.kind),
             ),
-            None => (RequestPermissionOutcome::Cancelled, cancelled(&ask)),
+            None => (RequestPermissionOutcome::Cancelled, CANCELLED),
         };
         if let Some(b) = core.buffers.get_mut(session.buffer) {
-            settle(b, &ask, &line);
+            settle(b, &ask, line);
         }
         core.close_wait(id, &ask);
         let response = RequestPermissionResponse::new(outcome);
@@ -1456,12 +1451,16 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Ends the turn, with a line saying why unless it ended normally.
+    /// Ends the turn, cancelling the requests it left pending, with a line saying why unless it
+    /// ended normally.
     pub(crate) fn agent_prompted(&mut self, id: AgentId, result: Result<StopReason, String>) {
-        let core = &mut *self.core;
-        if core.agents.get(&id).is_none_or(|s| s.turn.is_none()) {
+        let Some(session) = self.core.agents.get(&id).filter(|s| s.turn.is_some()) else {
             return;
+        };
+        for _ in 0..session.asks.len() {
+            self.answer_ask(id, 0, None);
         }
+        let core = &mut *self.core;
         let line = match result {
             Ok(StopReason::EndTurn) => None,
             Ok(StopReason::MaxTokens) => Some("Turn ended: max_tokens".into()),
@@ -1512,7 +1511,7 @@ impl Ctx<'_> {
         // The agent is gone with its requests, so only the blocks change.
         let asks = std::mem::take(&mut session.asks);
         if let Some(b) = core.buffers.get_mut(session.buffer) {
-            asks.iter().for_each(|ask| settle(b, ask, &cancelled(ask)));
+            asks.iter().for_each(|ask| settle(b, ask, CANCELLED));
         }
         asks.iter().for_each(|ask| core.close_wait(id, ask));
         let session = core.agents.get_mut(&id).expect("found above");
@@ -3944,9 +3943,7 @@ mod tests {
         let c = asked("C");
         assert_eq!(
             h.core.text(),
-            format!(
-                "> a\n\nChose Yes (allow_once) for A\n\nChose No (reject_once) for B\n\n{c}\n\nWorking for 0s\n\n> "
-            )
+            format!("> a\n\n✓ allowed once\n\n✗ rejected\n\n{c}\n\nWorking for 0s\n\n> ")
         );
         h.keys("C-c C-y");
         assert_eq!(ops(&mut h), ["reply 0 3 allow"]);
@@ -3965,19 +3962,73 @@ mod tests {
         // The newer request's second option, then the older one's header, which sends nothing.
         h.keys("C-p C-p C-p C-p C-p RET");
         assert_eq!(ops(&mut h), ["reply 0 2 always"]);
-        assert!(
-            h.core
-                .text()
-                .contains("Chose Always (allow_always) for B\n")
-        );
+        assert!(h.core.text().contains("✓ allowed always\n"));
         h.keys("M-< C-n C-n RET");
         assert_eq!(h.core.message(), Some("claude is busy"));
         h.keys("C-n C-n C-n RET");
         assert_eq!(ops(&mut h), ["reply 0 1 reject"]);
         assert_eq!(
             h.core.text(),
-            "> a\n\nChose No (reject_once) for A\n\nChose Always (allow_always) for B\n\nWorking for 0s\n\n> "
+            "> a\n\n✗ rejected\n\n✓ allowed always\n\nWorking for 0s\n\n> "
         );
+    }
+
+    #[test]
+    fn an_answered_line_is_dim_and_has_no_rule() {
+        use PermissionOptionKind::*;
+        for (kind, line) in [
+            (AllowOnce, "✓ allowed once"),
+            (AllowAlways, "✓ allowed always"),
+            (RejectOnce, "✗ rejected"),
+            (RejectAlways, "✗ rejected always"),
+        ] {
+            let mut h = session();
+            h.keys("a RET");
+            ops(&mut h);
+            let ask = RequestPermissionRequest::new(
+                "s",
+                ToolCallUpdate::new("c", ToolCallUpdateFields::new()),
+                vec![PermissionOption::new("o", "Option", kind)],
+            );
+            h.send(Msg::AgentRequest {
+                id: AgentId(0),
+                request: RequestId::Number(1),
+                body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
+            });
+            h.keys("C-p C-p C-p C-p RET");
+            assert_eq!(ops(&mut h), ["reply 0 1 o"]);
+            assert_eq!(
+                h.core.text(),
+                format!("> a\n\n{line}\n\nWorking for 0s\n\n> ")
+            );
+            let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
+            let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
+            let props = props(&h);
+            assert!(props.contains(&(line.to_string(), dim)), "{props:?}");
+            assert!(!props.iter().any(|(_, p)| *p == rule), "{props:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_ending_cancels_its_pending_requests() {
+        let ends = [
+            (Ok(StopReason::EndTurn), ""),
+            (Ok(StopReason::Refusal), "Turn ended: refusal\n\n"),
+            (Err("boom"), "Error: boom\n\n"),
+        ];
+        for (result, end) in ends {
+            let mut h = session();
+            h.keys("a RET");
+            ops(&mut h);
+            ask(&mut h, 1, "a", Some("A"));
+            ask(&mut h, 2, "b", Some("B"));
+            prompted(&mut h, result);
+            assert_eq!(ops(&mut h), ["reply 0 1 cancelled", "reply 0 2 cancelled"]);
+            assert_eq!(
+                h.core.text(),
+                format!("> a\n\n✗ cancelled\n\n✗ cancelled\n\n{end}Worked 0s\n\n> ")
+            );
+        }
     }
 
     #[test]
@@ -4019,7 +4070,7 @@ mod tests {
             ops(&mut h),
             ["cancel 0 s", "reply 0 1 cancelled", "reply 0 2 cancelled"]
         );
-        let cancelled = "Cancelled permission for A\n\nCancelled permission for B";
+        let cancelled = "✗ cancelled\n\n✗ cancelled";
         assert_eq!(
             h.core.text(),
             format!("> a\n\n{cancelled}\n\nWorking for 0s\n\n> ")
@@ -4032,11 +4083,7 @@ mod tests {
         ask(&mut h, 3, "c", Some("C"));
         exited(&mut h, 0, 1);
         assert_eq!(ops(&mut h), ["kill 0"]);
-        assert!(
-            h.core
-                .text()
-                .ends_with("Cancelled permission for C\n\nWorked 0s\n\n> ")
-        );
+        assert!(h.core.text().ends_with("✗ cancelled\n\nWorked 0s\n\n> "));
         h.keys("C-c C-y");
         assert_eq!(h.core.message(), Some("No permission request is pending"));
         // A request after the exit is cancelled and not shown.
