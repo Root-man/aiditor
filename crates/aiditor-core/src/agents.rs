@@ -27,7 +27,9 @@ use crate::project::{Project, ProjectId};
 use crate::settings::FaceName;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 
+mod groups;
 mod render;
+use groups::*;
 use render::*;
 
 /// The prompt line's text, just before the prompt area.
@@ -92,6 +94,13 @@ pub(crate) struct Session {
     plan: Option<(MarkerId, usize)>,
     /// Permission requests waiting for an answer, oldest first.
     asks: Vec<Ask>,
+    /// The tool calls and what sits among them since the last message, plan or prompt, until
+    /// they form a group.
+    run: Vec<Row>,
+    /// The run's group, once it has one.
+    group: Option<usize>,
+    /// The tool groups, in transcript order.
+    groups: Vec<Group>,
     /// The roots preamble a new session's first prompt carries, if there is anything to list.
     preamble: Option<String>,
 }
@@ -286,6 +295,10 @@ struct Tool {
     waited: Duration,
     /// How long it ran, once it finished.
     ran: Option<Duration>,
+    /// When it first finished.
+    ended: Option<Instant>,
+    /// The group it is a row of.
+    group: Option<usize>,
     /// What its header shows at the right, the last part of the header.
     time: String,
     /// The terminal it announced, whose output it shows.
@@ -352,6 +365,8 @@ struct Ask {
     /// Where the block starts and its length in chars, the blank line after it not counted.
     start: MarkerId,
     len: usize,
+    /// Its row's marker.
+    row: MarkerId,
 }
 
 /// What a block above the prompt line holds. A chunk joins a streamed block of its own kind, so
@@ -413,6 +428,10 @@ impl Core {
         {
             buffer.insert_output(end - "\n\n".len(), text);
             stream.dirty = true;
+            if let Block::Thought(_) = block {
+                session.thought_grew(text.chars().count());
+                return;
+            }
             if let (Block::Message(_), Some(message)) = (&block, session.messages.last_mut()) {
                 message.len += text.chars().count();
             }
@@ -431,6 +450,7 @@ impl Core {
                 len: text.chars().count(),
             });
         }
+        let row = (matches!(block, Block::Thought(_))).then(&mut marker);
         if let Block::Message(_) | Block::Thought(_) = block {
             session.stream = Some(Stream {
                 start: marker(),
@@ -438,6 +458,13 @@ impl Core {
                 dirty: true,
                 began: session.live().then_some((now, clock)),
             });
+        }
+        match row {
+            Some(row) => {
+                let row = Row::Thought(Thought::new(row, text.chars().count()));
+                session.add_row(buffer, row);
+            }
+            None => session.end_run(buffer),
         }
     }
 
@@ -485,7 +512,8 @@ impl Core {
     fn show_tool(&mut self, id: AgentId, call: ToolCall) {
         let known =
             (self.agents.get(&id)).is_some_and(|s| s.tools.contains_key(&call.tool_call_id));
-        if !known {
+        let new = !known;
+        if new {
             self.end_stream(id);
         }
         let Some(session) = self.agents.get_mut(&id) else {
@@ -512,6 +540,8 @@ impl Core {
         let asked = (session.asks.iter()).find(|a| a.tool == call.tool_call_id);
         let waiting = asked.map(|a| now - a.since);
         let done = finished(call.status);
+        let ended = known.and_then(|t| t.ended).or(done.then_some(now));
+        let group = known.map_or(session.group, |t| t.group);
         let ran = known.and_then(|t| t.ran).or_else(|| {
             let spent = (now - arrived?).checked_sub(waited + waiting.unwrap_or_default());
             done.then(|| spent.unwrap_or_default())
@@ -525,6 +555,9 @@ impl Core {
         };
         let open = known.is_some_and(|t| t.open);
         let mut header = tool_header(&call, term.as_ref(), open, &session.root);
+        if group.is_some() {
+            header.insert_str(0, "  ");
+        }
         if !time.is_empty() {
             header += &format!(" {time}");
         }
@@ -548,14 +581,14 @@ impl Core {
                 fence,
             });
         }
-        let tool = match session.tools.get_mut(&call.tool_call_id) {
+        let call_id = call.tool_call_id.clone();
+        match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
                 let start = buffer.marker(tool.start).expect("live while shown");
                 rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
                 (tool.term, tool.dirty, tool.faces, tool.output) = (term, false, faces, output);
-                (tool.ran, tool.time) = (ran, time);
-                tool
+                (tool.ran, tool.ended, tool.time) = (ran, ended, time);
             }
             None => {
                 let end = session.end(buffer);
@@ -569,6 +602,8 @@ impl Core {
                     arrived,
                     waited,
                     ran,
+                    ended,
+                    group,
                     time,
                     term,
                     dirty: false,
@@ -576,13 +611,26 @@ impl Core {
                     output,
                     output_buffer: None,
                 };
-                session
-                    .tools
-                    .entry(tool.call.tool_call_id.clone())
-                    .or_insert(tool)
+                session.tools.insert(call_id.clone(), tool);
+                session.add_row(buffer, Row::Tool(call_id.clone()));
             }
         };
-        render_tool(buffer, tool);
+        if group.is_none_or(|g| session.group_open(g)) {
+            render_tool(buffer, &session.tools[&call_id]);
+        }
+        if let Some(g) = group {
+            session.show_group(buffer, g);
+        }
+        if new && session.forms_group() {
+            session.form_group(buffer);
+            let g = session.group.expect("just formed");
+            for call in session.group_calls(g) {
+                self.show_tool(id, self.agents[&id].tools[&call].call.clone());
+            }
+            let session = self.agents.get_mut(&id).expect("found above");
+            let buffer = self.buffers.get_mut(session.buffer).expect("found above");
+            session.render_group(buffer, g);
+        }
     }
 
     /// Appends the command output in `meta` to the terminals it names and records their exit,
@@ -630,6 +678,9 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
+        if session.plan.is_none() {
+            session.end_run(buffer);
+        }
         let rows = plan_rows(plan);
         let text = rows_text(&rows);
         let len = text.chars().count();
@@ -673,28 +724,40 @@ impl Core {
         render_rows(buffer, end, &rows);
         let tool = ask.tool_call.tool_call_id;
         let shown = session.tools.get(&tool).map(|t| t.call.clone());
+        let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
+        let (start, row) = (marker(), marker());
+        let len = text.chars().count();
         session.asks.push(Ask {
             tool,
             since: now,
             request,
             title,
             options: ask.options,
-            start: (buffer.add_marker(end, InsertionType::Stay)).expect("in the text"),
-            len: text.chars().count(),
+            start,
+            len,
+            row,
         });
+        session.add_row(buffer, Row::Ask { start: row, len });
+        if let Some(g) = session.group {
+            session.show_group(buffer, g);
+        }
         if let Some(call) = shown {
             self.show_tool(id, call);
         }
     }
 
-    /// Adds `ask`'s wait, just closed, to its tool call and shows the call without it.
+    /// Adds `ask`'s wait, just closed, to its tool call and shows the call without it, its block
+    /// now the answer's `line`.
     // shortcut: overlapping asks on one call each add their wait, so the run time can read low;
     // both adapters ask once per call.
-    fn close_wait(&mut self, id: AgentId, ask: &Ask) {
+    fn close_wait(&mut self, id: AgentId, ask: &Ask, line: &str) {
         let now = self.now();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
+        if let Some(buffer) = self.buffers.get_mut(session.buffer) {
+            session.settle_row(buffer, ask.row, line.chars().count());
+        }
         if let Some(tool) = session.tools.get_mut(&ask.tool) {
             tool.waited += now - ask.since;
             let call = tool.call.clone();
@@ -725,7 +788,9 @@ impl Core {
         if std::mem::take(&mut stream.dirty) {
             let start = buffer.marker(stream.start).expect("live while streaming");
             let thought = matches!(stream.block, Block::Thought(_));
-            render(buffer, start..end, thought);
+            if !thought || !session.fold_stream(buffer) {
+                render(buffer, start..end, thought);
+            }
         }
     }
 
@@ -743,21 +808,26 @@ impl Core {
         };
         let start = buffer.marker(stream.start).expect("live while streaming");
         buffer.remove_marker(stream.start);
-        let Some((began, clock)) = stream.began else {
-            return;
-        };
-        match (stream.block, clock, session.messages.last_mut()) {
-            (Block::Thought(_), ..) => {
-                let elapsed = self.now.expect("set by handle") - began;
-                let header = format!("Thought for {}s", elapsed.as_secs());
-                buffer.insert_output(start, &format!("{header}\n"));
-                let end = start + header.chars().count();
-                (buffer.add_property(start..end, dim())).expect("just inserted");
+        let thought = matches!(stream.block, Block::Thought(_));
+        let mut header = None;
+        if let Some((began, clock)) = stream.began {
+            match (stream.block, clock, session.messages.last_mut()) {
+                (Block::Thought(_), ..) => {
+                    let elapsed = self.now.expect("set by handle") - began;
+                    let text = format!("Thought for {}s", elapsed.as_secs());
+                    buffer.insert_output(start, &format!("{text}\n"));
+                    let end = start + text.chars().count();
+                    (buffer.add_property(start..end, dim())).expect("just inserted");
+                    header = Some(end - start);
+                }
+                (Block::Message(_), Some(clock), Some(message)) => {
+                    message.len += put_time(buffer, line_end(buffer, start), &clock);
+                }
+                _ => {}
             }
-            (Block::Message(_), Some(clock), Some(message)) => {
-                message.len += put_time(buffer, line_end(buffer, start), &clock);
-            }
-            _ => {}
+        }
+        if thought {
+            session.end_thought(buffer, header);
         }
     }
 
@@ -1056,6 +1126,9 @@ impl Ctx<'_> {
             tools: HashMap::new(),
             plan: None,
             asks: Vec::new(),
+            run: Vec::new(),
+            group: None,
+            groups: Vec::new(),
             preamble,
         };
         core.agents.insert(id, session);
@@ -1263,7 +1336,7 @@ impl Ctx<'_> {
         if let Some(b) = core.buffers.get_mut(session.buffer) {
             settle(b, &ask, line);
         }
-        core.close_wait(id, &ask);
+        core.close_wait(id, &ask, line);
         let response = RequestPermissionResponse::new(outcome);
         self.effects.push(Effect::Agent(AgentOp::Reply {
             id,
@@ -1321,7 +1394,8 @@ impl Ctx<'_> {
         let b = core.buffers.get(buffer)?;
         let (&id, session) = core.agents.iter().find(|(_, s)| s.buffer == buffer)?;
         let tool = (session.tools.iter()).find(|(_, t)| {
-            (b.marker(t.start)).is_some_and(|s| (s..=s + t.header).contains(&point))
+            let shown = !session.hidden(t);
+            shown && (b.marker(t.start)).is_some_and(|s| (s..=s + t.header).contains(&point))
         });
         tool.map(|(call, _)| (id, call.clone()))
     }
@@ -1387,10 +1461,12 @@ impl Ctx<'_> {
             return Ok(());
         }
         core.end_stream(id);
+        let session = core.agents.get_mut(&id).expect("found above");
         let b = core
             .buffers
             .get_mut(buffer)
             .expect("current buffer is live");
+        session.end_run(b);
         let start = b.prompt_start();
         let working = format!("Working for {}", long_duration(Duration::ZERO));
         b.append(&format!("\n\n{working}\n\n{PROMPT}"));
@@ -1438,8 +1514,9 @@ impl Ctx<'_> {
         self.goto(at)
     }
 
-    /// `agent-toggle-tool-call`: shows or hides the content of the tool call whose header point
-    /// is on, or hides that of the open call point is in, moving point to its header.
+    /// `agent-toggle-tool-call`: shows or hides the content of the tool call or thought row whose
+    /// header point is on, or hides that of the open one point is in, moving point to its header.
+    /// Elsewhere in a group, it opens or folds the group.
     pub(crate) fn agent_toggle_tool_call(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
         let point = core.point();
@@ -1449,17 +1526,39 @@ impl Ctx<'_> {
             .buffers
             .get_mut(buffer)
             .expect("current buffer is live");
-        let tool = (session.into_iter().flat_map(|s| s.tools.values_mut()))
-            .find(|t| {
+        let session = session.ok_or("No tool call here")?;
+        let call = (session.tools.iter())
+            .find(|(_, t)| {
                 let end = if t.open { t.len } else { t.header };
-                (b.marker(t.start)).is_some_and(|s| (s..=s + end).contains(&point))
+                // A row with nothing to open leaves `TAB` to its group.
+                (t.group.is_none() || t.len > t.header)
+                    && !session.hidden(t)
+                    && (b.marker(t.start)).is_some_and(|s| (s..=s + end).contains(&point))
             })
-            .ok_or("No tool call here")?;
+            .map(|(call, _)| call.clone());
+        let Some(call) = call else {
+            if let Some((start, first)) = session.toggle_thought(b, point) {
+                return if point > first {
+                    self.goto(start)
+                } else {
+                    Ok(())
+                };
+            }
+            let (start, line, open) =
+                (session.toggle_group(b, point)).ok_or("No tool call here")?;
+            return if !open && point > line {
+                self.goto(start)
+            } else {
+                Ok(())
+            };
+        };
+        let tool = session.tools.get_mut(&call).expect("just found");
         // Without content there is nothing to show, so it stays folded for when content comes.
         tool.open = !tool.open && tool.len > tool.header;
         let start = b.marker(tool.start).expect("live while shown");
         b.remove_properties(start..start + tool.len);
-        b.replace_output(start..start + 1, if tool.open { "▾" } else { "▸" });
+        let mark = start + if tool.group.is_some() { 2 } else { 0 };
+        b.replace_output(mark..mark + 1, if tool.open { "▾" } else { "▸" });
         render_tool(b, tool);
         if point > start + tool.header {
             return self.goto(start);
@@ -1572,7 +1671,7 @@ impl Ctx<'_> {
         if let Some(b) = core.buffers.get_mut(session.buffer) {
             asks.iter().for_each(|ask| settle(b, ask, CANCELLED));
         }
-        asks.iter().for_each(|ask| core.close_wait(id, ask));
+        (asks.iter()).for_each(|ask| core.close_wait(id, ask, CANCELLED));
         let session = core.agents.get_mut(&id).expect("found above");
         if !std::mem::replace(&mut session.ended, true) {
             let agent = &session.agent;
@@ -2611,11 +2710,12 @@ mod tests {
             .map(|l| {
                 // Right-aligning padding reads as the one space it is in the text.
                 let padding = |s: &str| s.len() > 1 && s.trim().is_empty();
-                let text = |s: &crate::display::Span| match padding(&s.text) {
+                let text = |(i, s): (usize, &crate::display::Span)| match i > 0 && padding(&s.text)
+                {
                     true => " ".to_string(),
                     false => s.text.clone(),
                 };
-                l.spans.iter().map(text).collect()
+                l.spans.iter().enumerate().map(text).collect()
             })
             .collect()
     }
@@ -2748,6 +2848,7 @@ mod tests {
         assert_eq!(shown(&mut h, 3)[..2], ["▾ ✓   Ran ls 0.0s", ""]);
         assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
         // TAB on a call without content leaves it folded.
+        chunk(&mut h, "Next.");
         tool(&mut h, ToolCall::new("e", "Empty"));
         h.keys("M-> C-p C-p TAB");
         let content = ToolCallUpdateFields::new().raw_output(serde_json::json!("x"));
@@ -3997,6 +4098,461 @@ mod tests {
         let session = h.core.agents[&AgentId(0)].buffer;
         let text = h.core.buffers.get(session).unwrap().text().to_string();
         assert_eq!(text, "> a\n\nWorked 7s\n\n> ");
+    }
+
+    /// A finished `read` call `id` of `path`.
+    fn read(id: &'static str, path: &'static str) -> ToolCall {
+        ToolCall::new(id, format!("Read {path}"))
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::Completed)
+            .raw_output(serde_json::json!("text"))
+            .locations(vec![ToolCallLocation::new(path)])
+    }
+
+    /// An unfinished call `id` of `kind` without content.
+    fn call(id: &'static str, kind: ToolKind) -> ToolCall {
+        ToolCall::new(id, id.to_string()).kind(kind)
+    }
+
+    fn visible(h: &mut Harness) -> Vec<String> {
+        let lines = shown(h, 30);
+        (lines.into_iter()).filter(|l| !l.is_empty()).collect()
+    }
+
+    /// A session with a turn running and `read` calls `a` and `b` folded into a group.
+    fn grouped() -> Harness {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, read("b", "b.rs"));
+        h
+    }
+
+    /// Moves point to the line starting with `line` after any indent, from the top.
+    fn on_line(h: &mut Harness, line: &str) {
+        let text = h.core.text();
+        let at = (text.char_indices())
+            .scan(0, |chars, (byte, c)| {
+                let at = *chars;
+                *chars += 1;
+                Some((byte, at, c))
+            })
+            .find(|&(byte, _, c)| {
+                let start = byte == 0 || text[..byte].ends_with('\n');
+                start && c != '\n' && text[byte..].trim_start_matches(' ').starts_with(line)
+            })
+            .map(|(_, at, _)| at)
+            .expect("the line");
+        let core = &mut h.core;
+        let window = &mut core.windows.window;
+        window.set_point(&mut core.buffers, at).unwrap();
+    }
+
+    #[test]
+    fn two_calls_fold_into_one_line() {
+        let mut h = grouped();
+        assert_eq!(
+            h.core.text(),
+            "> a\n\n▸    Read files 0.0s\n  ▸ ✓    Read a.rs 0.0s\nOutput:\n```\ntext\n```\n  \
+             ▸ ✓    Read b.rs 0.0s\nOutput:\n```\ntext\n```\n\nWorking for 0s\n\n> "
+        );
+        assert_eq!(
+            visible(&mut h),
+            ["> a", "▸    Read files 0.0s", "Working for 0s", "> "]
+        );
+        let rule = |(_, p): &(String, Prop)| matches!(p, Prop::Line(Decoration::Rule(_)));
+        assert!(!props(&h).iter().any(rule), "the group line has no rule");
+        // A third call and updates keep it folded.
+        tool(&mut h, read("c", "c.rs"));
+        tool_update(
+            &mut h,
+            "a",
+            ToolCallUpdateFields::new().title("x".to_string()),
+        );
+        assert_eq!(visible(&mut h)[1], "▸    Read files 0.0s");
+        assert_eq!(visible(&mut h).len(), 4);
+    }
+
+    #[test]
+    fn a_single_call_has_no_group_line_and_messages_split_groups() {
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, read("a", "a.rs"));
+        chunk(&mut h, "one");
+        assert_eq!(visible(&mut h)[1], "▸ ✓   Read a.rs 0.0s");
+        tool(&mut h, read("b", "b.rs"));
+        tool(&mut h, read("c", "c.rs"));
+        chunk(&mut h, "two");
+        tool(&mut h, read("d", "d.rs"));
+        tool(&mut h, read("e", "e.rs"));
+        let lines = visible(&mut h);
+        let groups = lines.iter().filter(|l| l.contains("Read files")).count();
+        assert_eq!(groups, 2, "{lines:?}");
+        assert!(lines.contains(&"two".to_string()));
+    }
+
+    #[test]
+    fn a_prompt_and_a_session_line_end_a_run() {
+        let groups = |h: &mut Harness| {
+            let lines = visible(h);
+            lines.iter().filter(|l| l.contains("Read files")).count()
+        };
+        let mut h = grouped();
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.keys("b RET");
+        tool(&mut h, read("c", "c.rs"));
+        tool(&mut h, read("d", "d.rs"));
+        assert_eq!(groups(&mut h), 2);
+        let mut h = grouped();
+        prompted(&mut h, Ok(StopReason::MaxTokens));
+        tool(&mut h, read("c", "c.rs"));
+        tool(&mut h, read("d", "d.rs"));
+        assert_eq!(groups(&mut h), 2);
+    }
+
+    #[test]
+    fn a_shown_plan_doesnt_split_a_group_and_a_first_plan_does() {
+        let mut h = session();
+        h.keys("a RET");
+        let entry = [("x", PlanEntryStatus::Pending, PlanEntryPriority::Low)];
+        tool(&mut h, read("a", "a.rs"));
+        plan(&mut h, &entry);
+        tool(&mut h, read("b", "b.rs"));
+        assert!(
+            !h.core.text().contains("Read files"),
+            "the first plan ends the run"
+        );
+        tool(&mut h, read("c", "c.rs"));
+        plan(&mut h, &entry);
+        tool(&mut h, read("d", "d.rs"));
+        assert!(h.core.text().contains("Read files"));
+        assert_eq!(
+            visible(&mut h)
+                .iter()
+                .filter(|l| l.contains("Read"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn verbs_follow_first_appearance_and_the_running_one_is_present() {
+        let line = |h: &mut Harness| visible(h)[1].clone();
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, call("b", ToolKind::Execute));
+        tool(&mut h, read("c", "c.rs"));
+        assert_eq!(line(&mut h), "▸    Read files, running commands");
+        let mut h = session();
+        h.keys("a RET");
+        tool(
+            &mut h,
+            call("a", ToolKind::Edit).status(ToolCallStatus::Completed),
+        );
+        tool(
+            &mut h,
+            call("b", ToolKind::Search).status(ToolCallStatus::Completed),
+        );
+        tool(
+            &mut h,
+            call("c", ToolKind::Delete).status(ToolCallStatus::Completed),
+        );
+        tool(
+            &mut h,
+            call("d", ToolKind::Fetch).status(ToolCallStatus::Completed),
+        );
+        tool(
+            &mut h,
+            call("e", ToolKind::Other).status(ToolCallStatus::Completed),
+        );
+        assert_eq!(
+            line(&mut h),
+            "▸    Edited files, searched code, fetched pages, used tools 0.0s"
+        );
+        let icons: Vec<_> = (props(&h).into_iter())
+            .filter_map(|(_, p)| match p {
+                Prop::Icon(icon) => Some(icon),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(icons, [Icon::Pencil]);
+    }
+
+    #[test]
+    fn a_failed_call_shows_on_the_folded_line_and_the_duration_spans_the_group() {
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, call("a", ToolKind::Read));
+        h.advance(secs(1));
+        tool(&mut h, call("b", ToolKind::Execute));
+        let finish = |s| ToolCallUpdateFields::new().status(s);
+        tool_update(&mut h, "a", finish(ToolCallStatus::Completed));
+        h.advance(secs(2));
+        assert_eq!(visible(&mut h)[1], "▸    Read files, running commands");
+        tool_update(&mut h, "b", finish(ToolCallStatus::Failed));
+        assert_eq!(
+            visible(&mut h)[1],
+            "▸    Read files, ran commands 1 failed 3.0s"
+        );
+        assert!(h.core.text().contains("ran commands 1 failed  3.0s\n"));
+        let failed = (props(&h).into_iter()).find(|(t, _)| t == "1 failed");
+        let want = Prop::Named(vec![FaceRef::Face(FaceName::StatusFailed)]);
+        assert_eq!(failed.map(|(_, p)| p), Some(want));
+    }
+
+    #[test]
+    fn tab_opens_a_group_then_a_row_and_folds_back_a_level_at_a_time() {
+        let mut h = grouped();
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        assert_eq!(
+            visible(&mut h)[1..4],
+            [
+                "▾    Read files 0.0s",
+                "  ▸ ✓   Read a.rs 0.0s",
+                "  ▸ ✓   Read b.rs 0.0s"
+            ]
+        );
+        on_line(&mut h, "▸ ✓    Read a.rs");
+        h.keys("TAB");
+        assert_eq!(visible(&mut h)[2], "  ▾ ✓   Read a.rs 0.0s");
+        assert!(visible(&mut h).iter().any(|l| l.contains("text")));
+        // Inside the call, back to its row, the group staying open.
+        h.keys("C-n C-n TAB");
+        assert_eq!(visible(&mut h)[2], "  ▸ ✓   Read a.rs 0.0s");
+        assert_eq!(visible(&mut h).len(), 6);
+        on_line(&mut h, "▾    Read");
+        h.keys("TAB");
+        assert_eq!(visible(&mut h).len(), 4);
+        // What was open stays open across a fold.
+        h.keys("TAB");
+        on_line(&mut h, "▸ ✓    Read b.rs");
+        h.keys("TAB");
+        on_line(&mut h, "▾    Read");
+        h.keys("TAB TAB");
+        assert_eq!(visible(&mut h)[3], "  ▾ ✓   Read b.rs 0.0s");
+    }
+
+    #[test]
+    fn tab_on_a_row_with_nothing_to_open_folds_the_group() {
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, call("a", ToolKind::Read));
+        tool(&mut h, call("b", ToolKind::Read));
+        on_line(&mut h, "▸    Reading");
+        h.keys("TAB");
+        on_line(&mut h, "▸ ●    Reading a");
+        h.keys("TAB");
+        assert_eq!(visible(&mut h)[1], "▸    Reading files");
+        assert_eq!(visible(&mut h).len(), 4);
+        let at = h.core.current().text().line_to_char(2);
+        assert_eq!(h.core.point(), at);
+    }
+
+    #[test]
+    fn an_open_call_keeps_its_run_open_as_a_group_forms() {
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, read("a", "a.rs"));
+        on_line(&mut h, "▸ ✓    Read a.rs");
+        h.keys("TAB");
+        tool(&mut h, read("b", "b.rs"));
+        let lines = visible(&mut h);
+        assert_eq!(lines[1], "▾    Read files 0.0s");
+        assert_eq!(lines[2], "  ▾ ✓   Read a.rs 0.0s");
+    }
+
+    #[test]
+    fn thoughts_are_rows_of_the_group() {
+        let mut h = session();
+        h.keys("a RET");
+        thought(&mut h, "first\nthought");
+        tool(&mut h, read("a", "a.rs"));
+        thought(&mut h, "second");
+        tool(&mut h, read("b", "b.rs"));
+        thought(&mut h, "last");
+        tool(&mut h, read("c", "c.rs"));
+        assert_eq!(visible(&mut h).len(), 4);
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        assert_eq!(
+            visible(&mut h)[1..8],
+            [
+                "▾    Read files 0.0s",
+                "  ▸ Thought for 0s",
+                "  ▸ ✓   Read a.rs 0.0s",
+                "  ▸ Thought for 0s",
+                "  ▸ ✓   Read b.rs 0.0s",
+                "  ▸ Thought for 0s",
+                "  ▸ ✓   Read c.rs 0.0s"
+            ]
+        );
+        on_line(&mut h, "▸ Thought");
+        h.keys("TAB");
+        assert_eq!(visible(&mut h)[2], "  ▾ Thought for 0s");
+        assert_eq!(visible(&mut h)[3..5], ["first", "thought"]);
+        h.keys("C-n TAB");
+        assert_eq!(visible(&mut h)[2], "  ▸ Thought for 0s");
+        assert_eq!(visible(&mut h)[3], "  ▸ ✓   Read a.rs 0.0s");
+    }
+
+    #[test]
+    fn a_thought_streaming_into_a_folded_group_stays_hidden() {
+        let mut h = grouped();
+        thought(&mut h, "hmm");
+        assert_eq!(visible(&mut h).len(), 4);
+        thought(&mut h, " more");
+        assert_eq!(visible(&mut h).len(), 4);
+        chunk(&mut h, "done");
+        assert_eq!(visible(&mut h).len(), 5);
+        assert!(
+            h.core
+                .text()
+                .contains("  ▸ Thought for 0s\nhmm more\n\ndone")
+        );
+    }
+
+    #[test]
+    fn a_waiting_call_shows_under_the_fold_until_answered() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, call("t", ToolKind::Execute));
+        ask(&mut h, 1, "t", Some("t"));
+        h.advance(secs(2));
+        let lines = visible(&mut h);
+        assert_eq!(
+            lines[1..6],
+            [
+                "▸    Read files, running commands",
+                "  ▸ ●   Running t waiting 0:02",
+                "Permission: t",
+                "1. Yes (allow_once)",
+                "2. Always (allow_always)"
+            ],
+            "{lines:?}"
+        );
+        h.keys("C-c C-y");
+        assert_eq!(visible(&mut h).len(), 4);
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        assert_eq!(
+            visible(&mut h)[2..5],
+            [
+                "  ▸ ✓   Read a.rs 0.0s",
+                "  ▸ ●   Running t",
+                "✓ allowed once"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_permission_block_before_the_group_joins_it() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        ask(&mut h, 1, "u", Some("U"));
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, read("b", "b.rs"));
+        let lines = visible(&mut h);
+        assert_eq!(lines[1], "▸    Read files 0.0s", "{lines:?}");
+        assert_eq!(lines[2], "Permission: U");
+        h.keys("C-c C-y");
+        assert_eq!(visible(&mut h).len(), 4);
+    }
+
+    #[test]
+    fn line_motion_passes_a_folded_group_and_search_and_copy_reach_it() {
+        let mut h = grouped();
+        h.keys("M-< C-n C-n");
+        assert_eq!(h.core.current().text().line_to_char(2), h.core.point());
+        h.keys("C-n");
+        assert!(visible(&mut h)[1].starts_with('▸'));
+        let working = h.core.text().find("Working").unwrap();
+        let chars = h.core.text()[..working].chars().count();
+        h.keys("C-n");
+        assert_eq!(
+            h.core.point(),
+            chars,
+            "the working line, past the blank one"
+        );
+        h.keys("C-p C-p");
+        assert_eq!(h.core.current().text().line_to_char(2), h.core.point());
+    }
+
+    #[test]
+    fn search_lands_in_a_folded_group_and_tab_opens_it() {
+        let mut h = grouped();
+        h.keys("C-s b . r s RET");
+        let line = h.core.current().line_col(h.core.point()).unwrap().0;
+        let text = h.core.text();
+        assert!(text.lines().nth(line).unwrap().contains("Read b.rs"));
+        h.keys("TAB");
+        assert!(h.core.text().contains("▾    Read files 0.0s"));
+        h.keys("M-<");
+        assert_eq!(visible(&mut h)[3], "  ▸ ✓   Read b.rs 0.0s");
+    }
+
+    #[test]
+    fn a_region_over_a_folded_group_copies_its_rows() {
+        let mut h = grouped();
+        h.keys("M-< C-SPC C-n C-n C-n C-n M-w M-> C-y");
+        let prompt = h.core.text();
+        let prompt = prompt.rsplit("\n> ").next().unwrap();
+        assert!(prompt.contains("Read a.rs") && prompt.contains("Read b.rs"));
+    }
+
+    #[test]
+    fn terminal_output_reaches_a_hidden_call() {
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, command());
+        output(&mut h, "terminal_output", "t", "one\n");
+        assert_eq!(visible(&mut h).len(), 4);
+        output(&mut h, "terminal_output", "t", "two\n");
+        assert_eq!(visible(&mut h).len(), 4);
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        on_line(&mut h, "▸ ●    Running");
+        h.keys("TAB");
+        let lines = visible(&mut h);
+        assert!(lines.contains(&"two".to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn ret_on_hidden_text_shows_no_output() {
+        let mut h = grouped();
+        on_line(&mut h, "▸ ✓    Read a.rs");
+        h.keys("RET");
+        assert_eq!(h.core.message(), Some("claude is busy"));
+    }
+
+    #[test]
+    fn replayed_calls_group_without_a_duration() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
+        loading.load = Some(("old".into(), loading.buffer));
+        update(
+            &mut h,
+            0,
+            SessionUpdate::UserMessageChunk(ContentChunk::new("old".into())),
+        );
+        thought(&mut h, "hmm\nmore");
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, read("b", "b.rs"));
+        assert_eq!(visible(&mut h)[1], "▸    Read files");
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        assert_eq!(
+            visible(&mut h)[2..5],
+            ["  ▸ hmm", "  ▸ ✓   Read a.rs", "  ▸ ✓   Read b.rs"]
+        );
     }
 
     #[test]

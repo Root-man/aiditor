@@ -141,6 +141,102 @@ fn kind_parts(kind: ToolKind) -> (Icon, &'static str, &'static str) {
     }
 }
 
+/// A call's phrase on its group's line, past and present. Edits, deletes and moves share one.
+fn group_phrase(kind: ToolKind) -> (&'static str, &'static str) {
+    match kind {
+        ToolKind::Read => ("read files", "reading files"),
+        ToolKind::Search => ("searched code", "searching code"),
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => ("edited files", "editing files"),
+        ToolKind::Execute => ("ran commands", "running commands"),
+        ToolKind::Fetch => ("fetched pages", "fetching pages"),
+        _ => ("used tools", "using tools"),
+    }
+}
+
+/// `calls`' phrases in order of first appearance, comma separated, a phrase with an unfinished
+/// call in the present.
+fn group_verbs(calls: &[&Tool]) -> String {
+    let mut phrases: Vec<(&str, &str, bool)> = Vec::new();
+    for tool in calls {
+        let (past, present) = group_phrase(tool.call.kind);
+        let running = !finished(tool.call.status);
+        match phrases.iter_mut().find(|p| p.0 == past) {
+            Some(phrase) => phrase.2 |= running,
+            None => phrases.push((past, present, running)),
+        }
+    }
+    let phrases: Vec<_> = (phrases.iter())
+        .map(|&(past, present, running)| if running { present } else { past })
+        .collect();
+    let verbs = phrases.join(", ");
+    let mut chars = verbs.chars();
+    (chars.next()).map_or(String::new(), |c| c.to_uppercase().chain(chars).collect())
+}
+
+/// How long `calls` took, first start to last end, once all finished live.
+fn group_duration(calls: &[&Tool]) -> Option<Duration> {
+    let arrived = (calls.iter())
+        .map(|t| t.arrived)
+        .collect::<Option<Vec<_>>>()?;
+    let ended = (calls.iter())
+        .map(|t| t.ended)
+        .collect::<Option<Vec<_>>>()?;
+    Some(*ended.iter().max()? - *arrived.iter().min()?)
+}
+
+/// Writes a group's line over `range`, with its properties, returning its length in chars.
+pub(super) fn group_line(
+    buffer: &mut Buffer,
+    range: Range<usize>,
+    calls: &[&Tool],
+    open: bool,
+) -> usize {
+    const ICON: Range<usize> = 2..4;
+    const VERBS: usize = 5;
+    let fold = if open { '▾' } else { '▸' };
+    let verbs = group_verbs(calls);
+    let verbs_end = VERBS + verbs.chars().count();
+    let failed = (calls.iter())
+        .filter(|t| t.call.status == ToolCallStatus::Failed)
+        .count();
+    let failed = (failed > 0).then(|| format!("{failed} failed"));
+    let duration = group_duration(calls).map(short_duration);
+    let right: Vec<_> = failed.iter().chain(&duration).map(String::as_str).collect();
+    let mut text = format!("{fold}    {verbs}");
+    if !right.is_empty() {
+        text += &format!(" {}", right.join("  "));
+    }
+    let start = range.start;
+    rewrite(buffer, range, &text);
+    let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
+    let icon = calls
+        .first()
+        .map_or(Icon::Wrench, |t| kind_parts(t.call.kind).0);
+    let mut props = vec![
+        (MARKS, dim()),
+        (ICON, Prop::Icon(icon)),
+        (ICON, dim()),
+        (VERBS..verbs_end, dim()),
+    ];
+    if !right.is_empty() {
+        props.push((verbs_end..verbs_end + 1, Prop::AlignRight));
+    }
+    let mut at = verbs_end + 1;
+    if let Some(failed) = &failed {
+        let end = at + failed.chars().count();
+        props.push((at..end, face(FaceName::StatusFailed)));
+        at = end + "  ".len();
+    }
+    if let Some(duration) = &duration {
+        let end = at + duration.chars().count();
+        props.push((at..end, face(FaceName::Annotation)));
+    }
+    for (r, prop) in props {
+        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
+    }
+    text.chars().count()
+}
+
 /// The verb a call's header shows.
 fn verb(call: &ToolCall) -> &'static str {
     let (_, past, present) = kind_parts(call.kind);
@@ -549,16 +645,19 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         _ => FaceName::StatusRunning,
     };
     let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
+    // A row of a group sits two columns in, its rule still on the line's first char.
+    let indent = if tool.group.is_some() { 2 } else { 0 };
+    let head = |r: Range<usize>| r.start + indent..r.end + indent;
     let verb_end = VERB + verb(&tool.call).chars().count();
     let (icon, ..) = kind_parts(tool.call.kind);
     // A rule on one char touches only its line and sorts before the faces on it.
     let mut props = vec![
         (0..1, rule.clone()),
-        (MARKS, dim()),
-        (STATUS, face(status)),
-        (ICON, Prop::Icon(icon)),
-        (ICON, dim()),
-        (VERB..verb_end, dim()),
+        (head(MARKS), dim()),
+        (head(STATUS), face(status)),
+        (head(ICON), Prop::Icon(icon)),
+        (head(ICON), dim()),
+        (head(VERB..verb_end), dim()),
     ];
     if !tool.time.is_empty() {
         let suffix = tool.header - tool.time.chars().count() - 1;
