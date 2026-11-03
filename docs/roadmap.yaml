@@ -1947,6 +1947,33 @@ milestones:
               - "Files the agent changed after that message are left as they are"
               - "Point outside the transcript echoes `No message at point`"
             blocked_by: [m6-fork-session]
+      - key: m6-session-config
+        title: "Model and effort selection"
+        labels: [acp, minibuffer]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Editor commands that set a session's model and effort through ACP's `session/set_config_option`, the way `S-TAB` sets the mode, not agent slash commands: codex-acp offers model and reasoning effort only as config options. Both read the session's select config options (flat or grouped) by category, `model` and `thought_level`, and the answer's options update the mode line, which already shows them. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m6-select-model
+            title: "Select a session's model"
+            body: |
+              `agent-select-model` in a session buffer asks `Model:` over the values of the session's first select config option in category `model`, by display name with the current one as the default and each value's description as its annotation. Picking one sends `session/set_config_option` with that option's id and the value's id, through the existing `AgentOp::SetConfigOption`; the answer and later `config_option_update`s set the mode line's model, and a refusal is noted as a mode refusal is. A session with no model option, or not yet ready, echoes `<agent> has no model choice` or `Session not ready`.
+            acceptance:
+              - "Completion lists the model option's values, flat and grouped, with the current one as default"
+              - "Picking one sends `session/set_config_option` and the mode line follows the answer"
+              - "An agent without a model option echoes and sends nothing"
+              - "Core tests with the fake agent, which advertises a `model` option"
+              - "Checked against the real claude-agent-acp and codex-acp on macOS"
+          - key: m6-select-effort
+            title: "Select a session's effort"
+            body: |
+              `agent-select-effort` does what `agent-select-model` does for the first select config option in category `thought_level`, asking `Effort:`. The effort values can change with the model, so the command reads the options the agent reported last. A session with no effort option echoes `<agent> has no effort choice`.
+            acceptance:
+              - "Completion lists the effort option's current values, and picking one sends `session/set_config_option`"
+              - "After a model change, completion offers the values the agent reported for the new model"
+              - "An agent without an effort option echoes and sends nothing"
+              - "Checked against the real claude-agent-acp and codex-acp on macOS"
+            blocked_by: [m6-select-model]
 
 
   # ───────────────────────────────────────────── M7 ─────────────────────────────────────────────
