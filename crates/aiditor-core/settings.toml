@@ -23,6 +23,9 @@ max_watched_files = 10000
 # Files project grep searches at once; 1 searches them one by one.
 grep_workers = 1
 
+# Prompt yanks longer than this many lines fold into a paste chip.
+paste_fold_lines = 20
+
 # Agents by name: an ACP adapter's command, args, env (on top of the captured environment, under a
 # project file's) and the session mode to start in. A user table changes single keys or adds an agent.
 [agents.claude]

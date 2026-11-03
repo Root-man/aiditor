@@ -803,8 +803,9 @@ impl Buffer {
             return line;
         }
         let (text, pos) = (self.text(), self.text().line_to_char(line));
-        let fold = (self.properties_near(pos..pos).into_iter())
-            .find(|(r, p)| matches!(p, Prop::Invisible(_)) && r.start < pos && pos < r.end);
+        let fold = (self.properties_near(pos..pos).into_iter()).find(|(r, p)| {
+            matches!(p, Prop::Invisible(_) | Prop::Display(_)) && r.start < pos && pos < r.end
+        });
         match fold {
             Some((r, _)) if down => text.char_to_line(r.end) + 1,
             Some((r, _)) => text.char_to_line(r.start),
@@ -814,7 +815,7 @@ impl Buffer {
 
     /// Whether any property hides text.
     pub(crate) fn has_folds(&self) -> bool {
-        (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_)))
+        (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_) | Prop::Display(_)))
     }
 
     /// The non-empty property ranges, in stored order.
