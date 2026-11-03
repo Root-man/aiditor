@@ -61,12 +61,12 @@ fn render_thought(buffer: &mut Buffer, thought: &Thought) {
     let start = buffer.marker(thought.start).expect("live with its run");
     let end = start + thought.len;
     if thought.first == 0 {
-        return render(buffer, start..end, true);
+        return render(buffer, start..end, true, None);
     }
     let first = start + thought.first;
     (buffer.add_property(start..first, dim())).expect("inside the block");
     if thought.open {
-        render(buffer, first + 1..end, true);
+        render(buffer, first + 1..end, true, None);
     } else if first < end {
         (buffer.add_property(first..end, Prop::Invisible(String::new())))
             .expect("inside the block");

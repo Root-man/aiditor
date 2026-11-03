@@ -311,6 +311,8 @@ struct Tool {
     output: Option<usize>,
     /// The buffer showing its full output.
     output_buffer: Option<BufferId>,
+    /// The indexed file its header links to, and the line, from 1.
+    link: Option<(PathBuf, Option<usize>)>,
 }
 
 /// Faces on char ranges.
@@ -480,7 +482,7 @@ impl Core {
             return;
         };
         let end = session.end(buffer) - "\n\n".len();
-        render(buffer, end - text.chars().count()..end, false);
+        render(buffer, end - text.chars().count()..end, false, None);
         if let (true, Some(clock), Some(message)) =
             (session.live(), &self.clock, session.messages.last_mut())
         {
@@ -581,6 +583,9 @@ impl Core {
                 fence,
             });
         }
+        let index = self.index.get(&session.project);
+        let link = tool_path(&call, term.as_ref())
+            .and_then(|(path, line)| Some((index?.file(path)?, line.map(|l| l as usize))));
         let call_id = call.tool_call_id.clone();
         match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
@@ -588,7 +593,7 @@ impl Core {
                 rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
                 (tool.term, tool.dirty, tool.faces, tool.output) = (term, false, faces, output);
-                (tool.ran, tool.ended, tool.time) = (ran, ended, time);
+                (tool.ran, tool.ended, tool.time, tool.link) = (ran, ended, time, link);
             }
             None => {
                 let end = session.end(buffer);
@@ -610,6 +615,7 @@ impl Core {
                     faces,
                     output,
                     output_buffer: None,
+                    link,
                 };
                 session.tools.insert(call_id.clone(), tool);
                 session.add_row(buffer, Row::Tool(call_id.clone()));
@@ -789,7 +795,12 @@ impl Core {
             let start = buffer.marker(stream.start).expect("live while streaming");
             let thought = matches!(stream.block, Block::Thought(_));
             if !thought || !session.fold_stream(buffer) {
-                render(buffer, start..end, thought);
+                // shortcut: links are found as the block renders; a file indexed later isn't
+                // linked until it renders again, and RET on one since dropped sends the prompt.
+                let index = (!thought)
+                    .then(|| self.index.get(&session.project))
+                    .flatten();
+                render(buffer, start..end, thought, index);
             }
         }
     }
@@ -1386,6 +1397,34 @@ impl Ctx<'_> {
         })
     }
 
+    /// The file and line, from 1, of the link point is on: a tool call header's, else the word's.
+    fn link_at_point(&self) -> Option<(PathBuf, Option<usize>)> {
+        let core = &*self.core;
+        let (point, buffer) = (core.point(), core.windows.window.buffer());
+        let b = core.buffers.get(buffer)?;
+        let session = core.agents.values().find(|s| s.buffer == buffer)?;
+        let link = FaceRef::Face(FaceName::Link);
+        let linked = (b.properties_near(point..point).into_iter())
+            .any(|(r, p)| r.contains(&point) && matches!(p, Prop::Named(f) if f.contains(&link)));
+        if !linked || point >= b.prompt_start() {
+            return None;
+        }
+        if let Some((_, call)) = self.tool_at_point() {
+            return session.tools[&call].link.clone();
+        }
+        let text = b.text();
+        let start = text.line_to_char(text.char_to_line(point));
+        let line = text.slice(start..line_end(b, point)).to_string();
+        let at = line
+            .char_indices()
+            .nth(point - start)
+            .map_or(line.len(), |(i, _)| i);
+        let word = markdown::words(&line)
+            .into_iter()
+            .find(|w| w.contains(&at))?;
+        file_link(core.index.get(&session.project), &line[word])
+    }
+
     /// The tool call whose header point is on.
     fn tool_at_point(&self) -> Option<(AgentId, ToolCallId)> {
         let core = &*self.core;
@@ -1431,12 +1470,20 @@ impl Ctx<'_> {
     }
 
     /// `agent-send-input`: on a pending permission request's option line, answers it with that
-    /// option; on a tool call's header, shows its full output; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
+    /// option; on a file link, visits the file in another window; on a tool call's header, shows
+    /// its full output; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
     /// new prompt line.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
         if let Some((id, at, option)) = self.option_at_point() {
             self.answer_ask(id, at, Some(option));
             return Ok(());
+        }
+        if let Some((path, line)) = self.link_at_point() {
+            if self.core.windows.tree.leaves().len() == 1 {
+                self.split_window(false)?;
+            }
+            self.other_window(1)?;
+            return self.find_file_at(&path, line.map_or(0, |l| l.saturating_sub(1)), 0);
         }
         if let Some((id, call)) = self.tool_at_point() {
             return self.show_tool_output(id, &call);
@@ -1470,7 +1517,7 @@ impl Ctx<'_> {
         let start = b.prompt_start();
         let working = format!("Working for {}", long_duration(Duration::ZERO));
         b.append(&format!("\n\n{working}\n\n{PROMPT}"));
-        render(b, start..start + input.chars().count(), false);
+        render(b, start..start + input.chars().count(), false, None);
         let end = b.len_chars();
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
         let line = start + input.chars().count() + "\n\n".len();
@@ -3105,6 +3152,92 @@ mod tests {
             drawn(&mut h, "@@ -1 +1,2 @@").fg,
             h.core.settings().theme.face(FaceName::DiffHunk).fg
         );
+    }
+
+    /// A session whose project indexes `src/a.rs` and `src/main.rs`, `a.rs` three lines long, and
+    /// `lib/b.rs` in a second root.
+    fn indexed_session() -> Harness {
+        let mut h = session();
+        h.index_reply("app", &["src/a.rs", "src/main.rs"], &["app", "app/src"]);
+        let other = crate::project::Root {
+            path: h.path("other"),
+            role: String::new(),
+        };
+        h.core.projects[0].project.roots.push(other);
+        h.index_reply("other", &["lib/b.rs"], &["other", "other/lib"]);
+        h.read_reply("app/src/a.rs", Some(b"one\ntwo\nthree\n"));
+        h.keys("M-x project-index RET home RET");
+        h
+    }
+
+    /// Whether `text` draws as a link.
+    fn linked(h: &mut Harness, text: &str) -> bool {
+        let link = h.core.settings().theme.face(FaceName::Link).fg;
+        let face = drawn(h, text);
+        face.underline && face.fg == link
+    }
+
+    /// Puts point `n` chars into the first `text` in the buffer.
+    fn point_in(h: &mut Harness, text: &str, n: usize) {
+        let all = h.core.text();
+        let at = all[..all.find(text).expect("in the buffer")]
+            .chars()
+            .count();
+        h.ctx().goto(at + n).unwrap();
+    }
+
+    #[test]
+    fn existing_paths_in_messages_are_links() {
+        let mut h = indexed_session();
+        h.keys("a RET");
+        chunk(&mut h, "see `src/a.rs:2`, `lib/b.rs`, not `src/gone.rs`");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert!(linked(&mut h, "src/a.rs:2"));
+        assert!(linked(&mut h, "lib/b.rs"), "a second root's file");
+        assert!(!linked(&mut h, "src/gone.rs"));
+    }
+
+    #[test]
+    fn ret_on_a_message_link_visits_its_line_in_another_window() {
+        let mut h = indexed_session();
+        h.keys("a RET");
+        chunk(&mut h, "see src/a.rs:3 here");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.frame(800., 600.);
+        ops(&mut h);
+        point_in(&mut h, "src/a.rs:3", 2);
+        h.keys("RET");
+        assert!(ops(&mut h).is_empty(), "nothing is sent");
+        assert_eq!(h.core.windows.tree.leaves().len(), 2);
+        assert_eq!(h.core.current().file, Some(h.path("app/src/a.rs")));
+        assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
+    }
+
+    #[test]
+    fn tool_headers_link_indexed_files_and_ret_visits_them() {
+        let mut h = indexed_session();
+        let read = |id: &str, path: PathBuf| {
+            let location = ToolCallLocation::new(path).line(2);
+            ToolCall::new(id.to_string(), "Read")
+                .kind(ToolKind::Read)
+                .locations(vec![location])
+        };
+        let a = h.path("app/src/a.rs");
+        // Two calls would fold into a group.
+        let mut outside = indexed_session();
+        tool(&mut outside, read("u", "/etc/hosts".into()));
+        // Plain, it runs on from the space before it.
+        assert!(!linked(&mut outside, " /etc/hosts"));
+        tool(&mut h, read("t", a));
+        assert!(linked(&mut h, "src/a.rs"));
+        // Off the link, the header still opens the output.
+        point_in(&mut h, "Reading src/a.rs", 1);
+        h.keys("RET");
+        assert_eq!(h.core.message.as_deref(), Some("No output"));
+        point_in(&mut h, "src/a.rs", 1);
+        h.keys("RET");
+        assert_eq!(h.core.current().file, Some(h.path("app/src/a.rs")));
+        assert_eq!(h.core.current().line_col(h.point()).unwrap(), (1, 0));
     }
 
     #[test]
