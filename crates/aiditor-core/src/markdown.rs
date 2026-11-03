@@ -240,6 +240,7 @@ mod tests {
             bold,
             italic,
             underline,
+            strike: false,
             boxed: None,
         }
     }

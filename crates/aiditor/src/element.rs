@@ -10,8 +10,9 @@ use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
     Entity, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, LayoutId,
-    Pixels, Point, ShapedLine, Style, TextRun, TransformationMatrix, UnderlineStyle, Window, fill,
-    outline, point, prelude::*, px, quad, rgb, size, transparent_black,
+    Pixels, Point, ShapedLine, StrikethroughStyle, Style, TextRun, TransformationMatrix,
+    UnderlineStyle, Window, fill, outline, point, prelude::*, px, quad, rgb, size,
+    transparent_black,
 };
 
 use crate::editor::Editor;
@@ -480,7 +481,10 @@ pub(crate) fn text_run(
             thickness: px(1.),
             ..Default::default()
         }),
-        strikethrough: None,
+        strikethrough: face.strike.then(|| StrikethroughStyle {
+            thickness: px(1.),
+            ..Default::default()
+        }),
     }
 }
 

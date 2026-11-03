@@ -21,6 +21,7 @@ Some(
                                 bold: false,
                                 italic: false,
                                 underline: false,
+                                strike: false,
                                 boxed: None,
                             },
                             fold: false,

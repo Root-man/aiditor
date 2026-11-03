@@ -353,7 +353,7 @@ impl Terminal {
                     bold: run.bold,
                     italic: run.italic,
                     underline: run.underline,
-                    boxed: None,
+                    ..Face::default()
                 };
                 if face
                     != (Face {

@@ -27,8 +27,10 @@ use crate::project::{Project, ProjectId};
 use crate::settings::FaceName;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 
+mod chips;
 mod groups;
 mod render;
+pub(crate) use chips::Chips;
 use groups::*;
 use render::*;
 
@@ -103,6 +105,8 @@ pub(crate) struct Session {
     groups: Vec<Group>,
     /// The roots preamble a new session's first prompt carries, if there is anything to list.
     preamble: Option<String>,
+    /// The buffer's tick when the prompt area's chips were last painted.
+    painted: u64,
 }
 
 /// The project's roots with their role lines, the primary first; `None` with nothing to list.
@@ -471,9 +475,30 @@ impl Core {
     }
 
     /// Puts a replayed user message above session `id`'s prompt line as a sent prompt shows.
-    // shortcut: one block per chunk, as both adapters send whole messages; join chunks by
-    // `messageId` if one ever splits a message.
     fn show_user(&mut self, id: AgentId, text: &str, message: Option<MessageId>) {
+        let text = &self.chips.replace_links(text);
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        // A chunk of the last block's user message joins it, as Claude's adapter replays each
+        // of a message's blocks, a chip's link among them, as a chunk.
+        let end = session.end(buffer).saturating_sub("\n\n".len());
+        let last = (session.messages.last_mut()).filter(|m| m.id.is_some() && m.id == message);
+        if let Some(last) = last
+            && let Some(start) = buffer.marker(last.start)
+            && start + last.len == end
+            && session.stream.is_none()
+        {
+            buffer.insert_output(end, text);
+            last.len += text.chars().count();
+            let range = start + PROMPT.len()..start + last.len;
+            render(buffer, range.clone(), false, None);
+            self.chips.paint(buffer, range);
+            return;
+        }
         self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
         let Some(session) = self.agents.get_mut(&id) else {
             return;
@@ -483,6 +508,7 @@ impl Core {
         };
         let end = session.end(buffer) - "\n\n".len();
         render(buffer, end - text.chars().count()..end, false, None);
+        self.chips.paint(buffer, end - text.chars().count()..end);
         if let (true, Some(clock), Some(message)) =
             (session.live(), &self.clock, session.messages.last_mut())
         {
@@ -916,6 +942,46 @@ impl Core {
         }
     }
 
+    /// Repaints the chips of session `id`'s prompt area if it changed since, as yank and undo
+    /// bring chips back.
+    fn paint_prompt(&mut self, id: AgentId) {
+        let session = self.agents.get_mut(&id).expect("known session");
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        // The prompt area carries only chips' properties, so it is cleared whole.
+        if std::mem::replace(&mut session.painted, buffer.tick()) != buffer.tick() {
+            let range = buffer.prompt_start()..buffer.len_chars();
+            buffer.remove_properties(range.clone());
+            self.chips.paint(buffer, range);
+        }
+    }
+
+    /// Repaints every session buffer's chips, after a chip's file went or came back.
+    pub(crate) fn repaint_chips(&mut self) {
+        for session in self.agents.values() {
+            if let Some(buffer) = self.buffers.get_mut(session.buffer) {
+                self.chips.paint(buffer, 0..buffer.len_chars());
+            }
+        }
+    }
+
+    /// The chip at point in a session buffer.
+    fn chip_at_point(&self) -> Option<&chips::Chip> {
+        let buffer = self.windows.window.buffer();
+        self.agents.values().find(|s| s.buffer == buffer)?;
+        self.chips
+            .get(self.current().text().get_char(self.point())?)
+    }
+
+    /// Shows the path of the chip at point when the command left no message, as eldoc does.
+    pub(crate) fn echo_chip(&mut self) {
+        if self.message.is_none() {
+            let path = self.chip_at_point().and_then(|c| c.path.as_ref());
+            self.message = path.map(|p| p.display().to_string());
+        }
+    }
+
     /// Renders shown streamed blocks and dirty tool calls, at most once per frame.
     pub(crate) fn render_streams(&mut self, shown: &HashSet<BufferId>) {
         let ids: Vec<_> = self.agents.keys().copied().collect();
@@ -924,6 +990,7 @@ impl Core {
                 continue;
             }
             self.render_stream(id);
+            self.paint_prompt(id);
             let dirty: Vec<_> = (self.agents[&id].tools.values())
                 .filter(|t| t.dirty)
                 .map(|t| t.call.tool_call_id.clone())
@@ -1141,6 +1208,7 @@ impl Ctx<'_> {
             group: None,
             groups: Vec::new(),
             preamble,
+            painted: 0,
         };
         core.agents.insert(id, session);
         core.echo(echo);
@@ -1265,11 +1333,14 @@ impl Ctx<'_> {
                     core.output(id, &text.text, Block::Thought(chunk.message_id));
                 }
             }
-            SessionUpdate::UserMessageChunk(chunk) => {
-                if let ContentBlock::Text(text) = chunk.content {
-                    core.show_user(id, &text.text, chunk.message_id);
+            SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
+                ContentBlock::Text(text) => core.show_user(id, &text.text, chunk.message_id),
+                ContentBlock::Image(_) => {
+                    let chip = core.chips.intern(None, false).to_string();
+                    core.show_user(id, &chip, chunk.message_id);
                 }
-            }
+                _ => {}
+            },
             SessionUpdate::ToolCall(call) => {
                 let meta = call.meta.clone();
                 core.show_tool(id, call);
@@ -1478,6 +1549,18 @@ impl Ctx<'_> {
             self.answer_ask(id, at, Some(option));
             return Ok(());
         }
+        if let Some(chip) = self.core.chip_at_point() {
+            let (path, kind) = (chip.path.clone().ok_or("No file")?, chip.kind);
+            if kind == chips::Kind::Directory {
+                self.call("find-file", Args::default());
+                return self.set_text(&path.join("").to_string_lossy());
+            }
+            if self.core.windows.tree.leaves().len() == 1 {
+                self.split_window(false)?;
+            }
+            self.other_window(1)?;
+            return self.find_file_at(&path, 0, 0);
+        }
         if let Some((path, line)) = self.link_at_point() {
             if self.core.windows.tree.leaves().len() == 1 {
                 self.split_window(false)?;
@@ -1518,6 +1601,7 @@ impl Ctx<'_> {
         let working = format!("Working for {}", long_duration(Duration::ZERO));
         b.append(&format!("\n\n{working}\n\n{PROMPT}"));
         render(b, start..start + input.chars().count(), false, None);
+        core.chips.paint(b, start..start + input.chars().count());
         let end = b.len_chars();
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
         let line = start + input.chars().count() + "\n\n".len();
@@ -1540,8 +1624,9 @@ impl Ctx<'_> {
             start: self.now,
             len: working.chars().count() + "\n\n".len(),
         });
-        let blocks = session.preamble.take().into_iter().chain([input]);
-        let request = PromptRequest::new(session_id, blocks.map(Into::into).collect());
+        let preamble = session.preamble.take().into_iter().map(Into::into);
+        let blocks = preamble.chain(core.chips.blocks(&input)).collect();
+        let request = PromptRequest::new(session_id, blocks);
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
         self.goto(end)
@@ -1801,7 +1886,11 @@ mod tests {
                     let texts: Vec<_> = (request.prompt.iter())
                         .map(|block| match block {
                             ContentBlock::Text(text) => format!("{:?}", text.text),
-                            _ => panic!("text blocks only: {request:?}"),
+                            ContentBlock::ResourceLink(l) => format!("link {} {}", l.name, l.uri),
+                            ContentBlock::Image(i) => {
+                                format!("image {} {}", i.mime_type, i.uri.as_deref().unwrap())
+                            }
+                            _ => panic!("text, links and images only: {request:?}"),
                         })
                         .collect();
                     format!("prompt {} {} {}", id.0, request.session_id, texts.join(" "))
@@ -2342,7 +2431,11 @@ mod tests {
             SessionUpdate::UserMessageChunk(ContentChunk::new(image)),
         );
         chunk(&mut h, "c");
-        assert_eq!(h.core.text(), "a\n\n> see `b`\n\nc\n\n> ");
+        let image = h.core.chips.intern(None, false);
+        assert_eq!(
+            h.core.text(),
+            format!("a\n\n> see `b`\n\n> {image}\n\nc\n\n> ")
+        );
         let b = props(&h).into_iter().find(|(t, _)| t == "b");
         let code = vec![FaceRef::Face(FaceName::SessionCode)];
         assert_eq!(b, Some(("b".into(), Prop::Named(code))));
@@ -3195,6 +3288,165 @@ mod tests {
         assert!(linked(&mut h, "src/a.rs:2"));
         assert!(linked(&mut h, "lib/b.rs"), "a second root's file");
         assert!(!linked(&mut h, "src/gone.rs"));
+    }
+
+    /// A chip for `path`, a directory when `dir`, typed at point.
+    fn put_chip(h: &mut Harness, path: &str, dir: bool) -> char {
+        let chip = h.core.chips.intern(Some(path.into()), dir);
+        h.send(Msg::Insert {
+            text: chip.to_string(),
+            replace: None,
+        });
+        chip
+    }
+
+    /// The display line holding `text`.
+    fn drawn_line(h: &mut Harness, text: &str) -> crate::display::Line {
+        let mut frame = h.frame(800., 600.);
+        let lines = std::mem::take(&mut frame.windows[0].display.lines);
+        let line = lines.into_iter().find(|l| {
+            let drawn: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+            drawn.contains(text)
+        });
+        line.unwrap_or_else(|| panic!("{text:?} drawn"))
+    }
+
+    #[test]
+    fn a_chip_draws_as_its_icon_and_name_and_edits_as_one_char() {
+        let mut h = session();
+        h.keys("x");
+        let chip = put_chip(&mut h, "/p/src/main.rs", false);
+        h.keys("y");
+        let line = drawn_line(&mut h, "x ▤ main.rs y");
+        let attachment = h.core.settings().theme.face(FaceName::Attachment);
+        let name = line.spans.iter().find(|s| s.text == " main.rs ").unwrap();
+        assert_eq!(name.face.boxed, attachment.boxed);
+        h.keys("C-b C-b C-f");
+        assert_eq!(h.core.point(), 4, "past the chip");
+        h.keys("DEL");
+        assert_eq!(h.core.text(), "> xy");
+        h.keys("C-/");
+        assert_eq!(h.core.text(), format!("> x{chip}y"));
+        drawn_line(&mut h, "x ▤ main.rs y");
+        h.keys("C-e C-b C-b C-k C-y C-y");
+        drawn_line(&mut h, "x ▤ main.rs y ▤ main.rs y");
+    }
+
+    #[test]
+    fn chips_go_as_resource_links_and_images_and_show_in_the_echo() {
+        let mut h = session();
+        h.keys("l o o k SPC");
+        put_chip(&mut h, "/p/a.rs", false);
+        put_chip(&mut h, "/p/src", true);
+        put_chip(&mut h, "/p/Cat.JPG", false);
+        h.keys("SPC o k RET");
+        assert_eq!(
+            ops(&mut h),
+            [concat!(
+                r#"prompt 0 s "look " link a.rs file:///p/a.rs link src file:///p/src/ "#,
+                r#"image image/jpeg file:///p/Cat.JPG " ok""#
+            )]
+        );
+        drawn_line(&mut h, "> look  ▤ a.rs  ▦ src  ▣ Cat.JPG  ok");
+        // The agent service answers an unreadable image as the prompt's error.
+        prompted(&mut h, Err("can't read /p/Cat.JPG: not found"));
+        assert!(
+            h.core
+                .text()
+                .contains("Error: can't read /p/Cat.JPG: not found\n\nWorked")
+        );
+    }
+
+    #[test]
+    fn replayed_links_and_images_are_chips_in_one_message() {
+        let mut h = session();
+        let user = |block: ContentBlock| {
+            let chunk = ContentChunk::new(block).message_id(Some("u1".into()));
+            SessionUpdate::UserMessageChunk(chunk)
+        };
+        for text in ["look at ", "[@a.rs](file:///p/a.rs)", " please"] {
+            update(&mut h, 0, user(text.into()));
+        }
+        update(
+            &mut h,
+            0,
+            user(ContentBlock::Image(ImageContent::new("Zm9v", "image/png"))),
+        );
+        chunk(&mut h, "ok");
+        let a = h.core.chips.intern(Some("/p/a.rs".into()), false);
+        let image = h.core.chips.intern(None, false);
+        assert_eq!(
+            h.core.text(),
+            format!("> look at {a} please{image}\n\nok\n\n> ")
+        );
+        assert_eq!(message_list(&h).len(), 2);
+        drawn_line(&mut h, "> look at  ▤ a.rs  please ▣ image ");
+    }
+
+    #[test]
+    fn ret_on_a_chip_visits_it_and_the_echo_shows_its_path() {
+        let mut h = indexed_session();
+        let a = h.path("app/src/a.rs");
+        put_chip(&mut h, &a.to_string_lossy(), false);
+        h.keys("C-b");
+        assert_eq!(h.core.message.as_deref(), Some(&*a.to_string_lossy()));
+        h.keys("RET");
+        assert!(ops(&mut h).is_empty(), "nothing is sent");
+        assert_eq!(h.core.windows.tree.leaves().len(), 2);
+        assert_eq!(h.core.current().file, Some(a));
+    }
+
+    #[test]
+    fn ret_on_a_directory_chip_opens_find_file_there_and_a_pathless_one_echoes() {
+        let mut h = session();
+        put_chip(&mut h, "/p/src", true);
+        h.keys("C-b RET");
+        assert_eq!(h.core.current().text().to_string(), "/p/src/");
+        h.keys("C-g");
+        let image = h.core.chips.intern(None, false);
+        h.send(Msg::Insert {
+            text: image.to_string(),
+            replace: None,
+        });
+        h.keys("C-b RET");
+        assert_eq!(h.core.message.as_deref(), Some("No file"));
+        assert!(ops(&mut h).is_empty(), "nothing is sent");
+    }
+
+    #[test]
+    fn a_gone_file_is_struck_through_wherever_its_chip_shows() {
+        let mut h = session();
+        h.checks.insert("/p/gone.rs".into(), None);
+        put_chip(&mut h, "/p/gone.rs", false);
+        h.keys("RET");
+        let theme = h.core.settings().theme.clone();
+        let line = drawn_line(&mut h, ">  ▤ gone.rs");
+        let icon = line.spans.iter().find(|s| s.text == "▤").unwrap();
+        assert_eq!(icon.face.fg, theme.face(FaceName::StatusFailed).fg);
+        assert!(
+            line.spans
+                .iter()
+                .find(|s| s.text == " gone.rs ")
+                .unwrap()
+                .face
+                .strike
+        );
+        // Back on disk, as the watcher reports.
+        h.checks.insert("/p/gone.rs".into(), Some(1));
+        h.send(Msg::FilesChanged {
+            paths: vec![("/p".into(), crate::Disk::Dir)],
+            rescan: false,
+        });
+        let line = drawn_line(&mut h, ">  ▤ gone.rs");
+        assert!(
+            !line
+                .spans
+                .iter()
+                .find(|s| s.text == " gone.rs ")
+                .unwrap()
+                .face
+                .strike
+        );
     }
 
     #[test]

@@ -719,6 +719,7 @@ impl Ctx<'_> {
             Msg::AgentListed { request, result } => self.agent_listed(request, result),
             Msg::Key(key) => {
                 self.key(key);
+                self.core.echo_chip();
                 // The clipboard text was for this key only.
                 self.core.kills.clipboard = None;
             }
@@ -1021,6 +1022,8 @@ pub struct Core {
     next_terminal: u64,
     /// Each agent session, until its session buffer is killed.
     agents: BTreeMap<AgentId, agents::Session>,
+    /// Every file chip seen, shared by all sessions.
+    chips: agents::Chips,
     next_agent: u64,
     /// Whether projects' environments are captured: the app was not launched from a shell.
     capture: bool,
@@ -1103,6 +1106,7 @@ impl Default for Core {
             terminals: BTreeMap::new(),
             next_terminal: 0,
             agents: BTreeMap::new(),
+            chips: agents::Chips::default(),
             next_agent: 0,
             capture: false,
             environments: HashMap::new(),
@@ -1173,6 +1177,10 @@ impl Core {
         self.watch(&mut effects);
         self.sync_terminals(&mut effects);
         self.sync_agents(&mut effects);
+        let unchecked = std::mem::take(&mut self.chips.unchecked);
+        if !unchecked.is_empty() {
+            effects.push(Effect::File(FileOp::Check(unchecked)));
+        }
         self.sync_session_tick(now);
         self.sync_session_lists();
         effects

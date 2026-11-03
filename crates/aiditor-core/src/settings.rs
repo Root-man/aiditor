@@ -206,6 +206,10 @@ impl Theme {
                     underline: true,
                     ..Face::default()
                 },
+                FaceRef::Strike => Face {
+                    strike: true,
+                    ..Face::default()
+                },
             };
             face.over(under)
         })
@@ -382,9 +386,15 @@ mod tests {
         let inactive = FaceName::ModeLineInactive;
         assert_eq!(s.theme.face(inactive), bundled.face(inactive));
         assert!(bundled.face(FaceName::Attachment).boxed.is_some());
-        let boxed = "[themes.default.faces]\nattachment = { box = 0x504945 }";
-        let attachment = Settings::parse(Some(boxed)).unwrap().theme;
-        assert_eq!(attachment.face(FaceName::Attachment).boxed, Some(0x504945));
+        let boxed = "[themes.default.faces]\nattachment = { box = 0x504945, strike = true }";
+        let attachment = Settings::parse(Some(boxed))
+            .unwrap()
+            .theme
+            .face(FaceName::Attachment);
+        assert_eq!(
+            (attachment.boxed, attachment.strike),
+            (Some(0x504945), true)
+        );
         assert_eq!(s.theme.background(), bundled.background());
         let ansi = (0..16).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let s = Settings::parse(Some(&format!("[themes.default]\nansi = [{ansi}]"))).unwrap();

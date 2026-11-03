@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentRequest, CancelNotification, ClientCapabilities, Implementation, InitializeRequest,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, NewSessionResponse, RequestId,
-    SessionId, SessionInfo, SessionNotification,
+    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, Implementation,
+    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PromptRequest, RequestId, SessionId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Request};
@@ -63,6 +63,56 @@ impl Handle {
         self.pending.lock().unwrap().clear();
         terminate(self.pid, &self.exited)
     }
+}
+
+/// Sends `request` as `session/prompt`, its answer as `Msg::AgentPrompted`.
+fn prompt(connection: &ConnectionTo<Agent>, tx: Sender<Msg>, id: AgentId, request: PromptRequest) {
+    // The answer is handled before the next message, so it follows the turn's updates.
+    let sent = connection
+        .send_request(request)
+        .on_receiving_result(move |result| async move {
+            let result = result.map(|r| r.stop_reason).map_err(|err| err.message);
+            _ = tx.send(Msg::AgentPrompted { id, result }).await;
+            Ok(())
+        });
+    if let Err(err) = sent {
+        tracing::warn!("prompting the agent: {err}");
+    }
+}
+
+/// `request` with each image block that has no data filled from the file its URI names.
+async fn read_images(mut request: PromptRequest) -> Result<PromptRequest, String> {
+    for block in &mut request.prompt {
+        if let ContentBlock::Image(image) = block
+            && image.data.is_empty()
+        {
+            let uri = image.uri.as_deref().unwrap_or_default();
+            let path = uri.strip_prefix("file://").unwrap_or(uri);
+            let bytes =
+                (tokio::fs::read(path).await).map_err(|err| format!("can't read {path}: {err}"))?;
+            image.data = base64(&bytes);
+        }
+    }
+    Ok(request)
+}
+
+/// `bytes` in standard, padded base64.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(match i <= chunk.len() {
+                true => ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char,
+                false => '=',
+            });
+        }
+    }
+    out
 }
 
 /// SIGTERM to group `pid` unless the agent has exited; returns the group for the SIGKILL.
@@ -116,17 +166,27 @@ impl Agents {
             }
             AgentOp::Prompt { id, request } => {
                 let (connection, tx) = self.connection(id)?;
-                // The answer is handled before the next message, so it follows the turn's updates.
-                let sent = connection.send_request(request).on_receiving_result(
-                    move |result| async move {
-                        let result = result.map(|r| r.stop_reason).map_err(|err| err.message);
-                        _ = tx.send(Msg::AgentPrompted { id, result }).await;
-                        Ok(())
-                    },
-                );
-                if let Err(err) = sent {
-                    tracing::warn!("prompting the agent: {err}");
+                let unread =
+                    |b: &ContentBlock| matches!(b, ContentBlock::Image(i) if i.data.is_empty());
+                if !request.prompt.iter().any(unread) {
+                    prompt(&connection, tx, id, request);
+                    return None;
                 }
+                // Reading images waits off the caller's thread; nothing can overtake it, as the
+                // core sends no prompt while one runs.
+                tokio::spawn(async move {
+                    match read_images(request).await {
+                        Ok(request) => prompt(&connection, tx, id, request),
+                        Err(err) => {
+                            _ = tx
+                                .send(Msg::AgentPrompted {
+                                    id,
+                                    result: Err(err),
+                                })
+                                .await
+                        }
+                    }
+                });
                 None
             }
             AgentOp::SetConfigOption { id, request } => {
@@ -502,5 +562,44 @@ fn exit(id: AgentId, status: ExitStatus) -> Msg {
                 .to_string_lossy()
                 .into_owned()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::ImageContent;
+
+    #[test]
+    fn base64_pads_each_tail() {
+        let encoded: Vec<_> = ["", "f", "fo", "foo", "foob"]
+            .map(|s| base64(s.as_bytes()))
+            .into();
+        assert_eq!(encoded, ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg=="]);
+        assert_eq!(base64(&[0xfb, 0xff]), "+/8=");
+    }
+
+    #[tokio::test]
+    async fn images_are_read_from_their_uri_or_fail_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = dir.path().join("cat.png");
+        std::fs::write(&cat, b"foo").unwrap();
+        let image = |path: &Path| {
+            let uri = format!("file://{}", path.display());
+            ContentBlock::Image(ImageContent::new("", "image/png").uri(uri))
+        };
+        let request = PromptRequest::new("s", vec!["look".into(), image(&cat)]);
+        let read = read_images(request).await.unwrap();
+        let ContentBlock::Image(image_read) = &read.prompt[1] else {
+            panic!("an image");
+        };
+        assert_eq!(image_read.data, "Zm9v");
+        let gone = PromptRequest::new("s", vec![image(&dir.path().join("gone.png"))]);
+        assert!(
+            read_images(gone)
+                .await
+                .unwrap_err()
+                .starts_with("can't read")
+        );
     }
 }
