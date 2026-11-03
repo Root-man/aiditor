@@ -18,7 +18,7 @@ pub(super) fn render(
     buffer.remove_properties(range.clone());
     let text = buffer.text().slice(range.clone()).to_string();
     let is_file = |word: &str| file_link(index, word).is_some();
-    for (r, prop) in markdown::render(&text, thought, is_file) {
+    for (r, prop) in markdown::render(&text, thought, false, is_file) {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
@@ -53,6 +53,28 @@ pub(super) fn file_link(index: Option<&FileIndex>, word: &str) -> Option<(PathBu
 /// The dim face of a session's own lines.
 pub(super) fn dim() -> Prop {
     Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)])
+}
+
+/// Draws the prompt's `>` at `at` as frame 6's `❯`; the text keeps `>`.
+pub(super) fn prompt_glyph(buffer: &mut Buffer, at: usize) {
+    let glyph = vec![FaceRef::Face(FaceName::StatusInfo), FaceRef::Bold];
+    let prop = Prop::Display(vec![("❯".into(), glyph)]);
+    (buffer.add_property(at..at + 1, prop)).expect("the prompt's `>`");
+}
+
+/// Puts the `session-user` background on each line of an echo starting inside `range`, its first
+/// char included only when `first`. A one-char range per line keeps the properties sorted.
+pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>, first: bool) {
+    let text = buffer.text().slice(range.clone()).to_string();
+    let after_newlines = text.chars().enumerate().filter(|(_, c)| *c == '\n');
+    let starts = (first.then_some(0).into_iter())
+        .chain(after_newlines.map(|(i, _)| i + 1))
+        .filter(|&i| i < text.chars().count());
+    let background = Prop::Line(Decoration::Background(FaceName::SessionUser));
+    for i in starts.collect::<Vec<_>>() {
+        let at = range.start + i;
+        (buffer.add_property(at..at + 1, background.clone())).expect("inside the echo");
+    }
 }
 
 /// `12s`, `2m 05s` or `1h 02m 05s`.
@@ -312,8 +334,42 @@ pub(super) fn tool_target(call: &ToolCall, term: Option<&Term>, root: &Path) -> 
         .unwrap_or_else(|| first_line(&call.title).trim_matches('`').to_string())
 }
 
+/// The lines `call`'s diffs add and remove, if it has any.
+fn diff_counts(call: &ToolCall) -> Option<(usize, usize)> {
+    let mut diffs = (call.content.iter()).filter_map(|item| match item {
+        ToolCallContent::Diff(d) => Some(d),
+        _ => None,
+    });
+    let first = diffs.next()?;
+    let changes = |d: &Diff| {
+        let old = d.old_text.as_deref().unwrap_or_default();
+        let diff = similar::TextDiff::from_lines(old, &d.new_text);
+        let tags: Vec<_> = diff.iter_all_changes().map(|c| c.tag()).collect();
+        let count = |tag| tags.iter().filter(|t| **t == tag).count();
+        (
+            count(similar::ChangeTag::Insert),
+            count(similar::ChangeTag::Delete),
+        )
+    };
+    Some(
+        std::iter::once(first)
+            .chain(diffs)
+            .map(changes)
+            .fold((0, 0), |(a, r), (x, y)| (a + x, r + y)),
+    )
+}
+
+/// ` +<added> −<removed>` after a call's target, empty without diffs, and where `−` starts.
+fn counts_text(call: &ToolCall) -> (String, usize) {
+    diff_counts(call).map_or((String::new(), 0), |(added, removed)| {
+        let added = format!(" +{added}");
+        let at = added.chars().count();
+        (format!("{added} −{removed}"), at + 1)
+    })
+}
+
 /// A tool call's header line, the time left out: its fold and status marks, spaces for its icon,
-/// its verb and what it acts on.
+/// its verb, what it acts on and its diffs' counts.
 pub(super) fn tool_header(call: &ToolCall, term: Option<&Term>, open: bool, root: &Path) -> String {
     let fold = if open { '▾' } else { '▸' };
     let status = match call.status {
@@ -322,27 +378,45 @@ pub(super) fn tool_header(call: &ToolCall, term: Option<&Term>, open: bool, root
         _ => '●',
     };
     let target = tool_target(call, term, root);
-    format!("{fold} {status}    {} {target}", verb(call))
+    let (counts, _) = counts_text(call);
+    format!("{fold} {status}    {} {target}{counts}", verb(call))
 }
 
-/// A plan entry's line, `<content> (<status>, <priority>)` with the content's first line, and
-/// the content part's length in chars.
-pub(super) fn plan_line(entry: &PlanEntry) -> (String, usize) {
-    let content = first_line(&entry.content);
-    let suffix = format!(
-        " ({}, {})",
-        acp_name(&entry.status),
-        acp_name(&entry.priority)
-    );
-    (format!("{content}{suffix}"), content.chars().count())
+/// A plan entry's line, `  <mark> <content>` with the content's first line.
+fn plan_line(entry: &PlanEntry) -> String {
+    let mark = match entry.status {
+        PlanEntryStatus::Completed => '✓',
+        PlanEntryStatus::InProgress => '●',
+        _ => '○',
+    };
+    format!("  {mark} {}", first_line(&entry.content))
 }
 
-/// The plan block's rows: `Plan`, then a line per entry.
-pub(super) fn plan_rows(plan: &Plan) -> Vec<(String, usize)> {
-    let rows = plan.entries.iter().map(plan_line);
-    std::iter::once(("Plan".to_string(), 4))
-        .chain(rows)
-        .collect()
+/// The plan block's text: `Plan`, then a line per entry.
+pub(super) fn plan_text(plan: &Plan) -> String {
+    let lines: Vec<_> = std::iter::once("Plan".to_string())
+        .chain(plan.entries.iter().map(plan_line))
+        .collect();
+    lines.join("\n")
+}
+
+/// Renders the plan block at `start`, whose properties were removed: `Plan` and each finished or
+/// pending entry dim, an entry in progress with its mark in `status-waiting`.
+pub(super) fn render_plan(buffer: &mut Buffer, start: usize, plan: &Plan) {
+    let waiting = Prop::Named(vec![FaceRef::Face(FaceName::StatusWaiting)]);
+    let mut props = vec![(0.."Plan".len(), dim())];
+    let mut line = "Plan\n".len();
+    for entry in &plan.entries {
+        let len = plan_line(entry).chars().count();
+        props.push(match entry.status {
+            PlanEntryStatus::InProgress => (line + 2..line + 3, waiting.clone()),
+            _ => (line + 2..line + len, dim()),
+        });
+        line += len + 1;
+    }
+    for (r, prop) in props {
+        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
+    }
 }
 
 /// A permission request's rows: `Permission: <title>`, then a numbered line per option,
@@ -420,20 +494,25 @@ fn raw_text(output: &Value) -> String {
     }
 }
 
-/// `d` as a unified diff.
-fn unified(d: &Diff) -> String {
+/// `d` as a unified diff, with its `---`/`+++` header when `header`, else from its first hunk.
+fn unified(d: &Diff, header: bool) -> String {
     let (old, path) = (d.old_text.as_deref().unwrap_or_default(), d.path.display());
     let path = path.to_string();
     let diff = similar::TextDiff::from_lines(old, &d.new_text);
-    diff.unified_diff().header(&path, &path).to_string()
+    let mut unified = diff.unified_diff();
+    if header {
+        unified.header(&path, &path);
+    }
+    unified.to_string()
 }
 
-/// The `diff-*` faces of a unified diff's lines, which never run across a line's start.
-fn diff_faces(text: &str) -> Faces {
+/// The `diff-*` faces of a unified diff's lines, its first two the header when `header`, which
+/// never run across a line's start.
+fn diff_faces(text: &str, header: bool) -> Faces {
     let mut at = 0;
     let lines = text.split('\n').enumerate().map(|(i, line)| {
         let face = match line.as_bytes().first() {
-            _ if i < 2 || line.starts_with("@@") => Some(FaceName::DiffHunk),
+            _ if (header && i < 2) || line.starts_with("@@") => Some(FaceName::DiffHunk),
             Some(b'+') => Some(FaceName::DiffAdded),
             Some(b'-') => Some(FaceName::DiffRemoved),
             _ => None,
@@ -502,10 +581,10 @@ pub(super) fn tool_content(call: &ToolCall, term: Option<&Term>) -> ToolContent 
                 },
             },
             ToolCallContent::Diff(d) => {
-                let (path, diff) = (d.path.display().to_string(), unified(d));
+                let diff = unified(d, false);
                 let block = fenced("diff", &diff);
-                let at = path.chars().count() + 1 + block.find('\n').expect("fenced") + 1;
-                (format!("{path}\n{block}"), diff_faces(&diff), at)
+                let at = block.find('\n').expect("fenced") + 1;
+                (block, diff_faces(&diff, false), at)
             }
             ToolCallContent::Terminal(t) => (format!("Terminal {}", t.terminal_id), vec![], 0),
             _ => ("[?]".into(), vec![], 0),
@@ -549,7 +628,7 @@ pub(super) fn tool_output(call: &ToolCall, term: Option<&Term>) -> Option<(Strin
     }
     let diffs: Vec<_> = (call.content.iter())
         .filter_map(|item| match item {
-            ToolCallContent::Diff(d) => Some(unified(d)),
+            ToolCallContent::Diff(d) => Some(unified(d, true)),
             _ => None,
         })
         .collect();
@@ -557,7 +636,7 @@ pub(super) fn tool_output(call: &ToolCall, term: Option<&Term>) -> Option<(Strin
         let diff = diffs.concat();
         let faces = diffs.iter().fold((0, Vec::new()), |(at, mut faces), diff| {
             let shift = |(r, f): (Range<usize>, _)| (at + r.start..at + r.end, f);
-            faces.extend(diff_faces(diff).into_iter().map(shift));
+            faces.extend(diff_faces(diff, true).into_iter().map(shift));
             (at + diff.chars().count(), faces)
         });
         return Some((diff, faces.1));
@@ -694,13 +773,27 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         (head(ICON), dim()),
         (head(VERB..verb_end), dim()),
     ];
+    // Where the target ends, before the counts and the time.
+    let (counts, removed) = counts_text(&tool.call);
+    let mut end = match tool.time.is_empty() {
+        true => tool.header,
+        false => tool.header - tool.time.chars().count() - 1,
+    };
+    if !counts.is_empty() {
+        end -= counts.chars().count();
+        // The status marks' faces, as frame 6 draws them: the diff faces carry a background.
+        props.push((end + 1..end + removed - 1, face(FaceName::StatusRunning)));
+        props.push((
+            end + removed..end + counts.chars().count(),
+            face(FaceName::StatusFailed),
+        ));
+    }
     if tool.link.is_some() {
-        let end = match tool.time.is_empty() {
-            true => tool.header,
-            false => tool.header - tool.time.chars().count() - 1,
-        };
         let link = vec![FaceRef::Face(FaceName::Link), FaceRef::Underline];
         props.push((verb_end + indent + 1..end, Prop::Named(link)));
+    }
+    if tool_command(&tool.call, tool.term.as_ref()).is_some() {
+        props.push((verb_end + indent + 1..end, face(FaceName::SessionCode)));
     }
     if !tool.time.is_empty() {
         let suffix = tool.header - tool.time.chars().count() - 1;
@@ -730,7 +823,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             Some(h) if r.start >= h.start => r.start + h.len()..r.end + h.len(),
             _ => r,
         };
-        let markdown = markdown::render(&visible, false, |_| false).into_iter();
+        let markdown = markdown::render(&visible, false, true, |_| false).into_iter();
         props.extend(markdown.map(|(r, p)| (past(r), p)).map(shifted));
         // Sorted with the markdown faces by range; where both apply, the later sorted one wins.
         let faces = tool.faces.iter().filter_map(|(r, f)| {
@@ -743,6 +836,8 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             let more = format!("… {lines} more line{plural}");
             props.push(shifted((hidden, Prop::Invisible(more))));
         }
+        // Two columns past the status mark.
+        let body_indent = Prop::Line(Decoration::Indent(STATUS.end + indent + 1));
         let mut line = 0;
         for l in content.split('\n') {
             if hidden
@@ -750,6 +845,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
                 .is_none_or(|h| line <= h.start || line > h.end)
             {
                 props.push(shifted((line..line + 1, rule.clone())));
+                props.push(shifted((line..line + 1, body_indent.clone())));
             }
             line += l.chars().count() + 1;
         }

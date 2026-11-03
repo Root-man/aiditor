@@ -117,8 +117,13 @@ FrameDisplay {
                     ),
                 },
                 terminal: None,
+                prompt: None,
             },
             gutter: None,
+            inset: (
+                12.0,
+                12.0,
+            ),
             mode_line: ModeBar {
                 left: [
                     Span {
@@ -388,8 +393,13 @@ FrameDisplay {
                     ),
                 },
                 terminal: None,
+                prompt: None,
             },
             gutter: None,
+            inset: (
+                12.0,
+                12.0,
+            ),
             mode_line: ModeBar {
                 left: [
                     Span {

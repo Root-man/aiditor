@@ -4,7 +4,7 @@
 use agent_client_protocol_schema::v1::{
     AgentRequest, AvailableCommand, AvailableCommandInput, ClientResponse, ContentBlock, Error,
     MessageId, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
-    PromptRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
+    PlanEntryStatus, PromptRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
@@ -508,7 +508,8 @@ impl Core {
             last.len += text.chars().count();
             let range = start + PROMPT.len()..start + last.len;
             render(buffer, range.clone(), false, None);
-            self.chips.paint(buffer, range);
+            self.chips.paint(buffer, range.clone());
+            user_lines(buffer, range, false);
             return;
         }
         self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
@@ -527,6 +528,10 @@ impl Core {
             let at = line_end(buffer, end - text.chars().count());
             message.len += put_time(buffer, at, clock);
         }
+        let echo = end - text.chars().count() - PROMPT.len();
+        prompt_glyph(buffer, echo);
+        let end = session.end(buffer) - "\n\n".len();
+        user_lines(buffer, echo..end, true);
     }
 
     /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
@@ -725,8 +730,7 @@ impl Core {
         if session.plan.is_none() {
             session.end_run(buffer);
         }
-        let rows = plan_rows(plan);
-        let text = rows_text(&rows);
+        let text = plan_text(plan);
         let len = text.chars().count();
         let start = match &mut session.plan {
             Some((marker, old)) => {
@@ -743,7 +747,7 @@ impl Core {
                 end
             }
         };
-        render_rows(buffer, start, &rows);
+        render_plan(buffer, start, plan);
     }
 
     /// Puts permission request `ask` above session `id`'s prompt line as a block of its own,
@@ -1206,6 +1210,7 @@ impl Ctx<'_> {
         let buffer = core.buffers.create(&title);
         let b = core.buffers.get_mut(buffer).expect("just created");
         b.append(PROMPT);
+        prompt_glyph(b, 0);
         let start = PROMPT.len();
         b.prompt = Some((b.add_marker(start, InsertionType::Stay)).expect("after the prompt"));
         b.set_marker(b.point, start).expect("after the prompt");
@@ -1660,6 +1665,7 @@ impl Ctx<'_> {
         render(b, start..start + input.chars().count(), false, None);
         core.chips.paint(b, start..start + input.chars().count());
         let end = b.len_chars();
+        prompt_glyph(b, end - PROMPT.len());
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
         let line = start + input.chars().count() + "\n\n".len();
         (b.add_property(line..line + working.chars().count(), dim())).expect("just appended");
@@ -1675,6 +1681,7 @@ impl Ctx<'_> {
             let at = session.paste_line_end(b, start);
             message.len += put_time(b, at, clock);
         }
+        user_lines(b, echo..echo + message.len, true);
         let end = b.len_chars();
         let session = core.agents.get_mut(&id).expect("found above");
         session.fold_pastes(b, start);
@@ -2341,7 +2348,8 @@ mod tests {
     }
 
     fn session_rows(h: &mut Harness) -> Vec<String> {
-        h.frame(1000., 1000.).windows[0]
+        // Tall enough that a third of it docks a 20-line prompt whole.
+        h.joined_frame(1000., 2000.).windows[0]
             .display
             .lines
             .iter()
@@ -2365,13 +2373,13 @@ mod tests {
             replace: None,
         });
         assert_eq!(h.text(), format!("> before {text} after"));
-        assert_eq!(session_rows(&mut h), ["> before  ≡ Pasted 21 lines  after"]);
+        assert_eq!(session_rows(&mut h), ["❯ before  ≡ Pasted 21 lines  after"]);
         h.keys("C-x C-x TAB");
         let rows = session_rows(&mut h);
         assert_eq!(
             &rows[..6],
             [
-                "> before  ≡ Pasted 21 lines ",
+                "❯ before  ≡ Pasted 21 lines ",
                 "line 1 λ",
                 "line 2 λ",
                 "line 3 λ",
@@ -2406,7 +2414,7 @@ mod tests {
             h.clipboard = Some(text.clone());
             h.keys("C-y");
             assert_eq!(h.text(), format!("> {text}"));
-            assert_eq!(session_rows(&mut h)[0], "> line 1 λ");
+            assert_eq!(session_rows(&mut h)[0], "❯ line 1 λ");
         }
         let mut h = Harness::new(&[]);
         let text = paste_text(21);
@@ -2464,12 +2472,12 @@ mod tests {
         h.send(Msg::SettingsLoaded(Ok(Some("paste_fold_lines = 0".into()))));
         h.clipboard = Some("one\ntwo".into());
         h.keys("C-y C-x C-x TAB");
-        assert_eq!(session_rows(&mut h), [">  ≡ Pasted 2 lines ", "one", "two"]);
+        assert_eq!(session_rows(&mut h), ["❯  ≡ Pasted 2 lines ", "one", "two"]);
         assert_eq!(h.text(), "> one\ntwo");
         h.keys("TAB M->");
         h.send(Msg::SettingsLoaded(Ok(Some("paste_fold_lines = 2".into()))));
         h.keys("C-y");
-        assert_eq!(session_rows(&mut h), [">  ≡ Pasted 2 lines one", "two"]);
+        assert_eq!(session_rows(&mut h), ["❯  ≡ Pasted 2 lines one", "two"]);
         assert_eq!(h.text(), "> one\ntwoone\ntwo");
         h.send(Msg::SettingsLoaded(Ok(Some(
             "paste_fold_lines = -1".into(),
@@ -2490,7 +2498,7 @@ mod tests {
         });
         assert_eq!(
             session_rows(&mut h),
-            [">  ≡ Pasted 21 lines  ≡ Pasted 21 lines  see  ▤ a.rs "]
+            ["❯  ≡ Pasted 21 lines  ≡ Pasted 21 lines  see  ▤ a.rs "]
         );
         h.keys("RET");
         assert_eq!(
@@ -2718,7 +2726,7 @@ mod tests {
             assert_eq!(h.text(), format!("Output\n\n> compare {chip} please"));
             assert_eq!(h.point(), "Output\n\n> compare ".chars().count() + 1);
             h.keys("M-> SPC M-x agent-attach-file RET C-a C-k /outside/view.png RET");
-            drawn_line(&mut h, "> compare  ▤ a.rs  please  ▣ view.png ");
+            drawn_line(&mut h, "❯ compare  ▤ a.rs  please  ▣ view.png ");
             h.keys("RET");
             assert_eq!(
                 ops(&mut h),
@@ -2740,7 +2748,7 @@ mod tests {
         assert_eq!(mb.candidates, ["view.png"]);
         assert_eq!(mb.selected, None);
         h.keys("C-RET SPC M-x agent-attach-file RET C-a C-k /outside/empt C-RET");
-        drawn_line(&mut h, ">  ▦ screens   ▦ empty ");
+        drawn_line(&mut h, "❯  ▦ screens   ▦ empty ");
         h.keys("RET");
         assert_eq!(
             ops(&mut h),
@@ -2828,7 +2836,7 @@ mod tests {
         h.keys("lib.rs RET");
         let chip = h.core.chips.intern(Some(h.path("other/app/lib.rs")), false);
         assert_eq!(h.text(), format!("> {chip}"));
-        drawn_line(&mut h, ">  ▤ lib.rs ");
+        drawn_line(&mut h, "❯  ▤ lib.rs ");
         h.keys("RET");
         assert_eq!(
             ops(&mut h),
@@ -2900,7 +2908,7 @@ mod tests {
         let mut h = session();
         h.index_reply("app", &["cat.png"], &["app", "app/empty"]);
         h.keys("@ empty RET SPC @ cat RET");
-        drawn_line(&mut h, ">  ▦ empty   ▣ cat.png ");
+        drawn_line(&mut h, "❯  ▦ empty   ▣ cat.png ");
         h.keys("RET");
         assert_eq!(
             ops(&mut h),
@@ -2995,7 +3003,7 @@ mod tests {
         let review = h.core.chips.command("review");
         assert_eq!(h.core.text(), format!("> {review} "));
         assert_eq!(h.core.point(), h.core.text().chars().count());
-        drawn_line(&mut h, ">  ▷ /review  ");
+        drawn_line(&mut h, "❯  ▷ /review  ");
         // `RET` on the chip sends, as text, as ACP expects.
         h.keys("x C-b C-b C-b RET");
         assert_eq!(ops(&mut h), [r#"prompt 0 s "/review x""#]);
@@ -3138,6 +3146,11 @@ mod tests {
         let b = props(&h).into_iter().find(|(t, _)| t == "b");
         let code = vec![FaceRef::Face(FaceName::SessionCode)];
         assert_eq!(b, Some(("b".into(), Prop::Named(code))));
+        h.keys("M-<");
+        let user = Decoration::Background(FaceName::SessionUser);
+        let line = drawn_line(&mut h, "❯ see b");
+        assert!(line.decorations.contains(&user));
+        assert!(!drawn_line(&mut h, "c").decorations.contains(&user));
     }
 
     /// Session 0's messages as their ids and text.
@@ -3200,6 +3213,153 @@ mod tests {
         );
     }
 
+    /// The text of each transcript row and each prompt pane row of a frame `rows` text rows high,
+    /// and which part holds the cursor.
+    fn docked(h: &mut Harness, rows: usize) -> (Vec<String>, Vec<String>, &'static str) {
+        let settings = h.core.settings();
+        let height = rows as f32 * settings.line_height() + settings.mode_line_height();
+        let frame = h.frame(800., height);
+        let display = &frame.windows[0].display;
+        let text = |lines: &[crate::display::Line]| {
+            let line = |l: &crate::display::Line| l.spans.iter().map(|s| s.text.clone()).collect();
+            lines.iter().map(line).collect::<Vec<String>>()
+        };
+        let pane = display
+            .prompt
+            .as_ref()
+            .expect("a session window docks its prompt");
+        let cursor = match (display.cursor, pane.cursor) {
+            (Some(_), None) => "transcript",
+            (None, Some(_)) => "pane",
+            _ => "?",
+        };
+        (text(&display.lines), text(&pane.lines), cursor)
+    }
+
+    #[test]
+    fn the_prompt_area_docks_at_the_window_s_bottom() {
+        let mut h = session();
+        chunk(&mut h, "one\ntwo\nthree");
+        let (transcript, pane, cursor) = docked(&mut h, 30);
+        assert_eq!(transcript[..4], ["one", "two", "three", ""]);
+        assert_eq!((pane, cursor), (vec!["❯ ".to_string()], "pane"));
+        // The transcript gets the rows the pane and its rule and padding leave.
+        let line = h.core.settings().line_height();
+        let left = (29. * line - crate::display::PANE_CHROME) / line;
+        assert_eq!(h.core.windows.window.rows(), left as usize);
+        // Output arriving while typing keeps the transcript at its end and the pane as it was.
+        h.keys("h i");
+        chunk(
+            &mut h,
+            &(0..40).map(|i| format!("\nline {i}")).collect::<String>(),
+        );
+        let (transcript, pane, cursor) = docked(&mut h, 30);
+        assert_eq!(transcript[transcript.len() - 2..], ["line 39", ""]);
+        assert_eq!((pane, cursor), (vec!["❯ hi".to_string()], "pane"));
+        // Reading the transcript scrolls it alone.
+        h.keys("M-<");
+        let (transcript, pane, cursor) = docked(&mut h, 30);
+        assert_eq!((transcript[0].as_str(), cursor), ("one", "transcript"));
+        assert_eq!(pane, ["❯ hi"]);
+        // A long prompt docks a third of the rows, point's line among them.
+        h.keys("M->");
+        for _ in 0..19 {
+            h.keys("C-j x");
+        }
+        let (_, pane, cursor) = docked(&mut h, 30);
+        assert_eq!(
+            (pane.len(), pane.last().unwrap().as_str(), cursor),
+            (10, "x", "pane")
+        );
+        h.keys("M-<");
+        h.keys("C-s h i RET");
+        let (_, pane, cursor) = docked(&mut h, 30);
+        assert_eq!((pane[0].as_str(), cursor), ("❯ hi", "pane"));
+    }
+
+    #[test]
+    fn paging_and_recentering_move_the_transcript_rows() {
+        let mut h = session();
+        chunk(
+            &mut h,
+            &(0..100).map(|i| format!("line {i}\n")).collect::<String>(),
+        );
+        h.keys("M-<");
+        let (transcript, ..) = docked(&mut h, 30);
+        let rows = h.core.windows.window.rows();
+        assert_eq!(transcript.len(), rows, "the rows above the pane");
+        h.keys("C-v");
+        let (transcript, pane, cursor) = docked(&mut h, 30);
+        assert_eq!(
+            (transcript[0].clone(), cursor),
+            (format!("line {}", rows - 2), "transcript")
+        );
+        assert_eq!(pane, ["❯ "]);
+        h.keys("M-v");
+        assert_eq!(docked(&mut h, 30).0[0], "line 0");
+        h.keys("M-< C-u 4 9 C-n C-l");
+        let (transcript, ..) = docked(&mut h, 30);
+        assert_eq!(transcript[rows / 2], "line 49");
+    }
+
+    #[test]
+    fn other_buffers_dock_no_prompt() {
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.open("a.txt");
+        assert!(h.frame(800., 600.).windows[0].display.prompt.is_none());
+    }
+
+    #[test]
+    fn a_session_window_insets_its_text_as_frame_6() {
+        let mut h = session();
+        chunk(&mut h, &"x".repeat(60));
+        let frame = h.joined_frame(211., 600.);
+        let w = &frame.windows[0];
+        assert_eq!(w.inset, (27., 24.));
+        let text: String = w.display.lines[0]
+            .spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(text.chars().count(), 19, "20 columns less the wrap's");
+        assert_eq!(h.core.windows.window.cols(), 20);
+        let mut h = Harness::new(&[("a.txt", "a\n")]);
+        h.open("a.txt");
+        assert_eq!(
+            h.frame(211., 600.).windows[0].inset.0,
+            crate::display::TEXT_INSET
+        );
+    }
+
+    #[test]
+    fn prompts_draw_a_glyph_and_echoes_the_user_background() {
+        let mut h = session();
+        h.keys("a C-j b RET");
+        assert!(h.core.text().starts_with("> a\nb"));
+        h.keys("M-<");
+        let frame = h.joined_frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        let text = |l: &crate::display::Line| l.spans.iter().map(|s| s.text.clone()).collect();
+        let lines: Vec<(String, _)> = (lines.iter())
+            .map(|l| (text(l), l.decorations.clone()))
+            .collect();
+        let user = Decoration::Background(FaceName::SessionUser);
+        assert!(lines[0].0.starts_with("❯ a"), "{:?}", lines[0].0);
+        assert_eq!(lines[1].0, "b");
+        assert!(lines[0].1.contains(&user) && lines[1].1.contains(&user));
+        assert!(!lines[2].1.contains(&user), "the blank line after it");
+        let prompt = lines
+            .iter()
+            .find(|(t, _)| t.starts_with("❯ ") && t.len() == "❯ ".len());
+        assert!(!prompt.expect("the live prompt").1.contains(&user));
+        let glyph = &frame.windows[0].display.lines[0].spans[0];
+        let info = h.core.settings().theme.face(FaceName::StatusInfo);
+        assert_eq!(
+            (glyph.text.as_str(), glyph.face.fg, glyph.face.bold),
+            ("❯", info.fg, true)
+        );
+    }
+
     #[test]
     fn message_keys_move_past_tool_calls_and_thoughts() {
         let mut h = session();
@@ -3236,7 +3396,7 @@ mod tests {
     fn the_bar_follows_point_and_each_window_has_its_own() {
         let bar = Decoration::Bar(FaceName::MessageAtPoint);
         let barred = |h: &mut Harness, window: usize| -> Vec<usize> {
-            let frame = h.frame(800., 600.);
+            let frame = h.joined_frame(800., 600.);
             let display = &frame.windows[window].display;
             (display.lines.iter())
                 .filter(|l| l.decorations.contains(&bar))
@@ -3258,9 +3418,15 @@ mod tests {
     }
 
     /// Each property of the current buffer, with the text it covers.
+    /// The properties, without the prompt's glyph and the echo's background every session has.
     fn props(h: &Harness) -> Vec<(String, Prop)> {
         let b = h.core.current();
+        let prompt = |p: &Prop| match p {
+            Prop::Display(pieces) => pieces[0].0 == "❯",
+            _ => *p == Prop::Line(Decoration::Background(FaceName::SessionUser)),
+        };
         (b.properties())
+            .filter(|(_, p)| !prompt(p))
             .map(|(r, p)| (b.text().slice(r).to_string(), p.clone()))
             .collect()
     }
@@ -3284,7 +3450,7 @@ mod tests {
     /// The face the display gives `text`, a span of the frame.
     fn drawn(h: &mut Harness, text: &str) -> Face {
         h.keys("M-<");
-        let frame = h.frame(800., 600.);
+        let frame = h.joined_frame(800., 600.);
         let lines = &frame.windows[0].display.lines;
         let mut spans = lines.iter().flat_map(|l| &l.spans);
         spans.find(|s| s.text == text).expect("drawn").face
@@ -3302,7 +3468,7 @@ mod tests {
         let (dim, code) = retheme(&mut h);
         assert_eq!(props(&h), before, "only the display changes");
         assert_eq!(drawn(&mut h, "hmm").fg, Some(dim));
-        let frame = h.frame(800., 600.);
+        let frame = h.joined_frame(800., 600.);
         let lines = &frame.windows[0].display.lines;
         let block = (lines.iter())
             .find(|l| l.spans.iter().any(|s| s.text == "block"))
@@ -3411,7 +3577,7 @@ mod tests {
         h.open("app/src/main.rs");
         chunk(&mut h, "**a");
         chunk(&mut h, "b**");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         let b = h.core.buffers.get(id).unwrap();
         assert!(b.text().to_string().contains("**ab**"));
         assert!(h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
@@ -3422,7 +3588,7 @@ mod tests {
                 ..Args::default()
             },
         );
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert!(props(&h).contains(&("ab".into(), Prop::Named(vec![FaceRef::Bold]))));
         assert!(!h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
     }
@@ -3432,11 +3598,11 @@ mod tests {
         let mut h = session();
         h.keys("C-x 3");
         chunk(&mut h, "**a**");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert!(props(&h).contains(&("a".into(), Prop::Named(vec![FaceRef::Bold]))));
         h.open("app/src/main.rs");
         chunk(&mut h, " *b*");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         let id = h.core.agents[&AgentId(0)].buffer;
         assert!(
             h.core
@@ -3448,7 +3614,7 @@ mod tests {
         );
         h.keys("C-x o M-x");
         chunk(&mut h, " `c`");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert!(!h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
         assert!(
             h.core
@@ -3467,7 +3633,7 @@ mod tests {
         let project = h.core.current_workspace().project;
         h.core.new_workspace("other", project);
         chunk(&mut h, "**a**");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert!(h.core.agents[&AgentId(0)].stream.as_ref().unwrap().dirty);
         thought(&mut h, "hmm");
         let id = h.core.agents[&AgentId(0)].buffer;
@@ -3480,13 +3646,13 @@ mod tests {
                 .any(|(_, p)| *p == Prop::Named(vec![FaceRef::Bold]))
         );
         h.core.switch_workspace(workspace).unwrap();
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert!(props(&h).contains(&(
             "hmm".into(),
             Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)])
         )));
         h.keys("C-x k RET yes RET");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert!(h.core.buffers.get(id).is_none());
     }
 
@@ -3506,7 +3672,7 @@ mod tests {
             &mut h,
             "# Title\n\nSome **bold** [docs](https://x.dev).\n\n```rust\nfn main() {}\n```",
         );
-        let frame = h.frame(800., 600.);
+        let frame = h.joined_frame(800., 600.);
         let lines = &frame.windows[0].display.lines;
         let shown: Vec<String> = (lines.iter())
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
@@ -3544,7 +3710,7 @@ mod tests {
     fn shown(h: &mut Harness, rows: usize) -> Vec<String> {
         let settings = h.core.settings();
         let height = rows as f32 * settings.line_height() + settings.mode_line_height();
-        let frame = h.frame(800., height);
+        let frame = h.joined_frame(800., height);
         (frame.windows[0].display.lines.iter())
             .map(|l| {
                 // Right-aligning padding reads as the one space it is in the text.
@@ -3580,7 +3746,7 @@ mod tests {
         );
         assert_eq!(
             shown(&mut h, 10)[..5],
-            ["> a", "", "Let me look.", "", "▸ ●   Running ls"]
+            ["❯ a", "", "Let me look.", "", "▸ ●   Running ls"]
         );
         // A message after the call, then updates: the call's block changes where it is.
         chunk(&mut h, "Done.");
@@ -3605,7 +3771,7 @@ mod tests {
                 .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
         );
         // The header carries the rule and its icon, the verb is dim and the target isn't.
-        let frame = h.frame(800., 600.);
+        let frame = h.joined_frame(800., 600.);
         let header = &frame.windows[0].display.lines[4];
         let dim = FaceName::SessionThought;
         assert_eq!(header.decorations, [Decoration::Rule(dim)]);
@@ -3638,24 +3804,48 @@ mod tests {
         h.keys("TAB");
         assert_eq!(h.core.message(), Some("No tool call here"));
         h.keys("M-< C-e TAB");
-        let open = ["▾ ●   Running ls", "", "$ ls", "", "", "> "];
-        assert_eq!(shown(&mut h, 10)[..6], open);
-        let frame = h.frame(800., 600.);
+        let open = ["▾ ●   Running ls", "$ ls", "", "❯ "];
+        assert_eq!(shown(&mut h, 10)[..4], open);
+        let frame = h.joined_frame(800., 600.);
         let lines = &frame.windows[0].display.lines;
         let rule = Decoration::Rule(FaceName::SessionThought);
         assert!(
-            (0..4).all(|i| lines[i].decorations.contains(&rule)),
+            (0..2).all(|i| lines[i].decorations.contains(&rule)),
             "{lines:?}"
         );
-        assert!(!lines[4].decorations.contains(&rule));
+        assert!(!lines[2].decorations.contains(&rule));
         // An update keeps it open.
         let output = ToolCallUpdateFields::new().raw_output(serde_json::json!("a.rs"));
         tool_update(&mut h, "t", output);
-        assert_eq!(shown(&mut h, 12)[1..5], ["", "$ ls", "a.rs", ""]);
+        assert_eq!(shown(&mut h, 12)[1..4], ["$ ls", "a.rs", ""]);
         // TAB inside the open content folds it, point going to the header.
         h.keys("C-n C-n C-n TAB");
-        assert_eq!(shown(&mut h, 5)[..3], ["▸ ●   Running ls", "", "> "]);
+        assert_eq!(shown(&mut h, 5)[..3], ["▸ ●   Running ls", "", "❯ "]);
         assert_eq!(h.core.point(), 0);
+    }
+
+    #[test]
+    fn line_motion_passes_hidden_fences() {
+        let mut h = session();
+        tool(&mut h, ls().raw_output(serde_json::json!("a.rs\nb.rs")));
+        h.keys("M-< TAB");
+        let row = |h: &mut Harness| {
+            h.joined_frame(800., 600.).windows[0]
+                .display
+                .cursor
+                .unwrap()
+                .0
+        };
+        let mut rows = Vec::new();
+        for _ in 0..3 {
+            h.keys("C-n");
+            rows.push(row(&mut h));
+        }
+        assert_eq!(rows, [1, 2, 3], "$ ls, a.rs, b.rs");
+        h.keys("C-p C-p");
+        assert_eq!(row(&mut h), 1);
+        h.keys("C-p");
+        assert_eq!(row(&mut h), 0);
     }
 
     #[test]
@@ -3664,13 +3854,14 @@ mod tests {
         let output: String = (0..50).map(|i| format!("line {i}\n")).collect();
         tool(&mut h, ls().raw_output(serde_json::json!(output)));
         // The window keeps the header in view above the prompt line.
-        assert_eq!(shown(&mut h, 5)[..3], ["▸ ●   Running ls", "", "> "]);
+        assert_eq!(shown(&mut h, 5)[..3], ["▸ ●   Running ls", "", "❯ "]);
         h.keys("M-< C-n");
         assert_eq!(h.core.current().line_col(h.core.point()), Ok((54, 0)));
         h.keys("C-p");
         assert_eq!(h.core.point(), 0);
         h.keys("TAB C-n");
-        assert_eq!(h.core.current().line_col(h.core.point()), Ok((1, 0)));
+        // Past the hidden fence, onto `$ ls`.
+        assert_eq!(h.core.current().line_col(h.core.point()), Ok((2, 0)));
         // Open, its first lines show and the rest is counted.
         let lines = shown(&mut h, 70);
         assert!((0..20).all(|i| lines.contains(&format!("line {i}"))));
@@ -3684,7 +3875,7 @@ mod tests {
         h.keys("M-< C-e TAB");
         tool(&mut h, ls().status(ToolCallStatus::Completed));
         assert_eq!(h.core.text().matches("Ran ls").count(), 1);
-        assert_eq!(shown(&mut h, 3)[..2], ["▾ ✓   Ran ls 0.0s", ""]);
+        assert_eq!(shown(&mut h, 6)[..2], ["▾ ✓   Ran ls 0.0s", "$ ls"]);
         assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
         // TAB on a call without content leaves it folded.
         chunk(&mut h, "Next.");
@@ -3729,7 +3920,7 @@ mod tests {
         let diff = agent_client_protocol_schema::v1::Diff::new("/aiditor-test/app/a.rs", "b\n");
         let edit = ToolCall::new("t", "Editing files").kind(ToolKind::Edit);
         let edit = edit.content(vec![ToolCallContent::Diff(diff)]);
-        assert_eq!(header(edit), "▸ ●    Editing a.rs");
+        assert_eq!(header(edit), "▸ ●    Editing a.rs +1 −0");
         // A search keeps its pattern, whatever it found.
         let search = ToolCall::new("t", "grep x").kind(ToolKind::Search);
         assert_eq!(
@@ -3765,7 +3956,7 @@ mod tests {
         ] {
             let mut h = session();
             tool(&mut h, ToolCall::new("t", "x").kind(kind));
-            let frame = h.frame(800., 600.);
+            let frame = h.joined_frame(800., 600.);
             assert_eq!(frame.windows[0].display.lines[0].icons, [(4, icon)]);
         }
     }
@@ -3783,7 +3974,7 @@ mod tests {
             "terminal_exit": {"terminal_id": "t", "exit_code": 2, "signal": null}
         });
         meta_update(&mut h, ToolCallUpdateFields::new(), exit);
-        let frame = h.frame(800., 600.);
+        let frame = h.joined_frame(800., 600.);
         let line = &frame.windows[0].display.lines[0];
         let span = |text: &str| line.spans.iter().find(|s| s.text.contains(text)).unwrap();
         let failed = h.core.settings().theme.face(FaceName::StatusFailed).fg;
@@ -3793,7 +3984,7 @@ mod tests {
         let mut h = session();
         tool(&mut h, ls());
         let face = |h: &mut Harness, mark: &str| {
-            let frame = h.frame(800., 600.);
+            let frame = h.joined_frame(800., 600.);
             let line = &frame.windows[0].display.lines[0];
             (line.spans.iter())
                 .find(|s| s.text.contains(mark))
@@ -3827,16 +4018,21 @@ mod tests {
         let lines = shown(&mut h, 30);
         assert_eq!(
             lines[..3],
-            ["▾ ✓   Ran ls 0.0s".to_string(), "".into(), "$ ls".into()]
+            [
+                "▾ ✓   Ran ls 0.0s".to_string(),
+                "$ ls".into(),
+                "line 1".into()
+            ]
         );
         assert_eq!(
-            (lines[3].as_str(), lines[22].as_str()),
+            (lines[2].as_str(), lines[21].as_str()),
             ("line 1", "line 20")
         );
-        assert_eq!(lines[23], "… 30 more lines");
-        assert_eq!(lines[24..27], ["", "", "> "]);
+        assert_eq!(lines[22], "… 30 more lines");
+        assert_eq!(lines[23..25], ["", "❯ "], "no row for the closing fence");
         // The rest stays in the text, and props stay in order for bisecting.
         assert!(h.core.text().contains("line 50\n"));
+        assert!(h.core.text().contains("```\n$ ls\n") && h.core.text().contains("line 50\n```"));
         let props: Vec<_> = h.core.current().properties().map(|(r, _)| r).collect();
         assert!(
             props
@@ -3844,8 +4040,8 @@ mod tests {
                 .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end)
         );
         // The count's line keeps the rule and the block's background.
-        let frame = h.frame(800., 700.);
-        let more = &frame.windows[0].display.lines[23];
+        let frame = h.joined_frame(800., 700.);
+        let more = &frame.windows[0].display.lines[22];
         assert!(
             more.decorations
                 .contains(&Decoration::Rule(FaceName::SessionThought))
@@ -3854,9 +4050,12 @@ mod tests {
             more.decorations
                 .contains(&Decoration::Background(FaceName::SessionBlock))
         );
+        let count = more.spans.iter().find(|s| s.text.starts_with('…')).unwrap();
+        let annotation = h.core.settings().theme.face(FaceName::Annotation);
+        assert_eq!(count.face.fg, annotation.fg);
         // Motion passes the count, and one line more reads singular.
         let mut h = long_ls(21);
-        assert_eq!(shown(&mut h, 30)[23], "… 1 more line");
+        assert_eq!(shown(&mut h, 30)[22], "… 1 more line");
         h.keys("M-> C-p C-p C-p C-p");
         assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 22);
     }
@@ -3865,7 +4064,7 @@ mod tests {
     fn twenty_lines_show_whole() {
         let mut h = long_ls(20);
         let lines = shown(&mut h, 30);
-        assert_eq!(lines[22], "line 20");
+        assert_eq!(lines[21], "line 20");
         assert!(!lines.iter().any(|l| l.contains("more line")));
     }
 
@@ -3877,7 +4076,7 @@ mod tests {
             command().raw_input(serde_json::json!({"command": "make"})),
         );
         output(&mut h, "terminal_output", "t", "first\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         h.keys("M-< TAB");
         let more: String = (2..=25)
             .map(|i| format!("\u{1b}[31mline {i}\u{1b}[0m\n"))
@@ -3885,18 +4084,18 @@ mod tests {
         output(&mut h, "terminal_output", "t", &more);
         let lines = shown(&mut h, 30);
         assert_eq!(
-            (lines[3].as_str(), lines[22].as_str()),
+            (lines[2].as_str(), lines[21].as_str()),
             ("first", "line 20")
         );
-        assert_eq!(lines[23], "… 5 more lines");
+        assert_eq!(lines[22], "… 5 more lines");
         output(&mut h, "terminal_output", "t", "line 26\n");
-        assert_eq!(shown(&mut h, 30)[23], "… 6 more lines");
+        assert_eq!(shown(&mut h, 30)[22], "… 6 more lines");
         // A folded call's tail goes the short way and opens the same.
         h.keys("TAB");
         output(&mut h, "terminal_output", "t", "line 27\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         h.keys("TAB");
-        assert_eq!(shown(&mut h, 30)[23], "… 7 more lines");
+        assert_eq!(shown(&mut h, 30)[22], "… 7 more lines");
     }
 
     #[test]
@@ -3905,9 +4104,9 @@ mod tests {
         let call = command().raw_input(serde_json::json!({"command": "echo ````"}));
         tool(&mut h, call);
         output(&mut h, "terminal_output", "t", "ok\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         output(&mut h, "terminal_output", "t", "more\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         let text = h.core.text();
         assert!(
             text.contains("\n`````\n$ echo ````\nok\nmore\n`````\n"),
@@ -3937,6 +4136,11 @@ mod tests {
         );
         h.keys("M-< TAB");
         assert!(!h.core.text().contains("Input:"));
+        let body = &shown(&mut h, 10)[1..];
+        assert!(body.iter().any(|l| l.starts_with("@@")), "{body:?}");
+        let header =
+            |l: &&String| l.contains("a.rs") || l.starts_with("---") || l.starts_with("+++");
+        assert!(!body.iter().any(|l| header(&l)), "{body:?}");
         let added = drawn(&mut h, "+c").fg;
         let theme = &h.core.settings().theme;
         assert_eq!(added, theme.face(FaceName::DiffAdded).fg);
@@ -3944,6 +4148,32 @@ mod tests {
             drawn(&mut h, "@@ -1 +1,2 @@").fg,
             h.core.settings().theme.face(FaceName::DiffHunk).fg
         );
+    }
+
+    #[test]
+    fn edits_count_their_lines_and_commands_show_as_code() {
+        let mut h = session();
+        let diff = agent_client_protocol_schema::v1::Diff::new("a.rs", "1\n2\n3\n4\n5\n6\n");
+        let edit = ToolCall::new("t", "Edit").kind(ToolKind::Edit);
+        let edit = edit.content(vec![ToolCallContent::Diff(
+            diff.old_text("x\n".to_string()),
+        )]);
+        tool(&mut h, edit);
+        assert!(h.core.text().starts_with("▸ ●    Editing a.rs +6 −1\n"));
+        let theme = h.core.settings().theme.clone();
+        assert_eq!(
+            drawn(&mut h, "+6").fg,
+            theme.face(FaceName::StatusRunning).fg
+        );
+        assert_eq!(
+            drawn(&mut h, "−1").fg,
+            theme.face(FaceName::StatusFailed).fg
+        );
+        assert_eq!(drawn(&mut h, "+6").bg, None);
+        let mut h = session();
+        let ls = ToolCall::new("l", "`ls`").kind(ToolKind::Execute);
+        tool(&mut h, ls.raw_input(serde_json::json!({"command": "ls"})));
+        assert_eq!(drawn(&mut h, "ls").fg, theme.face(FaceName::SessionCode).fg);
     }
 
     /// A session whose project indexes `src/a.rs` and `src/main.rs`, `a.rs` three lines long, and
@@ -4001,7 +4231,7 @@ mod tests {
 
     /// The display line holding `text`.
     fn drawn_line(h: &mut Harness, text: &str) -> crate::display::Line {
-        let mut frame = h.frame(800., 600.);
+        let mut frame = h.joined_frame(800., 600.);
         let lines = std::mem::take(&mut frame.windows[0].display.lines);
         let line = lines.into_iter().find(|l| {
             let drawn: String = l.spans.iter().map(|s| s.text.as_str()).collect();
@@ -4046,7 +4276,7 @@ mod tests {
                 r#"image image/jpeg file:///p/Cat.JPG " ok""#
             )]
         );
-        drawn_line(&mut h, "> look  ▤ a.rs  ▦ src  ▣ Cat.JPG  ok");
+        drawn_line(&mut h, "❯ look  ▤ a.rs  ▦ src  ▣ Cat.JPG  ok");
         // The agent service answers an unreadable image as the prompt's error.
         prompted(&mut h, Err("can't read /p/Cat.JPG: not found"));
         assert!(
@@ -4079,7 +4309,7 @@ mod tests {
             format!("> look at {a} please{image}\n\nok\n\n> ")
         );
         assert_eq!(message_list(&h).len(), 2);
-        drawn_line(&mut h, "> look at  ▤ a.rs  please ▣ image ");
+        drawn_line(&mut h, "❯ look at  ▤ a.rs  please ▣ image ");
     }
 
     #[test]
@@ -4089,7 +4319,7 @@ mod tests {
         update(&mut h, 0, user("@src/a.rs vs @src/gone.rs"));
         let a = h.core.chips.intern(Some(h.path("app/src/a.rs")), false);
         assert!(h.core.text().starts_with(&format!("> {a} vs @src/gone.rs")));
-        drawn_line(&mut h, ">  ▤ a.rs  vs @src/gone.rs");
+        drawn_line(&mut h, "❯  ▤ a.rs  vs @src/gone.rs");
     }
 
     #[test]
@@ -4167,7 +4397,7 @@ mod tests {
         put_chip(&mut h, "/p/gone.rs", false);
         h.keys("RET");
         let theme = h.core.settings().theme.clone();
-        let line = drawn_line(&mut h, ">  ▤ gone.rs");
+        let line = drawn_line(&mut h, "❯  ▤ gone.rs");
         let icon = line.spans.iter().find(|s| s.text == "▤").unwrap();
         assert_eq!(icon.face.fg, theme.face(FaceName::StatusFailed).fg);
         assert!(
@@ -4184,7 +4414,7 @@ mod tests {
             paths: vec![("/p".into(), crate::Disk::Dir)],
             rescan: false,
         });
-        let line = drawn_line(&mut h, ">  ▤ gone.rs");
+        let line = drawn_line(&mut h, "❯  ▤ gone.rs");
         assert!(
             !line
                 .spans
@@ -4202,7 +4432,7 @@ mod tests {
         h.keys("a RET");
         chunk(&mut h, "see src/a.rs:3 here");
         prompted(&mut h, Ok(StopReason::EndTurn));
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         ops(&mut h);
         point_in(&mut h, "src/a.rs:3", 2);
         h.keys("RET");
@@ -4246,7 +4476,7 @@ mod tests {
         let call = command().raw_input(serde_json::json!({"command": "make"}));
         tool(&mut h, call);
         output(&mut h, "terminal_output", "t", "\u{1b}[31mred\u{1b}[0m\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         ops(&mut h);
         h.keys("x M-< RET");
         assert!(ops(&mut h).is_empty(), "nothing is sent");
@@ -4258,7 +4488,7 @@ mod tests {
         assert_eq!(buffer.properties().count(), 1);
         // RET again refreshes that buffer.
         output(&mut h, "terminal_output", "t", "more\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         h.keys("RET");
         let text = h.core.buffers.get(id).unwrap().text().to_string();
         assert_eq!((other(&h), text.as_str()), (Some(id), "red\nmore\n"));
@@ -4302,7 +4532,10 @@ mod tests {
         let diff = agent_client_protocol_schema::v1::Diff::new("a", "b\n");
         let edit = ToolCall::new("t", "Edit").content(vec![ToolCallContent::Diff(diff)]);
         let (text, faces) = tool_output(&edit, None).unwrap();
-        assert!(text.contains("+b"));
+        assert!(
+            text.starts_with("--- a\n+++ a\n@@") && text.contains("+b"),
+            "{text}"
+        );
         assert!(!faces.is_empty());
         let raw = ToolCall::new("t", "x")
             .content(vec!["seen".into()])
@@ -4336,7 +4569,7 @@ mod tests {
         ];
         assert_eq!(
             content(&call),
-            "**hi**\n\na.rs\n```diff\n--- a.rs\n+++ a.rs\n@@ -1 +1 @@\n-a\n+b\n```"
+            "**hi**\n\n```diff\n@@ -1 +1 @@\n-a\n+b\n```"
         );
         // A coloured text item's faces land on its chars after the parts before it.
         call.raw_input = Some(serde_json::json!(1));
@@ -4407,7 +4640,7 @@ mod tests {
         output(&mut h, "terminal_output", "t", "d\u{1b}[0m\r\n");
         output(&mut h, "terminal_output", "other", "lost");
         assert_eq!(h.core.text(), "▸ ●    Running make\n\n> ");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert_eq!(
             h.core.text(),
             "▸ ●    Running make\nOutput:\n```\nred\n```\n\n> "
@@ -4424,7 +4657,7 @@ mod tests {
         for h in [&mut folded, &mut open] {
             tool(h, command());
             output(h, "terminal_output", "t", "initial\n");
-            h.frame(800., 600.);
+            h.joined_frame(800., 600.);
         }
         open.keys("M-< C-e TAB");
         for text in [
@@ -4437,7 +4670,7 @@ mod tests {
         ] {
             for h in [&mut folded, &mut open] {
                 output(h, "terminal_output_delta", "t", text);
-                h.frame(800., 600.);
+                h.joined_frame(800., 600.);
             }
             // Past the fold marker, the one difference.
             let text = |h: &Harness| h.core.text().chars().skip(1).collect::<String>();
@@ -4467,7 +4700,7 @@ mod tests {
             let buffer = h.core.windows.window.buffer();
             tool(&mut h, command());
             output(&mut h, "terminal_output", "t", "initial\n");
-            h.frame(800., 600.);
+            h.joined_frame(800., 600.);
             let before = h.core.buffers.get(buffer).unwrap().text().to_string();
             if workspace {
                 h.new_workspace("other", "home");
@@ -4475,14 +4708,14 @@ mod tests {
                 h.open("other.txt");
             }
             output(&mut h, "terminal_output_delta", "t", "later\n");
-            h.frame(800., 600.);
+            h.joined_frame(800., 600.);
             assert_eq!(
                 h.core.buffers.get(buffer).unwrap().text().to_string(),
                 before
             );
             h.core.switch_workspace(work).unwrap();
             h.core.switch_to(buffer);
-            h.frame(800., 600.);
+            h.joined_frame(800., 600.);
             assert!(h.core.text().contains("initial\nlater\n```"));
         }
     }
@@ -4503,7 +4736,7 @@ mod tests {
         let mut h = session();
         tool(&mut h, command());
         output(&mut h, "terminal_output", "t", "\u{1b}[31mred");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         h.keys("M-< C-e TAB");
         let ansi = (1..=16)
             .map(|i| i.to_string())
@@ -4523,7 +4756,7 @@ mod tests {
         let mut h = session();
         tool(&mut h, command());
         let header = |h: &mut Harness| {
-            h.frame(800., 600.);
+            h.joined_frame(800., 600.);
             h.core.text().lines().next().unwrap().to_string()
         };
         let exit = |code: Value, signal: Value| {
@@ -4550,7 +4783,7 @@ mod tests {
         let meta = serde_json::json!({"terminal_info": {"terminal_id": "t"}});
         meta_update(&mut h, ToolCallUpdateFields::new().title("make"), meta);
         output(&mut h, "terminal_output", "t", "ok\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert_eq!(
             h.core.text(),
             "▸ ●    Using make\nOutput:\n```\nok\n```\n\n> "
@@ -4564,7 +4797,7 @@ mod tests {
         call.content.clear();
         tool(&mut h, call);
         output(&mut h, "terminal_output", "t", "ok\n");
-        h.frame(800., 600.);
+        h.joined_frame(800., 600.);
         assert_eq!(
             h.core.text(),
             "▸ ●    Running make\nOutput:\n```\nok\n```\n\n> "
@@ -4593,17 +4826,24 @@ mod tests {
                 ("Write tests", Pending, Medium),
             ],
         );
-        let first = "Plan\nRead the code (in_progress, high)\nWrite tests (pending, medium)";
+        let first = "Plan\n  ● Read the code\n  ○ Write tests";
         assert_eq!(h.core.text(), format!("Planning.\n\n{first}\n\n> "));
-        let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
-        let rules = |h: &Harness| {
+        let dim = Prop::Named(vec![FaceRef::Face(FaceName::SessionThought)]);
+        let waiting = Prop::Named(vec![FaceRef::Face(FaceName::StatusWaiting)]);
+        let faces = |h: &Harness| {
             (props(h).into_iter())
-                .filter(|(_, p)| *p == rule)
-                .map(|(t, _)| t)
+                .filter(|(t, _)| t != "Planning." && t != "Done.")
                 .collect::<Vec<_>>()
         };
-        assert_eq!(rules(&h), ["P", "R", "W"]);
-        assert!(props(&h).iter().any(|(t, _)| t == " (pending, medium)"));
+        assert_eq!(
+            faces(&h),
+            [
+                ("Plan".into(), dim.clone()),
+                ("●".into(), waiting.clone()),
+                ("○ Write tests".into(), dim.clone()),
+            ],
+            "no rule, and the entry in progress plain"
+        );
         // Point on the plan's first entry stays there while a later entry changes.
         h.keys("M-< C-n C-n C-n");
         let point = h.core.point();
@@ -4611,21 +4851,21 @@ mod tests {
         plan(
             &mut h,
             &[
-                ("Read the code", InProgress, High),
-                ("Write tests", Completed, Medium),
+                ("Read the code", Completed, High),
+                ("Write tests", Pending, Medium),
                 ("Ship\nit", Pending, Low),
             ],
         );
         assert_eq!(h.core.point(), point);
-        let second = "Plan\nRead the code (in_progress, high)\nWrite tests (completed, medium)\nShip … (pending, low)";
+        let second = "Plan\n  ✓ Read the code\n  ○ Write tests\n  ○ Ship …";
         assert_eq!(
             h.core.text(),
             format!("Planning.\n\n{second}\n\nDone.\n\n> ")
         );
-        assert_eq!(rules(&h), ["P", "R", "W", "S"]);
+        assert!(faces(&h).contains(&("✓ Read the code".into(), dim.clone())));
         plan(&mut h, &[]);
         assert_eq!(h.core.text(), "Planning.\n\nPlan\n\nDone.\n\n> ");
-        assert_eq!(rules(&h), ["P"]);
+        assert_eq!(faces(&h), [("Plan".into(), dim)]);
     }
 
     #[test]
@@ -4733,7 +4973,7 @@ mod tests {
         let work = h.core.workspace();
         let working = h.core.windows.window.buffer();
         let dots = |h: &mut Harness| {
-            h.frame(1600., 600.)
+            h.joined_frame(1600., 600.)
                 .workspaces
                 .into_iter()
                 .filter(|s| s.text == " ●")
@@ -4851,7 +5091,7 @@ mod tests {
         let mut h = session();
         info(&mut h, 0, serde_json::json!({"title":"A session title"}));
         h.keys("a RET C-x 3");
-        let frame = h.frame(1200., 300.);
+        let frame = h.joined_frame(1200., 300.);
         let theme = &h.core.settings.theme;
         for window in &frame.windows {
             let bar = &window.mode_line;
@@ -4880,7 +5120,7 @@ mod tests {
                 );
             }
         }
-        let frame = h.frame(400., 300.);
+        let frame = h.joined_frame(400., 300.);
         for window in frame.windows {
             let left = window
                 .mode_line
@@ -5291,7 +5531,7 @@ mod tests {
         );
         assert_eq!(
             visible(&mut h),
-            ["> a", "▸    Read files 0.0s", "Working for 0s", "> "]
+            ["❯ a", "▸    Read files 0.0s", "Working for 0s", "❯ "]
         );
         let rule = |(_, p): &(String, Prop)| matches!(p, Prop::Line(Decoration::Rule(_)));
         assert!(!props(&h).iter().any(rule), "the group line has no rule");
@@ -5432,6 +5672,28 @@ mod tests {
         let failed = (props(&h).into_iter()).find(|(t, _)| t == "1 failed");
         let want = Prop::Named(vec![FaceRef::Face(FaceName::StatusFailed)]);
         assert_eq!(failed.map(|(_, p)| p), Some(want));
+    }
+
+    #[test]
+    fn an_open_body_is_indented_past_its_status_mark() {
+        let mut h = grouped();
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        on_line(&mut h, "▸ ✓    Read a.rs");
+        h.keys("TAB");
+        let output = drawn_line(&mut h, "Output:");
+        assert_eq!(output.indent(), 6, "a grouped row's mark is at column 4");
+        let text = drawn_line(&mut h, "text");
+        let block = Decoration::Background(FaceName::SessionBlock);
+        assert_eq!(
+            (text.indent(), text.decorations.contains(&block)),
+            (6, true)
+        );
+        assert_eq!(drawn_line(&mut h, "Read a.rs").indent(), 0);
+        let mut h = session();
+        tool(&mut h, ls().raw_output(serde_json::json!("a.rs")));
+        h.keys("M-< TAB");
+        assert_eq!(drawn_line(&mut h, "$ ls").indent(), 4);
     }
 
     #[test]

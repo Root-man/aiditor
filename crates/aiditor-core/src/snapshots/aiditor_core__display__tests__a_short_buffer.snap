@@ -116,4 +116,5 @@ WindowDisplay {
         ),
     },
     terminal: None,
+    prompt: None,
 }

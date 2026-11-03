@@ -400,6 +400,8 @@ pub enum Decoration {
     Rule(FaceName),
     /// A bar in the left margin, wider than a rule, like the one beside the message at point.
     Bar(FaceName),
+    /// The line's text, and its background, start this many columns in, which it wraps short of.
+    Indent(usize),
 }
 
 /// An icon from the set bundled with the frontend.
@@ -797,20 +799,45 @@ impl Buffer {
     }
 
     /// `line`, or when it starts inside invisible text, the line after that fold (`down`) or the
-    /// fold's first line, as Emacs's `line-move-ignore-invisible`.
+    /// fold's first line, as Emacs's `line-move-ignore-invisible`. A line whose start begins a
+    /// fold past its newline, like a tool body's hidden fence, shows on the row of the line the
+    /// fold ends in: down goes to that line, up past it.
     pub(crate) fn unfolded_line(&self, line: usize, down: bool) -> usize {
         if !self.has_folds() {
             return line;
         }
         let (text, pos) = (self.text(), self.text().line_to_char(line));
         let fold = (self.properties_near(pos..pos).into_iter()).find(|(r, p)| {
-            matches!(p, Prop::Invisible(_) | Prop::Display(_)) && r.start < pos && pos < r.end
+            let joins = r.start == pos && text.char_to_line(r.end) > line;
+            matches!(p, Prop::Invisible(_) | Prop::Display(_))
+                && (r.start < pos || joins)
+                && pos < r.end
         });
         match fold {
+            Some((r, _)) if r.start == pos && down => text.char_to_line(r.end),
+            Some((r, _)) if r.start == pos => match line {
+                0 => 0,
+                _ => self.unfolded_line(line - 1, false),
+            },
             Some((r, _)) if down => text.char_to_line(r.end) + 1,
             Some((r, _)) => text.char_to_line(r.start),
             None => line,
         }
+    }
+
+    /// The columns an `Indent` decoration puts `line` in.
+    pub(crate) fn line_indent(&self, line: usize) -> usize {
+        let start = self.text().line_to_char(line);
+        let end = self
+            .char_idx(line, usize::MAX)
+            .unwrap_or(start)
+            .max(start + 1);
+        (self.properties_near(start..end).into_iter())
+            .find_map(|(r, p)| match p {
+                Prop::Line(Decoration::Indent(n)) if r.start < end && r.end > start => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0)
     }
 
     /// Whether any property hides text.

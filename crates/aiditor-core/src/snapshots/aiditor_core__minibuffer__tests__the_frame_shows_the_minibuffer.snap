@@ -63,6 +63,7 @@ Some(
                 path: None,
             },
             terminal: None,
+            prompt: None,
         },
         files: false,
         candidates: [],

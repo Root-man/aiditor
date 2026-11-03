@@ -46,7 +46,9 @@ WindowDisplay {
                 Span {
                     text: "…",
                     face: Face {
-                        fg: None,
+                        fg: Some(
+                            8421504,
+                        ),
                         bg: None,
                         bold: false,
                         italic: false,
@@ -119,4 +121,5 @@ WindowDisplay {
         path: None,
     },
     terminal: None,
+    prompt: None,
 }

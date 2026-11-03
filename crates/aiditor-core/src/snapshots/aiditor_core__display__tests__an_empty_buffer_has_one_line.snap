@@ -44,4 +44,5 @@ WindowDisplay {
         path: None,
     },
     terminal: None,
+    prompt: None,
 }

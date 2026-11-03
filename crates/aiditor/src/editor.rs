@@ -2315,7 +2315,8 @@ mod tests {
         cx.run_until_parked();
         editor.update(cx, |e, _| {
             let frame = e.core.frame();
-            let chip = frame.windows[0].display.lines[0]
+            let pane = frame.windows[0].display.prompt.as_ref().unwrap();
+            let chip = pane.lines[0]
                 .spans
                 .iter()
                 .find(|s| s.text.contains("Pasted 21 lines"))
@@ -2324,10 +2325,18 @@ mod tests {
                 chip.face.boxed,
                 e.core.settings().theme.face(FaceName::Attachment).boxed
             );
+            let p = &e.painted[0];
+            assert_eq!(p.rows[0].text.text.as_ref(), "❯  ≡ Pasted 21 lines ");
+            // The docked pane ends 8 px above the mode line, under a rule 8 px above it.
+            let last = p.rows.last().unwrap();
+            let mode_line = px(e.core.settings().mode_line_height());
             assert_eq!(
-                e.painted[0].rows[0].text.text.as_ref(),
-                ">  ≡ Pasted 21 lines "
+                last.top + last.height,
+                p.bounds.size.height - mode_line - px(8.)
             );
+            let rule = p.rule.unwrap();
+            assert_eq!(rule.size.height, px(1.));
+            assert_eq!(rule.bottom() - p.bounds.top(), p.rows[0].top - px(8.));
         });
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
@@ -2340,7 +2349,7 @@ mod tests {
             assert_eq!(
                 &rows[..6],
                 [
-                    ">  ≡ Pasted 21 lines ",
+                    "❯  ≡ Pasted 21 lines ",
                     "log line 1",
                     "log line 2",
                     "log line 3",
@@ -2353,7 +2362,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             editor.read_with(cx, |e, _| e.painted[0].rows[0].text.text.to_string()),
-            ">  ≡ Pasted 21 lines "
+            "❯  ≡ Pasted 21 lines "
         );
     }
 
@@ -2399,7 +2408,7 @@ mod tests {
             assert_eq!(mb.prompt, "Attach: ");
             assert_eq!(mb.candidates, ["screens/"]);
             assert_eq!(mb.selected, None);
-            assert_eq!(e.painted[0].rows[0].text.text, "> compare ");
+            assert_eq!(e.painted[0].rows[0].text.text, "❯ compare ");
         });
         let annotation = cx.debug_bounds("completion-annotation-0").unwrap();
         let width = cx.update(|window, _| window.viewport_size().width);
@@ -2408,10 +2417,10 @@ mod tests {
         cx.run_until_parked();
         editor.read_with(cx, |e, _| {
             let row = &e.painted[0].rows[0];
-            assert_eq!(row.text.text, "> compare  ▦ screens ");
+            assert_eq!(row.text.text, "❯ compare  ▦ screens ");
             let (first, last) = (row.boxes.first().unwrap(), row.boxes.last().unwrap());
             assert_eq!((first.open_left, last.open_right), (false, false));
-            assert_eq!(first.x.start, row.text.x_for_index("> compare ".len()));
+            assert_eq!(first.x.start, row.text.x_for_index("❯ compare ".len()));
             assert_eq!(last.x.end, row.text.width);
         });
         cx.update(|window, _| window.remove_window());

@@ -176,17 +176,7 @@ impl Window {
         let starts = |l: usize| self.row_starts(buffer, l);
         let row = starts(line).partition_point(|&s| s <= col) - 1;
         // The lowest first row: `rows - 1` rows above point's.
-        let (mut low, mut low_row) = (line, row);
-        for _ in 1..self.rows {
-            match (low_row, low) {
-                (0, 0) => break,
-                (0, _) => {
-                    low = buffer.unfolded_line(low - 1, false);
-                    low_row = starts(low).len() - 1;
-                }
-                _ => low_row -= 1,
-            }
-        }
+        let (low, low_row) = self.back(buffer, (line, row), self.rows - 1);
         if self.top_row > 0 && self.top < buffer.len_lines() {
             self.top_row = self.top_row.min(starts(self.top).len() - 1);
         }
@@ -206,12 +196,42 @@ impl Window {
             .char_idx(line, usize::MAX)
             .expect("line is in the buffer");
         let len = end - buffer.text().line_to_char(line);
+        let width = width.saturating_sub(buffer.line_indent(line)).max(1);
         display::row_starts(len, width, word, |i| text.char(i).is_whitespace())
     }
 
     /// The first row shown of the first line at the last `scroll`.
     pub fn top_row(&self) -> usize {
         self.top_row
+    }
+
+    /// The row `n` rows above `(line, row)`, past folds, or the buffer's first.
+    pub(crate) fn back(
+        &self,
+        buffer: &Buffer,
+        (mut line, mut row): (usize, usize),
+        n: usize,
+    ) -> (usize, usize) {
+        for _ in 0..n {
+            match (row, line) {
+                (0, 0) => break,
+                (0, _) => {
+                    line = buffer.unfolded_line(line - 1, false);
+                    row = self.row_starts(buffer, line).len() - 1;
+                }
+                _ => row -= 1,
+            }
+        }
+        (line, row)
+    }
+
+    /// Shows `rows` rows from `(top, top_row)`, as `scroll` would have.
+    pub(crate) fn show_from(&mut self, (top, top_row): (usize, usize), rows: usize) {
+        (self.top, self.top_row, self.rows) = (top, top_row, rows.max(1));
+    }
+
+    pub(crate) fn cols(&self) -> usize {
+        self.cols
     }
 
     /// Sets the columns long lines wrap at, as shown at this redisplay.

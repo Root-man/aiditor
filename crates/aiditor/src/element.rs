@@ -4,7 +4,7 @@ use std::time::Instant;
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face, Icon};
 use aiditor_core::display::{
-    CursorShape, FrameWindow, GUTTER_RIGHT, Line, Rect, Span, TEXT_INSET, Terminal,
+    CursorShape, FrameWindow, GUTTER_RIGHT, Line, PANE_PADDING, Rect, Span, TEXT_INSET, Terminal,
 };
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
@@ -23,7 +23,11 @@ pub(crate) struct Painted {
     pub(crate) selected: bool,
     /// Where its text starts, past the gutter, from the window's left.
     pub(crate) text_x: Pixels,
+    /// Where its text stops, from the window's right.
+    text_right: Pixels,
     pub(crate) rows: Vec<Row>,
+    /// The rule above a docked prompt pane.
+    pub(crate) rule: Option<Bounds<Pixels>>,
     /// A terminal's runs, each placed on its grid column.
     pub(crate) cells: Vec<Cells>,
     /// Its mode line's background and an inactive one's rule, each with its colour.
@@ -56,6 +60,8 @@ pub(crate) struct Row {
     pub(crate) top: Pixels,
     pub(crate) height: Pixels,
     decorations: Vec<Decoration>,
+    /// How far right of the text's start its text and background start.
+    indent: Pixels,
     /// Its label in the gutter, if the window has one, and the label's x from the window's left.
     pub(crate) number: Option<(Pixels, ShapedLine)>,
     pub(crate) text: ShapedLine,
@@ -159,13 +165,47 @@ impl Element for FrameElement {
             let line_height = px(settings.line_height());
             let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
                 let bounds = to_bounds(w.rect, bounds.origin);
-                let text_x = px(w.gutter.as_ref().map_or(TEXT_INSET, |g| g.width));
+                let text_x = px(w.gutter.as_ref().map_or(w.inset.0, |g| g.width));
                 let mut top = px(0.);
                 let mut cursor = None;
                 let mut cursor_char = None;
-                let rows = (w.display.lines.iter().enumerate()).map(|(i, line)| {
+                // A docked prompt pane's rows follow the transcript's, ending the padding above
+                // the mode line.
+                let display = &w.display;
+                let pane = display.prompt.as_ref();
+                let pane_rows: f32 = pane.map_or(0., |p| p.lines.iter().map(|l| l.height).sum());
+                let mode_line_height = px(settings.mode_line_height());
+                let pane_top =
+                    px(w.rect.height) - mode_line_height - px(PANE_PADDING) - px(pane_rows);
+                let pane_rule = pane.map(|_| {
+                    let top = bounds.origin + point(px(0.), pane_top - px(PANE_PADDING + 1.));
+                    Bounds::new(top, gpui::size(bounds.size.width, px(1.)))
+                });
+                let transcript = (display.lines.iter().enumerate()).map(|(i, line)| {
+                    let at = display.cursor.filter(|&(l, _)| l == i);
+                    (
+                        Some(i),
+                        line,
+                        at.map(|(_, col)| (col, display.cursor_width)),
+                    )
+                });
+                let docked = pane.into_iter().flat_map(|p| {
+                    (p.lines.iter().enumerate()).map(move |(i, line)| {
+                        let at = p.cursor.filter(|&(l, _)| l == i);
+                        (None, line, at.map(|(_, col)| (col, p.cursor_width)))
+                    })
+                });
+                let mut in_pane = false;
+                let rows = transcript.chain(docked).map(|(i, line, at)| {
+                    if i.is_none() && !in_pane {
+                        (in_pane, top) = (true, pane_top);
+                    }
                     let height = px(line.height);
-                    let at = w.display.cursor.filter(|&(l, _)| l == i && w.selected);
+                    let indent = cell * line.indent() as f32;
+                    let (at, chars) = match at.filter(|_| w.selected) {
+                        Some((col, chars)) => (Some((0, col)), chars),
+                        None => (None, 1),
+                    };
                     let marked = at.and(editor.marked.as_deref()).unwrap_or_default();
                     let (text, runs, byte, boxes) =
                         line_runs(line, at.map(|(_, col)| col), marked, &font, &settings.theme);
@@ -173,9 +213,8 @@ impl Element for FrameElement {
                     let boxes = boxed(&text, boxes);
                     let icons = icons(line, at.map(|(_, col)| col), marked, &text, &runs);
                     if at.is_some() {
-                        let chars = w.display.cursor_width;
                         let (x, width, under) = block(&text, byte, chars, cell);
-                        let origin = bounds.origin + point(text_x + x, top);
+                        let origin = bounds.origin + point(text_x + indent + x, top);
                         cursor = Some(Bounds::new(origin, gpui::size(width, height)));
                         let face = Face {
                             fg: settings.theme.face(FaceName::Cursor).fg,
@@ -184,7 +223,7 @@ impl Element for FrameElement {
                         let run = text_run(under.len(), face, false, &font, &settings.theme);
                         cursor_char = Some(shape(under.to_string(), &[run]));
                     }
-                    let number = w.gutter.as_ref().map(|g| {
+                    let number = w.gutter.as_ref().zip(i).map(|(g, i)| {
                         let (label, face) = &g.rows[i];
                         let run = text_run(label.len(), *face, false, &font, &settings.theme);
                         let label = shape(label.clone(), &[run]);
@@ -194,6 +233,7 @@ impl Element for FrameElement {
                         top,
                         height,
                         decorations: line.decorations.clone(),
+                        indent,
                         number,
                         text,
                         boxes,
@@ -299,7 +339,9 @@ impl Element for FrameElement {
                     bounds,
                     selected: w.selected,
                     text_x,
+                    text_right: px(w.inset.1),
                     rows,
+                    rule: pane_rule,
                     mode_line_fill: bar_fill.into_iter().chain(rule_fill).collect(),
                     mode_line: group(&w.mode_line.left),
                     mode_line_right: group(&w.mode_line.right),
@@ -350,14 +392,26 @@ impl Element for FrameElement {
                 for row in &p.rows {
                     let origin = p.bounds.origin + point(px(0.), row.top);
                     for decoration in &row.decorations {
-                        let (width, color) = match *decoration {
-                            Decoration::Background(name) => (width, theme.face(name).bg),
-                            Decoration::Rule(name) => (px(2.), theme.face(name).fg),
-                            Decoration::Bar(name) => (px(3.), theme.face(name).fg),
+                        // An indented line's background runs from its text to the right inset.
+                        let left = match row.indent > px(0.) {
+                            true => p.text_x + row.indent,
+                            false => px(0.),
+                        };
+                        let (x, width, color) = match *decoration {
+                            Decoration::Background(name) if left > px(0.) => {
+                                (left, width - left - p.text_right, theme.face(name).bg)
+                            }
+                            Decoration::Background(name) => (left, width, theme.face(name).bg),
+                            Decoration::Rule(name) => (px(0.), px(2.), theme.face(name).fg),
+                            Decoration::Bar(name) => (px(0.), px(3.), theme.face(name).fg),
+                            Decoration::Indent(_) => (px(0.), px(0.), None),
                         };
                         if let Some(color) = color {
-                            let bounds = Bounds::new(origin, size(width, row.height));
-                            window.paint_quad(fill(bounds, rgb(color)));
+                            let at = origin + point(x, px(0.));
+                            window.paint_quad(fill(
+                                Bounds::new(at, size(width, row.height)),
+                                rgb(color),
+                            ));
                         }
                     }
                     if let Some((x, number)) = &row.number {
@@ -365,7 +419,7 @@ impl Element for FrameElement {
                         number.paint_background(at, row.height, window, cx).ok();
                         number.paint(at, row.height, window, cx).ok();
                     }
-                    let origin = origin + point(p.text_x, px(0.));
+                    let origin = origin + point(p.text_x + row.indent, px(0.));
                     row.text
                         .paint_background(origin, row.height, window, cx)
                         .ok();
@@ -379,6 +433,9 @@ impl Element for FrameElement {
                         let unit = TransformationMatrix::unit();
                         window.paint_svg(bounds, path, unit, i.color, cx).ok();
                     }
+                }
+                if let (Some(rule), Some(color)) = (p.rule, theme.face(FaceName::Separator).fg) {
+                    window.paint_quad(fill(rule, rgb(color)));
                 }
                 for c in &p.cells {
                     if let Some((bounds, color)) = c.background {
