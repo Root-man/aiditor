@@ -554,6 +554,23 @@ impl Harness {
         });
         self.core.frame()
     }
+
+    /// `frame`, each docked prompt pane's rows following its transcript's, as drawn top to bottom.
+    pub fn joined_frame(&mut self, width: f32, height: f32) -> FrameDisplay {
+        let mut frame = self.frame(width, height);
+        for w in &mut frame.windows {
+            let display = &mut w.display;
+            if let Some(pane) = display.prompt.take() {
+                let above = display.lines.len();
+                display.lines.extend(pane.lines);
+                if let Some((l, c)) = pane.cursor {
+                    (display.cursor, display.cursor_width) =
+                        (Some((above + l, c)), pane.cursor_width);
+                }
+            }
+        }
+        frame
+    }
 }
 
 pub(crate) const MS: Duration = Duration::from_millis(1);

@@ -1781,6 +1781,13 @@ milestones:
               - "A path that doesn't exist stays plain text"
               - "RET visits the file at the line"
             blocked_by: [m6-tool-blocks]
+          - key: m6-frame6-gaps
+            title: "Match the session buffer to frame 6"
+            body: |
+              A design check against frame 6 found gaps in the session buffer's styling. Close each one, or record in docs/editor.md why it stays: the `session-user` background on sent prompts; an edit body that shows only the diff, with no path line and no `---`/`+++` headers; no empty rows for code fences in tool bodies; tool bodies indented under their row; `+N −M` on edit headers; commands in headers in `session-code`; a dim `… N more lines`; the 24px text inset; permission requests drawn with `key-hint` number keys on a `permission` background; plan entries with `✓`/`●`/`○` marks; and the `❯` prompt, docked at the bottom with a top border.
+            acceptance:
+              - "Each gap listed is fixed, or docs/editor.md records why it stays"
+              - "A design check against frame 6 finds no unexplained gaps"
       - key: m6-prompt
         title: "Prompt context and commands"
         labels: [acp, frontend]

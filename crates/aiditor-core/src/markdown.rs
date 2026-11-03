@@ -11,10 +11,12 @@ use crate::settings::FaceName;
 
 /// The properties that show `text` as rendered markdown, in char offsets of `text`, sorted by
 /// start then end. Faces and hidden markup never overlap, and code blocks decorate whole lines,
-/// so starts and ends both ascend. Words `is_file` accepts are links.
+/// so starts and ends both ascend. Words `is_file` accepts are links. In a tool call's `body` a
+/// fence line takes no row: it hides with the newline joining it to its block.
 pub(crate) fn render(
     text: &str,
     thought: bool,
+    body: bool,
     is_file: impl Fn(&str) -> bool,
 ) -> Vec<(Range<usize>, Prop)> {
     let Some(tree) = MarkdownParser::default().parse(text.as_bytes(), None) else {
@@ -54,15 +56,18 @@ pub(crate) fn render(
                     code.push(start..end);
                     start = end;
                 }
-                // A fence line shows as an empty line of the block.
-                for child in children(node) {
-                    if child.kind() == "fenced_code_block_delimiter" {
-                        let line = &text[child.start_byte()..];
-                        hidden.push(
-                            child.start_byte()
-                                ..child.start_byte() + line.find('\n').unwrap_or(line.len()),
-                        );
-                    }
+                // A fence line shows as an empty line of the block, or in a body as none.
+                let delimiters =
+                    children(node).filter(|c| c.kind() == "fenced_code_block_delimiter");
+                for (i, child) in delimiters.enumerate() {
+                    let (start, line) = (child.start_byte(), &text[child.start_byte()..]);
+                    let end = start + line.find('\n').unwrap_or(line.len());
+                    hidden.push(match (body, i) {
+                        (false, _) => start..end,
+                        (true, 0) => start..(end + 1).min(text.len()),
+                        (true, _) if text[..start].ends_with('\n') => start - 1..end,
+                        (true, _) => start..end,
+                    });
                 }
             }
             _ => {}
@@ -215,7 +220,7 @@ mod tests {
     /// for faces that aren't the default.
     fn shown(text: &str, thought: bool) -> (String, Vec<(String, Face)>) {
         let theme = Settings::default().theme;
-        let props = render(text, thought, |w| w.starts_with("src/"));
+        let props = render(text, thought, false, |w| w.starts_with("src/"));
         let chars: Vec<char> = text.chars().collect();
         let hidden = |i: usize| {
             (props.iter()).any(|(r, p)| matches!(p, Prop::Invisible(_)) && r.contains(&i))
@@ -282,7 +287,7 @@ mod tests {
     #[test]
     fn code_blocks_decorate_their_lines_and_hide_fences() {
         let text = "```rust\nfn main() {}\n```\nafter\n\n    indented\n";
-        let props = render(text, false, |_| false);
+        let props = render(text, false, false, |_| false);
         let lines: Vec<_> = (props.iter())
             .filter(|(_, p)| matches!(p, Prop::Line(_)))
             .map(|(r, _)| text.chars().skip(r.start).take(r.len()).collect::<String>())
@@ -368,7 +373,7 @@ mod tests {
         assert_eq!(shown, "é ünï ç\n\n\nß\nx\n\n");
         // A thought's dim face runs through the code lines too.
         for thought in [false, true] {
-            let props = render(text, thought, |_| false);
+            let props = render(text, thought, false, |_| false);
             let ascend = |w: &[(Range<usize>, Prop)]| {
                 w[0].0.start <= w[1].0.start && w[0].0.end <= w[1].0.end
             };

@@ -46,7 +46,23 @@ pub struct WindowDisplay {
     pub mode_line: ModeLine,
     /// A terminal buffer's screen, drawn instead of `lines` and `cursor`.
     pub terminal: Option<Terminal>,
+    /// A session's prompt area, docked under the transcript `lines` show.
+    pub prompt: Option<PromptPane>,
 }
+
+/// The rows a session window docks at its bottom, under a rule, for the prompt area.
+#[derive(Debug, PartialEq)]
+pub struct PromptPane {
+    pub lines: Vec<Line>,
+    /// As `WindowDisplay`'s, when point is in the prompt area.
+    pub cursor: Option<(usize, usize)>,
+    pub cursor_width: usize,
+}
+
+/// The px between a prompt pane's rule and its rows, and between its rows and the mode line.
+pub const PANE_PADDING: f32 = 8.;
+/// The prompt pane's rows less its own: the rule and the padding around the rows.
+pub const PANE_CHROME: f32 = 1. + 2. * PANE_PADDING;
 
 /// A mode line part shown only when it applies: pieces of text, each in a face over the bar's.
 pub type Segment = Vec<(String, FaceName)>;
@@ -271,6 +287,8 @@ pub struct FrameWindow {
     pub selected: bool,
     pub display: WindowDisplay,
     pub gutter: Option<Gutter>,
+    /// The px between the text and the window's left side, where it has no gutter, and its right.
+    pub inset: (f32, f32),
     pub mode_line: ModeBar,
 }
 
@@ -306,6 +324,18 @@ pub struct Line {
     pub icons: Vec<(usize, Icon)>,
 }
 
+impl Line {
+    /// The columns its text and background start in, from an `Indent` decoration.
+    pub fn indent(&self) -> usize {
+        (self.decorations.iter())
+            .find_map(|d| match d {
+                Decoration::Indent(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Span {
     pub text: String,
@@ -328,6 +358,9 @@ const GUTTER_LEFT: f32 = 10.;
 pub const GUTTER_RIGHT: f32 = 12.;
 /// Between text and a window's side where no gutter stands.
 pub const TEXT_INSET: f32 = 12.;
+/// A session window's text insets, left and right: frame 6's padding, the left one past the bar
+/// beside the message at point.
+pub const SESSION_INSET: (f32, f32) = (27., 24.);
 
 /// The width of a gutter for a buffer of `lines` lines in `cell` px cells.
 pub(crate) fn gutter_width(lines: usize, cell: f32) -> f32 {
@@ -520,9 +553,11 @@ pub fn build(
     let finish = |lines: &mut Vec<Line>, line: &mut Line, start: usize, end: usize, next| {
         let end = end.max(start + 1);
         for (range, prop) in &props {
+            // A fold joining lines can bring in a decoration the line has already.
             if let Prop::Line(d) = prop
                 && range.start < end
                 && range.end > start
+                && !line.decorations.contains(d)
             {
                 line.decorations.push(*d);
             }
@@ -584,9 +619,13 @@ pub fn build(
             false => 0..shown.len(),
         };
         let fold = props.iter().find_map(|(range, prop)| match prop {
+            // Placeholders stand for hidden text (line counts, a folded call's ` …`), which frame 6 draws dim.
             Prop::Invisible(placeholder) if range.contains(&pos) => Some((
                 range.end,
-                vec![(Cow::from(placeholder.as_str()), Face::default())],
+                vec![(
+                    Cow::from(placeholder.as_str()),
+                    settings.theme.face(FaceName::Annotation),
+                )],
             )),
             Prop::Display(pieces) if range.contains(&pos) => {
                 let face = |refs| settings.theme.resolve(refs);
@@ -719,6 +758,12 @@ pub fn build(
         }
     }
     let mut bottom = pos == text.len_chars();
+    if wrap.is_none() && shown.end != usize::MAX {
+        for line in lines.iter_mut().filter(|l| l.indent() > 0) {
+            let keep = shown.len().saturating_sub(line.indent());
+            cut_spans(&mut line.spans, keep);
+        }
+    }
     if let Some(wrap) = wrap {
         let marker = crate::syntax::face(&settings.theme.syntax, "comment").unwrap_or_default();
         lines = wrap_lines(lines, &mut cursor, rows, wrap, marker, &mut positions);
@@ -753,6 +798,7 @@ pub fn build(
             _ => mode_line(buffer, l + 1, c),
         },
         terminal: None,
+        prompt: None,
     }
 }
 
@@ -988,6 +1034,16 @@ fn search_overlays(
     }
 }
 
+/// `spans` cut to their first `keep` chars.
+fn cut_spans(spans: &mut Vec<Span>, mut keep: usize) {
+    spans.retain_mut(|span| {
+        let len = span.text.chars().count();
+        span.text = span.text.chars().take(keep).collect();
+        keep = keep.saturating_sub(len);
+        !span.text.is_empty()
+    });
+}
+
 fn wrap_lines(
     lines: Vec<Line>,
     cursor: &mut Option<(usize, usize)>,
@@ -1001,11 +1057,10 @@ fn wrap_lines(
     let mut mapped = positions.as_ref().map(|_| Vec::new());
     for (i, line) in lines.into_iter().enumerate() {
         let chars: Vec<char> = line.spans.iter().flat_map(|s| s.text.chars()).collect();
+        let width = wrap.width.saturating_sub(line.indent()).max(1);
         let starts = match line.aligned {
             true => vec![0],
-            false => row_starts(chars.len(), wrap.width, wrap.word, |i| {
-                chars[i].is_whitespace()
-            }),
+            false => row_starts(chars.len(), width, wrap.word, |i| chars[i].is_whitespace()),
         };
         if let (Some(old), Some(mapped)) = (positions.as_ref(), &mut mapped) {
             for (row, &start) in starts.iter().enumerate() {
@@ -1608,6 +1663,41 @@ mod tests {
         let id = h.core.windows.window.buffer();
         let buffer = h.core.buffers.get_mut(id).unwrap();
         buffer.add_property(range, prop).unwrap();
+    }
+
+    #[test]
+    fn an_indented_line_wraps_short_and_reports_its_indent() {
+        let text = "x".repeat(80);
+        let mut h = Harness::new(&[("a.rs", &format!("{text}\nab\n"))]);
+        h.open("a.rs");
+        prop(&mut h, 0..1, Prop::Line(Decoration::Indent(4)));
+        prop(&mut h, 81..82, Prop::Line(Decoration::Indent(4)));
+        let wrap = super::Wrap {
+            width: 40,
+            word: false,
+            from: 0,
+        };
+        let build = |h: &Harness, point| {
+            let b = h.core.current();
+            let s = h.core.settings();
+            super::build(b, 0, 5, point, None, s, 0..400, Some(wrap), &[], None)
+        };
+        let d = build(&h, 83);
+        let len = |l: usize| {
+            d.lines[l]
+                .spans
+                .iter()
+                .map(|s| s.text.chars().count())
+                .sum::<usize>()
+        };
+        // 36 chars and the `\` marker a row.
+        assert_eq!((len(0), len(1), len(2)), (37, 37, 8));
+        assert!(d.lines[..4].iter().all(|l| l.indent() == 4));
+        assert_eq!(d.cursor, Some((3, 2)), "point's char column");
+        // The window's rows agree, so motion and scrolling see the same rows.
+        h.core.windows.window.set_cols(41);
+        let starts = h.core.windows.window.row_starts(h.core.current(), 0);
+        assert_eq!(starts, [0, 36, 72]);
     }
 
     /// Each display line's text, folds included.

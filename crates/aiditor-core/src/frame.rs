@@ -1,7 +1,7 @@
 //! Windows and the frame's display model.
 
 use crate::buffer::{BufferId, Buffers};
-use crate::display::TEXT_INSET;
+use crate::display::{SESSION_INSET, TEXT_INSET};
 use crate::settings::{FaceName, LineNumbers, Settings};
 use crate::window::{Tree, Window, WindowId};
 use crate::{Core, Ctx, display};
@@ -163,17 +163,24 @@ impl Core {
                     && (selected || origin == Some(id))
                     && (buffer.numbered() || buffer.copy_mode());
                 let width = display::gutter_width(buffer.len_lines(), cell_width);
+                let session = self.agents.values().any(|s| s.buffer == window.buffer());
+                let inset = match session {
+                    true => SESSION_INSET,
+                    false => (TEXT_INSET, TEXT_INSET),
+                };
                 // A window too narrow for it keeps its one column of text.
-                let room = rect.width - TEXT_INSET;
+                let room = rect.width - inset.1;
                 let numbered = style != LineNumbers::Off && room - width > cell_width;
-                let cols =
-                    ((room - if numbered { width } else { TEXT_INSET }) / cell_width) as usize;
+                let cols = ((room - if numbered { width } else { inset.0 }) / cell_width) as usize;
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
                 let matches = search.filter(|(from, _)| *from == id).map(|(_, s)| s);
-                let mut display = window_display(
-                    window, buffers, settings, rows, drawn, cols, &roots, matches,
-                );
+                let mut display = match session {
+                    true => session_display(window, buffers, settings, rect.height, cols, &roots),
+                    false => window_display(
+                        window, buffers, settings, rows, drawn, cols, &roots, matches,
+                    ),
+                };
                 if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
                     display.mode_line = session.mode_line();
                     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
@@ -208,6 +215,7 @@ impl Core {
                     selected,
                     display,
                     gutter,
+                    inset,
                     mode_line,
                 }
             })
@@ -313,6 +321,114 @@ pub(crate) fn window_display(
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }
     display
+}
+
+/// A session window's display `cols` wide in a window `height` px high: the transcript in the
+/// rows above a pane docked at the bottom, which holds the prompt area, from the prompt line on.
+/// The transcript shows its last lines while point is in the prompt area and scrolls to keep
+/// point otherwise; the pane grows with the prompt area up to a third of the rows.
+fn session_display(
+    window: &mut Window,
+    buffers: &mut Buffers,
+    settings: &Settings,
+    height: f32,
+    cols: usize,
+    roots: &[PathBuf],
+) -> display::WindowDisplay {
+    window.set_cols(cols);
+    let id = window.buffer();
+    buffers
+        .get_mut(id)
+        .expect("window buffer is live")
+        .reparse();
+    let buffers = &*buffers;
+    let buffer = buffers.get(id).expect("window buffer is live");
+    let point = window.point(buffers);
+    let mark = window.mark(buffers).filter(|_| window.active());
+    let prompt = buffer.text().char_to_line(buffer.prompt_start());
+    let in_prompt = point >= buffer.text().line_to_char(prompt);
+    let most = (settings.text_rows(height) / 3).max(1);
+    // Laid out, as a folded paste's preview takes more rows than its lines.
+    let area = window_rows(
+        window,
+        buffer,
+        settings,
+        roots,
+        (prompt, 0),
+        most + 1,
+        point,
+        mark,
+    );
+    let pane_rows = area.lines.len().clamp(1, most);
+    let pane_height = pane_rows as f32 * settings.line_height() + display::PANE_CHROME;
+    let rows = settings.text_rows(height - pane_height);
+    let top = match in_prompt {
+        true => {
+            let top = window.back(buffer, (prompt, 0), rows);
+            window.show_from(top, rows);
+            top
+        }
+        false => (window.scroll(buffers, rows), window.top_row()),
+    };
+    let build = |top, rows| window_rows(window, buffer, settings, roots, top, rows, point, mark);
+    let mut display = build(top, rows);
+    let transcript = (display.lines.iter()).position(|l| l.number >= prompt);
+    display
+        .lines
+        .truncate(transcript.unwrap_or(display.lines.len()));
+    let shown = display.lines.len();
+    display.cursor = display.cursor.filter(|&(l, _)| l < shown);
+    // shortcut: the pane's top follows point each frame instead of being kept, so it can jump while editing a long prompt; keep a pane top on the window if it does.
+    let (line, col) = buffer.line_col(point).unwrap_or_default();
+    let row = window
+        .row_starts(buffer, line)
+        .partition_point(|&s| s <= col)
+        - 1;
+    let pane = match (in_prompt, area.lines.len() > most) {
+        (true, true) => build(
+            window.back(buffer, (line, row), most - 1).max((prompt, 0)),
+            most,
+        ),
+        _ => display::WindowDisplay {
+            lines: area.lines.into_iter().take(most).collect(),
+            cursor: area.cursor.filter(|&(l, _)| l < most),
+            ..area
+        },
+    };
+    display.prompt = Some(display::PromptPane {
+        lines: pane.lines,
+        cursor: pane.cursor,
+        cursor_width: pane.cursor_width,
+    });
+    display
+}
+
+/// `rows` display rows of `window`'s `buffer` from row `top_row` of line `top`, wrapped as the
+/// window wraps.
+#[allow(clippy::too_many_arguments)]
+fn window_rows(
+    window: &Window,
+    buffer: &crate::buffer::Buffer,
+    settings: &Settings,
+    roots: &[PathBuf],
+    (top, top_row): (usize, usize),
+    rows: usize,
+    point: usize,
+    mark: Option<usize>,
+) -> display::WindowDisplay {
+    let cols = window.cols();
+    let wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
+        width,
+        word,
+        from: window.row_starts(buffer, top)[top_row],
+    });
+    let shown = match wrap {
+        Some(_) => 0..(rows + 1).saturating_mul(cols),
+        None => 0..cols.saturating_add(1),
+    };
+    display::build(
+        buffer, top, rows, point, mark, settings, shown, wrap, roots, None,
+    )
 }
 
 /// Cuts the workspace modeline's names so `<project> › <workspace>` fits in `cols`.
