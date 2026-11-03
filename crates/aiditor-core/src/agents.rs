@@ -29,6 +29,7 @@ use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 
 mod chips;
 mod groups;
+mod pastes;
 mod render;
 pub(crate) use chips::{Chips, is_chip};
 use groups::*;
@@ -112,6 +113,7 @@ pub(crate) struct Session {
     painted: u64,
     /// The slash commands from the latest `available_commands_update`, hidden ones left out.
     commands: Vec<AvailableCommand>,
+    pastes: Vec<pastes::Paste>,
 }
 
 /// The project's roots with their role lines, the primary first; `None` with nothing to list.
@@ -959,19 +961,21 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        // The prompt area carries only chips' properties, so it is cleared whole.
+        // The prompt area carries only chips and pastes, so it is cleared whole.
         if std::mem::replace(&mut session.painted, buffer.tick()) != buffer.tick() {
             let range = buffer.prompt_start()..buffer.len_chars();
             buffer.remove_properties(range.clone());
             self.chips.paint(buffer, range);
+            session.paint_pastes(buffer, buffer.prompt_start());
         }
     }
 
     /// Repaints every session buffer's chips, after a chip's file went or came back.
     pub(crate) fn repaint_chips(&mut self) {
-        for session in self.agents.values() {
+        for session in self.agents.values_mut() {
             if let Some(buffer) = self.buffers.get_mut(session.buffer) {
                 self.chips.paint(buffer, 0..buffer.len_chars());
+                session.paint_pastes(buffer, 0);
             }
         }
     }
@@ -1249,6 +1253,7 @@ impl Ctx<'_> {
             preamble,
             painted: 0,
             commands: Vec::new(),
+            pastes: Vec::new(),
         };
         core.agents.insert(id, session);
         core.echo(echo);
@@ -1667,10 +1672,12 @@ impl Ctx<'_> {
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
         if let Some(clock) = &core.clock {
-            message.len += put_time(b, line_end(b, start), clock);
+            let at = session.paste_line_end(b, start);
+            message.len += put_time(b, at, clock);
         }
         let end = b.len_chars();
         let session = core.agents.get_mut(&id).expect("found above");
+        session.fold_pastes(b, start);
         session.messages.push(message);
         session.turn = Some(Turn {
             start: self.now,
@@ -1711,6 +1718,9 @@ impl Ctx<'_> {
             .get_mut(buffer)
             .expect("current buffer is live");
         let session = session.ok_or("No tool call here")?;
+        if let Some(start) = session.toggle_paste(b, point) {
+            return self.goto(start);
+        }
         let call = (session.tools.iter())
             .find(|(_, t)| {
                 let end = if t.open { t.len } else { t.header };
@@ -2324,6 +2334,189 @@ mod tests {
         ready(&mut h, 0);
         ops(&mut h);
         h
+    }
+
+    fn paste_text(lines: usize) -> String {
+        (1..=lines).map(|n| format!("line {n} λ\n")).collect()
+    }
+
+    fn session_rows(h: &mut Harness) -> Vec<String> {
+        h.frame(1000., 1000.).windows[0]
+            .display
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_long_yank_previews_four_lines_and_sends_every_line() {
+        let mut h = session();
+        h.send(Msg::Clock("12:34".into()));
+        h.send(Msg::Insert {
+            text: "before ".into(),
+            replace: None,
+        });
+        let text = paste_text(21);
+        h.clipboard = Some(text.clone());
+        h.keys("C-y");
+        h.send(Msg::Insert {
+            text: " after".into(),
+            replace: None,
+        });
+        assert_eq!(h.text(), format!("> before {text} after"));
+        assert_eq!(session_rows(&mut h), ["> before  ≡ Pasted 21 lines  after"]);
+        h.keys("C-x C-x TAB");
+        let rows = session_rows(&mut h);
+        assert_eq!(
+            &rows[..6],
+            [
+                "> before  ≡ Pasted 21 lines ",
+                "line 1 λ",
+                "line 2 λ",
+                "line 3 λ",
+                "line 4 λ",
+                "… 17 more lines after"
+            ]
+        );
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            [format!("prompt 0 s {:?}", format!("before {text} after"))]
+        );
+        let rows = session_rows(&mut h);
+        assert!(rows[0].contains("≡ Pasted 21 lines"));
+        assert!(rows[0].ends_with("12:34"));
+        h.keys("M-< C-u 9 C-f TAB");
+        let rows = session_rows(&mut h);
+        assert_eq!(
+            &rows[1..5],
+            ["line 1 λ", "line 2 λ", "line 3 λ", "line 4 λ"]
+        );
+        h.keys("C-n TAB");
+        assert_eq!(h.point(), 9);
+        assert!(session_rows(&mut h)[0].contains("≡ Pasted 21 lines"));
+    }
+
+    #[test]
+    fn short_yanks_and_ordinary_buffers_stay_plain() {
+        for lines in [1, 19, 20] {
+            let mut h = session();
+            let text = paste_text(lines);
+            h.clipboard = Some(text.clone());
+            h.keys("C-y");
+            assert_eq!(h.text(), format!("> {text}"));
+            assert_eq!(session_rows(&mut h)[0], "> line 1 λ");
+        }
+        let mut h = Harness::new(&[]);
+        let text = paste_text(21);
+        h.clipboard = Some(text.clone());
+        h.keys("C-y");
+        assert_eq!(h.text(), text);
+        assert_eq!(session_rows(&mut h)[0], "line 1 λ");
+    }
+
+    #[test]
+    fn paste_folds_follow_streaming_and_yank_pop() {
+        let mut h = session();
+        h.core.settings.paste_fold_lines = 4;
+        h.send(Msg::Insert {
+            text: "question".into(),
+            replace: None,
+        });
+        h.keys("RET");
+        ops(&mut h);
+        let text = paste_text(5);
+        h.clipboard = Some(text.clone());
+        h.keys("C-u C-y");
+        assert_eq!(h.point(), h.core.current().prompt_start());
+        chunk(&mut h, "answer\n");
+        assert!(
+            session_rows(&mut h)
+                .iter()
+                .any(|r| r.contains("≡ Pasted 5 lines"))
+        );
+        h.keys("TAB TAB");
+        assert!(
+            session_rows(&mut h)
+                .iter()
+                .any(|r| r.contains("≡ Pasted 5 lines"))
+        );
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        h.keys("RET");
+        assert_eq!(ops(&mut h), [format!("prompt 0 s {text:?}")]);
+
+        let mut h = session();
+        h.clipboard = Some("short".into());
+        h.keys("C-y");
+        h.clipboard = Some(paste_text(21));
+        h.keys("C-y M-y");
+        assert_eq!(h.text(), "> shortshort");
+        h.keys("M-y");
+        assert!(session_rows(&mut h)[0].contains("≡ Pasted 21 lines"));
+        h.keys("C-/");
+        assert_eq!(h.text(), "> shortshort");
+    }
+
+    #[test]
+    fn a_custom_threshold_previews_short_pastes_and_reload_applies_to_the_next_yank() {
+        let mut h = session();
+        h.send(Msg::SettingsLoaded(Ok(Some("paste_fold_lines = 0".into()))));
+        h.clipboard = Some("one\ntwo".into());
+        h.keys("C-y C-x C-x TAB");
+        assert_eq!(session_rows(&mut h), [">  ≡ Pasted 2 lines ", "one", "two"]);
+        assert_eq!(h.text(), "> one\ntwo");
+        h.keys("TAB M->");
+        h.send(Msg::SettingsLoaded(Ok(Some("paste_fold_lines = 2".into()))));
+        h.keys("C-y");
+        assert_eq!(session_rows(&mut h), [">  ≡ Pasted 2 lines one", "two"]);
+        assert_eq!(h.text(), "> one\ntwoone\ntwo");
+        h.send(Msg::SettingsLoaded(Ok(Some(
+            "paste_fold_lines = -1".into(),
+        ))));
+        assert_eq!(h.core.settings.paste_fold_lines, 2);
+    }
+
+    #[test]
+    fn several_pastes_and_a_file_chip_send_in_order() {
+        let mut h = session();
+        let text = paste_text(21);
+        h.clipboard = Some(text.clone());
+        h.keys("C-y C-y");
+        let chip = h.core.chips.intern(Some("/outside/a.rs".into()), false);
+        h.send(Msg::Insert {
+            text: format!(" see {chip}"),
+            replace: None,
+        });
+        assert_eq!(
+            session_rows(&mut h),
+            [">  ≡ Pasted 21 lines  ≡ Pasted 21 lines  see  ▤ a.rs "]
+        );
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            [format!(
+                "prompt 0 s {:?} link a.rs file:///outside/a.rs",
+                format!("{text}{text} see ")
+            )]
+        );
+        h.keys("M-< C-f C-f TAB");
+        let rows = session_rows(&mut h);
+        assert!(rows[5].contains("… 17 more lines ≡ Pasted 21 lines"));
+    }
+
+    #[test]
+    fn deleting_and_undoing_a_paste_preserves_the_original_text() {
+        let mut h = session();
+        let text = paste_text(21);
+        h.clipboard = Some(text.clone());
+        h.keys("C-y C-w");
+        assert_eq!(h.text(), "> ");
+        session_rows(&mut h);
+        h.keys("C-/");
+        assert_eq!(h.text(), format!("> {text}"));
+        h.keys("RET");
+        assert_eq!(ops(&mut h), [format!("prompt 0 s {text:?}")]);
     }
 
     fn info(h: &mut Harness, id: u64, info: Value) {

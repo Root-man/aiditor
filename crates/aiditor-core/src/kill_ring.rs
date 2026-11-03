@@ -118,6 +118,7 @@ impl Ctx<'_> {
             .window
             .push_mark(&mut core.buffers, start, false)?;
         self.insert_n(&text, 1, false)?;
+        self.core.fold_yank(start, &text);
         if matches!(prefix, Some(Prefix::Universal(_))) {
             self.point_before_yank(start)?;
         }
@@ -134,6 +135,7 @@ impl Ctx<'_> {
         let start = point.min(mark);
         self.core.current_mut().delete(start..point.max(mark))?;
         self.insert_n(&text, 1, false)?;
+        self.core.fold_yank(start, &text);
         if point < mark {
             self.point_before_yank(start)?;
         }

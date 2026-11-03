@@ -2292,6 +2292,72 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_prompt_paste_paints_a_box_and_tab_previews_four_lines(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.handle(
+                Instant::now(),
+                Msg::SettingsLoaded(Ok(Some("[agents.fake]\ncommand = 'unused'".into()))),
+            );
+            for key in parse_keys("M-x agent-start RET fake RET").unwrap() {
+                e.core.handle(Instant::now(), Msg::Key(key));
+            }
+            let text = (1..=21)
+                .map(|n| format!("log line {n}\n"))
+                .collect::<String>();
+            e.core.handle(Instant::now(), Msg::Clipboard(text));
+            for key in parse_keys("C-y C-x C-x").unwrap() {
+                e.core.handle(Instant::now(), Msg::Key(key));
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        editor.update(cx, |e, _| {
+            let frame = e.core.frame();
+            let chip = frame.windows[0].display.lines[0]
+                .spans
+                .iter()
+                .find(|s| s.text.contains("Pasted 21 lines"))
+                .unwrap();
+            assert_eq!(
+                chip.face.boxed,
+                e.core.settings().theme.face(FaceName::Attachment).boxed
+            );
+            assert_eq!(
+                e.painted[0].rows[0].text.text.as_ref(),
+                ">  ≡ Pasted 21 lines "
+            );
+        });
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            let rows: Vec<_> = e.painted[0]
+                .rows
+                .iter()
+                .map(|r| r.text.text.as_ref())
+                .collect();
+            assert_eq!(
+                &rows[..6],
+                [
+                    ">  ≡ Pasted 21 lines ",
+                    "log line 1",
+                    "log line 2",
+                    "log line 3",
+                    "log line 4",
+                    "… 17 more lines"
+                ]
+            );
+        });
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.painted[0].rows[0].text.text.to_string()),
+            ">  ≡ Pasted 21 lines "
+        );
+    }
+
+    #[gpui::test]
     fn attachment_picker_keeps_the_session_visible_and_control_return_inserts_a_chip(
         cx: &mut TestAppContext,
     ) {

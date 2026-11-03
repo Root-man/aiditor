@@ -441,7 +441,7 @@ pub fn build(
     let mut widen = folds;
     while widen {
         let hidden: usize = (props.iter())
-            .filter(|(_, p)| matches!(p, Prop::Invisible(_)))
+            .filter(|(_, p)| matches!(p, Prop::Invisible(_) | Prop::Display(_)))
             .map(|(r, _)| text.char_to_line(r.end) - text.char_to_line(r.start.max(first)))
             .sum();
         let end = text.line_to_char((end_line + hidden).min(text.len_lines()));
@@ -615,25 +615,42 @@ pub fn build(
                 .iter()
                 .any(|(r, p)| matches!(p, Prop::Display(_)) && r.start == pos);
             if let (true, Some((_, pieces))) = (point == pos && chip, &fold) {
-                cursor_width = pieces.iter().map(|(t, _)| t.chars().count()).sum();
+                cursor_width = pieces
+                    .iter()
+                    .flat_map(|(t, _)| t.chars())
+                    .take_while(|c| *c != '\n')
+                    .count();
             }
         }
         if let Some((end, pieces)) = fold {
             for (placeholder, face) in pieces {
-                let visible: String = (placeholder.chars().enumerate())
-                    .filter(|(i, _)| range.contains(&(col + i)))
-                    .map(|(_, c)| c)
-                    .collect();
-                col += placeholder.chars().count();
-                if !visible.is_empty() {
-                    if positions.is_some() {
-                        source_positions.extend(visible.chars().map(|_| None));
+                for (i, part) in placeholder.split('\n').enumerate() {
+                    if i > 0 {
+                        if let Some(positions) = &mut positions {
+                            positions.push(std::mem::take(&mut source_positions));
+                        }
+                        finish(&mut lines, &mut line, start, pos, text.char_to_line(pos));
+                        start = pos;
+                        col = 0;
+                        if lines.len() >= rows {
+                            break;
+                        }
                     }
-                    line.spans.push(Span {
-                        text: visible,
-                        face,
-                        fold: true,
-                    });
+                    let visible: String = (part.chars().enumerate())
+                        .filter(|(i, _)| range.contains(&(col + i)))
+                        .map(|(_, c)| c)
+                        .collect();
+                    col += part.chars().count();
+                    if !visible.is_empty() {
+                        if positions.is_some() {
+                            source_positions.extend(visible.chars().map(|_| None));
+                        }
+                        line.spans.push(Span {
+                            text: visible,
+                            face,
+                            fold: true,
+                        });
+                    }
                 }
             }
             pos = end;
@@ -1256,6 +1273,84 @@ mod tests {
             "xay 1\n",
             "the text is unchanged"
         );
+    }
+
+    #[test]
+    fn a_replacement_header_breaks_a_display_row_without_changing_text() {
+        let mut h = Harness::new(&[("a.txt", "abc\ndef\nghi\ntail")]);
+        h.open("a.txt");
+        prop(
+            &mut h,
+            0..1,
+            Prop::Display(vec![
+                (" chip ".into(), vec![FaceRef::Face(FaceName::Attachment)]),
+                ("\na".into(), vec![FaceRef::Face(FaceName::SessionBlock)]),
+            ]),
+        );
+        let d = super::build(
+            h.core.current(),
+            0,
+            10,
+            0,
+            None,
+            h.core.settings(),
+            0..40,
+            None,
+            &[],
+            None,
+        );
+        let lines: Vec<String> = d
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert_eq!(lines, [" chip ", "abc", "def", "ghi", "tail"]);
+        assert_eq!(d.cursor, Some((0, 0)));
+        assert_eq!(d.cursor_width, 6);
+        assert_eq!(h.text(), "abc\ndef\nghi\ntail");
+    }
+
+    #[test]
+    fn multiline_replacements_keep_following_properties_visible() {
+        let mut h = Harness::new(&[("a.txt", "a\nb\nc\nd\ne\nf\nlast")]);
+        h.open("a.txt");
+        prop(
+            &mut h,
+            0..12,
+            Prop::Display(vec![(" chip ".into(), vec![])]),
+        );
+        prop(
+            &mut h,
+            12..16,
+            Prop::Named(vec![FaceRef::Face(FaceName::StatusFailed)]),
+        );
+        let d = super::build(
+            h.core.current(),
+            0,
+            2,
+            14,
+            None,
+            h.core.settings(),
+            0..40,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(
+            d.lines[0]
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            " chip last"
+        );
+        let last = d.lines[0].spans.last().unwrap();
+        assert_eq!(last.text, "last");
+        assert_eq!(
+            last.face.fg,
+            h.core.settings().theme.face(FaceName::StatusFailed).fg
+        );
+        assert_eq!(d.cursor, Some((0, 8)));
     }
 
     /// `text` with the space at `space` right-aligned.
