@@ -202,7 +202,7 @@ impl Editor {
                     &[run],
                     None,
                 );
-                let (x, width, under) = block(&shaped, byte, cell);
+                let (x, width, under) = block(&shaped, byte, 1, cell);
                 let cursor = div()
                     .debug_selector(|| "minibuffer-cursor".into())
                     .absolute()
@@ -478,6 +478,7 @@ impl Editor {
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
+                Effect::OpenWithSystem(path) => cx.open_with_system(&path),
                 Effect::Recovery(op) => {
                     let failure = if let Some((tx, _)) = &self.recovery {
                         tx.send(op)

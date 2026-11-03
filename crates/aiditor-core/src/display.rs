@@ -41,6 +41,8 @@ pub struct WindowDisplay {
     pub lines: Vec<Line>,
     /// Point as (index into `lines`, char column in that line's text), if it is shown.
     pub cursor: Option<(usize, usize)>,
+    /// The chars of the line's text the cursor covers: a whole chip's when point is on one.
+    pub cursor_width: usize,
     pub mode_line: ModeLine,
     /// A terminal buffer's screen, drawn instead of `lines` and `cursor`.
     pub terminal: Option<Terminal>,
@@ -510,6 +512,7 @@ pub fn build(
     };
     let mut lines = Vec::new();
     let mut cursor = None;
+    let mut cursor_width = 1;
     let mut pos = first;
     let mut line = new_line(text.char_to_line(pos));
     let mut start = pos;
@@ -608,6 +611,12 @@ pub fn build(
         });
         if point == pos || fold.as_ref().is_some_and(|f| point > pos && point < f.0) {
             cursor = Some((lines.len(), col.saturating_sub(range.start)));
+            let chip = props
+                .iter()
+                .any(|(r, p)| matches!(p, Prop::Display(_)) && r.start == pos);
+            if let (true, Some((_, pieces))) = (point == pos && chip, &fold) {
+                cursor_width = pieces.iter().map(|(t, _)| t.chars().count()).sum();
+            }
         }
         if let Some((end, pieces)) = fold {
             for (placeholder, face) in pieces {
@@ -720,6 +729,7 @@ pub fn build(
     WindowDisplay {
         lines,
         cursor,
+        cursor_width,
         mode_line: match (&buffer.file, buffer.terminal()) {
             (Some(file), _) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
             (_, Some(terminal)) => terminal_mode_line(buffer, terminal, l + 1, c),
@@ -1227,6 +1237,20 @@ mod tests {
             None,
         );
         assert_eq!(point.cursor, Some((0, 1)), "the cursor on its first piece");
+        assert_eq!(point.cursor_width, 5, "and over all of them");
+        let after = super::build(
+            h.core.current(),
+            0,
+            1,
+            2,
+            None,
+            h.core.settings(),
+            0..13,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!((after.cursor, after.cursor_width), (Some((0, 6)), 1));
         assert_eq!(
             h.core.current().text().to_string(),
             "xay 1\n",

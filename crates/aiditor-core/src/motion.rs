@@ -90,27 +90,36 @@ impl Ctx<'_> {
         self.goto(self.word_end(n))
     }
 
-    /// Where `n` words on from point end, a word being a run of alphanumerics; backward when `n`
-    /// is negative.
+    /// Where `n` words on from point end, a word being a run of alphanumerics or one file chip;
+    /// backward when `n` is negative.
     pub(crate) fn word_end(&self, n: i64) -> usize {
         let buffer = self.core.current();
         let (text, len) = (buffer.text(), buffer.len_chars());
+        let chip = |i: usize| crate::agents::is_chip(text.char(i));
         let word = |i: usize| text.char(i).is_alphanumeric();
         let mut p = self.core.point();
         for _ in 0..n.unsigned_abs() {
             if n > 0 {
-                while p < len && !word(p) {
+                while p < len && !word(p) && !chip(p) {
                     p += 1;
                 }
-                while p < len && word(p) {
+                if p < len && chip(p) {
                     p += 1;
+                } else {
+                    while p < len && word(p) {
+                        p += 1;
+                    }
                 }
             } else {
-                while p > 0 && !word(p - 1) {
+                while p > 0 && !word(p - 1) && !chip(p - 1) {
                     p -= 1;
                 }
-                while p > 0 && word(p - 1) {
+                if p > 0 && chip(p - 1) {
                     p -= 1;
+                } else {
+                    while p > 0 && word(p - 1) {
+                        p -= 1;
+                    }
                 }
             }
             if p == 0 || p == len {

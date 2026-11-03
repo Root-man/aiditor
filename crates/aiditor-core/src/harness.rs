@@ -362,6 +362,7 @@ impl Harness {
                 Effect::Watch(_) => {}
                 effect @ Effect::CaptureEnvironment { .. } => self.effects.push(effect),
                 Effect::SetClipboard(text) => self.clipboard = Some(text),
+                effect @ Effect::OpenWithSystem(_) => self.effects.push(effect),
                 Effect::Quit => self.quit = true,
                 Effect::Recovery(RecoveryOp::AutoSave {
                     buffer,

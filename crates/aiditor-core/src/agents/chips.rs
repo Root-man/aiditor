@@ -22,6 +22,11 @@ static MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\s)@(\S+)").e
 static LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[@[^\]\n]*\]\(file://([^)\n]+)\)").expect("valid"));
 
+/// Whether `c` is a chip's char, which word motion takes as a word of its own.
+pub(crate) fn is_chip(c: char) -> bool {
+    c as u32 >= FIRST
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Kind {
     File,
@@ -34,7 +39,7 @@ pub(crate) struct Chip {
     pub(crate) path: Option<PathBuf>,
     pub(crate) kind: Kind,
     /// Its file is gone from disk.
-    gone: bool,
+    pub(crate) gone: bool,
 }
 
 impl Chip {

@@ -173,7 +173,8 @@ impl Element for FrameElement {
                     let boxes = boxed(&text, boxes);
                     let icons = icons(line, at.map(|(_, col)| col), marked, &text, &runs);
                     if at.is_some() {
-                        let (x, width, under) = block(&text, byte, cell);
+                        let chars = w.display.cursor_width;
+                        let (x, width, under) = block(&text, byte, chars, cell);
                         let origin = bounds.origin + point(text_x + x, top);
                         cursor = Some(Bounds::new(origin, gpui::size(width, height)));
                         let face = Face {
@@ -427,10 +428,19 @@ impl Element for FrameElement {
 
 /// The block cursor at byte `byte` of `line`: its x, its width and the char it covers, which is
 /// empty at the end of the line, where the block is one `cell` wide.
-pub(crate) fn block(line: &ShapedLine, byte: usize, cell: Pixels) -> (Pixels, Pixels, &str) {
+pub(crate) fn block(
+    line: &ShapedLine,
+    byte: usize,
+    chars: usize,
+    cell: Pixels,
+) -> (Pixels, Pixels, &str) {
     let x = line.x_for_index(byte);
-    let under =
-        (line.text[byte..].chars().next()).map_or("", |c| &line.text[byte..byte + c.len_utf8()]);
+    let rest = &line.text[byte..];
+    let end = rest
+        .char_indices()
+        .nth(chars)
+        .map_or(rest.len(), |(b, _)| b);
+    let under = &rest[..end];
     let width = match under.is_empty() {
         true => cell,
         false => line.x_for_index(byte + under.len()) - x,

@@ -397,6 +397,8 @@ pub enum Effect {
     LoadConfiguration { request: u64 },
     /// Put this text on the system clipboard.
     SetClipboard(String),
+    /// Open this file in the system's default app for it.
+    OpenWithSystem(PathBuf),
     /// Quit the app.
     Quit,
 }

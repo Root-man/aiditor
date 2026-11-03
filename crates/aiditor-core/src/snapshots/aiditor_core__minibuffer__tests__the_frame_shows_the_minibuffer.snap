@@ -38,6 +38,7 @@ Some(
                     2,
                 ),
             ),
+            cursor_width: 1,
             mode_line: ModeLine {
                 left: [
                     [

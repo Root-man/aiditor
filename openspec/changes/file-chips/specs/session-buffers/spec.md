@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: File chips
-A chip SHALL be one char of a session buffer's text naming a file, a directory or an image, drawn as a space, its icon (`▤` file, `▣` image, `▦` directory), a space, the path's last component and a space, in the boxed `attachment` face. Motion, deletion, kill, yank and undo SHALL treat it as one char, and a yanked chip SHALL keep its path.
+A chip SHALL be one char of a session buffer's text naming a file, a directory or an image, drawn as a space, its icon (`▤` file, `▣` image, `▦` directory), a space, the path's last component and a space, in the boxed `attachment` face. Motion, deletion, kill, yank and undo SHALL treat it as one char, and a yanked chip SHALL keep its path. Word motion and word kills SHALL take a chip as a word of its own. While point is on a chip, the cursor SHALL cover the whole chip.
 
 #### Scenario: Drawn as icon and name
 - **WHEN** a chip for `/p/src/main.rs` is in the prompt
@@ -10,6 +10,10 @@ A chip SHALL be one char of a session buffer's text naming a file, a directory o
 #### Scenario: One char
 - **WHEN** point is before a chip and `C-f` runs, then `DEL`
 - **THEN** point moves past the chip, then the chip is deleted whole
+
+#### Scenario: A word of its own
+- **WHEN** point is at the start of `ab <chip>cd` and `M-f` runs three times
+- **THEN** point stops after `ab`, after the chip, then after `cd`
 
 #### Scenario: Undo brings it back
 - **WHEN** a deleted chip's deletion is undone
@@ -42,11 +46,15 @@ The echoed prompt SHALL show its chips as the prompt did. In a replayed user mes
 - **THEN** `@src/a.rs` shows as a chip and `@src/gone.rs` stays text
 
 ### Requirement: RET and the echo on a chip
-`RET` with point on a chip SHALL visit its file in another window, splitting a lone one, or for a directory open `find-file` in it, sending nothing. A chip without a path SHALL echo `No file`. While point is on a chip, the echo line SHALL show its full path when the command left no other message.
+`RET` with point on a chip SHALL visit its file in another window, splitting a lone one, open an image in the system's default app, or for a directory open `find-file` in it, sending nothing. A chip without a path SHALL echo `No file`, and one whose file is gone `<path>: no such file`, without splitting. While point is on a chip, the echo line SHALL show its full path when the command left no other message.
 
 #### Scenario: Visiting
 - **WHEN** point is on a chip for `/p/a.rs` in the prompt and `RET` is typed
 - **THEN** `/p/a.rs` shows in another window and the prompt is not sent
+
+#### Scenario: An image
+- **WHEN** point is on a chip for `/p/cat.png` and `RET` is typed
+- **THEN** the system opens `/p/cat.png` and no window splits
 
 #### Scenario: The path on the echo line
 - **WHEN** point moves onto a chip for `/p/a.rs`

@@ -30,7 +30,7 @@ use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 mod chips;
 mod groups;
 mod render;
-pub(crate) use chips::Chips;
+pub(crate) use chips::{Chips, is_chip};
 use groups::*;
 use render::*;
 
@@ -1554,6 +1554,13 @@ impl Ctx<'_> {
         }
         if let Some(chip) = self.core.chip_at_point() {
             let (path, kind) = (chip.path.clone().ok_or("No file")?, chip.kind);
+            if chip.gone {
+                return Err(format!("{}: no such file", path.display()));
+            }
+            if kind == chips::Kind::Image {
+                self.effects.push(Effect::OpenWithSystem(path));
+                return Ok(());
+            }
             if kind == chips::Kind::Directory {
                 self.call("find-file", Args::default());
                 return self.set_text(&path.join("").to_string_lossy());
@@ -3394,6 +3401,44 @@ mod tests {
         let a = h.core.chips.intern(Some(h.path("app/src/a.rs")), false);
         assert!(h.core.text().starts_with(&format!("> {a} vs @src/gone.rs")));
         drawn_line(&mut h, ">  ▤ a.rs  vs @src/gone.rs");
+    }
+
+    #[test]
+    fn word_motion_takes_a_chip_as_a_word_of_its_own() {
+        let mut h = session();
+        h.keys("a b SPC");
+        let chip = put_chip(&mut h, "/p/a.rs", false);
+        h.keys("c d");
+        // `> ab <chip>cd`: the chip is at 5.
+        h.keys("C-a M-f M-f");
+        assert_eq!(h.core.point(), 6, "after the chip");
+        h.keys("M-f");
+        assert_eq!(h.core.point(), 8, "the word after it");
+        h.keys("M-b M-b");
+        assert_eq!(h.core.point(), 5, "back before the chip");
+        h.keys("C-f M-DEL");
+        assert_eq!(h.core.text(), "> ab cd", "it kills alone");
+        h.keys("C-y");
+        assert_eq!(h.core.text(), format!("> ab {chip}cd"), "and yanks back");
+    }
+
+    #[test]
+    fn ret_on_an_image_chip_opens_it_with_the_system_and_a_gone_file_echoes() {
+        let mut h = session();
+        put_chip(&mut h, "/p/cat.png", false);
+        h.keys("C-b RET");
+        let opened = (h.effects.iter()).any(
+            |e| matches!(e, Effect::OpenWithSystem(p) if p == std::path::Path::new("/p/cat.png")),
+        );
+        assert!(opened);
+        assert_eq!(h.core.windows.tree.leaves().len(), 1, "no split");
+        h.checks.insert("/p/gone.rs".into(), None);
+        h.keys("C-e");
+        put_chip(&mut h, "/p/gone.rs", false);
+        h.keys("C-b RET");
+        assert_eq!(h.core.message.as_deref(), Some("/p/gone.rs: no such file"));
+        assert_eq!(h.core.windows.tree.leaves().len(), 1, "no split");
+        assert!(ops(&mut h).is_empty(), "nothing is sent");
     }
 
     #[test]

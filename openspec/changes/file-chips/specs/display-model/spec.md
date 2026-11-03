@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: A range can be drawn as other text
-A buffer range MAY carry a display property listing pieces of text, each with its own face layers. The display SHALL draw the pieces in place of the range, one span per piece, counting their columns as it counts a fold's placeholder, with the cursor on the first piece when point is in the range. The buffer's text SHALL stay as it is.
+A buffer range MAY carry a display property listing pieces of text, each with its own face layers. The display SHALL draw the pieces in place of the range, one span per piece, counting their columns as it counts a fold's placeholder, with the cursor on the first piece when point is in the range, covering all the pieces when point is at its start. The buffer's text SHALL stay as it is.
 
 #### Scenario: Drawn in its pieces' faces
 - **WHEN** `a` in `xay` carries pieces ` `, `▤` in `status-failed` and ` n ` in `attachment`
