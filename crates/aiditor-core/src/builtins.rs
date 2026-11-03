@@ -749,6 +749,25 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_cycle_mode(),
         },
         Command {
+            name: "agent-command",
+            spec: ArgSpec {
+                prompts: &["Command: "],
+                completion: Some(|core, _| {
+                    (core.session_commands().iter())
+                        .map(|c| c.name.clone())
+                        .collect()
+                }),
+                annotation: Some(|core, name| core.command_note(name)),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.agent_command(&args.strings[0]),
+        },
+        Command {
+            name: "agent-slash",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.agent_slash(args),
+        },
+        Command {
             name: "agent-previous-message",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.agent_next_message(args.count().saturating_neg()),

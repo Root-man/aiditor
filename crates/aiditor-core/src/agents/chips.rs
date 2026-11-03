@@ -1,5 +1,5 @@
-//! File chips: each one private-use char in a session buffer's text, standing for a file, an
-//! image or a directory, drawn as its icon and name. Being one char, motion, deletion, kill,
+//! Chips: each one private-use char in a session buffer's text, standing for a file, an image,
+//! a directory or an agent's slash command, drawn as its icon and name. Being one char, motion, deletion, kill,
 //! yank and undo need nothing of their own.
 
 use agent_client_protocol_schema::v1::{ContentBlock, ImageContent, ResourceLink};
@@ -18,6 +18,8 @@ const FIRST: u32 = 0xF0000;
 /// How Claude's adapter writes a sent `resource_link` into the transcript it replays.
 /// How the Claude Code CLI writes a mention into the transcript it replays: `@` and the path.
 static MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\s)@(\S+)").expect("valid"));
+/// A slash command as a prompt's text holds it: `/` and its name, at a word's start.
+static COMMAND: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\s)/(\S+)").expect("valid"));
 
 static LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[@[^\]\n]*\]\(file://([^)\n]+)\)").expect("valid"));
@@ -32,11 +34,15 @@ pub(crate) enum Kind {
     File,
     Image,
     Directory,
+    /// An agent's slash command, sent as `/name` text.
+    Command,
 }
 
 pub(crate) struct Chip {
-    /// `None` for a replayed image, which comes as data alone.
+    /// `None` for a replayed image, which comes as data alone, and a command.
     pub(crate) path: Option<PathBuf>,
+    /// A command chip's name, without the `/`.
+    command: Option<String>,
     pub(crate) kind: Kind,
     /// Its file is gone from disk.
     pub(crate) gone: bool,
@@ -44,6 +50,9 @@ pub(crate) struct Chip {
 
 impl Chip {
     fn name(&self) -> String {
+        if let Some(command) = &self.command {
+            return format!("/{command}");
+        }
         let path = self.path.as_deref();
         let name = path.and_then(Path::file_name).map(|n| n.to_string_lossy());
         name.map_or_else(|| "image".into(), |n| n.into_owned())
@@ -75,6 +84,7 @@ impl Chip {
             Kind::File => "▤",
             Kind::Image => "▣",
             Kind::Directory => "▦",
+            Kind::Command => "▷",
         };
         let name = format!(" {} ", self.name());
         vec![
@@ -96,7 +106,8 @@ pub(crate) struct Chips {
 impl Chips {
     /// The char standing for `path`, a directory when `directory`; `None` is a replayed image.
     pub(crate) fn intern(&mut self, path: Option<PathBuf>, directory: bool) -> char {
-        let at = match self.chips.iter().position(|c| c.path == path) {
+        let found = (self.chips.iter()).position(|c| c.path == path && c.command.is_none());
+        let at = match found {
             Some(at) => at,
             None => {
                 let image = |p: &Path| {
@@ -114,11 +125,41 @@ impl Chips {
                 };
                 self.unchecked.extend(path.clone());
                 let gone = false;
-                self.chips.push(Chip { path, kind, gone });
+                let command = None;
+                (self.chips).push(Chip {
+                    path,
+                    kind,
+                    gone,
+                    command,
+                });
                 self.chips.len() - 1
             }
         };
         char::from_u32(FIRST + at as u32).expect("fewer chips than private-use chars")
+    }
+
+    /// The char standing for the slash command `name`.
+    pub(crate) fn command(&mut self, name: &str) -> char {
+        let found = (self.chips.iter()).position(|c| c.command.as_deref() == Some(name));
+        let at = found.unwrap_or_else(|| {
+            self.chips.push(Chip {
+                path: None,
+                kind: Kind::Command,
+                gone: false,
+                command: Some(name.into()),
+            });
+            self.chips.len() - 1
+        });
+        char::from_u32(FIRST + at as u32).expect("fewer chips than private-use chars")
+    }
+
+    /// `text` with each `/name` at a word's start that `known` names replaced by its chip.
+    pub(crate) fn replace_commands(&mut self, text: &str, known: impl Fn(&str) -> bool) -> String {
+        (COMMAND.replace_all(text, |c: &regex::Captures| match known(&c[2]) {
+            true => format!("{}{}", &c[1], self.command(&c[2])),
+            false => c[0].to_string(),
+        }))
+        .into_owned()
     }
 
     pub(crate) fn get(&self, c: char) -> Option<&Chip> {
@@ -180,6 +221,10 @@ impl Chips {
                 text.push(c);
                 continue;
             };
+            if let Some(command) = &chip.command {
+                text.push_str(&format!("/{command}"));
+                continue;
+            }
             flush(&mut text, &mut blocks);
             // A replayed image has no data left to send.
             let Some(path) = &chip.path else {
@@ -235,5 +280,16 @@ mod tests {
         let file = |w: &str| (w == "a.rs").then(|| PathBuf::from("/p/a.rs"));
         let text = chips.replace_mentions("@a.rs and @b.rs, me@a.rs", file);
         assert_eq!(text, format!("{a} and @b.rs, me@a.rs"));
+        let review = chips.command("review");
+        assert_eq!(chips.command("review"), review, "interned");
+        assert_ne!(
+            chips.intern(None, false),
+            review,
+            "an image isn't a command"
+        );
+        let text = chips.replace_commands("/review a/b /x", |name| name == "review");
+        assert_eq!(text, format!("{review} a/b /x"));
+        let blocks = chips.blocks(&format!("{review} it"));
+        assert_eq!(blocks, [ContentBlock::from("/review it".to_string())]);
     }
 }
