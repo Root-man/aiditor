@@ -356,6 +356,7 @@ pub struct Face {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strike: bool,
     /// The colour of a 1px rounded box around the run, which adds no width.
     #[serde(rename = "box")]
     pub boxed: Option<u32>,
@@ -370,6 +371,7 @@ impl Face {
             bold: self.bold || under.bold,
             italic: self.italic || under.italic,
             underline: self.underline || under.underline,
+            strike: self.strike || under.strike,
             boxed: self.boxed.or(under.boxed),
         }
     }
@@ -387,6 +389,7 @@ pub enum FaceRef {
     Bold,
     Italic,
     Underline,
+    Strike,
 }
 
 /// Something drawn across a whole line, in a face's `bg` or, for a rule, its `fg`.
@@ -425,6 +428,8 @@ pub enum Prop {
     AlignRight,
     /// An icon painted over the range's two spaces, which stay plain text.
     Icon(Icon),
+    /// Text drawn in place of the range, a piece per face, as Emacs's `display` string.
+    Display(Vec<(String, Vec<FaceRef>)>),
 }
 
 impl Buffer {

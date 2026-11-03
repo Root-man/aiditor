@@ -21,6 +21,7 @@ Some(
                                 bold: false,
                                 italic: false,
                                 underline: false,
+                                strike: false,
                                 boxed: None,
                             },
                             fold: false,
@@ -37,6 +38,7 @@ Some(
                     2,
                 ),
             ),
+            cursor_width: 1,
             mode_line: ModeLine {
                 left: [
                     [

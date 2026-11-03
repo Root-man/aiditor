@@ -1,6 +1,6 @@
 //! Following the disk: what the watcher watches, and what its reports do to buffers and indexes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::command::Args;
 use crate::file_index::scope;
@@ -164,6 +164,13 @@ impl Ctx<'_> {
     /// unmodified ones whose hash differs and marks the modified ones conflicted. An equal
     /// hash is the buffer's own save, or the file back as the buffer last had it.
     pub(crate) fn on_checked(&mut self, files: Vec<(PathBuf, Option<u64>)>) {
+        let gone = |(path, hash): &(PathBuf, Option<u64>)| (path.clone(), hash.is_none());
+        let chips: Vec<_> = files.iter().map(gone).collect();
+        if (chips.into_iter()).fold(false, |changed, (p, g)| {
+            self.core.chips.set_gone(&p, g) | changed
+        }) {
+            self.core.repaint_chips();
+        }
         for (path, hash) in files {
             let visiting = self.core.buffers.iter_mut();
             for (id, buffer) in visiting.filter(|(_, b)| b.file.as_ref() == Some(&path)) {
@@ -209,6 +216,18 @@ impl Ctx<'_> {
             .filter_map(|(_, b)| b.file.clone())
             .filter(|file| rescan || paths.iter().any(|(path, _)| file.starts_with(path)))
             .collect();
+        // shortcut: chips outside watched roots are checked only when first seen or on a rescan;
+        // watch their directories if a stale chip bites.
+        let chips = &self.core.chips;
+        (check).extend(
+            paths
+                .iter()
+                .flat_map(|(path, _)| chips.under(path))
+                .cloned(),
+        );
+        if rescan {
+            check.extend(chips.under(Path::new("/")).cloned());
+        }
         check.sort();
         check.dedup();
         if !check.is_empty() {

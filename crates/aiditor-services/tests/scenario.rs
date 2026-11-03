@@ -84,7 +84,10 @@ impl App {
                     self.send(reply);
                 }
                 Effect::Watch(set) => self.watcher.set(set),
-                Effect::Terminal(_) | Effect::Recovery(_) | Effect::SetClipboard(_) => {}
+                Effect::Terminal(_)
+                | Effect::Recovery(_)
+                | Effect::SetClipboard(_)
+                | Effect::OpenWithSystem(_) => {}
                 Effect::Grep(_)
                 | Effect::LoadConfiguration { .. }
                 | Effect::CaptureEnvironment { .. }

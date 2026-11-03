@@ -41,6 +41,8 @@ pub struct WindowDisplay {
     pub lines: Vec<Line>,
     /// Point as (index into `lines`, char column in that line's text), if it is shown.
     pub cursor: Option<(usize, usize)>,
+    /// The chars of the line's text the cursor covers: a whole chip's when point is on one.
+    pub cursor_width: usize,
     pub mode_line: ModeLine,
     /// A terminal buffer's screen, drawn instead of `lines` and `cursor`.
     pub terminal: Option<Terminal>,
@@ -510,6 +512,7 @@ pub fn build(
     };
     let mut lines = Vec::new();
     let mut cursor = None;
+    let mut cursor_width = 1;
     let mut pos = first;
     let mut line = new_line(text.char_to_line(pos));
     let mut start = pos;
@@ -535,7 +538,10 @@ pub fn build(
             false => text.len_chars(),
         };
         (props.iter())
-            .filter(|(r, p)| matches!(p, Prop::Invisible(_)) && (pos..newline).contains(&r.start))
+            .filter(|(r, p)| {
+                matches!(p, Prop::Invisible(_) | Prop::Display(_))
+                    && (pos..newline).contains(&r.start)
+            })
             .map(|(r, _)| r.start)
             .fold(newline, usize::min)
     };
@@ -549,6 +555,10 @@ pub fn build(
                 Prop::Invisible(placeholder) if range.contains(&end) => {
                     Some((range.end, placeholder.chars().count()))
                 }
+                Prop::Display(pieces) if range.contains(&end) => Some((
+                    range.end,
+                    pieces.iter().map(|(t, _)| t.chars().count()).sum(),
+                )),
                 _ => None,
             });
             let Some((next, chars)) = fold else {
@@ -574,8 +584,16 @@ pub fn build(
             false => 0..shown.len(),
         };
         let fold = props.iter().find_map(|(range, prop)| match prop {
-            Prop::Invisible(placeholder) if range.contains(&pos) => {
-                Some((range.end, Cow::from(placeholder.as_str()), Face::default()))
+            Prop::Invisible(placeholder) if range.contains(&pos) => Some((
+                range.end,
+                vec![(Cow::from(placeholder.as_str()), Face::default())],
+            )),
+            Prop::Display(pieces) if range.contains(&pos) => {
+                let face = |refs| settings.theme.resolve(refs);
+                let pieces = pieces
+                    .iter()
+                    .map(|(t, refs)| (Cow::from(t.as_str()), face(refs)));
+                Some((range.end, pieces.collect()))
             }
             Prop::AlignRight if range.contains(&pos) => {
                 // A wrapped top line shown from `from` has used those columns too.
@@ -584,28 +602,39 @@ pub fn build(
                 let fits = used <= row_width;
                 line.aligned |= fits;
                 let spaces = if fits { last_col - used + 1 } else { 1 };
-                Some((range.end, Cow::from(" ".repeat(spaces)), face_at(pos)))
+                Some((
+                    range.end,
+                    vec![(Cow::from(" ".repeat(spaces)), face_at(pos))],
+                ))
             }
             _ => None,
         });
         if point == pos || fold.as_ref().is_some_and(|f| point > pos && point < f.0) {
             cursor = Some((lines.len(), col.saturating_sub(range.start)));
+            let chip = props
+                .iter()
+                .any(|(r, p)| matches!(p, Prop::Display(_)) && r.start == pos);
+            if let (true, Some((_, pieces))) = (point == pos && chip, &fold) {
+                cursor_width = pieces.iter().map(|(t, _)| t.chars().count()).sum();
+            }
         }
-        if let Some((end, placeholder, face)) = fold {
-            let visible: String = (placeholder.chars().enumerate())
-                .filter(|(i, _)| range.contains(&(col + i)))
-                .map(|(_, c)| c)
-                .collect();
-            col += placeholder.chars().count();
-            if !visible.is_empty() {
-                if positions.is_some() {
-                    source_positions.extend(visible.chars().map(|_| None));
+        if let Some((end, pieces)) = fold {
+            for (placeholder, face) in pieces {
+                let visible: String = (placeholder.chars().enumerate())
+                    .filter(|(i, _)| range.contains(&(col + i)))
+                    .map(|(_, c)| c)
+                    .collect();
+                col += placeholder.chars().count();
+                if !visible.is_empty() {
+                    if positions.is_some() {
+                        source_positions.extend(visible.chars().map(|_| None));
+                    }
+                    line.spans.push(Span {
+                        text: visible,
+                        face,
+                        fold: true,
+                    });
                 }
-                line.spans.push(Span {
-                    text: visible,
-                    face,
-                    fold: true,
-                });
             }
             pos = end;
             continue;
@@ -700,6 +729,7 @@ pub fn build(
     WindowDisplay {
         lines,
         cursor,
+        cursor_width,
         mode_line: match (&buffer.file, buffer.terminal()) {
             (Some(file), _) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
             (_, Some(terminal)) => terminal_mode_line(buffer, terminal, l + 1, c),
@@ -1029,7 +1059,7 @@ fn wrap_lines(
 #[cfg(test)]
 mod tests {
     use super::{ModeLine, Span};
-    use crate::buffer::{Decoration, Face, Icon, Prop};
+    use crate::buffer::{Decoration, Face, FaceRef, Icon, Prop};
     use crate::harness::Harness;
     use crate::settings::{FaceName, Settings};
 
@@ -1039,6 +1069,7 @@ mod tests {
         bold: false,
         italic: false,
         underline: false,
+        strike: false,
         boxed: None,
     };
 
@@ -1103,6 +1134,7 @@ mod tests {
         bold: false,
         italic: false,
         underline: false,
+        strike: false,
         boxed: Some(0x505050),
     };
 
@@ -1166,6 +1198,64 @@ mod tests {
         };
         assert_eq!(top.over(BOXED).boxed, Some(1));
         assert_eq!(RED.over(BOXED).boxed, BOXED.boxed);
+    }
+
+    #[test]
+    fn a_display_range_draws_its_pieces_in_their_faces() {
+        let mut h = aligned("xay 1\n", 3);
+        let failed = vec![FaceRef::Face(FaceName::StatusFailed)];
+        let chip = vec![FaceRef::Face(FaceName::Attachment), FaceRef::Strike];
+        let pieces = vec![
+            (" ".into(), chip.clone()),
+            ("▤".into(), failed),
+            (" n ".into(), chip),
+        ];
+        prop(&mut h, 1..2, Prop::Display(pieces));
+        let d = built(&h, 12, false, 0);
+        let spans: Vec<_> = (d.lines[0].spans.iter()).map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            spans,
+            ["x", " ", "▤", " n ", "y", "    ", "1"],
+            "ends in column 12"
+        );
+        let theme = &h.core.settings().theme;
+        assert_eq!(
+            d.lines[0].spans[2].face.fg,
+            theme.face(FaceName::StatusFailed).fg
+        );
+        assert!(d.lines[0].spans[3].face.strike);
+        let point = super::build(
+            h.core.current(),
+            0,
+            1,
+            1,
+            None,
+            h.core.settings(),
+            0..13,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(point.cursor, Some((0, 1)), "the cursor on its first piece");
+        assert_eq!(point.cursor_width, 5, "and over all of them");
+        let after = super::build(
+            h.core.current(),
+            0,
+            1,
+            2,
+            None,
+            h.core.settings(),
+            0..13,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!((after.cursor, after.cursor_width), (Some((0, 6)), 1));
+        assert_eq!(
+            h.core.current().text().to_string(),
+            "xay 1\n",
+            "the text is unchanged"
+        );
     }
 
     /// `text` with the space at `space` right-aligned.

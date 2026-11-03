@@ -202,7 +202,7 @@ impl Editor {
                     &[run],
                     None,
                 );
-                let (x, width, under) = block(&shaped, byte, cell);
+                let (x, width, under) = block(&shaped, byte, 1, cell);
                 let cursor = div()
                     .debug_selector(|| "minibuffer-cursor".into())
                     .absolute()
@@ -478,6 +478,7 @@ impl Editor {
                 Effect::SetClipboard(text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
+                Effect::OpenWithSystem(path) => cx.open_with_system(&path),
                 Effect::Recovery(op) => {
                     let failure = if let Some((tx, _)) = &self.recovery {
                         tx.send(op)
@@ -1005,7 +1006,7 @@ mod tests {
         for styled in [true, false] {
             editor.update(cx, |e, cx| {
                 e.handle(Msg::SettingsLoaded(Ok(Some(format!(
-                    "[themes.default.syntax]\ncomment = {{ fg = 0x123456, bg = 0x223344, italic = {styled}, underline = {styled} }}\nkeyword = {{ fg = 0x654321, bg = 0x334455, bold = {styled} }}"
+                    "[themes.default.syntax]\ncomment = {{ fg = 0x123456, bg = 0x223344, italic = {styled}, underline = {styled}, strike = {styled} }}\nkeyword = {{ fg = 0x654321, bg = 0x334455, bold = {styled} }}"
                 )))), cx);
             });
             cx.run_until_parked();
@@ -1067,6 +1068,7 @@ mod tests {
                             }
                         );
                         assert_eq!(run.underline.is_some(), face.underline);
+                        assert_eq!(run.strikethrough.is_some(), face.strike);
                         let shaped = window.text_system().shape_line(
                             mb.candidates[row].clone().into(),
                             px(e.core.settings().font_size),
