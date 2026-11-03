@@ -569,7 +569,7 @@ A range of exactly two chars in a buffer MAY carry an icon property naming one o
 - **THEN** the kill ring holds two spaces, and the yanked text carries no icon
 
 ### Requirement: A range can be drawn as other text
-A buffer range MAY carry a display property listing pieces of text, each with its own face layers. The display SHALL draw the pieces in place of the range, one span per piece, counting their columns as it counts a fold's placeholder, with the cursor on the first piece when point is in the range, covering all the pieces when point is at its start. The buffer's text SHALL stay as it is.
+A buffer range MAY carry a display property listing pieces of text, each with its own face layers. The display SHALL draw the pieces in place of the range, one span per piece, counting their columns as it counts a fold's placeholder, with the cursor on the first piece when point is in the range, covering the pieces on the replacement's first display row when point is at its start. The buffer's text SHALL stay as it is.
 
 #### Scenario: Drawn in its pieces' faces
 - **WHEN** `a` in `xay` carries pieces ` `, `▤` in `status-failed` and ` n ` in `attachment`
@@ -585,3 +585,11 @@ A face SHALL optionally set `strike`, and a span SHALL carry it; the frontend SH
 #### Scenario: A struck face
 - **WHEN** a face with `strike = true` covers a run
 - **THEN** that run's span is struck
+
+### Requirement: Replacement strings can break display lines
+A replacement string containing a newline SHALL draw the text after it on the next display row without inserting that newline into the buffer. A replacement spanning hidden buffer lines SHALL leave subsequent text visible after the replacement.
+
+#### Scenario: Paste header and preview
+- **GIVEN** raw multiline text with a replacement header and display newline on its first character
+- **WHEN** a frame is built
+- **THEN** the header occupies one display row and the original first line starts on the following row, with the buffer text unchanged
