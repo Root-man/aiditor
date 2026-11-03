@@ -11,8 +11,12 @@ use crate::settings::FaceName;
 
 /// The properties that show `text` as rendered markdown, in char offsets of `text`, sorted by
 /// start then end. Faces and hidden markup never overlap, and code blocks decorate whole lines,
-/// so starts and ends both ascend.
-pub(crate) fn render(text: &str, thought: bool) -> Vec<(Range<usize>, Prop)> {
+/// so starts and ends both ascend. Words `is_file` accepts are links.
+pub(crate) fn render(
+    text: &str,
+    thought: bool,
+    is_file: impl Fn(&str) -> bool,
+) -> Vec<(Range<usize>, Prop)> {
     let Some(tree) = MarkdownParser::default().parse(text.as_bytes(), None) else {
         return Vec::new();
     };
@@ -95,6 +99,12 @@ pub(crate) fn render(text: &str, thought: bool) -> Vec<(Range<usize>, Prop)> {
             hidden.extend((children(node).filter(|c| c.kind() == markup)).map(|c| c.byte_range()));
         });
     }
+    // Last, so a link's face wins over the code span or emphasis around it.
+    faces.extend(
+        (words(text).into_iter())
+            .filter(|w| is_file(&text[w.clone()]))
+            .map(|w| (w, link)),
+    );
     // The old per-piece `covers` test never matched an empty range.
     faces.retain(|(r, _)| !r.is_empty());
     hidden.retain(|r| !r.is_empty());
@@ -159,6 +169,29 @@ pub(crate) fn render(text: &str, thought: bool) -> Vec<(Range<usize>, Prop)> {
     props
 }
 
+/// The byte ranges of `text`'s words that could name a file: the runs between whitespace,
+/// quotes, backticks, brackets, `*`, `,` and `;`, without a trailing `.`, `:`, `!` or `?`.
+// shortcut: a path holding a bracket or `*` (Next.js `app/(group)/page.tsx`) never links;
+// match whole indexed paths if agents name such files.
+pub(crate) fn words(text: &str) -> Vec<Range<usize>> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (i, c) in text.char_indices().chain([(text.len(), ' ')]) {
+        match (c.is_whitespace() || "`'\"()[]<>{}*,;".contains(c), start) {
+            (true, Some(s)) => {
+                let word = text[s..i].trim_end_matches(['.', ':', '!', '?']);
+                if !word.is_empty() {
+                    words.push(s..s + word.len());
+                }
+                start = None;
+            }
+            (false, None) => start = Some(i),
+            _ => {}
+        }
+    }
+    words
+}
+
 fn children<'a>(node: Node<'a>) -> impl Iterator<Item = Node<'a>> {
     (0..node.child_count()).filter_map(move |i| node.child(i))
 }
@@ -182,7 +215,7 @@ mod tests {
     /// for faces that aren't the default.
     fn shown(text: &str, thought: bool) -> (String, Vec<(String, Face)>) {
         let theme = Settings::default().theme;
-        let props = render(text, thought);
+        let props = render(text, thought, |w| w.starts_with("src/"));
         let chars: Vec<char> = text.chars().collect();
         let hidden = |i: usize| {
             (props.iter()).any(|(r, p)| matches!(p, Prop::Invisible(_)) && r.contains(&i))
@@ -248,7 +281,7 @@ mod tests {
     #[test]
     fn code_blocks_decorate_their_lines_and_hide_fences() {
         let text = "```rust\nfn main() {}\n```\nafter\n\n    indented\n";
-        let props = render(text, false);
+        let props = render(text, false, |_| false);
         let lines: Vec<_> = (props.iter())
             .filter(|(_, p)| matches!(p, Prop::Line(_)))
             .map(|(r, _)| text.chars().skip(r.start).take(r.len()).collect::<String>())
@@ -303,13 +336,38 @@ mod tests {
     }
 
     #[test]
+    fn words_that_name_files_are_links() {
+        assert_eq!(
+            words("see `src/a.rs:12`, (x.rs). é src/b.rs: c.rs?!"),
+            [0..3, 5..16, 20..24, 27..29, 30..38, 40..44]
+        );
+        let theme = Settings::default().theme;
+        let link = face(theme.face(FaceName::Link).fg, false, false, true);
+        let (text, faces) = shown("In `src/a.rs:3` and *src/b.rs*, not gone.rs.", false);
+        assert_eq!(text, "In src/a.rs:3 and src/b.rs, not gone.rs.");
+        assert_eq!(
+            faces,
+            [
+                ("src/a.rs:3".into(), link),
+                (
+                    "src/b.rs".into(),
+                    Face {
+                        italic: true,
+                        ..link
+                    }
+                )
+            ]
+        );
+    }
+
+    #[test]
     fn offsets_are_chars_and_props_ascend() {
         let text = "é **ünï** `ç`\n\n```\nß\nx\n```\n";
         let (shown, _) = shown(text, false);
         assert_eq!(shown, "é ünï ç\n\n\nß\nx\n\n");
         // A thought's dim face runs through the code lines too.
         for thought in [false, true] {
-            let props = render(text, thought);
+            let props = render(text, thought, |_| false);
             let ascend = |w: &[(Range<usize>, Prop)]| {
                 w[0].0.start <= w[1].0.start && w[0].0.end <= w[1].0.end
             };

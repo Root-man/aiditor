@@ -102,6 +102,19 @@ impl FileIndex {
         &self.roots
     }
 
+    /// The indexed file `path` names, relative to a root, the primary first, or absolute under one.
+    pub(crate) fn file(&self, path: &Path) -> Option<PathBuf> {
+        let path = path.strip_prefix(".").unwrap_or(path);
+        self.roots.iter().find_map(|(root, files)| {
+            let rel = match path.is_absolute() {
+                true => path.strip_prefix(root).ok()?,
+                false => path,
+            };
+            let found = files.binary_search_by(|f| f.as_path().cmp(rel)).is_ok();
+            found.then(|| root.join(rel))
+        })
+    }
+
     pub(crate) fn counts(&self, scope: &Scope) -> Option<(usize, usize)> {
         (self.ready && self.accepted.as_ref() == Some(scope) && self.requested(scope)).then(|| {
             (
@@ -245,6 +258,25 @@ mod tests {
     use crate::Msg;
     use crate::harness::Harness;
     use crate::project::Loaded;
+
+    #[test]
+    fn file_finds_indexed_paths_under_any_root() {
+        let index = FileIndex {
+            roots: vec![
+                ("/p".into(), vec!["a.rs".into(), "src/b.rs".into()]),
+                ("/q".into(), vec!["lib/c.rs".into()]),
+            ],
+            ..FileIndex::default()
+        };
+        let file = |p: &str| index.file(Path::new(p));
+        assert_eq!(file("src/b.rs"), Some("/p/src/b.rs".into()));
+        assert_eq!(file("./a.rs"), Some("/p/a.rs".into()));
+        assert_eq!(file("lib/c.rs"), Some("/q/lib/c.rs".into()));
+        assert_eq!(file("/q/lib/c.rs"), Some("/q/lib/c.rs".into()));
+        assert_eq!(file("/r/a.rs"), None);
+        assert_eq!(file("gone.rs"), None);
+        assert_eq!(file("src"), None);
+    }
 
     #[test]
     fn sorted_events_keep_component_boundaries_and_missed_suppression() {

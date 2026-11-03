@@ -1,16 +1,24 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent_client_protocol_schema::v1::{Diff, ToolKind};
 
 use crate::buffer::Icon;
+use crate::file_index::FileIndex;
 
 use super::*;
 
-/// Renders `range` of `buffer` as markdown, replacing its properties.
-pub(super) fn render(buffer: &mut Buffer, range: Range<usize>, thought: bool) {
+/// Renders `range` of `buffer` as markdown, replacing its properties, with links to the files
+/// of `index`.
+pub(super) fn render(
+    buffer: &mut Buffer,
+    range: Range<usize>,
+    thought: bool,
+    index: Option<&FileIndex>,
+) {
     buffer.remove_properties(range.clone());
     let text = buffer.text().slice(range.clone()).to_string();
-    for (r, prop) in markdown::render(&text, thought) {
+    let is_file = |word: &str| file_link(index, word).is_some();
+    for (r, prop) in markdown::render(&text, thought, is_file) {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
@@ -24,6 +32,22 @@ pub(super) fn rewrite(buffer: &mut Buffer, range: Range<usize>, text: &str) {
     for (r, new) in buffer::diff(&old, text).into_iter().rev() {
         buffer.replace_output(range.start + r.start..range.start + r.end, &new);
     }
+}
+
+/// The path and line of a `path`, `path:line` or `path:line:col` word.
+fn link_parts(word: &str) -> Option<(&str, Option<usize>)> {
+    let Some((path, rest)) = word.split_once(':') else {
+        return Some((word, None));
+    };
+    let numbers: Vec<_> = rest.split(':').collect();
+    let digits = |n: &&str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    (numbers.len() <= 2 && numbers.iter().all(digits)).then(|| (path, numbers[0].parse().ok()))
+}
+
+/// The indexed file and line, from 1, a `path`, `path:line` or `path:line:col` word names.
+pub(super) fn file_link(index: Option<&FileIndex>, word: &str) -> Option<(PathBuf, Option<usize>)> {
+    let (path, line) = link_parts(word)?;
+    Some((index?.file(Path::new(path))?, line))
 }
 
 /// The dim face of a session's own lines.
@@ -249,31 +273,42 @@ pub(super) fn tool_command<'a>(call: &'a ToolCall, term: Option<&Term>) -> Optio
     (call.kind == ToolKind::Execute || term.is_some()).then_some(command)
 }
 
+/// The file a call's header shows, with its location's line: a read's, edit's, delete's or
+/// move's first location, else its diff's path, unless it runs a command.
+pub(super) fn tool_path<'a>(
+    call: &'a ToolCall,
+    term: Option<&Term>,
+) -> Option<(&'a Path, Option<u32>)> {
+    let file = matches!(
+        call.kind,
+        ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move
+    );
+    if !file || tool_command(call, term).is_some() {
+        return None;
+    }
+    let diff = call.content.iter().find_map(|item| match item {
+        ToolCallContent::Diff(d) => Some((d.path.as_path(), None)),
+        _ => None,
+    });
+    let location = (call.locations.first()).map(|l| (l.path.as_path(), l.line));
+    location.or(diff)
+}
+
 /// What a call acts on: its command, URL or path, else its title. A path under `root` is relative
 /// to it. A location would hide a search's pattern, so a search shows its title.
 pub(super) fn tool_target(call: &ToolCall, term: Option<&Term>, root: &Path) -> String {
     let input = |key| call.raw_input.as_ref()?.get(key)?.as_str();
-    let path = || {
-        let diff = call.content.iter().find_map(|item| match item {
-            ToolCallContent::Diff(d) => Some(&d.path),
-            _ => None,
-        });
-        let path = call.locations.first().map(|l| &l.path).or(diff)?;
-        Some(
-            path.strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string(),
-        )
-    };
-    let target = match call.kind {
-        ToolKind::Fetch => input("url").map(first_line),
-        ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => path(),
-        _ => None,
-    };
+    let path = tool_path(call, term).map(|(path, _)| {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    });
+    let fetch = (call.kind == ToolKind::Fetch).then(|| input("url").map(first_line));
     let command = tool_command(call, term).map(first_line);
     command
-        .or(target)
+        .or(fetch.flatten())
+        .or(path)
         .unwrap_or_else(|| first_line(&call.title).trim_matches('`').to_string())
 }
 
@@ -659,6 +694,14 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         (head(ICON), dim()),
         (head(VERB..verb_end), dim()),
     ];
+    if tool.link.is_some() {
+        let end = match tool.time.is_empty() {
+            true => tool.header,
+            false => tool.header - tool.time.chars().count() - 1,
+        };
+        let link = vec![FaceRef::Face(FaceName::Link), FaceRef::Underline];
+        props.push((verb_end + indent + 1..end, Prop::Named(link)));
+    }
     if !tool.time.is_empty() {
         let suffix = tool.header - tool.time.chars().count() - 1;
         let exit = tool.term.as_ref().and_then(|t| t.exit.as_ref());
@@ -687,7 +730,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             Some(h) if r.start >= h.start => r.start + h.len()..r.end + h.len(),
             _ => r,
         };
-        let markdown = markdown::render(&visible, false).into_iter();
+        let markdown = markdown::render(&visible, false, |_| false).into_iter();
         props.extend(markdown.map(|(r, p)| (past(r), p)).map(shifted));
         // Sorted with the markdown faces by range; where both apply, the later sorted one wins.
         let faces = tool.faces.iter().filter_map(|(r, f)| {
@@ -716,5 +759,21 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     props.sort_by_key(|(r, _)| (r.start, r.end));
     for (r, prop) in props {
         (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_words_take_a_line_and_column() {
+        assert_eq!(link_parts("a.rs"), Some(("a.rs", None)));
+        assert_eq!(link_parts("a.rs:12"), Some(("a.rs", Some(12))));
+        assert_eq!(link_parts("a.rs:12:5"), Some(("a.rs", Some(12))));
+        assert_eq!(link_parts("a.rs:x"), None);
+        assert_eq!(link_parts("a.rs:12-20"), None);
+        assert_eq!(link_parts("a.rs:1:2:3"), None);
+        assert_eq!(file_link(None, "a.rs"), None);
     }
 }

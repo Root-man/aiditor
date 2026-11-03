@@ -1,7 +1,7 @@
 //! Project grep: the grep service's hits listed live in the minibuffer, as consult-ripgrep.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use grep_matcher::Matcher;
@@ -248,6 +248,33 @@ impl Core {
 }
 
 impl Ctx<'_> {
+    /// Visits `path` with point at `line` and `col`, from 0: at once when it is visited, else once
+    /// read.
+    pub(crate) fn find_file_at(
+        &mut self,
+        path: &Path,
+        line: usize,
+        col: usize,
+    ) -> Result<(), String> {
+        let from = self.core.windows.window.buffer();
+        self.find_file(&path.to_string_lossy())?;
+        match self.core.buffers.visiting(path) == Some(self.core.windows.window.buffer()) {
+            true => {
+                // Switching to another buffer recorded the jump already.
+                if self.core.windows.window.buffer() == from {
+                    self.core.push_jump();
+                }
+                self.core.goto_line_col(line, col)
+            }
+            false => {
+                if let Some(pending) = &mut self.core.pending_visit {
+                    pending.destination = Some((line, col));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Asks for a regexp and lists its hits in every root of the current workspace's project as
     /// it is typed; given a listed hit, visits its file at the match.
     pub(crate) fn project_grep(&mut self, mut args: Args) -> Result<(), String> {
@@ -272,24 +299,7 @@ impl Ctx<'_> {
         if let Some(label) = args.strings.first() {
             let hit = self.core.grep.hit(label).ok_or("No match")?;
             let (path, line, col) = (hit.root.join(&hit.path), hit.line, hit.col);
-            let from = self.core.windows.window.buffer();
-            self.find_file(&path.to_string_lossy())?;
-            // A visited file is switched to at once; another jumps once read.
-            match self.core.buffers.visiting(&path) == Some(self.core.windows.window.buffer()) {
-                true => {
-                    // Switching to another buffer recorded the jump already.
-                    if self.core.windows.window.buffer() == from {
-                        self.core.push_jump();
-                    }
-                    self.core.goto_line_col(line, col)
-                }
-                false => {
-                    if let Some(pending) = &mut self.core.pending_visit {
-                        pending.destination = Some((line, col));
-                    }
-                }
-            }
-            return Ok(());
+            return self.find_file_at(&path, line, col);
         }
         let project = self.core.current_workspace().project;
         let loaded = &self.core.projects[self.core.project_at(project)?].project;
