@@ -2292,6 +2292,68 @@ mod tests {
     }
 
     #[gpui::test]
+    fn attachment_picker_keeps_the_session_visible_and_control_return_inserts_a_chip(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let _native = NativeTest::new(cx);
+        let dir = tempdir();
+        std::fs::create_dir(dir.path().join("screens")).unwrap();
+        let (editor, cx) = editor(cx, "");
+        editor.update(cx, |e, cx| {
+            e.core.handle(
+                Instant::now(),
+                Msg::SettingsLoaded(Ok(Some("[agents.fake]\ncommand = 'unused'".into()))),
+            );
+            for key in parse_keys("M-x agent-start RET fake RET").unwrap() {
+                e.core.handle(Instant::now(), Msg::Key(key));
+            }
+            cx.notify();
+        });
+        cx.simulate_input("compare ");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("agent-attach-file");
+        cx.simulate_keystrokes("enter ctrl-a ctrl-k");
+        cx.simulate_input(&format!("{}/", dir.path().display()));
+        cx.run_until_parked();
+        for _ in 0..100 {
+            let ready = editor.update(cx, |e, _| {
+                e.core.frame().minibuffer.unwrap().candidates == ["screens/"]
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        editor.update(cx, |e, _| {
+            let mb = e.core.frame().minibuffer.unwrap();
+            assert_eq!(mb.prompt, "Attach: ");
+            assert_eq!(mb.candidates, ["screens/"]);
+            assert_eq!(mb.selected, None);
+            assert_eq!(e.painted[0].rows[0].text.text, "> compare ");
+        });
+        let annotation = cx.debug_bounds("completion-annotation-0").unwrap();
+        let width = cx.update(|window, _| window.viewport_size().width);
+        assert_eq!(annotation.right(), width - px(TEXT_INSET));
+        cx.simulate_keystrokes("ctrl-n ctrl-enter");
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            let row = &e.painted[0].rows[0];
+            assert_eq!(row.text.text, "> compare  ▦ screens ");
+            let (first, last) = (row.boxes.first().unwrap(), row.boxes.last().unwrap());
+            assert_eq!((first.open_left, last.open_right), (false, false));
+            assert_eq!(first.x.start, row.text.x_for_index("> compare ".len()));
+            assert_eq!(last.x.end, row.text.width);
+        });
+        cx.update(|window, _| window.remove_window());
+        drop(editor);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn project_file_metadata_uses_the_file_columns_without_initial_preview(
         cx: &mut TestAppContext,
     ) {

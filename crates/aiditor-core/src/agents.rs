@@ -1764,6 +1764,24 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    pub(crate) fn agent_attach_file(&mut self, args: Args) -> Result<(), String> {
+        self.core.current_session()?;
+        let Some(name) = args.strings.first() else {
+            let command = self.core.commands["agent-attach-file"];
+            return self.read_string(command, args, "Attach: ".into(), None);
+        };
+        let directory = name.ends_with('/');
+        let path = self.core.directory().join(name).components().collect();
+        let chip = self.core.chips.intern(Some(path), directory);
+        let at = if self.core.point() < self.core.current().prompt_start() {
+            self.core.current().len_chars()
+        } else {
+            self.core.point()
+        };
+        self.core.current_mut().insert(at, &chip.to_string())?;
+        self.goto(at + 1)
+    }
+
     pub(crate) fn agent_reference(&mut self, args: Args) -> Result<(), String> {
         self.core.current_session()?;
         if let Some(path) = args.strings.first() {
@@ -2484,6 +2502,106 @@ mod tests {
             h.core.text(),
             "> hello\n\nHi there\n\nWorked 0s\n\n> again\n\nAgain\n\nWorking for 0s\n\n> "
         );
+    }
+
+    #[test]
+    fn attachments_insert_external_files_and_images_as_chips_and_send_them() {
+        for key in ["RET", "C-RET"] {
+            let mut h = session();
+            h.listing("/outside", &["a.rs", "view.png"]);
+            h.keys("compare SPC SPC please");
+            h.ctx().goto(10).unwrap();
+            h.keys("M-x agent-attach-file RET C-a C-k /outside/a.rs");
+            let mb = h.core.minibuffer().unwrap();
+            assert_eq!(mb.prompt, "Attach: ");
+            let buffer = h.core.origin().unwrap().buffer();
+            assert_eq!(
+                h.core.buffers.get(buffer).unwrap().text().to_string(),
+                "> compare  please"
+            );
+            chunk(&mut h, "Output");
+            h.keys(key);
+            let chip = h.core.chips.intern(Some("/outside/a.rs".into()), false);
+            assert_eq!(h.text(), format!("Output\n\n> compare {chip} please"));
+            assert_eq!(h.point(), "Output\n\n> compare ".chars().count() + 1);
+            h.keys("M-> SPC M-x agent-attach-file RET C-a C-k /outside/view.png RET");
+            drawn_line(&mut h, "> compare  ▤ a.rs  please  ▣ view.png ");
+            h.keys("RET");
+            assert_eq!(
+                ops(&mut h),
+                [
+                    "prompt 0 s \"compare \" link a.rs file:///outside/a.rs \" please \" image image/png file:///outside/view.png"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn attachments_enter_directories_or_attach_them_with_control_return() {
+        let mut h = session();
+        h.listing("/outside", &["empty/", "screens/"]);
+        h.listing("/outside/screens", &["view.png"]);
+        h.keys("M-x agent-attach-file RET C-a C-k /outside/screen RET");
+        assert_eq!(h.text(), "/outside/screens/");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.candidates, ["view.png"]);
+        assert_eq!(mb.selected, None);
+        h.keys("C-RET SPC M-x agent-attach-file RET C-a C-k /outside/empt C-RET");
+        drawn_line(&mut h, ">  ▦ screens   ▦ empty ");
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            ["prompt 0 s link screens file:///outside/screens/ link empty file:///outside/empty/"]
+        );
+    }
+
+    #[test]
+    fn attachments_cancel_restores_point_and_transcript_invocation_appends() {
+        let mut h = session();
+        h.listing("/outside", &["a.rs"]);
+        h.keys("before SPC SPC after");
+        h.ctx().goto(9).unwrap();
+        h.keys("M-x agent-attach-file RET C-a C-k /outside/a");
+        chunk(&mut h, "Output");
+        h.keys("C-g x");
+        assert_eq!(h.text(), "Output\n\n> before x after");
+        h.keys("M-< M-x agent-attach-file RET C-a C-k /outside/a RET");
+        let chip = h.core.chips.intern(Some("/outside/a.rs".into()), false);
+        assert_eq!(h.text(), format!("Output\n\n> before x after{chip}"));
+        assert_eq!(h.point(), h.core.current().len_chars());
+        h.keys("C-/");
+        assert_eq!(h.text(), "Output\n\n> before x after");
+    }
+
+    #[test]
+    fn attachments_use_filesystem_annotations_and_directory_editing() {
+        let mut h = session();
+        let base = h.core.directory();
+        h.listing(base.to_str().unwrap(), &["folder/", "note.txt"]);
+        h.keys("M-x agent-attach-file RET");
+        assert_eq!(h.text(), base.join("").to_string_lossy());
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!((mb.count.trim(), mb.selected), ("*/2", None));
+        h.keys("folder TAB DEL");
+        assert_eq!(h.text(), base.join("").to_string_lossy());
+        h.keys("C-g");
+        let note = "-rw-r--r--      41 B       5s ago";
+        h.listings.insert(
+            base,
+            Ok(vec![crate::FileEntry {
+                name: "note.txt".into(),
+                annotation: note.into(),
+            }]),
+        );
+        h.keys("M-x agent-attach-file RET");
+        assert_eq!(h.core.minibuffer().unwrap().annotations, [note]);
+    }
+
+    #[test]
+    fn attachments_require_a_session_before_opening_the_picker() {
+        let mut h = Harness::new(&[]);
+        h.keys("M-x agent-attach-file RET");
+        assert_eq!(h.core.message(), Some("Not in an agent session buffer"));
     }
 
     #[test]

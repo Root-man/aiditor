@@ -160,6 +160,9 @@
 [swiper]
 "C-s" = "swiper-C-s"
 
+[agent-attach-file]
+"C-RET" = "minibuffer-attach-file"
+
 # A minor mode of a minibuffer that completes over candidates.
 [minibuffer-completion]
 "C-n" = "minibuffer-next-completion"
