@@ -413,9 +413,9 @@ impl Ctx<'_> {
     }
 
     /// Closes the minibuffer and calls its command with the selected candidate, or with `input`
-    /// or no match the text, as the next string. A selected directory is entered instead, except
-    /// in a directory prompt, which returns it.
-    pub(crate) fn exit_minibuffer(&mut self, input: bool) -> Result<(), String> {
+    /// or no match the text, as the next string. With `enter`, a selected directory is entered
+    /// instead, except in a directory prompt, which returns it.
+    pub(crate) fn exit_minibuffer(&mut self, input: bool, enter: bool) -> Result<(), String> {
         let core = &*self.core;
         let directories = core.prompts.directories(&core.commands);
         let selected = (!input)
@@ -453,6 +453,7 @@ impl Ctx<'_> {
             return Err("Match required".into());
         }
         if completion.is_some_and(|c| c.dir.is_some())
+            && enter
             && !directories
             && let Some(dir) = selected.as_ref().filter(|s| s.ends_with('/'))
         {

@@ -763,6 +763,15 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.agent_command(&args.strings[0]),
         },
         Command {
+            name: "agent-attach-file",
+            spec: ArgSpec {
+                unselected: true,
+                files: Some(0),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.agent_attach_file(args),
+        },
+        Command {
             name: "agent-reference",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.agent_reference(args),
@@ -861,12 +870,17 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "exit-minibuffer",
             spec: ArgSpec::default(),
-            handler: |ctx, _| ctx.exit_minibuffer(false),
+            handler: |ctx, _| ctx.exit_minibuffer(false, true),
         },
         Command {
             name: "minibuffer-exit-input",
             spec: ArgSpec::default(),
-            handler: |ctx, _| ctx.exit_minibuffer(true),
+            handler: |ctx, _| ctx.exit_minibuffer(true, true),
+        },
+        Command {
+            name: "minibuffer-attach-file",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.exit_minibuffer(false, false),
         },
         Command {
             name: "abort-minibuffers",
