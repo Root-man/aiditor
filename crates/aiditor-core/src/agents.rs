@@ -487,7 +487,9 @@ impl Core {
         let index = self.index.get(&session.project);
         let file = |word: &str| file_link(index, word).map(|(path, _)| path);
         let linked = self.chips.replace_links(text);
-        let text = &self.chips.replace_mentions(&linked, file);
+        let mentioned = self.chips.replace_mentions(&linked, file);
+        let known = |name: &str| session.commands.iter().any(|c| c.name == name);
+        let text = &self.chips.replace_commands(&mentioned, known);
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
@@ -978,8 +980,11 @@ impl Core {
     fn chip_at_point(&self) -> Option<&chips::Chip> {
         let buffer = self.windows.window.buffer();
         self.agents.values().find(|s| s.buffer == buffer)?;
-        self.chips
-            .get(self.current().text().get_char(self.point())?)
+        // A command chip has nothing to open, so `RET` on it sends the prompt.
+        (self
+            .chips
+            .get(self.current().text().get_char(self.point())?))
+        .filter(|c| c.kind != chips::Kind::Command)
     }
 
     /// Shows the path of the chip at point when the command left no message, as eldoc does.
@@ -1759,21 +1764,38 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// `agent-command`: inserts `/name ` at the start of the prompt area, point after it.
+    /// `agent-command`: inserts the command's chip and a space at point in the prompt area, or
+    /// at its end from the transcript; an answer naming no command goes in as `/answer `.
     pub(crate) fn agent_command(&mut self, name: &str) -> Result<(), String> {
         self.core.current_session()?;
-        let start = self.core.current().prompt_start();
-        let text = format!("/{name} ");
-        self.core.current_mut().insert(start, &text)?;
-        self.goto(start + text.chars().count())
+        let core = &mut *self.core;
+        let known = core.session_commands().iter().any(|c| c.name == name);
+        let text = match known {
+            true => format!("{} ", core.chips.command(name)),
+            false => format!("/{name} "),
+        };
+        let (point, start, end) = (
+            core.point(),
+            core.current().prompt_start(),
+            core.current().len_chars(),
+        );
+        let at = if point >= start { point } else { end };
+        // Appended after the prompt's text from the transcript, it starts a word of its own.
+        let joins =
+            point < start && end > start && !core.current().text().char(end - 1).is_whitespace();
+        let text = if joins { format!(" {text}") } else { text };
+        core.current_mut().insert(at, &text)?;
+        self.goto(at + text.chars().count())
     }
 
-    /// `/` in a session: `agent-command` at the start of the prompt area when the session has
-    /// commands, else typed as itself.
+    /// `/` in a session: `agent-command` at a word's start in the prompt area when the session
+    /// has commands, else typed as itself.
     pub(crate) fn agent_slash(&mut self, args: Args) -> Result<(), String> {
         let core = &*self.core;
-        let pick =
-            !core.session_commands().is_empty() && core.point() == core.current().prompt_start();
+        let (point, start) = (core.point(), core.current().prompt_start());
+        let before = point.checked_sub(1).map(|p| core.current().text().char(p));
+        let word_start = point == start || before.is_some_and(char::is_whitespace);
+        let pick = !core.session_commands().is_empty() && point >= start && word_start;
         let command = if pick {
             "agent-command"
         } else {
@@ -2469,10 +2491,12 @@ mod tests {
         assert_eq!(mb.candidates, ["review", "mcp"]);
         assert_eq!(mb.annotations, ["[path]  Review changes", "Run mcp"]);
         h.keys("RET");
-        assert_eq!(h.core.text(), "> /review ");
+        let review = h.core.chips.command("review");
+        assert_eq!(h.core.text(), format!("> {review} "));
         assert_eq!(h.core.point(), h.core.text().chars().count());
-        // Sent as text, as ACP expects.
-        h.keys("x RET");
+        drawn_line(&mut h, ">  ▷ /review  ");
+        // `RET` on the chip sends, as text, as ACP expects.
+        h.keys("x C-b C-b C-b RET");
         assert_eq!(ops(&mut h), [r#"prompt 0 s "/review x""#]);
     }
 
@@ -2502,27 +2526,43 @@ mod tests {
         assert!(h.core.minibuffer().is_none());
         assert_eq!(h.core.text(), "> /");
         commands(&mut h, &["review"]);
+        // Inside a word, as in a path.
         h.keys("/");
         assert!(h.core.minibuffer().is_none());
         assert_eq!(h.core.text(), "> //");
+        let review = h.core.chips.command("review");
+        // After a space, mid-message.
+        h.keys("SPC / RET a");
+        assert_eq!(h.core.text(), format!("> // {review} a"));
         // At the start of a prompt that holds text, the command goes before it.
         h.ctx().goto(2).unwrap();
         h.keys("/ RET");
-        assert_eq!(h.core.text(), "> /review //");
+        assert_eq!(h.core.text(), format!("> {review} // {review} a"));
     }
 
     #[test]
-    fn agent_command_from_the_transcript_inserts_at_the_prompt_start() {
+    fn agent_command_from_the_transcript_appends_to_the_prompt() {
         let mut h = session();
         commands(&mut h, &["compact"]);
         chunk(&mut h, "Hi");
         h.keys("w o r k M-<");
         h.keys("M-x agent-command RET RET");
-        assert!(h.core.text().ends_with("> /compact work"));
-        assert_eq!(h.core.point(), h.core.text().chars().count() - "work".len());
+        let compact = h.core.chips.command("compact");
+        assert!(h.core.text().ends_with(&format!("> work {compact} ")));
+        assert_eq!(h.core.point(), h.core.text().chars().count());
         // An answer that names no command goes in as typed.
         h.keys("M-x agent-command RET f o o RET");
-        assert!(h.core.text().ends_with("> /foo /compact work"));
+        assert!(h.core.text().ends_with(&format!("> work {compact} /foo ")));
+    }
+
+    #[test]
+    fn replayed_commands_the_session_knows_are_chips() {
+        let mut h = session();
+        commands(&mut h, &["review"]);
+        let user = SessionUpdate::UserMessageChunk(ContentChunk::new("/review it, not /x".into()));
+        update(&mut h, 0, user);
+        let review = h.core.chips.command("review");
+        assert!(h.core.text().starts_with(&format!("> {review} it, not /x")));
     }
 
     #[test]
