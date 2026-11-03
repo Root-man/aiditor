@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Project grep</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:3ch;flex:none;text-align:right;padding:0 12px 0 10px;color:#665c54}
+.cur{background:#32302f}
+.cur .g{color:#fabd2f}
+.k{color:#fb4934}.s{color:#b8bb26}.f{color:#b8bb26}.t{color:#fabd2f}.c{color:#928374;font-style:italic}.n{color:#d3869b}.p{color:#83a598}.m{color:#8ec07c}.o{color:#fe8019}
+.mt{background:#5a4b2b;color:#fabd2f;font-style:normal}
+.mc{background:#fabd2f;color:#282828;font-weight:700;font-style:normal}
+.row{display:flex;white-space:pre;padding:0 12px;min-height:21px;overflow:hidden}
+.sel{background:#3c3836}
+.hl{color:#d3869b;width:4ch;flex:none;text-align:right}
+.hm{color:#fe8019;font-weight:700}
+.file{display:flex;align-items:center;gap:8px;padding:0 12px;min-height:21px;white-space:pre}
+.rule{height:1px;background:#504945}
+.fn{color:#8ec07c;font-style:italic}
+.sp{color:#504945}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span><span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span> <span style="color: #fabd2f">●</span><span class="sp">  │  </span>aiditor › grep-progress <span style="color: #b8bb26">●</span><span class="sp">  │  </span>Legacy crap › cleanup<span class="sp">  │  </span>zed › tab-bar</span>
+    <span>20:41</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 6px">
+    <sc-for list="{{lines}}" as="line" hint-placeholder-count="20">
+      <div class="l {{line.cls}}"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+    </sc-for>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #3c3836; white-space: pre">
+    <span><span style="color: #a89984">crates/aiditor/src/</span><span style="font-weight: 700">editor.rs</span><span class="sp">  │  </span><span style="color: #a89984">Rust 1.99.0</span><span class="sp">  │  </span><span style="color: #928374">preview</span></span>
+    <span>297:31<span class="sp">  │  </span><span style="color: #a89984">28%</span></span>
+  </div>
+  <div style="flex: none; padding: 4px 0 6px 0">
+    <div class="row" style="justify-content: space-between">
+      <span><span style="color: #928374">  3/48 </span><span style="color: #8ec07c; font-weight: 700">Grep in aiditor: </span>emacs<span style="background: #ebdbb2; color: #282828"> </span></span>
+      <span style="color: #928374">searching · 1,204 of 1,685 files</span>
+    </div>
+    <sc-for list="{{groups}}" as="grp" hint-placeholder-count="6">
+      <div class="file"><span class="rule" style="width: 32px"></span><span class="fn">{{grp.path}}</span><span class="rule" style="flex: 1"></span></div>
+      <sc-for list="{{grp.hits}}" as="h" hint-placeholder-count="2">
+        <div class="row {{h.cls}}"><span class="hl">{{h.line}}</span><span style="color: #928374">:  </span><sc-for list="{{h.parts}}" as="p"><span class="{{p.c}}">{{p.t}}</span></sc-for></div>
+      </sc-for>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const KW = /^(use|pub|fn|let|mut|loop|for|in|if|break|impl|as|return|match|struct|const|mod|crate|self|move|where|Some)$/;
+    const hl = (src, first, cur) => src.split('\n').map((line, i) => {
+      const toks = [];
+      const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(\b\d[\d_.e]*\b)|([A-Za-z_][A-Za-z0-9_]*!?)|(\s+)|(.)/g;
+      let m;
+      while ((m = re.exec(line))) {
+        const t = m[0];
+        let c = '';
+        if (m[1]) c = 'c';
+        else if (m[2]) c = 's';
+        else if (m[3]) c = 'n';
+        else if (m[4]) c = t.endsWith('!') ? 'o' : KW.test(t) ? 'k' : /^[A-Z]/.test(t) ? 't' : line[re.lastIndex] === '(' ? 'f' : '';
+        t.split(/(emacs)/i).forEach((part) => {
+          if (part) toks.push({ t: part, c: /^emacs$/i.test(part) ? (first + i === cur ? 'mc' : 'mt') : c });
+        });
+      }
+      return { n: first + i, toks, cls: first + i === cur ? 'cur' : '' };
+    });
+    const src = `        let line_height = px(settings.line_height());
+        window.set_window_title(&frame.title);
+        let line = || div().h(line_height).whitespace_nowrap().overflow_hidden();
+        let hint = frame.hint.map(|hint| {
+            // Keys right-aligned so the colons line up, as Emacs's which-key.
+            let keys = (hint.entries.iter()).map(|(key, _)| key.chars().count());
+            let keys = keys.max().unwrap_or(0);
+            let entries: Vec<String> = (hint.entries.iter())
+                .map(|(key, what)| format!("{key:>keys$} : {what}"))
+                .collect();
+            let width = entries.iter().map(|e| e.chars().count()).max().unwrap_or(0) + 2;
+            let column = cell * width as f32;
+            div()
+                .flex()
+                .flex_wrap()
+                .child(line().w_full().child(format!("{}-", hint.keys)))
+                .children(entries.into_iter().map(|e| line().w(column).child(e)))
+        });
+        let message = frame.message.unwrap_or_default();`;
+    const raw = [
+      ['AGENTS.md', [[5, 'aiditor is a personal, keyboard-first GUI editor written in Rust. It is built around Emacs’s buffer/window model']]],
+      ['CLAUDE.md', [[5, 'aiditor is a personal, keyboard-first GUI editor written in Rust. It is built around Emacs’s buffer/window model']]],
+      ['crates/aiditor/src/editor.rs', [[297, '// Keys right-aligned so the colons line up, as Emacs’s which-key.', 'sel'], [354, '// A gap like Emacs’s 8px fringes, so the rounded window corners never clip text.']]],
+      ['crates/aiditor-core/keymap.toml', [[28, '# Workspaces, on Emacs’s tab-bar prefix.']]],
+      ['crates/aiditor-core/src/autosave.rs', [[132, '/// Whether `buffer` has edits a crash would lose: modified and visiting a file, as Emacs’s']]],
+      ['crates/aiditor-core/src/buffer.rs', [
+        [102, '/// Every buffer, most recently shown first; new buffers go last, as in Emacs’s `buffer-list`.'],
+        [277, '/// Long lines are cut at the window edge instead of wrapping, as Emacs’s `truncate-lines`.'],
+        [282, '/// Counts text changes, like Emacs’s `buffer-modified-tick`.'],
+      ]],
+    ];
+    const groups = raw.map(([path, hits]) => ({
+      path,
+      hits: hits.map(([line, text, cls]) => ({
+        line, cls: cls || '',
+        parts: text.split(/(emacs)/i).filter(Boolean).map((t) => ({ t, c: /^emacs$/i.test(t) ? 'hm' : '' })),
+      })),
+    }));
+    return { lines: hl(src, 293, 297), groups };
+  }
+}
+</script>
+</body>
+</html>

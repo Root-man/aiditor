@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mode line study</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.lbl{color:#928374;margin:14px 0 6px 0;font-size:13px}
+.bar{height:26px;line-height:26px;display:flex;justify-content:space-between;padding:0 12px;white-space:pre;overflow:hidden}
+.on{background:#3c3836;color:#ebdbb2}
+.off{background:#282828;color:#7c6f64;box-shadow:inset 0 1px 0 #3c3836}
+.ws{height:22px;line-height:22px;font-size:13px;background:#1d2021;color:#a89984}
+.d{color:#a89984}.b{font-weight:700}.y{color:#fabd2f}.o{color:#fe8019}.g{color:#b8bb26}.r{color:#fb4934}.a{color:#8ec07c}.bl{color:#83a598}.gr{color:#665c54}.sp{color:#504945}
+.tbl{display:grid;grid-template-columns:200px 150px minmax(0,1fr);column-gap:20px;row-gap:2px;font-size:14px}
+.th{color:#928374}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2; padding: 20px 32px; display: flex; gap: 40px">
+  <div style="flex: 1; min-width: 0">
+    <div class="lbl" style="margin-top: 0">Workspace bar · one workspace, no agents</div>
+    <div class="bar ws"><span><span class="b" style="color: #ebdbb2">aiditor</span><span class="gr"> › </span><span class="y">watcher-fix</span></span><span>20:41</span></div>
+    <div class="lbl">Workspace bar · every workspace, a dot where agents run</div>
+    <div class="bar ws"><span><span class="b" style="color: #ebdbb2">aiditor</span><span class="gr"> › </span><span class="y">watcher-fix</span> <span class="y">●</span><span class="sp">  │  </span>aiditor › grep-progress <span class="g">●</span><span class="sp">  │  </span>Legacy crap › cleanup <span class="r">●</span><span class="sp">  │  </span>zed › tab-bar</span><span>20:41</span></div>
+    <div class="lbl">Workspace bar · more than fit, the hidden ones folded with their most urgent dot</div>
+    <div class="bar ws" style="width: 640px"><span>aiditor › grep-progress <span class="g">●</span><span class="sp">  │  </span><span class="b" style="color: #ebdbb2">aiditor</span><span class="gr"> › </span><span class="y">watcher-fix</span><span class="sp">  │  </span>+4 <span class="y">●</span></span><span>20:41</span></div>
+
+    <div class="lbl">File · clean</div>
+    <div class="bar on"><span><span class="d">benches/src/</span><span class="b">support.rs</span><span class="sp">  │  </span><span class="d">Rust 1.99.0</span></span><span><span class="a">⎇ main</span><span class="sp">  │  </span>5:21<span class="sp">  │  </span><span class="d">Top</span></span></div>
+    <div class="lbl">File · modified, with region</div>
+    <div class="bar on"><span><span class="o">●</span> <span class="d">lib/</span><span class="b">billing.ex</span><span class="sp">  │  </span><span class="d">Elixir 1.20.2-otp-26</span></span><span><span class="d">3 lines, 84 chars</span><span class="sp">  │  </span><span class="a">⎇ main</span><span class="sp">  │  </span>5:21<span class="sp">  │  </span><span class="d">12%</span></span></div>
+    <div class="lbl">File · read-only, non-default encoding and line endings</div>
+    <div class="bar on"><span><span class="r">⊘</span> <span class="d">vendor/</span><span class="b">legacy.php</span><span class="sp">  │  </span><span class="d">PHP 8.4.1</span></span><span><span class="y">Latin-1 CRLF</span><span class="sp">  │  </span><span class="a">⎇ master</span><span class="sp">  │  </span>120:4<span class="sp">  │  </span><span class="d">33%</span></span></div>
+    <div class="lbl">File · inactive window</div>
+    <div class="bar off"><span>● benches/src/support.rs  │  Rust 1.99.0</span><span>22:8  │  41%</span></div>
+
+    <div class="lbl">Terminal · char mode, running</div>
+    <div class="bar on"><span><span class="b">vterm1</span><span class="sp">  │  </span><span class="d">~/Code/aiditor/crates</span></span><span><span class="g">◉ cargo test</span><span class="sp">  │  </span><span class="y">char</span></span></div>
+    <div class="lbl">Terminal · copy mode, last command failed</div>
+    <div class="bar on"><span><span class="b">vterm1</span><span class="sp">  │  </span><span class="d">~/Code/aiditor/crates</span></span><span><span class="r">exit 101</span><span class="sp">  │  </span><span class="bl">copy</span><span class="sp">  │  </span>5001:1</span></div>
+
+    <div class="lbl">Agent session · streaming, plan mode</div>
+    <div class="bar on"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="bl">plan</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="g">● working</span><span class="sp">  │  </span><span class="d">ctx 5%</span></span></div>
+    <div class="lbl">Agent session · awaiting permission, accept edits</div>
+    <div class="bar on"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="y">acceptEdits</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="y">● awaiting permission</span><span class="sp">  │  </span><span class="d">ctx 48%</span></span></div>
+    <div class="lbl">Agent session · Codex, full access, exited</div>
+    <div class="bar on"><span><span class="b">6.1 Sol · xhigh</span><span class="sp">  │  </span><span class="r">agent-full-access</span><span class="sp">  │  </span><span class="d">legacy cleanup</span></span><span><span class="r">● exited</span><span class="sp">  │  </span><span class="d">ctx 82%</span></span></div>
+
+    <div class="lbl">Special buffer · grep results</div>
+    <div class="bar on"><span><span class="b">*grep: emacs*</span><span class="sp">  │  </span><span class="d">48 hits in 12 files</span></span><span>3/48</span></div>
+  </div>
+  <div style="width: 500px; flex: none">
+    <div class="lbl" style="margin-top: 0">Where each segment lives</div>
+    <div class="tbl">
+      <span class="th">Segment</span><span class="th">Place</span><span class="th">Shown when</span>
+      <span>Workspaces</span><span>workspace bar</span><span class="d">always; current one bright</span>
+      <span>Agent dot</span><span>workspace bar</span><span class="d">a workspace has sessions; most urgent state</span>
+      <span>Clock</span><span>workspace bar</span><span class="d">always, right</span>
+      <span>Modified ●, read-only ⊘</span><span>buffer line</span><span class="d">when true</span>
+      <span>Path, name</span><span>buffer line</span><span class="d">always; path dim</span>
+      <span>Mode, version</span><span>buffer line</span><span class="d">version when the project pins one</span>
+      <span>Region size</span><span>buffer line</span><span class="d">while a region is active</span>
+      <span>Encoding, EOL</span><span>buffer line</span><span class="d">only when not UTF-8 LF</span>
+      <span>VCS branch</span><span>buffer line</span><span class="d">file in a repo</span>
+      <span>Line:col, %</span><span>buffer line</span><span class="d">text buffers</span>
+      <span>Terminal mode</span><span>buffer line</span><span class="d">char or copy</span>
+      <span>Exit status</span><span>buffer line</span><span class="d">non-zero only</span>
+      <span>Model · effort</span><span>buffer line</span><span class="d">sessions</span>
+      <span>Mode</span><span>buffer line</span><span class="d">sessions; colour = risk</span>
+      <span>Agent status</span><span>buffer line</span><span class="d">sessions; colour = state</span>
+      <span>Context %</span><span>buffer line</span><span class="d">sessions</span>
+    </div>
+    <div class="lbl" style="margin-top: 28px">Rules</div>
+    <div style="color: #bdae93; white-space: pre-wrap; font-size: 14px">Left: what the buffer is. Right: where point is and what is running.
+Segments split by │.
+Colour only for state: orange modified, yellow waiting, green running, red failed.
+Agent modes by risk: plan blue, edits yellow, auto green, full access red.
+Inactive lines keep the layout and drop every colour.
+Nothing the workspace bar shows repeats in a buffer line.</div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

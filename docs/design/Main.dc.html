@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Editor</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre}
+.g{width:2ch;flex:none;text-align:right;padding:0 12px 0 10px;color:#665c54}
+.cur{background:#32302f}
+.cur .g{color:#fabd2f}
+.k{color:#fb4934}.s{color:#b8bb26}.f{color:#b8bb26}.t{color:#fabd2f}.c{color:#928374;font-style:italic}.n{color:#d3869b}.p{color:#83a598}.m{color:#8ec07c}.o{color:#fe8019}
+.pt{background:#ebdbb2;color:#282828}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span><span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span> <span style="color: #fabd2f">●</span><span style="color: #504945">  │  </span>aiditor › grep-progress <span style="color: #b8bb26">●</span><span style="color: #504945">  │  </span>Legacy crap › cleanup<span style="color: #504945">  │  </span>zed › tab-bar</span>
+    <span>20:41</span>
+  </div>
+  <div style="flex: 1; min-height: 0; padding: 6px 0 0 0; overflow: hidden">
+    <div class="l"><span class="g">1</span><span><span class="k">use</span> <span class="m">std</span>::<span class="m">time</span>::{<span class="t">Duration</span>, <span class="t">Instant</span>};</span></div>
+    <div class="l"><span class="g">2</span><span></span></div>
+    <div class="l"><span class="g">3</span><span><span class="c">/// Times `operation`, doubling the batch until one takes 10 ms, then reports the median.</span></span></div>
+    <div class="l"><span class="g">4</span><span><span class="k">pub fn</span> <span class="f">measure</span>(<span class="p">name</span>: &amp;<span class="t">str</span>, <span class="k">mut</span> <span class="p">operation</span>: <span class="k">impl</span> <span class="t">FnMut</span>(), <span class="p">output</span>: &amp;<span class="k">mut</span> <span class="t">String</span>) {</span></div>
+    <div class="l cur"><span class="g">5</span><span>    <span class="k">let mut</span> iterations = <span class="n">1</span>;<span class="pt"> </span></span></div>
+    <div class="l"><span class="g">6</span><span>    <span class="k">loop</span> {</span></div>
+    <div class="l"><span class="g">7</span><span>        <span class="k">let</span> start = <span class="t">Instant</span>::<span class="f">now</span>();</span></div>
+    <div class="l"><span class="g">8</span><span>        <span class="k">for</span> _ <span class="k">in</span> <span class="n">0</span>..iterations {</span></div>
+    <div class="l"><span class="g">9</span><span>            <span class="p">operation</span>();</span></div>
+    <div class="l"><span class="g">10</span><span>        }</span></div>
+    <div class="l"><span class="g">11</span><span>        <span class="k">if</span> start.<span class="f">elapsed</span>() &gt;= <span class="t">Duration</span>::<span class="f">from_millis</span>(<span class="n">10</span>) {</span></div>
+    <div class="l"><span class="g">12</span><span>            <span class="k">break</span>;</span></div>
+    <div class="l"><span class="g">13</span><span>        }</span></div>
+    <div class="l"><span class="g">14</span><span>        iterations *= <span class="n">2</span>;</span></div>
+    <div class="l"><span class="g">15</span><span>    }</span></div>
+    <div class="l"><span class="g">16</span><span>    <span class="k">let mut</span> samples = <span class="t">Vec</span>::<span class="f">new</span>();</span></div>
+    <div class="l"><span class="g">17</span><span>    <span class="k">for</span> _ <span class="k">in</span> <span class="n">0</span>..<span class="n">21</span> {</span></div>
+    <div class="l"><span class="g">18</span><span>        <span class="k">let</span> start = <span class="t">Instant</span>::<span class="f">now</span>();</span></div>
+    <div class="l"><span class="g">19</span><span>        <span class="k">for</span> _ <span class="k">in</span> <span class="n">0</span>..iterations {</span></div>
+    <div class="l"><span class="g">20</span><span>            <span class="p">operation</span>();</span></div>
+    <div class="l"><span class="g">21</span><span>        }</span></div>
+    <div class="l"><span class="g">22</span><span>        samples.<span class="f">push</span>(start.<span class="f">elapsed</span>().<span class="f">as_secs_f64</span>() * <span class="n">1e9</span> / iterations <span class="k">as</span> <span class="t">f64</span>);</span></div>
+    <div class="l"><span class="g">23</span><span>    }</span></div>
+    <div class="l"><span class="g">24</span><span>    samples.<span class="f">sort_by</span>(<span class="t">f64</span>::<span class="f">total_cmp</span>);</span></div>
+    <div class="l"><span class="g">25</span><span>    <span class="o">println!</span>(<span class="s">"{name}: {:.0} ns/op (median of 21 batches)"</span>, samples[<span class="n">10</span>]);</span></div>
+    <div class="l"><span class="g">26</span><span>    <span class="p">output</span>.<span class="f">push_str</span>(&amp;<span class="o">format!</span>(</span></div>
+    <div class="l"><span class="g">27</span><span>        <span class="s">"{name}\t{}\t{}\t{}\n"</span>,</span></div>
+    <div class="l"><span class="g">28</span><span>        samples[<span class="n">10</span>], samples[<span class="n">0</span>], samples[<span class="n">20</span>]</span></div>
+    <div class="l"><span class="g">29</span><span>    ));</span></div>
+    <div class="l"><span class="g">30</span><span>}</span></div>
+    <div class="l"><span class="g">31</span><span></span></div>
+    <div class="l"><span class="g">32</span><span><span class="c">// Setup and teardown stay outside each timed operation for cases that cannot reuse their state.</span></span></div>
+    <div class="l"><span class="g">33</span><span><span class="k">pub fn</span> <span class="f">prepared</span>&lt;<span class="t">T</span>&gt;(</span></div>
+    <div class="l"><span class="g">34</span><span>    <span class="p">name</span>: &amp;<span class="t">str</span>,</span></div>
+    <div class="l"><span class="g">35</span><span>    <span class="k">mut</span> <span class="p">setup</span>: <span class="k">impl</span> <span class="t">FnMut</span>() -&gt; <span class="t">T</span>,</span></div>
+    <div class="l"><span class="g">36</span><span>    <span class="k">mut</span> <span class="p">operation</span>: <span class="k">impl</span> <span class="t">FnMut</span>(&amp;<span class="k">mut</span> <span class="t">T</span>),</span></div>
+    <div class="l"><span class="g">37</span><span>    <span class="p">output</span>: &amp;<span class="k">mut</span> <span class="t">String</span>,</span></div>
+    <div class="l"><span class="g">38</span><span>) {</span></div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #3c3836; color: #ebdbb2; white-space: pre">
+    <span><span style="color: #fe8019">●</span> <span style="color: #a89984">benches/src/</span><span style="font-weight: 700">support.rs</span><span style="color: #504945">  │  </span><span style="color: #a89984">Rust 1.99.0</span></span>
+    <span><span style="color: #8ec07c">⎇ main</span><span style="color: #504945">  │  </span>5:21<span style="color: #504945">  │  </span><span style="color: #a89984">Top</span></span>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 16px; color: #928374">Wrote benches/src/support.rs</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

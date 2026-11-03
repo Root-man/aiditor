@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gruvbox light</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:2ch;flex:none;text-align:right;padding:0 12px 0 10px;color:#a89984}
+.cur{background:#f2e5bc}
+.cur .g{color:#b57614}
+.k{color:#9d0006}.s{color:#79740e}.f{color:#79740e}.t{color:#b57614}.c{color:#928374;font-style:italic}.n{color:#8f3f71}.p{color:#076678}.m{color:#427b58}.o{color:#af3a03}
+.mt{background:#f2d98a;color:#3c3836}
+.win{min-height:0;display:flex;flex-direction:column}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 16px;white-space:pre}
+.on{background:#ebdbb2;color:#3c3836}
+.off{background:#fbf1c7;color:#a89984;box-shadow:inset 0 1px 0 #ebdbb2}
+.row{display:flex;white-space:pre;padding:0 16px;min-height:21px}
+.sel{background:#ebdbb2}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #fbf1c7; color: #3c3836">
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; padding: 0 16px; background: #f2e5bc; color: #7c6f64">
+    <span style="color: #3c3836; font-weight: 700">aiditor</span><span style="color: #a89984"> › </span><span style="color: #b57614">watcher-fix</span>
+  </div>
+  <div class="win" style="flex: 3">
+    <div class="body">
+      <sc-for list="{{a}}" as="line" hint-placeholder-count="20">
+        <div class="l {{line.cls}}"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+      </sc-for>
+    </div>
+    <div class="ml on"><span><span style="color: #af3a03">●</span> <span style="color: #7c6f64">benches/src/</span><span style="font-weight: 700">support.rs</span>   <span style="color: #7c6f64">Rust</span></span><span><span style="color: #427b58">⎇ main</span>   5:21   <span style="color: #7c6f64">Top</span></span></div>
+  </div>
+  <div class="win" style="flex: 2">
+    <div class="body">
+      <sc-for list="{{b}}" as="line" hint-placeholder-count="12">
+        <div class="l"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+      </sc-for>
+    </div>
+    <div class="ml off"><span>crates/aiditor-services/src/grep.rs   Rust</span><span>14:0   8%</span></div>
+  </div>
+  <div style="flex: none; padding: 4px 0 6px 0">
+    <div class="row"><span style="color: #7c6f64">   1/4 </span><span style="color: #427b58; font-weight: 700">Swiper: </span>iterations<span style="background: #3c3836; color: #fbf1c7"> </span></div>
+    <div class="row sel"><span style="color: #7c6f64">4: </span>    let mut <span style="color: #af3a03; font-weight: 700">iterations</span> = 1;</div>
+    <div class="row"><span style="color: #7c6f64">7: </span>        for _ in 0..<span style="color: #af3a03; font-weight: 700">iterations</span> {</div>
+    <div class="row"><span style="color: #7c6f64">13: </span>        <span style="color: #af3a03; font-weight: 700">iterations</span> *= 2;</div>
+    <div class="row"><span style="color: #7c6f64">19: </span>        samples.push(start.elapsed().as_secs_f64() * 1e9 / <span style="color: #af3a03; font-weight: 700">iterations</span> as f64);</div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const KW = /^(use|pub|fn|let|mut|loop|for|in|if|break|impl|as|const|struct|self)$/;
+    const hl = (src, cur, needle) => src.split('\n').map((line, i) => {
+      const toks = [];
+      const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(\b\d[\d_.e]*\b)|([A-Za-z_][A-Za-z0-9_]*!?)|(\s+)|(.)/g;
+      let m;
+      while ((m = re.exec(line))) {
+        const t = m[0];
+        let c = '';
+        if (m[1]) c = 'c'; else if (m[2]) c = 's'; else if (m[3]) c = 'n';
+        else if (m[4]) c = t.endsWith('!') ? 'o' : KW.test(t) ? 'k' : /^[A-Z]/.test(t) ? 't' : line[re.lastIndex] === '(' ? 'f' : '';
+        if (needle && t === needle) c = 'mt';
+        toks.push({ t, c });
+      }
+      return { n: i + 1, toks, cls: i + 1 === cur ? 'cur' : '' };
+    });
+    const support = `use std::time::{Duration, Instant};
+
+pub fn measure(name: &str, mut operation: impl FnMut(), output: &mut String) {
+    let mut iterations = 1;
+    loop {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            operation();
+        }
+        if start.elapsed() >= Duration::from_millis(10) {
+            break;
+        }
+        iterations *= 2;
+    }
+    let mut samples = Vec::new();
+    for _ in 0..21 {
+        let start = Instant::now();
+        // Each batch runs the operation as often as the warm-up found.
+        samples.push(start.elapsed().as_secs_f64() * 1e9 / iterations as f64);
+    }
+    samples.sort_by(f64::total_cmp);
+    println!("{name}: {:.0} ns/op (median of 21 batches)", samples[10]);
+}`;
+    const grep = `/// How long hits wait to be sent, so a fast search doesn't flood the core with messages.
+const BATCH: Duration = Duration::from_millis(50);
+
+/// Runs searches one at a time: each one, or a cancel, stops the one before.
+pub struct Grep {
+    latest: Arc<AtomicU64>,
+}
+
+impl Grep {
+    pub fn run(&self, op: GrepOp, tx: mpsc::Sender<Msg>) {
+        self.latest.store(op.id, Ordering::Relaxed);
+    }
+}`;
+    return { a: hl(support, 4, 'iterations'), b: hl(grep, 0, null) };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent session, monospace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.r{display:flex;justify-content:space-between;white-space:pre-wrap;min-height:21px;padding:0 24px;border-left:3px solid transparent}
+.gap{height:21px}
+.user{background:#32302f}
+.at{border-left-color:#fabd2f}
+.dim{color:#928374}
+.ts{color:#7c6f64;flex:none;padding-left:24px}
+.th{color:#928374;font-style:italic}
+.code{color:#8ec07c}
+.ln{color:#83a598;text-decoration:underline;text-decoration-color:#4f6a6a;text-underline-offset:3px}
+.tok{display:inline-block;line-height:17px;padding:0 7px;border:1px solid #504945;border-radius:5px;background:#3c3836;color:#ebdbb2}
+.ic{color:#a89984;margin-right:7px}
+.ok{color:#b8bb26}.run{color:#fabd2f}.bad{color:#fb4934}
+.blk{background:#32302f;margin:0 24px 0 51px;padding:0 12px;white-space:pre;min-height:21px}
+.add{background:#32361a;color:#b8bb26}
+.del{background:#3c1f1e;color:#fb4934}
+.hunk{color:#83a598}
+.key{color:#282828;background:#fabd2f;font-weight:700}
+.perm{background:#3c3836;margin:0 24px 0 27px;padding:0 12px;white-space:pre}
+.blk.in{margin-left:69px}
+.gi{display:inline-block;width:15px;height:15px;vertical-align:-3px;margin-right:3px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span><span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span> <span style="color: #fabd2f">●</span><span style="color: #504945">  │  </span>aiditor › grep-progress <span style="color: #b8bb26">●</span><span style="color: #504945">  │  </span>Legacy crap › cleanup<span style="color: #504945">  │  </span>zed › tab-bar</span>
+    <span>20:41</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 6px">
+    <div class="r"><span class="dim">Worked 2m 05s</span><span class="ts">13:58</span></div>
+    <div class="gap"></div>
+    <div class="r user"><span><span style="color: #83a598; font-weight: 700">❯ </span>Show that a project grep is running, as #338 says. Start from <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span class="ts">14:01</span></div>
+    <div class="r user"><span>  <span class="tok"><span class="ic">▣</span>grep-stall.png</span> <span class="tok"><span class="ic">≡</span>Pasted 214 lines</span></span><span></span></div>
+    <div class="gap"></div>
+    <div class="r"><span class="dim">▸ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path></svg> Read files, searched code</span><span class="ts">0.6s  14:01</span></div>
+    <div class="r"><span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>; the prompt never shows them. The change belongs in <span class="ln">crates/aiditor-core/src/grep.rs:112</span>.</span><span></span></div>
+    <div class="gap"></div>
+    <div class="r"><span class="dim">Plan</span><span></span></div>
+    <div class="r"><span><span class="ok">  ✓ </span><span class="dim">Read the grep core and service</span></span><span></span></div>
+    <div class="r"><span><span class="run">  ● </span>Show the running and no-match states in the prompt</span><span></span></div>
+    <div class="r"><span class="dim">  ○ Core tests for running, done and superseded</span><span></span></div>
+    <div class="gap"></div>
+    <div class="r"><span class="dim">▾ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edited files, ran commands</span><span class="ts"><span class="bad">1 failed</span>  43.1s</span></div>
+    <div class="r"><span class="th">  ▸ Thought for 4s</span><span></span></div>
+    <div class="r"><span>  <span class="dim">▾ </span><span class="ok">✓ </span><svg class="gi dim" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edit  <span class="ln">crates/aiditor-core/src/grep.rs</span>  <span class="ok">+6</span> <span class="bad">−1</span></span><span class="ts">0.3s</span></div>
+    <div class="blk in"><span class="hunk">@@ -112,7 +112,12 @@ impl Core {</span></div>
+    <div class="blk in del">-        grep.running = !done;</div>
+    <div class="blk in add">+        let status = match (done, grep.hits.is_empty()) {</div>
+    <div class="blk in add">+            (false, _) =&gt; "searching",</div>
+    <div class="r"><span>  <span class="dim">▸ </span><span class="ok">✓ </span><svg class="gi dim" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 11 2-2-2-2"></path><path d="M11 13h4"></path><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg> Run  <span class="code">cargo fmt --check</span></span><span class="ts">0.4s</span></div>
+    <div class="r"><span>  <span class="dim">▾ </span><span class="bad">✗ </span><svg class="gi dim" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 11 2-2-2-2"></path><path d="M11 13h4"></path><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg> Run  <span class="code">cargo test -p aiditor-core grep</span></span><span class="ts"><span class="bad">exit 101</span>  38.4s</span></div>
+    <div class="blk in"><span class="dim">$ </span>cargo test -p aiditor-core grep</div>
+    <div class="blk in"><span class="dim">test grep::tests::</span>shows_searching_while_running <span class="ok">... ok</span></div>
+    <div class="blk in"><span class="dim">test grep::tests::</span>running_then_done <span class="bad">... FAILED</span></div>
+    <div class="blk in">  assertion failed: left == "", right == "searching"  <span class="ln">src/grep.rs:418</span></div>
+    <div class="blk in dim">… 142 more lines</div>
+    <div class="gap"></div>
+    <div class="r at"><span>The status is set before the last batch lands, so <span class="code">running_then_done</span> still sees <span class="code">searching</span>. Moving it after the batch and running the tests again.</span><span class="ts">14:03</span></div>
+    <div class="gap"></div>
+    <div class="r"><span class="dim">▸ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edited files, running commands</span><span></span></div>
+    <div class="r"><span>  <span class="dim">▸ </span><span class="run">● </span><svg class="gi dim" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 11 2-2-2-2"></path><path d="M11 13h4"></path><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg> Run  <span class="code">cargo test -p aiditor-core grep</span></span><span class="ts">waiting 0:12</span></div>
+    <div class="perm"><span style="color: #fabd2f; font-weight: 700">Permission</span>  Run cargo test -p aiditor-core grep</div>
+    <div class="perm"><span class="key"> 1 </span> Yes, once        <span class="key"> 2 </span> Yes, for this session        <span class="key"> 3 </span> No</div>
+    <div class="gap"></div>
+    <div class="r"><span class="dim">Working for 2m 16s</span><span></span></div>
+  </div>
+  <div style="flex: none; border-top: 1px solid #3c3836; padding: 8px 0">
+    <div class="r"><span><span style="color: #83a598; font-weight: 700">❯ </span>After that, also cover the superseded case next to the tests in <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+    <div class="r"><span>  and keep the count width fixed while it searches<span style="background: #ebdbb2; color: #282828"> </span></span><span></span></div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 16px; background: #3c3836; white-space: pre">
+    <span><span style="font-weight: 700">Opus 5.5 · high</span><span style="color: #504945">  │  </span><span style="color: #b8bb26">auto</span><span style="color: #504945">  │  </span><span style="color: #a89984">grep progress</span></span>
+    <span><span style="color: #fabd2f">● awaiting permission</span><span style="color: #504945">  │  </span><span style="color: #a89984">ctx 5%</span></span>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 16px; color: #928374"></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

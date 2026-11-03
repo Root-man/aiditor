@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Splits</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:44px;flex:none;text-align:right;padding-right:16px;color:#665c54}
+.cur{background:#32302f}
+.cur .g{color:#fabd2f}
+.k{color:#fb4934}.s{color:#b8bb26}.f{color:#b8bb26}.t{color:#fabd2f}.c{color:#928374;font-style:italic}.n{color:#d3869b}.p{color:#83a598}.m{color:#8ec07c}.o{color:#fe8019}
+.win{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 16px}
+.on{background:#3c3836;color:#ebdbb2}
+.off{background:#282828;color:#7c6f64;box-shadow:inset 0 1px 0 #3c3836}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; padding: 0 16px; background: #1d2021; color: #a89984">
+    <span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex">
+    <div class="win">
+      <div class="body">
+        <sc-for list="{{a}}" as="line" hint-placeholder-count="20">
+          <div class="l {{line.cls}}"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+        </sc-for>
+      </div>
+      <div class="ml on">
+        <span><span style="color: #fe8019">●</span> <span style="color: #a89984">benches/src/</span><span style="font-weight: 700">support.rs</span>   <span style="color: #a89984">Rust</span></span>
+        <span>5:21   <span style="color: #a89984">Top</span></span>
+      </div>
+    </div>
+    <div style="width: 1px; flex: none; background: #1d2021"></div>
+    <div class="win">
+      <div class="body">
+        <sc-for list="{{b}}" as="line" hint-placeholder-count="20">
+          <div class="l"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+        </sc-for>
+      </div>
+      <div class="ml off">
+        <span><span style="color: #fe8019">●</span> <span>benches/src/</span>support.rs   Rust</span>
+        <span>22:8   41%</span>
+      </div>
+    </div>
+  </div>
+  <div class="win" style="flex: 1">
+    <div class="body">
+      <sc-for list="{{c}}" as="line" hint-placeholder-count="16">
+        <div class="l"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+      </sc-for>
+    </div>
+    <div class="ml off">
+      <span>crates/aiditor-services/src/<span style="color: #a89984">grep.rs</span>   Rust</span>
+      <span>14:0   8%</span>
+    </div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 16px; color: #928374"></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const KW = /^(use|pub|fn|let|mut|loop|for|in|if|break|impl|as|return|match|struct|const|mod|crate|self|move|where)$/;
+    const hl = (src, first, cur) => src.split('\n').map((line, i) => {
+      const toks = [];
+      const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(\b\d[\d_.e]*\b)|([A-Za-z_][A-Za-z0-9_]*!?)|(\s+)|(.)/g;
+      let m;
+      while ((m = re.exec(line))) {
+        const t = m[0];
+        let c = '';
+        if (m[1]) c = 'c';
+        else if (m[2]) c = 's';
+        else if (m[3]) c = 'n';
+        else if (m[4]) c = t.endsWith('!') ? 'o' : KW.test(t) ? 'k' : /^[A-Z]/.test(t) ? 't' : line[re.lastIndex] === '(' ? 'f' : '';
+        toks.push({ t, c });
+      }
+      return { n: first + i, toks, cls: first + i === cur ? 'cur' : '' };
+    });
+    const support = `use std::time::{Duration, Instant};
+
+pub fn measure(name: &str, mut operation: impl FnMut(), output: &mut String) {
+    let mut iterations = 1;
+    loop {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            operation();
+        }
+        if start.elapsed() >= Duration::from_millis(10) {
+            break;
+        }
+        iterations *= 2;
+    }
+    let mut samples = Vec::new();
+    for _ in 0..21 {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            operation();
+        }
+        samples.push(start.elapsed().as_secs_f64() * 1e9 / iterations as f64);
+    }
+    samples.sort_by(f64::total_cmp);
+    println!("{name}: {:.0} ns/op (median of 21 batches)", samples[10]);
+    output.push_str(&format!(
+        "{name}\\t{}\\t{}\\t{}\\n",
+        samples[10], samples[0], samples[20]
+    ));
+}`;
+    const grep = `//! Project grep: the files the index lists, searched with ripgrep's crates on the blocking pool.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long hits wait to be sent, so a fast search doesn't flood the core with messages.
+const BATCH: Duration = Duration::from_millis(50);
+
+/// Runs searches one at a time: each one, or a cancel, stops the one before.
+pub struct Grep {
+    latest: Arc<AtomicU64>,
+}
+
+impl Grep {
+    pub fn run(&self, op: GrepOp, tx: mpsc::Sender<Msg>) {
+        self.latest.store(op.id, Ordering::Relaxed);
+        let latest = self.latest.clone();
+    }
+}`;
+    const s = hl(support, 1, 5);
+    return { a: s, b: hl(support, 1, 0).slice(9), c: hl(grep, 1, 0) };
+  }
+}
+</script>
+</body>
+</html>

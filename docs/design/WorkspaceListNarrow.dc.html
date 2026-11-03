@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workspace list in a split</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:2ch;flex:none;text-align:right;padding:0 12px 0 10px;color:#665c54}
+.k{color:#fb4934}.s{color:#b8bb26}.f{color:#b8bb26}.t{color:#fabd2f}.p{color:#83a598}.n{color:#d3869b}
+.win{flex:1;min-width:0;display:flex;flex-direction:column}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 12px;white-space:pre;overflow:hidden}
+.on{background:#3c3836;color:#ebdbb2}
+.off{background:#282828;color:#7c6f64;box-shadow:inset 0 1px 0 #3c3836}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto 2ch;column-gap:12px;white-space:pre;padding:0 12px;min-height:21px}
+.gap{min-height:21px}
+.mk{color:#928374}
+.proj{font-weight:700}
+.ws{color:#ebdbb2}
+.wscur{color:#fabd2f;font-weight:700}
+.buf{color:#a89984}
+.an{color:#928374}
+.st{text-align:right}
+.waiting{color:#fabd2f}.running{color:#b8bb26}.failed{color:#fb4934}.modified{color:#fe8019}
+.sel{background:#3c3836}
+.pt{background:#ebdbb2;color:#282828}
+.sp{color:#504945}
+.kh{color:#fabd2f;font-weight:700}
+</style>
+</helmet>
+<div class="fr" style="width: 900px; height: 600px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span>aiditor › watcher-fix <span style="color: #fabd2f">●</span><span class="sp">  │  </span><span style="color: #ebdbb2; font-weight: 700">Legacy crap</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">invalid-site-redirects-in-the-user-gr…</span><span class="sp">  │  </span>+4 <span style="color: #fb4934">●</span></span>
+    <span>20:41</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex">
+    <div class="win">
+      <div class="body">
+        <sc-for list="{{rows}}" as="r" hint-placeholder-count="14">
+          <sc-if value="{{r.isGap}}" hint-placeholder-val="{{false}}">
+            <div class="gap"></div>
+          </sc-if>
+          <sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
+            <div class="row {{r.sel}}"><span style="overflow: hidden"><span class="mk">{{r.pre}}</span><span class="{{r.cls}}">{{r.mark}}</span><span class="pt">{{r.first}}</span><span class="{{r.cls}}">{{r.name}}</span></span><span class="an">{{r.where}}</span><span class="st {{r.stCls}}">{{r.state}}</span></div>
+          </sc-if>
+        </sc-for>
+      </div>
+      <div class="ml on"><span style="font-weight: 700">*Workspaces*</span><span>3/10</span></div>
+    </div>
+    <div style="width: 1px; flex: none; background: #1d2021"></div>
+    <div class="win">
+      <div class="body">
+        <div class="l"><span class="g">40</span><span><span class="k">export function</span> <span class="f">siteError</span>(<span class="p">code</span>: <span class="t">string</span>) {</span></div>
+        <div class="l"><span class="g">41</span><span>  <span class="k">if</span> (<span class="p">code</span> === <span class="s">"INVALID_SITE"</span>) {</span></div>
+        <div class="l"><span class="g">42</span><span>    <span class="k">return new</span> <span class="t">GraphQLError</span>(<span class="s">"The site does no</span></span></div>
+        <div class="l"><span class="g" style="color: #665c54">↪</span><span><span class="s">t exist or was retired"</span>, {</span></div>
+        <div class="l"><span class="g">43</span><span>      <span class="p">extensions</span>: { <span class="p">code</span>: <span class="s">"INVALID_SITE"</span> },</span></div>
+        <div class="l"><span class="g">44</span><span>    });</span></div>
+        <div class="l"><span class="g">45</span><span>  }</span></div>
+        <div class="l"><span class="g">46</span><span>  <span class="k">return</span> <span class="n">null</span>;</span></div>
+        <div class="l"><span class="g">47</span><span>}</span></div>
+      </div>
+      <div class="ml off"><span>errors.ts</span><span>41:12</span></div>
+    </div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 12px; color: #a89984; white-space: pre"><span class="kh">n/p</span> move   <span class="kh">RET</span> switch   <span class="kh">TAB</span> fold   <span class="kh">q</span> quit</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":900,"height":600}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const base = { isRow: true, pre: '', mark: '', first: '', name: '', cls: '', where: '', state: '', stCls: '', sel: '' };
+    const gap = () => ({ isGap: true });
+    const project = (open, name, where, state, stCls) => ({ ...base, pre: open ? '▾ ' : '▸ ', name, cls: 'proj', where, state: state || '', stCls: stCls || '' });
+    const empty = (name, where) => ({ ...base, pre: '  ', name, cls: 'proj', where });
+    const workspace = (open, name, state, stCls, extra) => ({ ...base, pre: open ? '  ▾ ' : '  ▸ ', mark: '  ', name, cls: 'ws', state: state || '', stCls: stCls || '', ...(extra || {}) });
+    const buffer = (name, state, stCls) => ({ ...base, pre: '      ', name, cls: 'buf', state: state || '', stCls: stCls || '' });
+    const rows = [
+      project(true, 'aiditor', '~/Code/aiditor'),
+      workspace(false, 'watcher-fix', '●', 'waiting'),
+      workspace(false, 'rep-progress', '●', 'running', { first: 'g', sel: 'sel' }),
+      gap(),
+      project(false, 'aiditor', '…/Repos/aiditor-old'),
+      project(true, 'Legacy crap', '~/Code/legacy'),
+      workspace(true, 'invalid-site-redirects-in-the-user-…', '', '', { mark: '* ', cls: 'wscur' }),
+      buffer('errors.test.ts'),
+      buffer('errors.ts', '●', 'modified'),
+      workspace(false, 'cleanup', '●', 'failed'),
+      gap(),
+      project(false, 'zed', '~/Code/zed'),
+      empty('dotfiles', '~/Code/dotfiles'),
+      empty('notes', '~/Documents/notes'),
+    ];
+    return { rows };
+  }
+}
+</script>
+</body>
+</html>

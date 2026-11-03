@@ -12,26 +12,29 @@ aiditor leans on the GPUI crate and is partially inspired by Zed. When you need 
 
 ## Visual design
 
-The approved designs are on the [aiditor visual direction canvas](https://claude.ai/artifact/VyRd2AK1RfiVhuBx6nA1KP). Follow them for any visual work (epic #343). Frames:
+The approved designs are in [docs/design](docs/design), exported from the [aiditor visual direction canvas](https://claude.ai/artifact/VyRd2AK1RfiVhuBx6nA1KP) (the remote copy needs a claude.ai login; agents read the local files). Each frame is an HTML file whose markup and CSS give the exact colours, sizes and spacing; they don't render without the canvas runtime, so read them as source. [canvas.json](docs/design/canvas.json) lists the frames in order. Follow them for any visual work (epic #343). When the canvas changes, re-export the changed files. Frames:
 
-- **1 · Editor:** a file buffer with the line number gutter, point's line, the workspace modeline, the mode line and the echo line.
-- **2 · Splits:** three windows, with active and inactive mode lines and the 1px divider.
-- **3 · Project grep:** hits grouped by file, match highlighting in the previewed buffer, the fixed-width count and the searching state.
-- **4 · find-file:** the `*/16` count, directories in their own face, and annotations for mode bits, size and age.
-- **5 · Terminal:** test output, with the exit status and input mode in the mode line.
-- **6 · Agent session, monospace:** the interactive session buffer: messages, timings and the working timer, collapsed tool groups and tool-call blocks, the permission request, file chips and the growing prompt.
-- **6b · Session prompt:** `@` references, `/` commands, `agent-attach-file` and folded pastes.
-- **6c · File chips:** the chip's kinds and states, and file links in agent prose.
-- **7 · Agent session, rich:** a sketch for M7, with proportional prose and cards. Not approved; see below.
-- **8 · Welcome dashboard:** a sketch for M7. Not approved; see below.
-- **9 · Mode line study:** the workspace modeline and every buffer type's mode line, where each segment lives, and the rules.
-- **10 · Gruvbox light:** the light theme, with swiper.
-- **11 · Narrow frame:** truncation and the `↪` continuation marker at 900×600.
-- **12 · Faces and spacing:** every named face in both themes, the spacing scale and type sizes.
-- **13 · Workspace list:** `*Workspaces*` with every project, `TAB` folding, name, where and state columns, and key hints in the echo line.
-- **13b · Workspace list study:** every row kind and state, where each piece comes from, keys and rules.
-- **13c · Workspace list in a split:** the list in a narrow window, beside a file.
-- **13d · Workspace list, Gruvbox light:** the folded list in the light theme, with point away from the current workspace.
+- **1 · Editor** ([Main.dc.html](docs/design/Main.dc.html)): a file buffer with the line number gutter, point's line, the workspace modeline, the mode line and the echo line.
+- **2 · Splits** ([Splits.dc.html](docs/design/Splits.dc.html)): three windows, with active and inactive mode lines and the 1px divider.
+- **3 · Project grep** ([Grep.dc.html](docs/design/Grep.dc.html)): hits grouped by file, match highlighting in the previewed buffer, the fixed-width count and the searching state.
+- **4 · find-file** ([FindFile.dc.html](docs/design/FindFile.dc.html)): the `*/16` count, directories in their own face, and annotations for mode bits, size and age.
+- **5 · Terminal** ([Terminal.dc.html](docs/design/Terminal.dc.html)): test output, with the exit status and input mode in the mode line.
+- **6 · Agent session, monospace** ([Session.dc.html](docs/design/Session.dc.html)): the interactive session buffer: messages, timings and the working timer, collapsed tool groups and tool-call blocks, the permission request, file chips and the growing prompt.
+- **6b · Session prompt** ([SessionPrompt.dc.html](docs/design/SessionPrompt.dc.html)): `@` references, `/` commands, `agent-attach-file` and folded pastes.
+- **6c · File chips** ([FileLinks.dc.html](docs/design/FileLinks.dc.html)): the chip's kinds and states, and file links in agent prose.
+- **6d · Questions: choices** ([QuestionChoices.dc.html](docs/design/QuestionChoices.dc.html)): one choice, several choices and previews.
+- **6e · Questions: several questions and forms** ([QuestionForms.dc.html](docs/design/QuestionForms.dc.html)): folded questions, own answer, every form field type and minibuffer checks.
+- **6f · Questions: URL, non-blocking, answered** ([QuestionStates.dc.html](docs/design/QuestionStates.dc.html)): URL requests, questions beside a running turn, answered rows and a question while you type.
+- **7 · Agent session, rich** ([SessionRich.dc.html](docs/design/SessionRich.dc.html)): a sketch for M7, with proportional prose and cards. Not approved; see below.
+- **8 · Welcome dashboard** ([Dashboard.dc.html](docs/design/Dashboard.dc.html)): a sketch for M7. Not approved; see below.
+- **9 · Mode line study** ([ModeLines.dc.html](docs/design/ModeLines.dc.html)): the workspace modeline and every buffer type's mode line, where each segment lives, and the rules.
+- **10 · Gruvbox light** ([Light.dc.html](docs/design/Light.dc.html)): the light theme, with swiper.
+- **11 · Narrow frame** ([Narrow.dc.html](docs/design/Narrow.dc.html)): truncation and the `↪` continuation marker at 900×600.
+- **12 · Faces and spacing** ([Faces.dc.html](docs/design/Faces.dc.html)): every named face in both themes, the spacing scale and type sizes.
+- **13 · Workspace list** ([WorkspaceList.dc.html](docs/design/WorkspaceList.dc.html)): `*Workspaces*` with every project, `TAB` folding, name, where and state columns, and key hints in the echo line.
+- **13b · Workspace list study** ([WorkspaceListStudy.dc.html](docs/design/WorkspaceListStudy.dc.html)): every row kind and state, where each piece comes from, keys and rules.
+- **13c · Workspace list in a split** ([WorkspaceListNarrow.dc.html](docs/design/WorkspaceListNarrow.dc.html)): the list in a narrow window, beside a file.
+- **13d · Workspace list, Gruvbox light** ([WorkspaceListLight.dc.html](docs/design/WorkspaceListLight.dc.html)): the folded list in the light theme, with point away from the current workspace.
 
 Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those.
 

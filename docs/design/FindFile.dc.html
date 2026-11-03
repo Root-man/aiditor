@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>find-file</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:2ch;flex:none;text-align:right;padding:0 12px 0 10px;color:#665c54}
+.k{color:#fb4934}.s{color:#b8bb26}.f{color:#b8bb26}.t{color:#fabd2f}.c{color:#928374;font-style:italic}.n{color:#d3869b}.p{color:#83a598}.m{color:#8ec07c}.o{color:#fe8019}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 120px 72px 110px;column-gap:24px;white-space:pre;padding:0 16px;min-height:21px}
+.dir{color:#83a598;font-weight:700}
+.file{color:#ebdbb2}
+.an{color:#928374;text-align:right}
+.sel{background:#3c3836}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span><span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span> <span style="color: #fabd2f">●</span><span style="color: #504945">  │  </span>aiditor › grep-progress <span style="color: #b8bb26">●</span><span style="color: #504945">  │  </span>Legacy crap › cleanup<span style="color: #504945">  │  </span>zed › tab-bar</span>
+    <span>20:41</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 6px">
+    <sc-for list="{{lines}}" as="line" hint-placeholder-count="20">
+      <div class="l"><span class="g">{{line.n}}</span><span><sc-for list="{{line.toks}}" as="tok"><span class="{{tok.c}}">{{tok.t}}</span></sc-for></span></div>
+    </sc-for>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #3c3836; white-space: pre">
+    <span><span style="color: #a89984">benches/src/</span><span style="font-weight: 700">support.rs</span><span style="color: #504945">  │  </span><span style="color: #a89984">Rust 1.99.0</span></span>
+    <span>5:21<span style="color: #504945">  │  </span><span style="color: #a89984">Top</span></span>
+  </div>
+  <div style="flex: none; padding: 4px 0 6px 0">
+    <div class="row" style="display: flex"><span style="color: #928374"> */16 </span><span style="color: #8ec07c; font-weight: 700">Find file: </span><span style="color: #a89984">~/Code/aiditor/</span><span style="background: #ebdbb2; color: #282828"> </span></div>
+    <sc-for list="{{entries}}" as="e" hint-placeholder-count="10">
+      <div class="row {{e.sel}}"><span class="{{e.kind}}">{{e.name}}</span><span class="an">{{e.mode}}</span><span class="an">{{e.size}}</span><span class="an">{{e.age}}</span></div>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const KW = /^(use|pub|fn|let|mut|loop|for|in|if|break|impl|as)$/;
+    const hl = (src) => src.split('\n').map((line, i) => {
+      const toks = [];
+      const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|(\b\d[\d_.e]*\b)|([A-Za-z_][A-Za-z0-9_]*!?)|(\s+)|(.)/g;
+      let m;
+      while ((m = re.exec(line))) {
+        const t = m[0];
+        let c = '';
+        if (m[1]) c = 'c'; else if (m[2]) c = 's'; else if (m[3]) c = 'n';
+        else if (m[4]) c = t.endsWith('!') ? 'o' : KW.test(t) ? 'k' : /^[A-Z]/.test(t) ? 't' : line[re.lastIndex] === '(' ? 'f' : '';
+        toks.push({ t, c });
+      }
+      return { n: i + 1, toks };
+    });
+    const src = `use std::time::{Duration, Instant};
+
+pub fn measure(name: &str, mut operation: impl FnMut(), output: &mut String) {
+    let mut iterations = 1;
+    loop {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            operation();
+        }
+        if start.elapsed() >= Duration::from_millis(10) {
+            break;
+        }
+        iterations *= 2;
+    }
+    let mut samples = Vec::new();
+    for _ in 0..21 {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            operation();
+        }
+        samples.push(start.elapsed().as_secs_f64() * 1e9 / iterations as f64);
+    }
+    samples.sort_by(f64::total_cmp);
+}`;
+    const entries = [
+      ['.agents/', 'dir', 'drwxr-xr-x', '—', '3d ago'],
+      ['.claude/', 'dir', 'drwxr-xr-x', '—', '5h12m ago'],
+      ['.github/', 'dir', 'drwxr-xr-x', '—', '12d ago'],
+      ['benches/', 'dir', 'drwxr-xr-x', '—', '2d4h ago'],
+      ['crates/', 'dir', 'drwxr-xr-x', '—', '18m ago'],
+      ['docs/', 'dir', 'drwxr-xr-x', '—', '1h03m ago'],
+      ['.gitignore', 'file', '-rw-r--r--', '41 B', '21d ago'],
+      ['AGENTS.md', 'file', '-rw-r--r--', '4.1 kB', '6d ago'],
+      ['Cargo.lock', 'file', '-rw-r--r--', '182 kB', '2d ago'],
+      ['Cargo.toml', 'file', '-rw-r--r--', '1.3 kB', '2d ago'],
+      ['demo.mov', 'file', '-rw-r--r--', '48.2 MB', '9d ago'],
+    ].map(([name, kind, mode, size, age]) => ({ name, kind, mode, size, age, sel: '' }));
+    return { lines: hl(src), entries };
+  }
+}
+</script>
+</body>
+</html>

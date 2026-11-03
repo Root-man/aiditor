@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Question forms</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:24px;height:100%}
+.pane{display:flex;flex-direction:column;min-width:0;min-height:0;background:#282828;box-shadow:0 0 0 1px #3c3836}
+.cap{color:#928374;padding:10px 16px 0 16px;flex:none}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.r{display:flex;justify-content:space-between;white-space:pre;min-height:21px;padding:0 24px;border-left:3px solid transparent;overflow:hidden}
+.gap{height:21px}
+.ts{color:#7c6f64;flex:none;padding-left:24px}
+.q{display:flex;justify-content:space-between;background:#3c3836;margin:0 24px 0 27px;padding:0 12px;white-space:pre;min-height:21px;overflow:hidden}
+.q .ts{color:#a89984}
+.at{background:#504945}
+.t{color:#fabd2f;font-weight:700}
+.key{color:#282828;background:#fabd2f;font-weight:700}
+.kh{color:#fabd2f;font-weight:700}
+.d{color:#a89984}
+.ok{color:#b8bb26}.run{color:#fabd2f}.bad{color:#fb4934}
+.pr{flex:none;border-top:1px solid #3c3836;padding:8px 0}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 12px;background:#3c3836;white-space:pre}
+.mb{flex:none;padding:4px 0 6px 0}
+.row{display:flex;justify-content:space-between;white-space:pre;padding:0 12px;min-height:21px}
+.an{color:#928374}
+.pp{color:#8ec07c;font-weight:700}
+.cur{background:#ebdbb2;color:#282828}
+.u{color:#83a598;font-weight:700}
+.sp{color:#504945}
+.b{font-weight:700}
+.y{color:#fabd2f}
+.g{color:#b8bb26}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #1d2021; color: #ebdbb2; padding: 24px">
+  <div class="grid">
+
+    <div class="pane">
+      <div class="cap">Several questions: one open at a time, the rest folded</div>
+      <div class="body">
+        <div class="r"><span>Three things to settle before I start.</span><span class="ts">14:06</span></div>
+        <div class="gap"></div>
+        <div class="q"><span><span class="t">Questions</span>  2 of 3</span></div>
+        <div class="q"><span> <span class="d">▸</span> <span class="ok">✓</span> Status  <span class="d">Both</span></span></div>
+        <div class="q"><span> <span class="d">▾</span> <span class="run">●</span> Tests   Which cases should the new tests cover?</span></div>
+        <div class="q"><span>     <span class="key"> 1 </span>  [x] Superseded  <span class="d">A newer query replaces it</span></span></div>
+        <div class="q"><span>     <span class="key"> 2 </span>  [x] No matches  <span class="d">The search ends empty</span></span></div>
+        <div class="q at"><span><span class="cur"> </span>    <span class="key"> 3 </span>  [ ] Cancelled   <span class="d">C-g stops the search</span></span></div>
+        <div class="q"><span>     <span class="key"> o </span>  [ ] Own answer</span></div>
+        <div class="q"><span> <span class="d">▸ ○</span> Commit  <span class="d">One commit or one per change?</span></span></div>
+        <div class="q"><span class="d"> <span class="kh">1-3</span> tick  <span class="kh">TAB</span> next  <span class="kh">C-c C-y</span> send all  <span class="kh">C-c C-k</span> skip all</span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 6%</span></span></div>
+    </div>
+
+    <div class="pane">
+      <div class="cap">Own answer: o asks in the minibuffer, then the row shows it</div>
+      <div class="body">
+        <div class="r"><span>Three things to settle before I start.</span><span class="ts">14:06</span></div>
+        <div class="gap"></div>
+        <div class="q"><span><span class="t">Questions</span>  2 of 3</span></div>
+        <div class="q"><span> <span class="d">▸</span> <span class="ok">✓</span> Status  <span class="d">Both</span></span></div>
+        <div class="q"><span> <span class="d">▾</span> <span class="run">●</span> Tests   Which cases should the new tests cover?</span></div>
+        <div class="q"><span>     <span class="key"> 1 </span>  [x] Superseded  <span class="d">A newer query replaces it</span></span></div>
+        <div class="q"><span>     <span class="key"> 2 </span>  [x] No matches  <span class="d">The search ends empty</span></span></div>
+        <div class="q"><span>     <span class="key"> 3 </span>  [ ] Cancelled   <span class="d">C-g stops the search</span></span></div>
+        <div class="q at"><span><span class="cur"> </span>    <span class="key"> o </span>  [ ] Own answer</span></div>
+        <div class="q"><span> <span class="d">▸ ○</span> Commit  <span class="d">One commit or one per change?</span></span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 6%</span></span></div>
+      <div class="mb">
+        <div class="row"><span><span class="pp">Own answer: </span>the count stays fixed at 100k hits<span class="cur"> </span></span><span></span></div>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="cap">Form: every field type, one row each</div>
+      <div class="body">
+        <div class="q"><span><span class="t">Question</span>  Create a preview deployment</span></div>
+        <div class="q"><span> <span class="y">*</span> Environment     <span class="d">empty</span></span><span class="ts">one of 3</span></div>
+        <div class="q at"><span><span class="cur"> </span>* Branch          grep-progress</span><span class="ts">text</span></div>
+        <div class="q"><span class="d">   Branch to deploy, at most 40 characters</span></div>
+        <div class="q"><span>   Retries         3</span><span class="ts">0-10</span></div>
+        <div class="q"><span>   Budget          12.50</span><span class="ts">number</span></div>
+        <div class="q"><span>   Reviewer        <span class="d">empty</span></span><span class="ts">email</span></div>
+        <div class="q"><span>   Expires         2026-11-06</span><span class="ts">date</span></div>
+        <div class="q"><span>   Notify team     [x]</span><span class="ts">yes or no</span></div>
+        <div class="q"><span>   Regions         eu-west, us-east</span><span class="ts">several</span></div>
+        <div class="q"><span class="d"> <span class="kh">RET</span> edit or toggle   <span class="kh">C-c C-y</span> send   <span class="kh">C-c C-k</span> skip</span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">deploy preview</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 9%</span></span></div>
+    </div>
+
+    <div class="pane">
+      <div class="cap">Checked in the minibuffer: a bad value never reaches the form</div>
+      <div class="body">
+        <div class="q"><span><span class="t">Question</span>  Create a preview deployment</span></div>
+        <div class="q"><span> * Environment     staging</span><span class="ts">one of 3</span></div>
+        <div class="q"><span> * Branch          grep-progress</span><span class="ts">text</span></div>
+        <div class="q at"><span><span class="cur"> </span>  Retries         3</span><span class="ts">0-10</span></div>
+        <div class="q"><span>   Budget          12.50</span><span class="ts">number</span></div>
+        <div class="q"><span>   Reviewer        <span class="d">empty</span></span><span class="ts">email</span></div>
+        <div class="q"><span>   Expires         2026-11-06</span><span class="ts">date</span></div>
+        <div class="q"><span>   Notify team     [x]</span><span class="ts">yes or no</span></div>
+        <div class="q"><span>   Regions         eu-west, us-east</span><span class="ts">several</span></div>
+        <div class="q"><span class="d"> <span class="kh">RET</span> edit or toggle   <span class="kh">C-c C-y</span> send   <span class="kh">C-c C-k</span> skip</span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">deploy preview</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 9%</span></span></div>
+      <div class="mb">
+        <div class="row"><span><span class="pp">Retries (0-10): </span>42<span class="cur"> </span> <span class="bad">[At most 10]</span></span><span></span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Question choices</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:24px;height:100%}
+.pane{display:flex;flex-direction:column;min-width:0;min-height:0;background:#282828;box-shadow:0 0 0 1px #3c3836}
+.cap{color:#928374;padding:10px 16px 0 16px;flex:none}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.r{display:flex;justify-content:space-between;white-space:pre;min-height:21px;padding:0 24px;border-left:3px solid transparent;overflow:hidden}
+.gap{height:21px}
+.user{background:#32302f}
+.ts{color:#7c6f64;flex:none;padding-left:24px}
+.q{display:flex;justify-content:space-between;background:#3c3836;margin:0 24px 0 27px;padding:0 12px;white-space:pre;min-height:21px;overflow:hidden}
+.q .ts{color:#a89984}
+.at{background:#504945}
+.t{color:#fabd2f;font-weight:700}
+.key{color:#282828;background:#fabd2f;font-weight:700}
+.kh{color:#fabd2f;font-weight:700}
+.d{color:#a89984}
+.pv{flex:1;background:#32302f;color:#bdae93;margin-left:54px;padding:0 12px}
+.code{color:#8ec07c}
+.pr{flex:none;border-top:1px solid #3c3836;padding:8px 0}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 12px;background:#3c3836;white-space:pre}
+.cur{background:#ebdbb2;color:#282828}
+.u{color:#83a598;font-weight:700}
+.sp{color:#504945}
+.b{font-weight:700}
+.y{color:#fabd2f}
+.g{color:#b8bb26}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #1d2021; color: #ebdbb2; padding: 24px">
+  <div class="grid">
+
+    <div class="pane">
+      <div class="cap">One choice: a digit answers at once</div>
+      <div class="body">
+        <div class="r user"><span><span class="u">❯ </span>Show that a project grep is running, as #338 says.</span><span class="ts">14:01</span></div>
+        <div class="gap"></div>
+        <div class="r"><span>The status fits in two places; the tests cover only one.</span><span class="ts">14:03</span></div>
+        <div class="gap"></div>
+        <div class="q"><span><span class="t">Question</span>  Where should the searching status go?</span></div>
+        <div class="q at"><span><span class="cur"> </span><span class="key"> 1 </span>  Prompt count  <span class="d">Replace the count while it runs</span></span></div>
+        <div class="q"><span> <span class="key"> 2 </span>  Mode line     <span class="d">A segment in the grep buffer's line</span></span></div>
+        <div class="q"><span> <span class="key"> 3 </span>  Both          <span class="d">Prompt and mode line agree</span></span></div>
+        <div class="q"><span> <span class="key"> o </span>  Own answer</span></div>
+        <div class="q"><span class="d"> <span class="kh">1-3</span> answer   <span class="kh">RET</span> answer with the row at point   <span class="kh">C-c C-k</span> skip</span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 5%</span></span></div>
+    </div>
+
+    <div class="pane">
+      <div class="cap">Several choices: digits tick, C-c C-y sends</div>
+      <div class="body">
+        <div class="r"><span>The status works. Next come the tests.</span><span class="ts">14:06</span></div>
+        <div class="gap"></div>
+        <div class="q"><span><span class="t">Question</span>  Which cases should the new tests cover?</span></div>
+        <div class="q"><span> <span class="key"> 1 </span>  [x] Superseded  <span class="d">A newer query replaces the search</span></span></div>
+        <div class="q"><span> <span class="key"> 2 </span>  [x] No matches  <span class="d">The search ends empty</span></span></div>
+        <div class="q at"><span><span class="cur"> </span><span class="key"> 3 </span>  [ ] Cancelled   <span class="d">C-g stops the search</span></span></div>
+        <div class="q"><span> <span class="key"> 4 </span>  [ ] Slow batch  <span class="d">A batch lands after the status</span></span></div>
+        <div class="q"><span> <span class="key"> o </span>  [ ] Own answer</span></div>
+        <div class="q"><span class="d"> <span class="kh">1-4</span> tick   <span class="kh">RET</span> tick at point   <span class="kh">C-c C-y</span> send   <span class="kh">C-c C-k</span> skip</span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 6%</span></span></div>
+    </div>
+
+    <div class="pane">
+      <div class="cap">Preview: drawn under the option at point; a long question wraps</div>
+      <div class="body">
+        <div class="r"><span>The count jumps while the search runs.</span><span class="ts">14:04</span></div>
+        <div class="gap"></div>
+        <div class="q"><span><span class="t">Question</span>  Which count should the prompt show while a search is</span></div>
+        <div class="q"><span>still running?</span></div>
+        <div class="q at"><span><span class="cur"> </span><span class="key"> 1 </span>  Fixed width</span></div>
+        <div class="q"><span class="pv"><span class="d">  3/48</span> Grep in aiditor: emacs</span></div>
+        <div class="q"><span class="pv"><span class="d"> 12/48</span> Grep in aiditor: emacs</span></div>
+        <div class="q"><span class="pv"><span class="d">  …/48</span> Grep in aiditor: emacs</span></div>
+        <div class="q"><span class="pv"><span class="d">… 6 more lines</span></span></div>
+        <div class="q"><span> <span class="key"> 2 </span>  Spinner</span></div>
+        <div class="q"><span> <span class="key"> 3 </span>  Hidden until done</span></div>
+        <div class="q"><span> <span class="key"> o </span>  Own answer</span></div>
+        <div class="q"><span class="d"> <span class="kh">1-3</span> answer   <span class="kh">C-n C-p</span> preview another   <span class="kh">C-c C-k</span> skip</span></div>
+      </div>
+      <div class="pr"><div class="r"><span><span class="u">❯ </span></span></div></div>
+      <div class="ml"><span><span class="b">Opus 5.5 · high</span><span class="sp">  │  </span><span class="g">auto</span><span class="sp">  │  </span><span class="d">grep progress</span></span><span><span class="y">● awaiting answer</span><span class="sp">  │  </span><span class="d">ctx 5%</span></span></div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

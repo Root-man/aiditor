@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workspace list study</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.lbl{color:#928374;margin:14px 0 6px 0;font-size:13px}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 290px 200px;column-gap:20px;white-space:pre;padding:0 12px;min-height:21px;overflow:hidden}
+.mk{color:#928374}
+.proj{font-weight:700}
+.wscur{color:#fabd2f;font-weight:700}
+.buf{color:#a89984}
+.an{color:#928374}
+.st{text-align:right;color:#928374}
+.waiting{color:#fabd2f}.running{color:#b8bb26}.failed{color:#fb4934}.modified{color:#fe8019}
+.sel{background:#3c3836}
+.pt{background:#ebdbb2;color:#282828}
+.bar{height:26px;line-height:26px;display:flex;justify-content:space-between;padding:0 12px;white-space:pre;overflow:hidden;background:#3c3836}
+.echo{min-height:26px;line-height:26px;padding:0 12px;color:#a89984;white-space:pre}
+.d{color:#a89984}.sp{color:#504945}
+.kh{color:#fabd2f;font-weight:700}
+.tbl{display:grid;grid-template-columns:130px 170px minmax(0,1fr);column-gap:20px;row-gap:2px;font-size:14px}
+.keys{display:grid;grid-template-columns:130px minmax(0,1fr);column-gap:20px;row-gap:2px;font-size:14px}
+.th{color:#928374}
+.key{color:#fabd2f}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2; padding: 20px 32px; display: flex; gap: 40px">
+  <div style="flex: 1; min-width: 0">
+    <div class="lbl" style="margin-top: 0">Project · open, folded with its most urgent state, no workspaces</div>
+    <div class="row"><span><span class="mk">▾ </span><span class="proj">aiditor</span></span><span class="an">~/Code/aiditor</span><span class="st"></span></div>
+    <div class="row"><span><span class="mk">▸ </span><span class="proj">Legacy crap</span></span><span class="an">~/Code/legacy · 1 workspace</span><span class="st failed">● exited</span></div>
+    <div class="row"><span><span class="mk">  </span><span class="proj">notes</span></span><span class="an">~/Documents/notes · no workspaces</span><span class="st"></span></div>
+    <div class="lbl">Project · equal names need no special case</div>
+    <div class="row"><span><span class="mk">▸ </span><span class="proj">aiditor</span></span><span class="an">~/Code/aiditor · 2 workspaces</span><span class="st"></span></div>
+    <div class="row"><span><span class="mk">▸ </span><span class="proj">aiditor</span></span><span class="an">~/Repos/aiditor-old · 1 workspace</span><span class="st"></span></div>
+
+    <div class="lbl">Workspace · current and open under point, current and folded, other, failed, idle</div>
+    <div class="row sel"><span><span class="mk">  ▾ </span><span class="wscur">* </span><span class="pt">w</span><span class="wscur">atcher-fix</span></span><span class="an">6 buffers · 1 unsaved</span><span class="st waiting">● awaiting permission</span></div>
+    <div class="row"><span><span class="mk">  ▸ </span><span class="wscur">* watcher-fix</span></span><span class="an">6 buffers · 1 unsaved</span><span class="st waiting">● awaiting permission</span></div>
+    <div class="row"><span><span class="mk">  ▸ </span>  grep-progress</span><span class="an">4 buffers</span><span class="st running">● working</span></div>
+    <div class="row"><span><span class="mk">  ▸ </span>  cleanup</span><span class="an">5 buffers · 2 unsaved</span><span class="st failed">● exited</span></div>
+    <div class="row"><span><span class="mk">  ▸ </span>  tab-bar</span><span class="an">3 buffers</span><span class="st"></span></div>
+
+    <div class="lbl">Buffer · what each kind says</div>
+    <div class="row"><span class="buf">      grep.rs</span><span class="an">crates/aiditor-services/src/</span><span class="st"></span></div>
+    <div class="row"><span class="buf">      watcher.rs</span><span class="an">crates/aiditor-services/src/</span><span class="st modified">● unsaved</span></div>
+    <div class="row"><span class="buf">      legacy.php</span><span class="an">vendor/</span><span class="st failed">⊘ read-only</span></div>
+    <div class="row"><span class="buf">      config.rs</span><span class="an">crates/aiditor-core/src/</span><span class="st failed">[deleted]</span></div>
+    <div class="row"><span class="buf">      vterm1</span><span class="an">~/Code/aiditor</span><span class="st running">◉ cargo test</span></div>
+    <div class="row"><span class="buf">      vterm2</span><span class="an">~/Code/legacy</span><span class="st failed">exit 101</span></div>
+    <div class="row"><span class="buf">      *claude: watcher rescan*</span><span class="an">Opus 5.5 · high</span><span class="st waiting">● awaiting permission</span></div>
+    <div class="row"><span class="buf">      *grep: emacs*</span><span class="an">48 hits in 12 files</span><span class="st"></span></div>
+    <div class="row"><span class="buf">      *scratch*</span><span class="an"></span><span class="st"></span></div>
+
+    <div class="lbl">Mode line</div>
+    <div class="bar"><span><span style="font-weight: 700">*Workspaces*</span><span class="sp">  │  </span><span class="d">5 projects, 4 workspaces</span></span><span>2/8</span></div>
+
+    <div class="lbl">Echo line · today's keys, a message for one keypress, then more keys wrapping to a second row</div>
+    <div class="echo"><span class="kh">n/p</span> move   <span class="kh">RET</span> switch   <span class="kh">TAB</span> fold   <span class="kh">q</span> quit</div>
+    <div class="echo" style="color: #928374">Select a project or workspace row</div>
+    <div class="echo" style="width: 420px; white-space: pre-wrap"><span class="kh">n/p</span> move   <span class="kh">RET</span> switch   <span class="kh">TAB</span> fold   <span class="kh">r</span> rename   <span class="kh">k</span> kill   <span class="kh">q</span> quit</div>
+  </div>
+  <div style="width: 500px; flex: none">
+    <div class="lbl" style="margin-top: 0">Where each piece comes from</div>
+    <div class="tbl">
+      <span class="th">Piece</span><span class="th">Face</span><span class="th">Shown when</span>
+      <span>▾ ▸</span><span class="d">session-thought, plain</span><span class="d">the row has anything to fold</span>
+      <span>Project name</span><span class="d">default, bold</span><span class="d">always, workspaces or not</span>
+      <span>Primary root</span><span class="d">annotation</span><span class="d">always</span>
+      <span>Workspace count</span><span class="d">annotation</span><span class="d">folded, or none to show</span>
+      <span>Project state</span><span class="d">status-*</span><span class="d">folded only, its most urgent</span>
+      <span>Workspace</span><span class="d">default</span><span class="d">always</span>
+      <span>Current mark</span><span class="d">workspace-current</span><span class="d">the current workspace, bold</span>
+      <span>Point's row</span><span class="d">completion-selected</span><span class="d">the project or workspace at point</span>
+      <span>Count</span><span class="d">annotation</span><span class="d">always; unsaved only when any</span>
+      <span>Agent state</span><span class="d">status-*</span><span class="d">the bar's most urgent dot, with its word</span>
+      <span>Buffer name</span><span class="d">mode-line-dim</span><span class="d">without its &lt;workspace&gt; suffix</span>
+      <span>Where</span><span class="d">annotation</span><span class="d">directory, cwd, model · effort</span>
+      <span>Buffer state</span><span class="d">status-*</span><span class="d">the words its own mode line uses</span>
+      <span>Hint keys</span><span class="d">frame 6d's hint row</span><span class="d">echo line, unless a message is up</span>
+    </div>
+    <div class="lbl" style="margin-top: 28px">Keys</div>
+    <div class="keys">
+      <span class="key">C-x t l</span><span class="d">open or refresh the list</span>
+      <span class="key">n p</span><span class="d">next or previous project or workspace; also C-n, C-p, arrows</span>
+      <span class="key">TAB</span><span class="d">fold or unfold the row at point</span>
+      <span class="key">RET</span><span class="d">workspace: switch to it. Project: project-switch, which shows its last workspace or makes one</span>
+      <span class="key">q</span><span class="d">dismiss; also C-g</span>
+    </div>
+    <div class="lbl" style="margin-top: 28px">Rules</div>
+    <div style="color: #bdae93; white-space: pre-wrap; font-size: 14px">Every saved project is listed; those with no workspace come last, by name.
+It opens with projects unfolded, workspaces folded, the current one open.
+A folded row sums up what it hides; an open project leaves that to its rows.
+Colour only for state, in the mode lines' colours and words.
+Yellow marks the workspace you are in; the band marks the row you are on.
+Blank rows follow open projects, so folded ones sit together.
+Point stops on project and workspace rows only; buffer rows stay informational.</div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

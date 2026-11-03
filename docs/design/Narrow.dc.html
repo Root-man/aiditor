@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Narrow frame</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:2ch;flex:none;text-align:right;padding:0 10px 0 8px;color:#665c54}
+.cur{background:#32302f}
+.cur .g{color:#fabd2f}
+.cont{color:#665c54}
+.k{color:#fb4934}.s{color:#b8bb26}.f{color:#b8bb26}.t{color:#fabd2f}.c{color:#928374;font-style:italic}.n{color:#d3869b}.p{color:#83a598}.m{color:#8ec07c}.o{color:#fe8019}
+.win{flex:1;min-width:0;display:flex;flex-direction:column}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 12px;white-space:pre;overflow:hidden}
+.on{background:#3c3836;color:#ebdbb2}
+.off{background:#282828;color:#7c6f64;box-shadow:inset 0 1px 0 #3c3836}
+</style>
+</helmet>
+<div class="fr" style="width: 900px; height: 600px; background: #282828; color: #ebdbb2">
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; padding: 0 12px; background: #1d2021; color: #a89984; white-space: pre">
+    <span style="color: #ebdbb2; font-weight: 700">Legacy crap</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">invalid-site-redirects-in-the-user-gr…</span>
+  </div>
+  <div style="flex: 1; min-height: 0; display: flex">
+    <div class="win">
+      <div class="body">
+        <div class="l"><span class="g">40</span><span><span class="k">export function</span> <span class="f">siteError</span>(<span class="p">code</span>: <span class="t">string</span>) {</span></div>
+        <div class="l cur"><span class="g">41</span><span>  <span class="k">if</span> (<span class="p">code</span> === <span class="s">"INVALID_SITE"</span>) {</span></div>
+        <div class="l"><span class="g">42</span><span>    <span class="k">return new</span> <span class="t">GraphQLError</span>(<span class="s">"The site</span></span></div>
+        <div class="l"><span class="g cont">↪</span><span><span class="s">      does not exist or was retired"</span>, {</span></div>
+        <div class="l"><span class="g">43</span><span>      <span class="p">extensions</span>: { <span class="p">code</span>: <span class="s">"INVALID_SITE"</span> },</span></div>
+        <div class="l"><span class="g">44</span><span>    });</span></div>
+        <div class="l"><span class="g">45</span><span>  }</span></div>
+        <div class="l"><span class="g">46</span><span>  <span class="k">return</span> <span class="n">null</span>;</span></div>
+        <div class="l"><span class="g">47</span><span>}</span></div>
+      </div>
+      <div class="ml on"><span><span style="color: #fe8019">●</span> <span class="b" style="font-weight: 700">errors.ts</span>  <span style="color: #a89984">TS</span></span><span>41:12</span></div>
+    </div>
+    <div style="width: 1px; flex: none; background: #1d2021"></div>
+    <div class="win">
+      <div class="body">
+        <div class="l"><span class="g">12</span><span><span class="k">describe</span>(<span class="s">"siteError"</span>, () =&gt; {</span></div>
+        <div class="l"><span class="g">13</span><span>  <span class="f">it</span>(<span class="s">"maps INVALID_SITE"</span>, () =&gt; {</span></div>
+        <div class="l"><span class="g">14</span><span>    <span class="f">expect</span>(<span class="f">siteError</span>(<span class="s">"INVALID_SI</span></span></div>
+        <div class="l"><span class="g cont">↪</span><span><span class="s">      TE"</span>)).<span class="f">toBeTruthy</span>();</span></div>
+        <div class="l"><span class="g">15</span><span>  });</span></div>
+        <div class="l"><span class="g">16</span><span>});</span></div>
+      </div>
+      <div class="ml off"><span>errors.test.ts</span><span>13:4</span></div>
+    </div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 12px; color: #928374; white-space: pre"></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":900,"height":600}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

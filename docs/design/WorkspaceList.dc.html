@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workspace list</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 420px 240px;column-gap:24px;white-space:pre;padding:0 12px;min-height:21px}
+.gap{min-height:21px}
+.mk{color:#928374}
+.proj{color:#ebdbb2;font-weight:700}
+.ws{color:#ebdbb2}
+.wscur{color:#fabd2f;font-weight:700}
+.buf{color:#a89984}
+.an{color:#928374}
+.st{text-align:right;color:#928374}
+.waiting{color:#fabd2f}.running{color:#b8bb26}.failed{color:#fb4934}.modified{color:#fe8019}
+.sel{background:#3c3836}
+.pt{background:#ebdbb2;color:#282828}
+.sp{color:#504945}
+.d{color:#a89984}
+.kh{color:#fabd2f;font-weight:700}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span><span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span> <span style="color: #fabd2f">●</span><span class="sp">  │  </span>aiditor › grep-progress <span style="color: #b8bb26">●</span><span class="sp">  │  </span>Legacy crap › cleanup <span style="color: #fb4934">●</span><span class="sp">  │  </span>zed › tab-bar</span>
+    <span>20:41</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 6px">
+    <sc-for list="{{rows}}" as="r" hint-placeholder-count="20">
+      <sc-if value="{{r.isGap}}" hint-placeholder-val="{{false}}">
+        <div class="gap"></div>
+      </sc-if>
+      <sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
+        <div class="row {{r.sel}}"><span><span class="mk">{{r.pre}}</span><span class="{{r.cls}}">{{r.mark}}</span><span class="pt">{{r.first}}</span><span class="{{r.cls}}">{{r.name}}</span></span><span class="an">{{r.where}}</span><span class="st {{r.stCls}}">{{r.state}}</span></div>
+      </sc-if>
+    </sc-for>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #3c3836; white-space: pre">
+    <span><span style="font-weight: 700">*Workspaces*</span><span class="sp">  │  </span><span class="d">5 projects, 4 workspaces</span></span>
+    <span>2/8</span>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 12px; color: #a89984; white-space: pre"><span class="kh">n/p</span> move   <span class="kh">RET</span> switch   <span class="kh">TAB</span> fold   <span class="kh">q</span> quit</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const base = { isRow: true, pre: '', mark: '', first: '', name: '', cls: '', where: '', state: '', stCls: '', sel: '' };
+    const gap = () => ({ isGap: true });
+    const project = (open, name, where, state, stCls) => ({ ...base, pre: open ? '▾ ' : '▸ ', name, cls: 'proj', where, state: state || '', stCls: stCls || '' });
+    const empty = (name, where) => ({ ...base, pre: '  ', name, cls: 'proj', where });
+    const workspace = (open, name, where, state, stCls, extra) => ({ ...base, pre: open ? '  ▾ ' : '  ▸ ', mark: '  ', name, cls: 'ws', where, state: state || '', stCls: stCls || '', ...(extra || {}) });
+    const buffer = (name, where, state, stCls) => ({ ...base, pre: '      ', name, cls: 'buf', where: where || '', state: state || '', stCls: stCls || '' });
+    const rows = [
+      project(true, 'aiditor', '~/Code/aiditor'),
+      workspace(true, 'atcher-fix', '6 buffers · 1 unsaved', '● awaiting permission', 'waiting', { mark: '* ', first: 'w', cls: 'wscur', sel: 'sel' }),
+      buffer('*claude: watcher rescan*', 'Opus 5.5 · high', '● awaiting permission', 'waiting'),
+      buffer('*scratch*'),
+      buffer('project.rs', 'crates/aiditor-core/src/'),
+      buffer('vterm1', '~/Code/aiditor', '◉ cargo test', 'running'),
+      buffer('watcher.rs', 'crates/aiditor-services/src/', '● unsaved', 'modified'),
+      buffer('watcher_tests.rs', 'crates/aiditor-services/tests/'),
+      workspace(false, 'grep-progress', '4 buffers', '● working', 'running'),
+      gap(),
+      project(true, 'Legacy crap', '~/Code/legacy'),
+      workspace(false, 'cleanup', '5 buffers · 2 unsaved', '● exited', 'failed'),
+      gap(),
+      project(false, 'zed', '~/Code/zed · 1 workspace'),
+      empty('dotfiles', '~/Code/dotfiles · no workspaces'),
+      empty('notes', '~/Documents/notes · no workspaces'),
+    ];
+    return { rows };
+  }
+}
+</script>
+</body>
+</html>

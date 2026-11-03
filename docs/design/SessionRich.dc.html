@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent session, rich</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.col{width:860px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.prose{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:26px;color:#ebdbb2}
+.h{font-family:Inter,system-ui,sans-serif;font-size:20px;line-height:28px;font-weight:600;color:#ebdbb2}
+.ic{font-family:'Cascadia Code',Menlo,monospace;font-size:14px;color:#8ec07c;background:#32302f;padding:1px 5px;border-radius:4px}
+.card{border:1px solid #3c3836;border-radius:6px;overflow:hidden}
+.ch{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#32302f;font-family:Inter,system-ui,sans-serif;font-size:14px;color:#bdae93}
+.mono{font-family:'Cascadia Code',Menlo,monospace;font-size:14px;line-height:20px;white-space:pre;padding:8px 12px}
+.add{background:#32361a;color:#b8bb26;display:block;margin:0 -12px;padding:0 12px}
+.del{background:#3c1f1e;color:#fb4934;display:block;margin:0 -12px;padding:0 12px}
+.tool{display:flex;align-items:center;gap:8px;font-family:Inter,system-ui,sans-serif;font-size:14px;color:#a89984}
+.btn{font-family:Inter,system-ui,sans-serif;font-size:14px;color:#ebdbb2;background:#3c3836;border:1px solid #504945;border-radius:6px;padding:8px 14px;display:flex;gap:8px;align-items:center;cursor:pointer}
+.btn.pri{background:#fabd2f;color:#282828;border-color:#fabd2f;font-weight:600}
+.kb{font-family:'Cascadia Code',Menlo,monospace;font-size:12px;opacity:.7}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; padding: 0 16px; background: #1d2021; color: #a89984">
+    <span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 24px">
+    <div class="col">
+      <div class="card" style="background: #32302f"><div class="mono" style="font-size: 15px; white-space: pre-wrap">Show that a project grep is running, as #338 says</div></div>
+      <div class="prose" style="color: #928374; font-style: italic; font-size: 15px">Grep's core already tracks whether a search is running; the prompt just never shows it.</div>
+      <div class="h">Plan</div>
+      <div class="prose" style="display: flex; flex-direction: column; gap: 4px; font-size: 15px">
+        <div style="display: flex; gap: 10px; color: #928374"><svg width="18" height="26" viewBox="0 0 18 26" fill="none" stroke="#b8bb26" stroke-width="2" aria-hidden="true"><path d="M3 13l4 4 8-9"></path></svg><span style="text-decoration: line-through">Read the grep core and service</span></div>
+        <div style="display: flex; gap: 10px"><svg width="18" height="26" viewBox="0 0 18 26" aria-hidden="true"><circle cx="9" cy="13" r="5" fill="#fabd2f"></circle></svg><span>Show the running and no-match states in the prompt</span></div>
+        <div style="display: flex; gap: 10px; color: #a89984"><svg width="18" height="26" viewBox="0 0 18 26" fill="none" stroke="#7c6f64" stroke-width="2" aria-hidden="true"><circle cx="9" cy="13" r="5"></circle></svg><span>Core tests for running, done and superseded</span></div>
+      </div>
+      <div class="tool"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#b8bb26" stroke-width="2" aria-hidden="true"><path d="M2 8l4 4 8-9"></path></svg>Read <span class="ic">crates/aiditor-core/src/grep.rs</span></div>
+      <div class="card">
+        <div class="ch"><span style="display: flex; gap: 8px; align-items: center"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#b8bb26" stroke-width="2" aria-hidden="true"><path d="M2 8l4 4 8-9"></path></svg>Edit <span class="ic">crates/aiditor-core/src/grep.rs</span></span><span><span style="color: #b8bb26">+6</span> <span style="color: #fb4934">−1</span></span></div>
+        <div class="mono"><span style="color: #83a598">@@ -112,7 +112,12 @@ impl Core {</span>
+    pub(crate) fn on_grepped(&amp;mut self, search: u64, …) {
+<span class="del">-        grep.running = !done;</span><span class="add">+        grep.running = !done;</span><span class="add">+        let status = match (done, grep.hits.is_empty()) {</span><span class="add">+            (false, _) =&gt; "searching",</span><span class="add">+            (true, true) =&gt; "no matches",</span><span class="add">+            (true, false) =&gt; "",</span><span class="add">+        };</span></div>
+      </div>
+      <div class="card" style="border-color: #7c6f64">
+        <div class="ch" style="color: #fabd2f; font-weight: 600"><span>Run cargo test -p aiditor-core grep</span><span style="color: #a89984; font-weight: 400">Permission</span></div>
+        <div class="mono" style="color: #a89984">~/Code/aiditor  ·  terminal</div>
+        <div style="display: flex; gap: 8px; padding: 0 12px 12px 12px">
+          <button class="btn pri" type="button">Yes, once <span class="kb">1</span></button>
+          <button class="btn" type="button">Yes, for this session <span class="kb">2</span></button>
+          <button class="btn" type="button">No <span class="kb">3</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="flex: none; padding: 12px 0 14px 0">
+    <div class="col">
+      <div class="card" style="background: #32302f"><div class="mono" style="font-size: 15px; white-space: pre-wrap"><span style="color: #83a598; font-weight: 700">❯ </span><span style="background: #ebdbb2; color: #282828"> </span></div></div>
+    </div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 16px; background: #3c3836">
+    <span><span style="font-weight: 700">claude: grep progress</span>   <span style="color: #a89984">Claude Code</span>   <span style="color: #a89984">default</span></span>
+    <span><span style="color: #fabd2f">● awaiting permission</span>   <span style="color: #a89984">48k ctx</span></span>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 16px; color: #928374"></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

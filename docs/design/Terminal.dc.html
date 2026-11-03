@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Terminal</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.t{white-space:pre;min-height:21px;padding:0 16px}
+.pr{display:flex;justify-content:space-between;white-space:pre;padding:0 16px;margin-top:10px}
+.y{color:#fabd2f}.g{color:#b8bb26}.r{color:#fb4934}.a{color:#8ec07c}.d{color:#928374}.b{color:#83a598}.bo{font-weight:700}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; padding: 0 16px; background: #1d2021; color: #a89984">
+    <span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">watcher-fix</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 6px">
+    <div class="pr"><span><span class="y">◉ </span><span class="g">cargo</span> test -p aiditor-services grep</span><span><span class="a bo">aiditor</span><span class="a">/crates</span> <span class="d">on</span> <span class="b">⎇ watcher-fix</span> <span class="d">20:52</span></span></div>
+    <div class="t"><span class="g bo">   Compiling</span> aiditor-core v0.1.0 (/Users/ilia.shchepin/Code/aiditor/crates/aiditor-core)</div>
+    <div class="t"><span class="g bo">   Compiling</span> aiditor-services v0.1.0 (/Users/ilia.shchepin/Code/aiditor/crates/aiditor-services)</div>
+    <div class="t"><span class="g bo">    Finished</span> `test` profile [unoptimized + debuginfo] target(s) in 14.82s</div>
+    <div class="t"><span class="g bo">     Running</span> unittests src/lib.rs (target/debug/deps/aiditor_services-3f9c1a)</div>
+    <div class="t"></div>
+    <div class="t">running 9 tests</div>
+    <div class="t">test grep::tests::finds_hits_in_root_order ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::smart_case ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::skips_binary_files ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::stops_at_the_limit ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::batches_hits_every_50ms ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::a_cancelled_search_stops_at_once_and_sends_nothing ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::a_search_cancelled_after_an_in_file_batch_sends_nothing_more ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::a_newer_search_or_a_cancel_supersedes_queued_searches ... <span class="g">ok</span></div>
+    <div class="t">test grep::tests::unreadable_files_are_skipped ... <span class="r">FAILED</span></div>
+    <div class="t"></div>
+    <div class="t">failures:</div>
+    <div class="t"></div>
+    <div class="t">---- grep::tests::unreadable_files_are_skipped stdout ----</div>
+    <div class="t"><span class="r">thread 'grep::tests::unreadable_files_are_skipped' panicked at crates/aiditor-services/src/grep.rs:214:9:</span></div>
+    <div class="t">assertion `left == right` failed</div>
+    <div class="t">  left: 2</div>
+    <div class="t"> right: 1</div>
+    <div class="t"></div>
+    <div class="t">test result: <span class="r">FAILED</span>. 8 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.04s</div>
+    <div class="t"></div>
+    <div class="pr"><span><span class="r">◉ </span><span style="background: #ebdbb2; color: #282828"> </span></span><span><span class="a bo">aiditor</span><span class="a">/crates</span> <span class="d">on</span> <span class="b">⎇ watcher-fix</span> <span class="r">✗ 101</span> <span class="d">20:53</span></span></div>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 16px; background: #3c3836">
+    <span><span style="font-weight: 700">vterm1</span>   <span style="color: #a89984">Terminal</span>   <span style="color: #a89984">~/Code/aiditor/crates</span></span>
+    <span><span style="color: #fb4934">exit 101</span>   <span style="color: #fabd2f">char</span></span>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 16px; color: #928374"></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

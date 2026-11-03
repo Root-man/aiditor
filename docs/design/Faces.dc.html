@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Faces and spacing</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:14px;line-height:20px;font-variant-ligatures:none}
+.tbl{display:grid;grid-template-columns:200px 170px 170px minmax(0,1fr);column-gap:16px;row-gap:3px;align-items:center}
+.th{color:#928374;padding-bottom:6px}
+.sw{padding:0 8px;height:22px;line-height:22px;white-space:pre;overflow:hidden}
+.use{color:#a89984}
+.sp{display:grid;grid-template-columns:220px 90px minmax(0,1fr);column-gap:16px;row-gap:3px}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2; padding: 28px 40px; display: flex; gap: 48px">
+  <div style="flex: 1; min-width: 0">
+    <div style="color: #fabd2f; font-weight: 700; margin-bottom: 14px">Faces</div>
+    <div class="tbl">
+      <span class="th">Face</span><span class="th">Gruvbox dark</span><span class="th">Gruvbox light</span><span class="th">Used for</span>
+      <sc-for list="{{faces}}" as="f" hint-placeholder-count="20">
+        <span>{{f.name}}</span>
+        <span class="sw" style="{{f.dark}}">{{f.sample}}</span>
+        <span class="sw" style="{{f.light}}">{{f.sample}}</span>
+        <span class="use">{{f.use}}</span>
+      </sc-for>
+    </div>
+  </div>
+  <div style="width: 440px; flex: none">
+    <div style="color: #fabd2f; font-weight: 700; margin-bottom: 14px">Spacing</div>
+    <div class="sp">
+      <sc-for list="{{spacing}}" as="s" hint-placeholder-count="10">
+        <span>{{s.name}}</span><span style="color: #d3869b">{{s.value}}</span><span class="use" style="color: #a89984">{{s.note}}</span>
+      </sc-for>
+    </div>
+    <div style="color: #fabd2f; font-weight: 700; margin: 28px 0 14px 0">Type</div>
+    <div class="sp">
+      <span>Buffer, chrome</span><span style="color: #d3869b">15 / 21</span><span style="color: #a89984">Cascadia Code; workspace bar 13 / 22</span>
+      <span>Session prose (M7, open)</span><span style="color: #d3869b">16 / 26</span><span style="color: #a89984">Inter or system sans</span>
+      <span>Session heading (M7, open)</span><span style="color: #d3869b">20 / 28</span><span style="color: #a89984">semibold</span>
+      <span>Syntax styles</span><span style="color: #d3869b">italic</span><span style="color: #a89984">comments only; bold for match and key hints</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const f = (name, sample, dark, light, use) => ({
+      name, sample, use,
+      dark: `background: ${dark[1]}; color: ${dark[0]};${dark[2] || ''}`,
+      light: `background: ${light[1]}; color: ${light[0]};${light[2] || ''}`,
+    });
+    const faces = [
+      f('default', 'let x = 1;', ['#ebdbb2', '#282828'], ['#3c3836', '#fbf1c7'], 'buffer text and background'),
+      f('workspace-bar', 'aiditor › fix', ['#a89984', '#1d2021'], ['#7c6f64', '#f2e5bc'], 'frame-wide bar above all windows'),
+      f('mode-line', 'support.rs  5:21', ['#ebdbb2', '#3c3836'], ['#3c3836', '#ebdbb2'], 'the selected window’s mode line'),
+      f('mode-line-inactive', 'support.rs  5:21', ['#7c6f64', '#282828', 'box-shadow: inset 0 1px 0 #3c3836'], ['#a89984', '#fbf1c7', 'box-shadow: inset 0 1px 0 #ebdbb2'], 'other windows, a 1px rule on top'),
+      f('mode-line-dim', 'benches/src/  Rust', ['#a89984', '#3c3836'], ['#7c6f64', '#ebdbb2'], 'path, major mode, percentage'),
+      f('divider', '', ['#1d2021', '#1d2021'], ['#d5c4a1', '#d5c4a1'], '1px between side-by-side windows'),
+      f('line-number', '  37', ['#665c54', '#282828'], ['#a89984', '#fbf1c7'], 'gutter'),
+      f('line-number-current', '   5', ['#fabd2f', '#32302f'], ['#b57614', '#f2e5bc'], 'point’s line number'),
+      f('hl-line', 'let mut i = 1;', ['#ebdbb2', '#32302f'], ['#3c3836', '#f2e5bc'], 'point’s line'),
+      f('region', 'selected', ['#ebdbb2', '#504945'], ['#3c3836', '#d5c4a1'], 'the region'),
+      f('match', 'emacs', ['#fabd2f', '#5a4b2b'], ['#3c3836', '#f2d98a'], 'every visible search match'),
+      f('match-current', 'emacs', ['#282828', '#fabd2f', 'font-weight: 700'], ['#fbf1c7', '#b57614', 'font-weight: 700'], 'the selected hit'),
+      f('completion-match', 'Emacs’s', ['#fe8019', '#282828', 'font-weight: 700'], ['#af3a03', '#fbf1c7', 'font-weight: 700'], 'matched characters in lists'),
+      f('completion-selected', 'editor.rs:297', ['#ebdbb2', '#3c3836'], ['#3c3836', '#ebdbb2'], 'the selected candidate'),
+      f('annotation', '-rw-r--r--  4.1k', ['#928374', '#282828'], ['#7c6f64', '#fbf1c7'], 'marginalia, hit paths, counts'),
+      f('prompt', 'Grep in aiditor:', ['#8ec07c', '#282828', 'font-weight: 700'], ['#427b58', '#fbf1c7', 'font-weight: 700'], 'minibuffer prompts'),
+      f('directory', 'crates/', ['#83a598', '#282828', 'font-weight: 700'], ['#076678', '#fbf1c7', 'font-weight: 700'], 'directories in find-file'),
+      f('status-modified', '●', ['#fe8019', '#3c3836'], ['#af3a03', '#ebdbb2'], 'unsaved buffer'),
+      f('status-waiting', '● awaiting', ['#fabd2f', '#3c3836'], ['#b57614', '#ebdbb2'], 'agent needs you, searching'),
+      f('status-running', '● working', ['#b8bb26', '#3c3836'], ['#79740e', '#ebdbb2'], 'agent or command running, done'),
+      f('status-failed', 'exit 101', ['#fb4934', '#3c3836'], ['#9d0006', '#ebdbb2'], 'failure, read-only, exited'),
+      f('session-user', '❯ Show grep progress', ['#ebdbb2', '#32302f'], ['#3c3836', '#f2e5bc'], 'user turns in sessions'),
+      f('session-thought', 'Grep’s core already…', ['#928374', '#282828', 'font-style: italic'], ['#928374', '#fbf1c7', 'font-style: italic'], 'agent thoughts'),
+      f('diff-added', '+ let status', ['#b8bb26', '#32361a'], ['#79740e', '#e8e5b5'], 'added lines'),
+      f('diff-removed', '- grep.running', ['#fb4934', '#3c1f1e'], ['#9d0006', '#f6d6c9'], 'removed lines'),
+      f('link', 'grep.rs:112', ['#83a598', '#282828', 'text-decoration: underline'], ['#076678', '#fbf1c7', 'text-decoration: underline'], 'file references, RET opens'),
+      f('attachment', '▤ notes.md', ['#ebdbb2', '#3c3836', 'box-shadow: inset 0 0 0 1px #504945; border-radius: 5px'], ['#3c3836', '#ebdbb2', 'box-shadow: inset 0 0 0 1px #d5c4a1; border-radius: 5px'], 'chips: @ references, attachments, pastes'),
+      f('message-at-point', '▌', ['#fabd2f', '#282828'], ['#b57614', '#fbf1c7'], 'margin bar on the message C-c acts on'),
+      f('key-hint',' 1 ', ['#282828', '#fabd2f', 'font-weight: 700'], ['#fbf1c7', '#b57614', 'font-weight: 700'], 'permission keys'),
+      f('permission', 'Permission  Run …', ['#ebdbb2', '#3c3836'], ['#3c3836', '#ebdbb2'], 'permission request rows'),
+    ];
+    const spacing = [
+      { name: 'Cell', value: '9 × 21', note: 'Cascadia 15px, line height 1.4' },
+      { name: 'Workspace bar', value: '22', note: '13px type, segments split by │' },
+      { name: 'Mode lines, echo', value: '26', note: 'segments split by │' },
+      { name: 'Frame edge padding', value: '12', note: 'text never touches the window edge' },
+      { name: 'Gutter', value: '10 + digits + 12', note: 'as wide as the last line number needs' },
+      { name: 'Top of buffer', value: '6', note: 'breathing room under the bar' },
+      { name: 'Minibuffer', value: '4 / 6', note: 'above / below the list' },
+      { name: 'Divider', value: '1', note: 'no fringe bitmaps, no borders around windows' },
+      { name: 'Session margin', value: '24', note: 'monospace session text inset' },
+      { name: 'Rich column', value: '860', note: 'M7, open: centred, cards radius 6, gap 14' },
+    ];
+    return { faces, spacing };
+  }
+}
+</script>
+</body>
+</html>

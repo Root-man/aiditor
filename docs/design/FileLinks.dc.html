@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>File chips</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.opt{display:grid;grid-template-columns:240px minmax(0,1fr);column-gap:32px;align-items:center;padding:16px 0;border-top:1px solid #3c3836}
+.name{color:#a89984}
+.r{white-space:pre;min-height:21px;padding:0 16px;overflow:hidden}
+.user{background:#32302f}
+.pr{color:#83a598;font-weight:700}
+.cur{background:#ebdbb2;color:#282828}
+.tok{display:inline-block;line-height:17px;padding:0 7px;border:1px solid #504945;border-radius:5px;background:#3c3836;color:#ebdbb2}
+.ic{color:#a89984;margin-right:7px}
+.at{border-color:#fabd2f}
+.gone{color:#928374;text-decoration:line-through;text-decoration-color:#7c6f64}
+.gone .ic{color:#fb4934}
+.ln{color:#83a598;text-decoration:underline;text-decoration-color:#4f6a6a;text-underline-offset:3px}
+.echo{color:#928374;padding:0 16px}
+.big{font-size:22px;line-height:30px}
+.big .tok{line-height:24px;padding:0 10px;border-radius:7px}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2; padding: 28px 40px">
+
+  <div class="opt" style="border-top: none">
+    <div class="name">Chip, enlarged</div>
+    <div class="r big"><span class="tok"><span class="ic">▤</span>SKILL.md</span>  <span class="tok"><span class="ic">▣</span>Screenshot 2026-09-22 at 14.22.52.png</span></div>
+  </div>
+
+  <div class="opt">
+    <div class="name">Kinds</div>
+    <div class="r"><span class="tok"><span class="ic">▤</span>grep.rs</span>  <span class="tok"><span class="ic">▤</span>grep.rs:112</span>  <span class="tok"><span class="ic">▣</span>grep-stall.png</span>  <span class="tok"><span class="ic">▦</span>screenshots/</span>  <span class="tok"><span class="ic">≡</span>Pasted 214 lines</span></div>
+  </div>
+
+  <div class="opt">
+    <div class="name">In a prompt</div>
+    <div>
+      <div class="r user"><span class="pr">❯ </span>Show that grep is running. Start from <span class="tok"><span class="ic">▤</span>grep.rs</span> and <span class="tok"><span class="ic">▣</span>grep-stall.png</span></div>
+      <div class="r user">  <span class="tok"><span class="ic">≡</span>Pasted 214 lines</span></div>
+    </div>
+  </div>
+
+  <div class="opt">
+    <div class="name">Point on a chip</div>
+    <div>
+      <div class="r"><span class="pr">❯ </span>Compare <span class="tok at"><span class="ic">▤</span>grep.rs</span><span class="cur"> </span>with <span class="tok"><span class="ic">▤</span>grep.rs</span></div>
+      <div class="echo">crates/aiditor-core/src/grep.rs</div>
+    </div>
+  </div>
+
+  <div class="opt">
+    <div class="name">File gone</div>
+    <div class="r"><span class="pr">❯ </span>Why did this fail? <span class="tok gone"><span class="ic">▤</span>old-notes.md</span></div>
+  </div>
+
+  <div class="opt">
+    <div class="name">Agent prose</div>
+    <div class="r">The change belongs in <span class="ln">crates/aiditor-core/src/grep.rs:112</span>, next to on_grepped.</div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
