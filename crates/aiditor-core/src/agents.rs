@@ -2,14 +2,14 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, ClientResponse, ContentBlock, Error, MessageId, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, Plan, PlanEntry, PromptRequest, RequestId,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOption,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    AgentRequest, AvailableCommand, AvailableCommandInput, ClientResponse, ContentBlock, Error,
+    MessageId, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
+    PromptRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, ToolCall,
+    ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use alacritty_terminal::vte::ansi::{Attr, Color, Handler, Processor};
 use serde_json::{Map, Value};
@@ -36,6 +36,9 @@ use render::*;
 
 /// The prompt line's text, just before the prompt area.
 const PROMPT: &str = "> ";
+/// Slash commands the editor does itself, left out of the `Command:` prompt: Codex's `plan`, as
+/// `S-TAB` cycles modes.
+const HIDDEN_COMMANDS: &[&str] = &["plan"];
 /// The session buffer's major mode.
 pub(crate) const MODE: &str = "agent-session-mode";
 /// How often a shown session's working line and waiting counters tick.
@@ -107,6 +110,8 @@ pub(crate) struct Session {
     preamble: Option<String>,
     /// The buffer's tick when the prompt area's chips were last painted.
     painted: u64,
+    /// The slash commands from the latest `available_commands_update`, hidden ones left out.
+    commands: Vec<AvailableCommand>,
 }
 
 /// The project's roots with their role lines, the primary first; `None` with nothing to list.
@@ -1057,6 +1062,32 @@ impl Core {
             .ok_or_else(|| "Not in an agent session buffer".into())
     }
 
+    /// The current session's slash commands; none outside a session buffer.
+    pub(crate) fn session_commands(&self) -> &[AvailableCommand] {
+        let buffer = self.windows.window.buffer();
+        (self.agents.values())
+            .find(|s| s.buffer == buffer)
+            .map_or(&[], |s| &s.commands)
+    }
+
+    /// The `Command:` annotation of the current session's command `name`: its argument hint and
+    /// its description's first non-blank line, cut to 60 chars.
+    pub(crate) fn command_note(&self, name: &str) -> Option<String> {
+        let command = self.session_commands().iter().find(|c| c.name == name)?;
+        let hint = match &command.input {
+            Some(AvailableCommandInput::Unstructured(input)) => input.hint.as_str(),
+            _ => "",
+        };
+        let mut lines = command.description.lines();
+        let line = lines.find(|l| !l.trim().is_empty()).unwrap_or_default();
+        let description = match line.chars().count() > 60 {
+            true => format!("{}…", line.chars().take(59).collect::<String>()),
+            false => line.to_string(),
+        };
+        let note = [hint, &description].into_iter().filter(|s| !s.is_empty());
+        Some(note.collect::<Vec<_>>().join("  "))
+    }
+
     /// The agent names `agent-start` completes over, in registry order.
     pub(crate) fn agent_names(&self) -> Vec<String> {
         self.settings.agents.keys().cloned().collect()
@@ -1212,6 +1243,7 @@ impl Ctx<'_> {
             groups: Vec::new(),
             preamble,
             painted: 0,
+            commands: Vec::new(),
         };
         core.agents.insert(id, session);
         core.echo(echo);
@@ -1370,6 +1402,11 @@ impl Ctx<'_> {
                 }
             }
             SessionUpdate::UsageUpdate(usage) => session.usage = Some((usage.used, usage.size)),
+            SessionUpdate::AvailableCommandsUpdate(update) => {
+                session.commands = (update.available_commands.into_iter())
+                    .filter(|c| !HIDDEN_COMMANDS.contains(&c.name.as_str()))
+                    .collect();
+            }
             _ => {}
         }
     }
@@ -1722,6 +1759,30 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// `agent-command`: inserts `/name ` at the start of the prompt area, point after it.
+    pub(crate) fn agent_command(&mut self, name: &str) -> Result<(), String> {
+        self.core.current_session()?;
+        let start = self.core.current().prompt_start();
+        let text = format!("/{name} ");
+        self.core.current_mut().insert(start, &text)?;
+        self.goto(start + text.chars().count())
+    }
+
+    /// `/` in a session: `agent-command` at the start of the prompt area when the session has
+    /// commands, else typed as itself.
+    pub(crate) fn agent_slash(&mut self, args: Args) -> Result<(), String> {
+        let core = &*self.core;
+        let pick =
+            !core.session_commands().is_empty() && core.point() == core.current().prompt_start();
+        let command = if pick {
+            "agent-command"
+        } else {
+            "self-insert-command"
+        };
+        self.call(command, args);
+        Ok(())
+    }
+
     /// `agent-cycle-mode`: sets the session's mode option to its next value, wrapping around.
     pub(crate) fn agent_cycle_mode(&mut self) -> Result<(), String> {
         let (id, session) = self.core.current_session()?;
@@ -1830,8 +1891,9 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::{
-        ConfigOptionUpdate, ContentChunk, ImageContent, PlanEntryPriority, PlanEntryStatus,
-        SessionConfigSelectOption, SessionUpdate, ToolCallLocation, ToolCallUpdateFields, ToolKind,
+        AvailableCommandsUpdate, ConfigOptionUpdate, ContentChunk, ImageContent, PlanEntryPriority,
+        PlanEntryStatus, SessionConfigSelectOption, SessionUpdate, ToolCallLocation,
+        ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
     };
 
     use super::*;
@@ -2375,6 +2437,92 @@ mod tests {
             h.core.text(),
             "> hello\n\nHi there\n\nWorked 0s\n\n> again\n\nAgain\n\nWorking for 0s\n\n> "
         );
+    }
+
+    fn commands(h: &mut Harness, names: &[&str]) {
+        let commands = (names.iter())
+            .map(|&name| {
+                let description = match name {
+                    "review" => "Review changes".to_string(),
+                    _ => format!("Run {name}"),
+                };
+                let command = AvailableCommand::new(name, description);
+                match name {
+                    "review" => command.input(AvailableCommandInput::Unstructured(
+                        UnstructuredCommandInput::new("[path]"),
+                    )),
+                    _ => command,
+                }
+            })
+            .collect();
+        let update = AvailableCommandsUpdate::new(commands);
+        self::update(h, 0, SessionUpdate::AvailableCommandsUpdate(update));
+    }
+
+    #[test]
+    fn slash_at_the_prompt_start_picks_a_command_with_its_hint() {
+        let mut h = session();
+        commands(&mut h, &["review", "plan", "mcp"]);
+        h.keys("/");
+        let mb = h.core.minibuffer().unwrap();
+        // `plan` is the editor's own mode switch.
+        assert_eq!(mb.candidates, ["review", "mcp"]);
+        assert_eq!(mb.annotations, ["[path]  Review changes", "Run mcp"]);
+        h.keys("RET");
+        assert_eq!(h.core.text(), "> /review ");
+        assert_eq!(h.core.point(), h.core.text().chars().count());
+        // Sent as text, as ACP expects.
+        h.keys("x RET");
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "/review x""#]);
+    }
+
+    #[test]
+    fn the_command_list_follows_updates() {
+        let mut h = session();
+        commands(&mut h, &["review"]);
+        commands(&mut h, &["compact"]);
+        h.keys("/");
+        assert_eq!(listed(&mut h).0, ["compact"]);
+    }
+
+    #[test]
+    fn long_descriptions_show_their_first_line_cut_to_sixty_chars() {
+        let mut h = session();
+        let long = format!("\n{}\nmore", "x".repeat(70));
+        let list = AvailableCommandsUpdate::new(vec![AvailableCommand::new("skill", long)]);
+        update(&mut h, 0, SessionUpdate::AvailableCommandsUpdate(list));
+        let note = h.core.command_note("skill").unwrap();
+        assert_eq!(note, format!("{}…", "x".repeat(59)));
+    }
+
+    #[test]
+    fn slash_types_itself_elsewhere_and_without_commands() {
+        let mut h = session();
+        h.keys("/");
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(h.core.text(), "> /");
+        commands(&mut h, &["review"]);
+        h.keys("/");
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(h.core.text(), "> //");
+        // At the start of a prompt that holds text, the command goes before it.
+        h.ctx().goto(2).unwrap();
+        h.keys("/ RET");
+        assert_eq!(h.core.text(), "> /review //");
+    }
+
+    #[test]
+    fn agent_command_from_the_transcript_inserts_at_the_prompt_start() {
+        let mut h = session();
+        commands(&mut h, &["compact"]);
+        chunk(&mut h, "Hi");
+        h.keys("w o r k M-<");
+        h.keys("M-x agent-command RET RET");
+        assert!(h.core.text().ends_with("> /compact work"));
+        assert_eq!(h.core.point(), h.core.text().chars().count() - "work".len());
+        // An answer that names no command goes in as typed.
+        h.keys("M-x agent-command RET f o o RET");
+        assert!(h.core.text().ends_with("> /foo /compact work"));
     }
 
     #[test]
