@@ -1764,6 +1764,31 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    pub(crate) fn agent_reference(&mut self, args: Args) -> Result<(), String> {
+        self.core.current_session()?;
+        if let Some(path) = args.strings.first() {
+            let point = self.core.point();
+            let at = point.checked_sub(1).ok_or("No reference here")?;
+            if at < self.core.current().prompt_start() || self.core.current().text().char(at) != '@'
+            {
+                return Err("No reference here".into());
+            }
+            let directory = path.ends_with('/');
+            let path = PathBuf::from(path);
+            let chip = self
+                .core
+                .chips
+                .intern(Some(path.components().collect()), directory);
+            self.delete_to(at)?;
+            return self.insert_n(&chip.to_string(), 1, false);
+        }
+        self.insert_n("@", args.count(), false)?;
+        if args.count() == 1 {
+            self.project_file_prompt(args, true)?;
+        }
+        Ok(())
+    }
+
     /// `agent-command`: inserts the command's chip and a space at point in the prompt area, or
     /// at its end from the transcript; an answer naming no command goes in as `/answer `.
     pub(crate) fn agent_command(&mut self, name: &str) -> Result<(), String> {
@@ -2459,6 +2484,171 @@ mod tests {
             h.core.text(),
             "> hello\n\nHi there\n\nWorked 0s\n\n> again\n\nAgain\n\nWorking for 0s\n\n> "
         );
+    }
+
+    #[test]
+    fn references_offer_files_and_directories_in_every_root_without_previewing() {
+        let mut h = session();
+        let buffer = h.core.windows.window.buffer();
+        let other = h.path("other/app");
+        h.core.projects[0].project.roots.push(Root {
+            path: other,
+            role: String::new(),
+        });
+        h.index_reply("app", &["src/main.rs"], &["app", "app/src"]);
+        h.index_reply("other/app", &["lib.rs"], &["other/app", "other/app/empty"]);
+        h.keys("@");
+        let mb = h.core.minibuffer().unwrap();
+        assert_eq!(mb.prompt, "Reference in home: ");
+        assert_eq!(
+            mb.candidates,
+            [
+                "app/",
+                "app/src/",
+                "app/src/main.rs",
+                "app<2>/",
+                "app<2>/empty/",
+                "app<2>/lib.rs"
+            ]
+        );
+        assert_eq!(h.core.origin().unwrap().buffer(), buffer);
+        let origin = h.core.buffers.get(buffer).unwrap();
+        assert_eq!(origin.text().to_string(), "> @");
+        h.keys("lib.rs RET");
+        let chip = h.core.chips.intern(Some(h.path("other/app/lib.rs")), false);
+        assert_eq!(h.text(), format!("> {chip}"));
+        drawn_line(&mut h, ">  ▤ lib.rs ");
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            ["prompt 0 s link lib.rs file:///aiditor-test/other/app/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn references_annotate_files_with_age_and_directories_as_dir() {
+        let mut h = indexed_session();
+        h.collect_effects = true;
+        h.keys("@ main");
+        let session = h
+            .effects
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Effect::File(crate::FileOp::Annotate { session, .. }) => Some(*session),
+                _ => None,
+            })
+            .unwrap();
+        h.send(Msg::Annotated {
+            session,
+            entries: vec![crate::FileEntry {
+                name: "app/src/main.rs".into(),
+                annotation: "-rw-r--r--      41 B       5s ago".into(),
+            }],
+        });
+        assert_eq!(h.core.minibuffer().unwrap().annotations, ["5s ago"]);
+        h.keys("C-a C-k");
+        let mb = h.core.minibuffer().unwrap();
+        let dir = mb.candidates.iter().position(|c| c == "app/src/").unwrap();
+        assert_eq!(mb.annotations[dir], "dir");
+    }
+
+    #[test]
+    fn references_replace_only_the_at_sign_amid_text_after_output_arrives() {
+        let mut h = indexed_session();
+        h.keys("compare SPC SPC please");
+        h.ctx().goto(10).unwrap();
+        h.keys("@ main");
+        chunk(&mut h, "An answer");
+        h.keys("RET");
+        let chip = h.core.chips.intern(Some(h.path("app/src/main.rs")), false);
+        assert_eq!(h.text(), format!("An answer\n\n> compare {chip} please"));
+        assert_eq!(h.point(), "An answer\n\n> compare ".chars().count() + 1);
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            [
+                "prompt 0 s \"compare \" link main.rs file:///aiditor-test/app/src/main.rs \" please\""
+            ]
+        );
+    }
+
+    #[test]
+    fn references_cancel_keeps_the_literal_at_sign_and_restores_point() {
+        let mut h = indexed_session();
+        h.keys("before SPC SPC after");
+        h.ctx().goto(9).unwrap();
+        h.keys("@ main");
+        chunk(&mut h, "Output");
+        h.keys("C-g x");
+        assert_eq!(h.text(), "Output\n\n> before @x after");
+    }
+
+    #[test]
+    fn references_attach_empty_directories_and_images_as_their_chip_kinds() {
+        let mut h = session();
+        h.index_reply("app", &["cat.png"], &["app", "app/empty"]);
+        h.keys("@ empty RET SPC @ cat RET");
+        drawn_line(&mut h, ">  ▦ empty   ▣ cat.png ");
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            [
+                "prompt 0 s link empty file:///aiditor-test/app/empty/ image image/png file:///aiditor-test/app/cat.png"
+            ]
+        );
+    }
+
+    #[test]
+    fn references_fill_when_first_use_indexing_answers() {
+        let mut h = session();
+        h.collect_effects = true;
+        h.keys("@");
+        let (project, walk) = h
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::File(crate::FileOp::Index { project, walk, .. }) => Some((*project, *walk)),
+                _ => None,
+            })
+            .unwrap();
+        h.send(Msg::Indexed {
+            project,
+            walk,
+            roots: vec![(h.path("app"), Ok(vec!["src/main.rs".into()]))],
+            directories: vec![h.path("app"), h.path("app/src")],
+        });
+        assert_eq!(listed(&mut h).0, ["app/", "app/src/", "app/src/main.rs"]);
+        h.keys("main RET");
+        let chip = h.core.chips.intern(Some(h.path("app/src/main.rs")), false);
+        assert_eq!(h.text(), format!("> {chip}"));
+    }
+
+    #[test]
+    fn references_keep_the_captured_mapping_after_roots_change() {
+        let mut h = indexed_session();
+        h.keys("@ main");
+        h.core.projects[0].project.primary.path = h.path("new/app");
+        h.keys("RET");
+        h.keys("RET");
+        assert_eq!(
+            ops(&mut h),
+            ["prompt 0 s link main.rs file:///aiditor-test/app/src/main.rs"]
+        );
+    }
+
+    #[test]
+    fn references_require_a_match_and_preserve_read_only_text() {
+        let mut h = indexed_session();
+        h.keys("@ nonexistent RET");
+        assert_eq!(h.core.message(), Some("Match required"));
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Reference in home: ");
+        h.keys("C-g");
+        assert_eq!(h.text(), "> @");
+        chunk(&mut h, "Answer");
+        h.keys("M-< @");
+        assert_eq!(h.core.message(), Some("Text is read-only"));
+        assert_eq!(h.text(), "Answer\n\n> @");
     }
 
     fn commands(h: &mut Harness, names: &[&str]) {

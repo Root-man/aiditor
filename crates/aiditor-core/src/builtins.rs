@@ -763,6 +763,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.agent_command(&args.strings[0]),
         },
         Command {
+            name: "agent-reference",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.agent_reference(args),
+        },
+        Command {
             name: "agent-slash",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.agent_slash(args),
