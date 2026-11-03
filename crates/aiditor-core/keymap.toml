@@ -132,6 +132,7 @@
 "TAB" = "agent-toggle-tool-call"
 "S-TAB" = "agent-cycle-mode"
 "/" = "agent-slash"
+"@" = "agent-reference"
 "C-c C-y" = "agent-allow-once"
 "C-c C-k" = "agent-reject-once"
 "C-c C-p" = "agent-previous-message"

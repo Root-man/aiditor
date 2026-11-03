@@ -443,7 +443,13 @@ impl Ctx<'_> {
                     .data
                     .2
             });
-        if filtered && selected.is_none() {
+        let references = core
+            .prompts
+            .minibuffer
+            .as_ref()
+            .and_then(|mb| mb.finder.as_ref())
+            .is_some_and(|f| f.references);
+        if (filtered || references) && selected.is_none() {
             return Err("Match required".into());
         }
         if completion.is_some_and(|c| c.dir.is_some())
@@ -460,7 +466,14 @@ impl Ctx<'_> {
             .as_ref()
             .and_then(|mb| mb.finder.as_ref())
         {
-            Some(finder) => finder.path(&text).to_string_lossy().into_owned(),
+            Some(finder) => {
+                let path = finder.path(&text).to_string_lossy().into_owned();
+                if references && text.ends_with('/') {
+                    format!("{}/", path.trim_end_matches('/'))
+                } else {
+                    path
+                }
+            }
             None => text,
         };
         let mut mb = self.core.close_minibuffer().ok_or("Not in a minibuffer")?;
@@ -850,12 +863,17 @@ impl Core {
                         };
                         highlights.push(ranges);
                         candidates.push(item.data.0.clone());
-                        annotations.push(
-                            mb.file_notes
-                                .get(&item.data.0)
-                                .unwrap_or(&item.data.1)
-                                .clone(),
-                        );
+                        let note = mb.file_notes.get(&item.data.0).unwrap_or(&item.data.1);
+                        let note = if mb.finder.as_ref().is_some_and(|f| f.references) {
+                            if item.data.0.ends_with('/') {
+                                "dir"
+                            } else {
+                                note.rsplit("  ").next().unwrap_or("").trim()
+                            }
+                        } else {
+                            note
+                        };
+                        annotations.push(note.to_string());
                     }
                     (matched, rows)
                 }

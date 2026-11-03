@@ -150,13 +150,29 @@ impl Core {
         self.add_project(Loaded::ad_hoc(&name, root))
     }
 
-    /// Every indexed file of `project` as `<root name>/<relative path>`, the primary's first.
-    pub(crate) fn project_files(&self, project: ProjectId) -> Vec<String> {
-        let roots = self.index.get(&project).map_or(&[][..], |i| i.roots());
+    /// Indexed paths as `<root name>/<relative path>`, including directories for references.
+    pub(crate) fn project_files(&self, project: ProjectId, references: bool) -> Vec<String> {
+        let index = self.index.get(&project);
+        let roots = index.map_or(&[][..], |i| i.roots());
         let names = root_names(roots.iter().map(|(root, _)| root.as_path()));
         (names.iter().zip(roots))
-            .flat_map(|(name, (_, files))| {
-                (files.iter()).map(move |f| format!("{name}/{}", f.display()))
+            .flat_map(|(name, (root, files))| {
+                let mut paths: Vec<_> = (files.iter())
+                    .map(|f| format!("{name}/{}", f.display()))
+                    .collect();
+                if references && let Some(index) = index {
+                    paths.extend(index.directories().iter().filter_map(|dir| {
+                        let relative = dir.strip_prefix(root).ok()?;
+                        Some(if relative.as_os_str().is_empty() {
+                            format!("{name}/")
+                        } else {
+                            format!("{name}/{}/", relative.display())
+                        })
+                    }));
+                    paths.sort();
+                    paths.dedup();
+                }
+                paths
             })
             .collect()
     }
@@ -177,6 +193,7 @@ impl Core {
             roots,
             names,
             waiting,
+            references: false,
         })
     }
 
@@ -197,8 +214,14 @@ impl Core {
             return;
         }
         finder.waiting = false;
-        let files = self.project_files(project);
-        self.add_candidates("project-find-file", files);
+        let references = finder.references;
+        let files = self.project_files(project, references);
+        let command = if references {
+            "agent-reference"
+        } else {
+            "project-find-file"
+        };
+        self.add_candidates(command, files);
     }
 }
 
@@ -207,6 +230,7 @@ pub(crate) struct Finder {
     roots: Vec<PathBuf>,
     names: Vec<String>,
     waiting: bool,
+    pub(crate) references: bool,
 }
 
 impl Finder {
@@ -440,21 +464,36 @@ impl Ctx<'_> {
             let path = self.core.finder(project)?.path(text);
             return self.find_file(&path.to_string_lossy());
         }
+        self.project_file_prompt(args, false)
+    }
+
+    pub(crate) fn project_file_prompt(
+        &mut self,
+        args: Args,
+        references: bool,
+    ) -> Result<(), String> {
+        let project = self.core.current_workspace().project;
         if let Some(index) = self.core.index.get_mut(&project) {
             // No answer yet, as every answer lists the primary: the pending walk fills the list.
             index.announce_initial();
         } else {
             self.index_project(project, false)?;
         }
-        let finder = self.core.finder(project)?;
+        let mut finder = self.core.finder(project)?;
+        finder.references = references;
         let files = if finder.waiting {
             Vec::new()
         } else {
-            self.core.project_files(project)
+            self.core.project_files(project, references)
         };
         let choices: Vec<&str> = files.iter().map(String::as_str).collect();
-        let command = self.core.commands["project-find-file"];
-        let prompt = format!("Find file in {}: ", self.core.project_name(project));
+        let (command, verb) = if references {
+            ("agent-reference", "Reference")
+        } else {
+            ("project-find-file", "Find file")
+        };
+        let command = self.core.commands[command];
+        let prompt = format!("{verb} in {}: ", self.core.project_name(project));
         self.read_string(command, args, prompt, Some(&choices))?;
         self.core
             .prompts
