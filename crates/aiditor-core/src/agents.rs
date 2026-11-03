@@ -476,10 +476,13 @@ impl Core {
 
     /// Puts a replayed user message above session `id`'s prompt line as a sent prompt shows.
     fn show_user(&mut self, id: AgentId, text: &str, message: Option<MessageId>) {
-        let text = &self.chips.replace_links(text);
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
+        let index = self.index.get(&session.project);
+        let file = |word: &str| file_link(index, word).map(|(path, _)| path);
+        let linked = self.chips.replace_links(text);
+        let text = &self.chips.replace_mentions(&linked, file);
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
@@ -3381,6 +3384,16 @@ mod tests {
         );
         assert_eq!(message_list(&h).len(), 2);
         drawn_line(&mut h, "> look at  ▤ a.rs  please ▣ image ");
+    }
+
+    #[test]
+    fn replayed_cli_mentions_of_indexed_files_are_chips() {
+        let mut h = indexed_session();
+        let user = |text: &str| SessionUpdate::UserMessageChunk(ContentChunk::new(text.into()));
+        update(&mut h, 0, user("@src/a.rs vs @src/gone.rs"));
+        let a = h.core.chips.intern(Some(h.path("app/src/a.rs")), false);
+        assert!(h.core.text().starts_with(&format!("> {a} vs @src/gone.rs")));
+        drawn_line(&mut h, ">  ▤ a.rs  vs @src/gone.rs");
     }
 
     #[test]

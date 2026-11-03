@@ -27,7 +27,7 @@ Sending a prompt with chips SHALL send its text as text blocks split at the chip
 - **THEN** the request carries image content of type `image/png` with the file's bytes
 
 ### Requirement: Chips in sent and replayed messages
-The echoed prompt SHALL show its chips as the prompt did. In a replayed user message, each `[@name](file://path)` SHALL show as a chip for `path`, a directory when it ends in `/`, and an image block as an `▣ image` chip. Replayed user chunks with the same message id SHALL join one block.
+The echoed prompt SHALL show its chips as the prompt did. In a replayed user message, each `[@name](file://path)` SHALL show as a chip for `path`, a directory when it ends in `/`; each `@path` word at the start or after whitespace, as the Claude Code CLI writes a mention, SHALL show as a chip when `path` is a file in the project's file index, relative to any root or absolute under one; and an image block SHALL show as an `▣ image` chip. Replayed user chunks with the same message id SHALL join one block.
 
 #### Scenario: Echo
 - **WHEN** a prompt with a chip is sent
@@ -36,6 +36,10 @@ The echoed prompt SHALL show its chips as the prompt did. In a replayed user mes
 #### Scenario: Replay
 - **WHEN** a loaded session replays the chunks `look at `, `[@a.rs](file:///p/a.rs)` and ` please` with one message id
 - **THEN** one block shows `> look at  ▤ a.rs  please`, the middle a chip
+
+#### Scenario: A CLI mention
+- **WHEN** a loaded session replays `@src/a.rs vs @src/gone.rs`, and only `src/a.rs` is in the index
+- **THEN** `@src/a.rs` shows as a chip and `@src/gone.rs` stays text
 
 ### Requirement: RET and the echo on a chip
 `RET` with point on a chip SHALL visit its file in another window, splitting a lone one, or for a directory open `find-file` in it, sending nothing. A chip without a path SHALL echo `No file`. While point is on a chip, the echo line SHALL show its full path when the command left no other message.

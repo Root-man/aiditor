@@ -16,6 +16,9 @@ use crate::settings::FaceName;
 const FIRST: u32 = 0xF0000;
 
 /// How Claude's adapter writes a sent `resource_link` into the transcript it replays.
+/// How the Claude Code CLI writes a mention into the transcript it replays: `@` and the path.
+static MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|\s)@(\S+)").expect("valid"));
+
 static LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[@[^\]\n]*\]\(file://([^)\n]+)\)").expect("valid"));
 
@@ -142,6 +145,19 @@ impl Chips {
         .into_owned()
     }
 
+    /// `text` with each `@path` mention that `file` resolves to a file replaced by its chip.
+    pub(crate) fn replace_mentions(
+        &mut self,
+        text: &str,
+        file: impl Fn(&str) -> Option<PathBuf>,
+    ) -> String {
+        (MENTION.replace_all(text, |c: &regex::Captures| match file(&c[2]) {
+            Some(path) => format!("{}{}", &c[1], self.intern(Some(path), false)),
+            None => c[0].to_string(),
+        }))
+        .into_owned()
+    }
+
     /// `input` as prompt blocks: text runs split at its chips, those of only whitespace left
     /// out, a file or directory chip a `resource_link`, an image one image content whose data
     /// the agent service reads from its URI.
@@ -211,5 +227,8 @@ mod tests {
         assert_eq!(chips.get(src).unwrap().name(), "src");
         assert_eq!(text, format!("see {src} and {a}"));
         assert_eq!(chips.unchecked.len(), 3);
+        let file = |w: &str| (w == "a.rs").then(|| PathBuf::from("/p/a.rs"));
+        let text = chips.replace_mentions("@a.rs and @b.rs, me@a.rs", file);
+        assert_eq!(text, format!("{a} and @b.rs, me@a.rs"));
     }
 }
