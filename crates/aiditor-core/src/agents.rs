@@ -5346,6 +5346,44 @@ mod tests {
     }
 
     #[test]
+    fn folded_workspace_list_project_uses_urgent_state_across_workspaces() {
+        let mut h = session();
+        h.keys("running RET");
+        let first = h.core.workspace();
+        let project = h.core.current_workspace().project;
+        let second = h.core.new_workspace("other", project);
+        h.core.switch_workspace(second).unwrap();
+        h.keys("M-x agent-start RET claude RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Err("failed".into()),
+        });
+        h.core.switch_workspace(first).unwrap();
+        for (waiting, text, face) in [
+            (false, "● exited", FaceName::StatusFailed),
+            (true, "● awaiting permission", FaceName::StatusWaiting),
+        ] {
+            if waiting {
+                ask(&mut h, 1, "one", Some("First"));
+            }
+            h.keys("C-x t l p TAB");
+            let frame = h.frame(1440., 900.);
+            let line = frame.windows[0]
+                .display
+                .lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.text.contains("2 workspaces")))
+                .unwrap();
+            assert!(
+                line.spans
+                    .iter()
+                    .any(|s| s.text == text && s.face.fg == h.core.settings.theme.face(face).fg)
+            );
+            h.keys("q");
+        }
+    }
+
+    #[test]
     fn workspace_list_sessions_show_model_effort_and_the_bars_urgent_state() {
         let mut h = session();
         let config = [
@@ -5388,13 +5426,20 @@ mod tests {
             assert!(
                 snapshot
                     .lines()
-                    .find(|s| s.starts_with("    * work "))
+                    .find(|s| s.starts_with("  ▾ * work "))
                     .unwrap()
                     .ends_with(word)
             );
             assert!(snapshot.lines().any(|s| s.starts_with("      *claude* ")
                 && s.contains("Opus 5.5 · High")
                 && s.ends_with(if step == 2 { word } else { "● working" })));
+            h.keys("p TAB");
+            assert!(
+                h.text().lines().any(|s| s.starts_with("▸ ")
+                    && s.contains(" · 1 workspace")
+                    && s.ends_with(word))
+            );
+            h.keys("TAB n");
             let dark = h.core.settings.theme.clone();
             for light in [false, true] {
                 h.core.settings.theme = dark.clone();
@@ -5441,7 +5486,7 @@ mod tests {
                 assert!(
                     h.text()
                         .lines()
-                        .find(|s| s.starts_with("    * work "))
+                        .find(|s| s.starts_with("  ▾ * work "))
                         .unwrap()
                         .ends_with("● exited")
                 );

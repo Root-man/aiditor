@@ -832,6 +832,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn workspace_list_tab_keeps_selection_and_restores_children(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "body");
+        cx.simulate_keystrokes("ctrl-x t l");
+        let original = editor.read_with(cx, |e, _| e.core.text());
+        assert!(original.lines().any(|s| s.starts_with("  ▾ * ")));
+        cx.simulate_keystrokes("tab");
+        let folded = editor.read_with(cx, |e, _| e.core.text());
+        assert!(folded.lines().any(|s| s.starts_with("  ▸ * ")));
+        editor.update(cx, |e, _| {
+            let display = e.core.frame().windows.remove(0).display;
+            let (line, col) = display.cursor.unwrap();
+            assert_eq!(col, 6);
+            assert!(
+                display.lines[line]
+                    .spans
+                    .iter()
+                    .any(|s| s.text.contains("* "))
+            );
+            assert!(display.lines[line].decorations.contains(
+                &aiditor_core::buffer::Decoration::Background(
+                    aiditor_core::settings::FaceName::CompletionSelected
+                )
+            ));
+        });
+        cx.simulate_keystrokes("tab");
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), original);
+        cx.simulate_keystrokes("p tab");
+        assert!(
+            editor
+                .read_with(cx, |e, _| e.core.text())
+                .lines()
+                .any(|s| s.starts_with("▸ ") && s.contains(" · 1 workspace"))
+        );
+        cx.simulate_keystrokes("enter");
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "body");
+    }
+
+    #[gpui::test]
     fn typing_goes_through_the_text_input(cx: &mut TestAppContext) {
         let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");

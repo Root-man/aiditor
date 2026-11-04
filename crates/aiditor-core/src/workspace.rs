@@ -839,12 +839,13 @@ mod tests {
             [
                 "Workspaces — RET switch, n/p move, q quit".into(),
                 "".into(),
-                "one /aiditor-test/one".into(),
-                "a 1 buffer".into(),
+                "▾ one /aiditor-test/one".into(),
+                "▸ a 1 buffer".into(),
+                "".into(),
+                "▾ two /aiditor-test/two".into(),
+                "▾ * b 1 buffer".into(),
                 "*scratch*".into(),
-                "two /aiditor-test/two".into(),
-                "* b 1 buffer".into(),
-                "*scratch*".into(),
+                "".into(),
                 "app /aiditor-test/app · no workspaces".into(),
                 format!(
                     "home {} · no workspaces",
