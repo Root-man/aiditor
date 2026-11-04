@@ -399,6 +399,8 @@ pub enum Effect {
     SetClipboard(String),
     /// Open this file in the system's default app for it.
     OpenWithSystem(PathBuf),
+    /// Open this web URL in the system's default browser.
+    OpenUrl(String),
     /// Quit the app.
     Quit,
 }

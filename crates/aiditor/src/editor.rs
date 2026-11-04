@@ -480,6 +480,7 @@ impl Editor {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
                 Effect::OpenWithSystem(path) => cx.open_with_system(&path),
+                Effect::OpenUrl(url) => cx.open_url(&url),
                 Effect::Recovery(op) => {
                     let failure = if let Some((tx, _)) = &self.recovery {
                         tx.send(op)

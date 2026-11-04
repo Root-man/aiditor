@@ -50,7 +50,10 @@ impl Driver {
                 }
                 Effect::Grep(GrepOp::Cancel) => {}
                 Effect::Watch(set) => self.watched = set,
-                Effect::Recovery(_) | Effect::SetClipboard(_) | Effect::OpenWithSystem(_) => {}
+                Effect::Recovery(_)
+                | Effect::SetClipboard(_)
+                | Effect::OpenWithSystem(_)
+                | Effect::OpenUrl(_) => {}
                 Effect::Quit => self.quit = true,
                 Effect::LoadConfiguration { .. } | Effect::CaptureEnvironment { .. } => {
                     panic!("unexpected effect in service test")

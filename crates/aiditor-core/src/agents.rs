@@ -1628,20 +1628,16 @@ impl Ctx<'_> {
         })
     }
 
-    /// The file and line, from 1, of the link point is on: a tool call header's, else the word's.
-    fn link_at_point(&self) -> Option<(PathBuf, Option<usize>)> {
+    /// Point's line and its byte offset in it, when point is on a link above the prompt.
+    fn linked_line(&self) -> Option<(String, usize)> {
         let core = &*self.core;
         let (point, buffer) = (core.point(), core.windows.window.buffer());
         let b = core.buffers.get(buffer)?;
-        let session = core.agents.values().find(|s| s.buffer == buffer)?;
         let link = FaceRef::Face(FaceName::Link);
         let linked = (b.properties_near(point..point).into_iter())
             .any(|(r, p)| r.contains(&point) && matches!(p, Prop::Named(f) if f.contains(&link)));
         if !linked || point >= b.prompt_start() {
             return None;
-        }
-        if let Some((_, call)) = self.tool_at_point() {
-            return session.tools[&call].link.clone();
         }
         let text = b.text();
         let start = text.line_to_char(text.char_to_line(point));
@@ -1650,6 +1646,36 @@ impl Ctx<'_> {
             .char_indices()
             .nth(point - start)
             .map_or(line.len(), |(i, _)| i);
+        Some((line, at))
+    }
+
+    /// The URL of the link point is on, when it has a scheme; a relative destination is left
+    /// to file links.
+    fn url_at_point(&self) -> Option<String> {
+        if self.tool_at_point().is_some() {
+            return None;
+        }
+        let (line, at) = self.linked_line()?;
+        let url = markdown::url_at(&line, at)?;
+        // A scheme is a letter, then letters, digits, `+`, `-` or `.`, before a `:` that isn't
+        // a `path:line`'s.
+        let (scheme, rest) = url.split_once(':')?;
+        let scheme_chars = |c: char| c.is_ascii_alphanumeric() || "+-.".contains(c);
+        let is_scheme = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme.chars().all(scheme_chars)
+            && !rest.starts_with(|c: char| c.is_ascii_digit());
+        is_scheme.then_some(url)
+    }
+
+    /// The file and line, from 1, of the link point is on: a tool call header's, else the word's.
+    fn link_at_point(&self) -> Option<(PathBuf, Option<usize>)> {
+        let (line, at) = self.linked_line()?;
+        let core = &*self.core;
+        let buffer = core.windows.window.buffer();
+        let session = core.agents.values().find(|s| s.buffer == buffer)?;
+        if let Some((_, call)) = self.tool_at_point() {
+            return session.tools[&call].link.clone();
+        }
         let word = markdown::words(&line)
             .into_iter()
             .find(|w| w.contains(&at))?;
@@ -1701,7 +1727,7 @@ impl Ctx<'_> {
     }
 
     /// `agent-send-input`: on a pending permission request's option line, answers it with that
-    /// option; on a file link, visits the file in another window; on a tool call's header, shows
+    /// option; on a web link, opens it in the browser; on a file link, visits the file in another window; on a tool call's header, shows
     /// its full output; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
     /// new prompt line.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
@@ -1727,6 +1753,13 @@ impl Ctx<'_> {
             }
             self.other_window(1)?;
             return self.find_file_at(&path, 0, 0);
+        }
+        if let Some(url) = self.url_at_point() {
+            if !markdown::is_web(&url) {
+                return Err(format!("Not a web link: {url}"));
+            }
+            self.effects.push(Effect::OpenUrl(url));
+            return Ok(());
         }
         if let Some((path, line)) = self.link_at_point() {
             if self.core.windows.tree.leaves().len() == 1 {
@@ -4624,6 +4657,64 @@ mod tests {
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
         assert_eq!(h.core.current().file, Some(h.path("app/src/a.rs")));
         assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
+    }
+
+    #[test]
+    fn ret_on_a_web_link_opens_it_in_the_browser() {
+        let mut h = indexed_session();
+        h.keys("a RET");
+        chunk(
+            &mut h,
+            "See [docs](https://x.dev), <https://x.dev/a>, [run](file:///bin/sh) and src/a.rs:3.",
+        );
+        h.joined_frame(800., 600.);
+        ops(&mut h);
+        let opened = |h: &mut Harness| {
+            let urls: Vec<_> = (h.effects.drain(..))
+                .filter_map(|e| match e {
+                    Effect::OpenUrl(url) => Some(url),
+                    _ => None,
+                })
+                .collect();
+            urls
+        };
+        point_in(&mut h, "docs", 1);
+        h.keys("RET");
+        assert_eq!(opened(&mut h), ["https://x.dev"]);
+        point_in(&mut h, "x.dev/a", 1);
+        h.keys("RET");
+        assert_eq!(opened(&mut h), ["https://x.dev/a"]);
+        point_in(&mut h, "run", 1);
+        h.keys("RET");
+        assert!(opened(&mut h).is_empty());
+        assert_eq!(
+            h.core.message.as_deref(),
+            Some("Not a web link: file:///bin/sh")
+        );
+        assert!(ops(&mut h).is_empty(), "nothing is sent, and no busy echo");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        chunk(&mut h, "now https://y.dev/b.");
+        h.joined_frame(800., 600.);
+        assert!(linked(&mut h, "https://y.dev/b"));
+        point_in(&mut h, "y.dev/b", 1);
+        h.keys("RET");
+        assert_eq!(opened(&mut h), ["https://y.dev/b"]);
+        assert_eq!(h.core.windows.tree.leaves().len(), 1, "no split");
+        point_in(&mut h, "src/a.rs:3", 2);
+        h.keys("RET");
+        assert_eq!(
+            h.core.current().file,
+            Some(h.path("app/src/a.rs")),
+            "files still visit"
+        );
+    }
+
+    #[test]
+    fn ret_on_a_url_in_the_prompt_sends_it() {
+        let mut h = session();
+        h.keys("https://x.dev RET");
+        assert!(!h.effects.iter().any(|e| matches!(e, Effect::OpenUrl(_))));
+        assert_eq!(ops(&mut h).len(), 1, "the prompt is sent");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::settings::FaceName;
 
 /// The properties that show `text` as rendered markdown, in char offsets of `text`, sorted by
 /// start then end. Faces and hidden markup never overlap, and code blocks decorate whole lines,
-/// so starts and ends both ascend. Words `is_file` accepts are links. In a tool call's `body` a
+/// so starts and ends both ascend. Words `is_file` accepts and bare web URLs are links. In a tool call's `body` a
 /// fence line takes no row: it hides with the newline joining it to its block.
 pub(crate) fn render(
     text: &str,
@@ -74,8 +74,12 @@ pub(crate) fn render(
         },
     );
     let link = &[FaceRef::Face(FaceName::Link), FaceRef::Underline][..];
+    let mut spans = Vec::new();
     for inline in tree.inline_trees() {
         walk(inline.root_node(), &mut |node| {
+            if node.kind() == "code_span" {
+                spans.push(node.byte_range());
+            }
             let (face, markup) = match node.kind() {
                 "emphasis" => (&[FaceRef::Italic][..], "emphasis_delimiter"),
                 "strong_emphasis" => (&[FaceRef::Bold][..], "emphasis_delimiter"),
@@ -109,6 +113,12 @@ pub(crate) fn render(
         (words(text).into_iter())
             .filter(|w| is_file(&text[w.clone()]))
             .map(|w| (w, link)),
+    );
+    // Code shows a URL as written, as GFM doesn't autolink there; file paths in code still link.
+    faces.extend(
+        (web_urls(text).into_iter())
+            .filter(|u| !code.iter().chain(&spans).any(|c| c.contains(&u.start)))
+            .map(|u| (u, link)),
     );
     // The old per-piece `covers` test never matched an empty range.
     faces.retain(|(r, _)| !r.is_empty());
@@ -195,6 +205,70 @@ pub(crate) fn words(text: &str) -> Vec<Range<usize>> {
         }
     }
     words
+}
+
+/// Whether `url` is an `http` or `https` URL, the only kind a link opens.
+pub(crate) fn is_web(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") && !rest.is_empty()
+}
+
+/// The byte ranges of `text`'s bare web URLs, ended as GFM's extended autolinks are: at
+/// whitespace, quotes, backticks, angle or square brackets and braces, without trailing
+/// punctuation or a `)` that opens nothing in the URL, so `(…/Emacs_(text_editor))` keeps one.
+pub(crate) fn web_urls(text: &str) -> Vec<Range<usize>> {
+    let mut urls = Vec::new();
+    let mut from = 0;
+    while let Some(start) = text[from..].find("http").map(|i| from + i) {
+        let stop = |c: char| c.is_whitespace() || "<>\"'`[]{}".contains(c);
+        let end = text[start..].find(stop).map_or(text.len(), |i| start + i);
+        from = end.max(start + 4);
+        let mut url = &text[start..end];
+        loop {
+            let trimmed = url.trim_end_matches(['.', ',', ':', ';', '!', '?', '*', '_', '~']);
+            let trimmed = match trimmed.strip_suffix(')') {
+                Some(t) if trimmed.matches(')').count() > trimmed.matches('(').count() => t,
+                _ => trimmed,
+            };
+            if trimmed.len() == url.len() {
+                break;
+            }
+            url = trimmed;
+        }
+        let word_start = !text[..start].ends_with(|c: char| c.is_alphanumeric());
+        if word_start && is_web(url) {
+            urls.push(start..start + url.len());
+        }
+    }
+    urls
+}
+
+/// The URL of the link holding byte `at` of `line`: an inline link's destination, an
+/// autolink's text, else a bare web URL word.
+// shortcut: parses one line, so a link whose label wraps opens only from its destination's
+// line; parse the whole block if that shows up.
+pub(crate) fn url_at(line: &str, at: usize) -> Option<String> {
+    let tree = MarkdownParser::default().parse(line.as_bytes(), None)?;
+    let mut url = None;
+    for inline in tree.inline_trees() {
+        walk(inline.root_node(), &mut |node| {
+            if url.is_some() || !node.byte_range().contains(&at) {
+                return;
+            }
+            url = match node.kind() {
+                "uri_autolink" => Some(line[node.start_byte() + 1..node.end_byte() - 1].into()),
+                "inline_link" => (children(node).find(|c| c.kind() == "link_destination"))
+                    .map(|d| line[d.byte_range()].into()),
+                _ => None,
+            };
+        });
+    }
+    url.or_else(|| {
+        let found = web_urls(line).into_iter().find(|u| u.contains(&at));
+        found.map(|u| line[u].into())
+    })
 }
 
 fn children<'a>(node: Node<'a>) -> impl Iterator<Item = Node<'a>> {
@@ -364,6 +438,51 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn bare_web_urls_are_links() {
+        let link = face(
+            Settings::default().theme.face(FaceName::Link).fg,
+            false,
+            false,
+            true,
+        );
+        let (_, faces) = shown("See https://x.dev/docs. Not ftp://x.dev/file", false);
+        assert_eq!(faces, [("https://x.dev/docs".into(), link)]);
+        let wiki = "https://en.wikipedia.org/wiki/Emacs_(text_editor)";
+        let (_, faces) = shown(&format!("({wiki}), `https://x.dev/code`"), false);
+        assert_eq!(faces[0], (wiki.into(), link));
+        assert!(
+            !faces.iter().any(|(t, f)| t.contains("code") && f.underline),
+            "not in code"
+        );
+        let (_, faces) = shown("```\nhttps://x.dev/block\n```\n", false);
+        assert!(
+            !faces.iter().any(|(_, f)| f.underline),
+            "nor in a code block"
+        );
+        assert_eq!(
+            web_urls("xhttps://a.b [https://c.d] https://e.f/(g)h). https://"),
+            [14..25, 27..43]
+        );
+    }
+
+    #[test]
+    fn url_at_finds_link_destinations_autolinks_and_bare_urls() {
+        let line =
+            "a [docs](https://x.dev) <http://y.dev/a> https://z.dev/b. [f](file:///bin/sh) c";
+        let at = |s: &str| line.find(s).unwrap();
+        assert_eq!(url_at(line, at("docs")).as_deref(), Some("https://x.dev"));
+        assert_eq!(url_at(line, at("y.dev")).as_deref(), Some("http://y.dev/a"));
+        assert_eq!(
+            url_at(line, at("z.dev")).as_deref(),
+            Some("https://z.dev/b")
+        );
+        assert_eq!(url_at(line, at("f]")).as_deref(), Some("file:///bin/sh"));
+        assert_eq!(url_at(line, 0), None);
+        assert_eq!(url_at(line, line.len() - 1), None);
+        assert!(is_web("HTTPS://x.dev") && !is_web("file:///bin/sh") && !is_web("src/a.rs"));
     }
 
     #[test]
