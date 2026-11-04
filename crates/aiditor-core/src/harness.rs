@@ -178,6 +178,14 @@ impl Harness {
         self
     }
 
+    /// Sends the frontend's clock as `HH:MM:SS`.
+    pub fn clock(&mut self, time: &str) -> &mut Self {
+        let secs = time
+            .split(':')
+            .fold(0, |t, n| t * 60 + n.parse::<u64>().expect("HH:MM:SS"));
+        self.send(Msg::Clock(Duration::from_secs(secs)))
+    }
+
     /// Sends `msg`, delivering configured replies and collecting unanswered effects.
     pub fn send(&mut self, msg: Msg) -> &mut Self {
         let effects = self.core.handle(self.now, msg);

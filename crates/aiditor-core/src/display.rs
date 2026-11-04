@@ -522,12 +522,29 @@ pub fn build(
         aligned: false,
         icons: Vec::new(),
     };
-    // The face of the char at `at`: its syntax, then its properties, then the region.
+    // A background decoration's face, less its background, sits under its line's text.
+    let line_faces: Vec<(usize, Face)> = (props.iter())
+        .filter_map(|(range, prop)| match prop {
+            Prop::Line(Decoration::Background(name)) => {
+                let face = settings.theme.face(*name);
+                (face.fg.is_some() || face.bold)
+                    .then(|| (text.char_to_line(range.start), Face { bg: None, ..face }))
+            }
+            _ => None,
+        })
+        .collect();
+    // The face of the char at `at`: its line's, its syntax, then its properties, then the region.
     let face_at = |at: usize| {
         let i = syntax.partition_point(|(range, _)| range.end <= at);
         let mut face = (syntax.get(i))
             .filter(|(range, _)| range.start <= at)
             .map_or(Face::default(), |(_, face)| *face);
+        if !line_faces.is_empty() {
+            let line = text.char_to_line(at);
+            if let Some((_, under)) = line_faces.iter().find(|(l, _)| *l == line) {
+                face = face.over(*under);
+            }
+        }
         for (range, prop) in &props {
             if !range.contains(&at) {
                 continue;
@@ -638,9 +655,15 @@ pub fn build(
                 // A wrapped top line shown from `from` has used those columns too.
                 let before = col + if lines.is_empty() { from } else { 0 };
                 let used = before + 1 + rest(range.end);
-                let fits = used <= row_width;
+                // An indented line is drawn that many columns in, so it ends that much sooner.
+                let indent = buffer.line_indent(text.char_to_line(pos));
+                let fits = used + indent <= row_width;
                 line.aligned |= fits;
-                let spaces = if fits { last_col - used + 1 } else { 1 };
+                let spaces = if fits {
+                    last_col - indent - used + 1
+                } else {
+                    1
+                };
                 Some((
                     range.end,
                     vec![(Cow::from(" ".repeat(spaces)), face_at(pos))],
@@ -1113,11 +1136,20 @@ fn wrap_lines(
                     fold: false,
                 });
             }
+            // A wrapped line's top border goes on its first row, its bottom one on its last.
+            let decorations = (line.decorations.iter())
+                .filter(|d| match d {
+                    Decoration::Border { top: true, .. } => row == 0,
+                    Decoration::Border { top: false, .. } => row == last,
+                    _ => true,
+                })
+                .copied()
+                .collect();
             out.push(Line {
                 number: line.number,
                 height: line.height,
                 spans,
-                decorations: line.decorations.clone(),
+                decorations,
                 aligned: line.aligned,
                 icons,
             });
@@ -1547,6 +1579,15 @@ mod tests {
     }
 
     #[test]
+    fn an_indented_right_aligned_line_ends_in_the_last_column_too() {
+        let mut h = aligned("ab 12s\nnext\n", 2);
+        prop(&mut h, 0..1, Prop::Line(Decoration::Indent(2)));
+        let padded = format!("ab{}12s", " ".repeat(13));
+        assert_eq!(rows_at(&h, 20, false, 0)[0], padded);
+        assert_eq!(rows_at(&h, 20, true, 0)[0], padded);
+    }
+
+    #[test]
     fn a_line_too_long_keeps_one_space() {
         // In a row exactly, the one space is all the room there is.
         let h = aligned("ab 12s\n", 2);
@@ -1663,6 +1704,27 @@ mod tests {
         let id = h.core.windows.window.buffer();
         let buffer = h.core.buffers.get_mut(id).unwrap();
         buffer.add_property(range, prop).unwrap();
+    }
+
+    #[test]
+    fn a_wrapped_line_keeps_its_borders_on_its_first_and_last_rows() {
+        let mut h = Harness::new(&[("a.rs", &format!("{}\n", "x".repeat(100)))]);
+        h.open("a.rs");
+        let border = |top| Decoration::Border {
+            top,
+            face: FaceName::SessionUserRule,
+        };
+        prop(&mut h, 0..1, Prop::Line(border(true)));
+        prop(&mut h, 0..1, Prop::Line(border(false)));
+        let wrap = super::Wrap {
+            width: 40,
+            word: false,
+            from: 0,
+        };
+        let (b, s) = (h.core.current(), h.core.settings());
+        let d = super::build(b, 0, 5, 0, None, s, 0..400, Some(wrap), &[], None);
+        let rows: Vec<_> = d.lines[..3].iter().map(|l| l.decorations.clone()).collect();
+        assert_eq!(rows, [vec![border(true)], vec![], vec![border(false)]]);
     }
 
     #[test]
@@ -1860,6 +1922,16 @@ mod tests {
             6..7,
             Prop::Line(Decoration::Rule(FaceName::SessionThought)),
         );
+        let top = Decoration::Border {
+            top: true,
+            face: FaceName::SessionUserRule,
+        };
+        prop(&mut h, 0..1, Prop::Line(top));
+        prop(
+            &mut h,
+            4..5,
+            Prop::Line(Decoration::HRule(FaceName::Separator)),
+        );
         let decorations: Vec<_> = h
             .display(4)
             .lines
@@ -1869,9 +1941,12 @@ mod tests {
         assert_eq!(
             decorations,
             [
-                vec![],
+                vec![top],
                 vec![Decoration::Background(FaceName::SessionBlock)],
-                vec![Decoration::Background(FaceName::SessionBlock)],
+                vec![
+                    Decoration::Background(FaceName::SessionBlock),
+                    Decoration::HRule(FaceName::Separator)
+                ],
                 vec![Decoration::Rule(FaceName::SessionThought)],
             ]
         );

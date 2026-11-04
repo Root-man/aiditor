@@ -149,6 +149,7 @@ pub enum FaceName {
     StatusFailed,
     StatusInfo,
     SessionUser,
+    SessionUserRule,
     SessionThought,
     SessionBlock,
     SessionCode,
@@ -160,6 +161,13 @@ pub enum FaceName {
     Link,
     Attachment,
     MessageAtPoint,
+    QualityPoor,
+    QualityCommon,
+    QualityUncommon,
+    QualityRare,
+    QualityEpic,
+    QualityLegendary,
+    QualityArtifact,
 }
 
 /// A resolved theme: `themes.default` with the selected one merged over it.
@@ -505,6 +513,7 @@ mod tests {
             "status-failed",
             "status-info",
             "session-user",
+            "session-user-rule",
             "session-thought",
             "session-block",
             "session-code",
@@ -516,6 +525,13 @@ mod tests {
             "link",
             "attachment",
             "message-at-point",
+            "quality-poor",
+            "quality-common",
+            "quality-uncommon",
+            "quality-rare",
+            "quality-epic",
+            "quality-legendary",
+            "quality-artifact",
         ];
         let theme = Settings::default().theme;
         assert_eq!(theme.faces.len(), names.len());
@@ -524,7 +540,12 @@ mod tests {
         for name in names {
             let parsed = toml::Value::String(name.into()).try_into().unwrap();
             assert!(theme.faces.contains_key(&parsed), "{name}");
+            if name.starts_with("quality-") || name == "session-user-rule" {
+                assert!(theme.face(parsed).fg.is_some(), "{name}");
+            }
         }
+        let user = theme.face(FaceName::SessionUser);
+        assert!(user.fg.is_some() && user.bg.is_some() && user.bold);
     }
 
     #[test]

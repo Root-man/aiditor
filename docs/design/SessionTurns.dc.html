@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Telling turns apart</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;gap:20px;padding:24px;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px 24px}
+.cell{display:flex;flex-direction:column;gap:6px}
+.cap{color:#ebdbb2;font-weight:700;white-space:pre}
+.cap span{color:#928374;font-weight:400}
+.box{border:1px solid #3c3836;padding:6px 0}
+.r{display:flex;justify-content:space-between;white-space:pre;min-height:21px;padding:0 16px}
+.gap{height:21px}
+.user{background:#32302f}
+.dim{color:#928374}
+.ts{color:#7c6f64;flex:none;padding-left:16px}
+.code{color:#8ec07c}
+.tok{display:inline-block;line-height:17px;padding:0 7px;border:1px solid #504945;border-radius:5px;background:#3c3836;color:#ebdbb2}
+.ic{color:#a89984;margin-right:7px}
+.p{color:#83a598;font-weight:700}
+.sep{height:21px;display:flex;align-items:center;padding:0 16px}
+.sep::before{content:'';flex:1;border-top:1px solid #504945}
+.lr{height:21px;display:flex;align-items:center;padding:0 16px;color:#7c6f64;white-space:pre}
+.lr i{flex:1;border-top:1px solid #504945;margin:0 9px}
+.lr i.s{flex:0 0 18px;margin-left:0}
+.lr i.e{flex:0 0 18px;margin-right:0}
+.who{display:inline-block;width:63px;flex:none}
+.you{color:#83a598;font-weight:700}
+.agent{color:#fe8019}
+.ruled{border-top:1px solid #665c54;border-bottom:1px solid #665c54}
+.ind{margin-left:27px;padding-left:12px;border-left:1px solid #504945}
+.mlbar{display:flex;flex-direction:column;gap:6px}
+.ml{height:26px;line-height:26px;display:flex;justify-content:space-between;padding:0 16px;background:#3c3836;white-space:pre}
+.bar{color:#504945}
+.lab{color:#928374;display:inline-block;width:72px}
+.q-poor{color:#928374}.q-common{color:#ebdbb2}.q-uncommon{color:#b8bb26}.q-rare{color:#83a598}.q-epic{color:#d3869b}.q-legendary{color:#fe8019}.q-artifact{color:#e6cc80}
+.ctx-ok{color:#b8bb26}.ctx-warn{color:#fabd2f}.ctx-full{color:#fb4934}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div class="grid">
+
+    <div class="cell">
+      <div class="cap">A  Rule between turns</div>
+      <div class="box">
+        <div class="r"><span>Moved the status after the last batch; tests pass.</span><span></span></div>
+        <div class="r"><span class="dim">Worked 2m 05s</span><span class="ts">13:58:12</span></div>
+        <div class="sep"></div>
+        <div class="r user"><span><span class="p">❯ </span>Show that a project grep is running, as #338 says.</span><span class="ts">14:01:05</span></div>
+        <div class="r user"><span>  Start from <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+        <div class="gap"></div>
+        <div class="r"><span class="dim">▸ Read files, searched code</span><span class="ts">0.6s  14:01:09</span></div>
+        <div class="r"><span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>.</span><span></span></div>
+      </div>
+    </div>
+
+    <div class="cell">
+      <div class="cap">B  Labelled rule  <span>turn number and start time live on the rule</span></div>
+      <div class="box">
+        <div class="r"><span>Moved the status after the last batch; tests pass.</span><span></span></div>
+        <div class="r"><span class="dim">Worked 2m 05s</span><span></span></div>
+        <div class="lr"><i class="s"></i>turn 3<i></i>14:01:05<i class="e"></i></div>
+        <div class="r user"><span><span class="p">❯ </span>Show that a project grep is running, as #338 says.</span><span></span></div>
+        <div class="r user"><span>  Start from <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+        <div class="gap"></div>
+        <div class="r"><span class="dim">▸ Read files, searched code</span><span class="ts">0.6s  14:01:09</span></div>
+        <div class="r"><span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>.</span><span></span></div>
+      </div>
+    </div>
+
+    <div class="cell">
+      <div class="cap">C  Speaker gutter  <span>who speaks, on each message's first line</span></div>
+      <div class="box">
+        <div class="r"><span><span class="who"></span>Moved the status after the last batch; tests pass.</span><span></span></div>
+        <div class="r"><span><span class="who"></span><span class="dim">Worked 2m 05s</span></span><span class="ts">13:58:12</span></div>
+        <div class="gap"></div>
+        <div class="r user"><span><span class="who you">you</span>Show that a project grep is running, as #338 says.</span><span class="ts">14:01:05</span></div>
+        <div class="r user"><span><span class="who"></span>Start from <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+        <div class="gap"></div>
+        <div class="r"><span><span class="who agent">claude</span><span class="dim">▸ Read files, searched code</span></span><span class="ts">0.6s  14:01:09</span></div>
+        <div class="r"><span><span class="who"></span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>.</span><span></span></div>
+      </div>
+    </div>
+
+    <div class="cell">
+      <div class="cap">D  Ruled prompt band  <span>used in frame 6, with F</span></div>
+      <div class="box">
+        <div class="r"><span>Moved the status after the last batch; tests pass.</span><span></span></div>
+        <div class="r"><span class="dim">Worked 2m 05s</span><span class="ts">13:58:12</span></div>
+        <div class="gap"></div>
+        <div class="ruled">
+          <div class="r user"><span><span class="p">❯ </span><span style="color: #fbf1c7; font-weight: 700">Show that a project grep is running, as #338 says.</span></span><span class="ts">14:01:05</span></div>
+          <div class="r user"><span>  <span style="color: #fbf1c7; font-weight: 700">Start from</span> <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+        </div>
+        <div class="gap"></div>
+        <div class="r"><span class="dim">▸ Read files, searched code</span><span class="ts">0.6s  14:01:09</span></div>
+        <div class="r"><span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>.</span><span></span></div>
+      </div>
+    </div>
+
+    <div class="cell">
+      <div class="cap">E  Indented replies  <span>the agent's work hangs under the prompt</span></div>
+      <div class="box">
+        <div class="r"><span class="ind">Moved the status after the last batch; tests pass.</span><span></span></div>
+        <div class="r"><span class="ind dim">Worked 2m 05s</span><span class="ts">13:58:12</span></div>
+        <div class="gap"></div>
+        <div class="r user"><span><span class="p">❯ </span>Show that a project grep is running, as #338 says.</span><span class="ts">14:01:05</span></div>
+        <div class="r user"><span>  Start from <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+        <div class="r"><span class="ind"> </span><span></span></div>
+        <div class="r"><span class="ind dim">▸ Read files, searched code</span><span class="ts">0.6s  14:01:09</span></div>
+        <div class="r"><span class="ind">Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>.</span><span></span></div>
+      </div>
+    </div>
+
+    <div class="cell">
+      <div class="cap">F  Summary rule  <span>used in frame 6, with D</span></div>
+      <div class="box">
+        <div class="r"><span>Moved the status after the last batch; tests pass.</span><span></span></div>
+        <div class="lr"><i class="s"></i>Worked 2m 05s · 14 tools<i></i>13:58:12<i class="e"></i></div>
+        <div class="gap"></div>
+        <div class="r user"><span><span class="p">❯ </span>Show that a project grep is running, as #338 says.</span><span class="ts">14:01:05</span></div>
+        <div class="r user"><span>  Start from <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
+        <div class="gap"></div>
+        <div class="r"><span class="dim">▸ Read files, searched code</span><span class="ts">0.6s  14:01:09</span></div>
+        <div class="r"><span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>.</span><span></span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="mlbar">
+    <div class="cap">Mode line colours  <span>model and effort by item quality, context by how full it is</span></div>
+    <div class="ml">
+      <span><span class="lab">claude</span><span class="q-legendary">Fable 5.1</span><span class="bar">  │  </span><span class="q-epic">Opus 5.5</span><span class="bar">  │  </span><span class="q-rare">Sonnet 5.5</span><span class="bar">  │  </span><span class="q-uncommon">Haiku 5.5</span></span>
+      <span><span class="lab">effort</span><span class="q-poor">default</span><span class="bar">  │  </span><span class="q-common">low</span><span class="bar">  │  </span><span class="q-uncommon">medium</span><span class="bar">  │  </span><span class="q-rare">high</span><span class="bar">  │  </span><span class="q-epic">xhigh</span><span class="bar">  │  </span><span class="q-legendary">max</span><span class="bar">  │  </span><span class="q-artifact">ultra</span></span>
+    </div>
+    <div class="ml">
+      <span><span class="lab">codex</span><span class="q-legendary">6 Astra</span><span class="bar">  │  </span><span class="q-epic">6.1 Sol</span><span class="bar">  │  </span><span class="q-rare">5.6 Terra</span><span class="bar">  │  </span><span class="q-uncommon">6 Luna</span></span>
+      <span><span class="lab">context</span><span class="ctx-ok">ctx 12%</span><span class="bar">  │  </span><span class="ctx-warn">ctx 64%</span><span class="bar">  │  </span><span class="ctx-full">ctx 91%</span></span>
+    </div>
+    <div class="ml">
+      <span style="font-weight: 700"><span class="q-legendary">Fable 5.1</span><span class="dim"> · </span><span class="q-legendary">max</span><span class="bar">  │  </span><span style="color: #b8bb26; font-weight: 400">auto</span></span>
+      <span style="font-weight: 700"><span class="q-uncommon">6 Luna</span><span class="dim"> · </span><span class="q-common">low</span><span class="bar">  │  </span><span style="color: #b8bb26; font-weight: 400">workspace-write</span></span>
+      <span><span style="color: #fabd2f">● working</span><span class="bar">  │  </span><span class="ctx-full">ctx 87%</span></span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

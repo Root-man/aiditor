@@ -402,6 +402,13 @@ pub enum Decoration {
     Bar(FaceName),
     /// The line's text, and its background, start this many columns in, which it wraps short of.
     Indent(usize),
+    /// A 1 px line across the window at the line's top, or else its bottom.
+    Border {
+        top: bool,
+        face: FaceName,
+    },
+    /// A 1 px line through the middle of the line, where it has no text.
+    HRule(FaceName),
 }
 
 /// An icon from the set bundled with the frontend.

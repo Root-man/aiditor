@@ -62,19 +62,28 @@ pub(super) fn prompt_glyph(buffer: &mut Buffer, at: usize) {
     (buffer.add_property(at..at + 1, prop)).expect("the prompt's `>`");
 }
 
-/// Puts the `session-user` background on each line of an echo starting inside `range`, its first
-/// char included only when `first`. A one-char range per line keeps the properties sorted.
-pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>, first: bool) {
+/// Puts the `session-user` background on each line of the echo at `range`, a top border on its
+/// first and a bottom one on its last. A one-char range per line keeps the properties sorted.
+pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
     let text = buffer.text().slice(range.clone()).to_string();
     let after_newlines = text.chars().enumerate().filter(|(_, c)| *c == '\n');
-    let starts = (first.then_some(0).into_iter())
-        .chain(after_newlines.map(|(i, _)| i + 1))
-        .filter(|&i| i < text.chars().count());
+    let starts: Vec<_> = (std::iter::once(0).chain(after_newlines.map(|(i, _)| i + 1)))
+        .filter(|&i| i < text.chars().count())
+        .map(|i| range.start + i)
+        .collect();
+    let border = |top| {
+        let face = FaceName::SessionUserRule;
+        Prop::Line(Decoration::Border { top, face })
+    };
     let background = Prop::Line(Decoration::Background(FaceName::SessionUser));
-    for i in starts.collect::<Vec<_>>() {
-        let at = range.start + i;
+    for &at in &starts {
         (buffer.add_property(at..at + 1, background.clone())).expect("inside the echo");
     }
+    let (Some(&first), Some(&last)) = (starts.first(), starts.last()) else {
+        return;
+    };
+    (buffer.add_property(first..first + 1, border(true))).expect("inside the echo");
+    (buffer.add_property(last..last + 1, border(false))).expect("inside the echo");
 }
 
 /// `12s`, `2m 05s` or `1h 02m 05s`.

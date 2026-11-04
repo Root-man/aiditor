@@ -87,8 +87,8 @@ pub struct FileEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
     Key(Key),
-    /// The local time as `HH:MM`, sent as the frontend's clock changes; the core stamps with it.
-    Clock(String),
+    /// The local time since midnight, sent at startup and each minute; the core stamps with it.
+    Clock(Duration),
     /// Text from the platform's text input, each char typed as a plain key. `replace`, in UTF-16
     /// code units, is text an input method rewrites, deleted first.
     Insert {
@@ -855,7 +855,7 @@ impl Ctx<'_> {
                 result,
                 direnv,
             } => self.environment_captured(project, request, result, direnv),
-            Msg::Clock(text) => self.core.clock = Some(text),
+            Msg::Clock(time) => self.core.clock = Some((time, self.now)),
             Msg::Tick => {}
         }
     }
@@ -966,8 +966,8 @@ pub struct Core {
     pending: Vec<Key>,
     /// The timer that shows the hint for `pending`.
     hint_timer: Option<TimerId>,
-    /// The frontend's clock, `HH:MM`, once it has sent one.
-    clock: Option<String>,
+    /// The frontend's last time since midnight and when it came, once it has sent one.
+    clock: Option<(Duration, Instant)>,
     /// The time of the last `handle`, for what happens outside it, like a frame.
     now: Option<Instant>,
     /// The repeating timer that wakes the core while a shown session has something ticking.
@@ -1208,9 +1208,16 @@ impl Core {
         self.timers.next_deadline()
     }
 
-    /// The clock text the frontend last sent.
-    pub fn clock(&self) -> Option<&str> {
-        self.clock.as_deref()
+    /// The local time as `HH:MM:SS`, counted on from the frontend's last clock.
+    pub fn clock(&self) -> Option<String> {
+        let (time, at) = self.clock?;
+        let s = (time + self.now?.saturating_duration_since(at)).as_secs();
+        Some(format!(
+            "{:02}:{:02}:{:02}",
+            s / 3600 % 24,
+            s / 60 % 60,
+            s % 60
+        ))
     }
 
     pub fn current(&self) -> &Buffer {
