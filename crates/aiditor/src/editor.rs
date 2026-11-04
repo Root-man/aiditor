@@ -876,6 +876,34 @@ mod tests {
         cx.run_until_parked();
         let snapshot = editor.read_with(cx, |e, _| e.core.text());
         let point = editor.read_with(cx, |e, _| e.core.point());
+        let expected_rows = snapshot.lines().count();
+        for font_size in [12., 28.] {
+            editor.update(cx, |e, cx| {
+                e.handle(
+                    Msg::SettingsLoaded(Ok(Some(format!("font_size = {font_size}")))),
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            editor.update(cx, |e, _| {
+                for window in e.core.frame().windows {
+                    assert_eq!(
+                        window
+                            .display
+                            .lines
+                            .iter()
+                            .map(|l| l.number)
+                            .collect::<Vec<_>>(),
+                        (0..expected_rows).collect::<Vec<_>>()
+                    );
+                }
+            });
+            editor.read_with(cx, |e, _| {
+                for window in &e.painted {
+                    assert_eq!(window.rows.len(), expected_rows);
+                }
+            });
+        }
         editor.read_with(cx, |e, _| {
             for window in &e.painted {
                 assert!((window.bounds.size.width - px(449.5)).abs() < px(10.));
@@ -903,12 +931,16 @@ mod tests {
                 }
             }
         });
+        editor.update(cx, |e, cx| {
+            e.handle(Msg::SettingsLoaded(Ok(Some("font_size = 16".into()))), cx)
+        });
         cx.simulate_resize(gpui::size(px(3000.), px(600.)));
         cx.run_until_parked();
         editor.read_with(cx, |e, _| {
             assert_eq!(e.core.text(), snapshot);
             assert_eq!(e.core.point(), point);
             for window in &e.painted {
+                assert_eq!(window.rows.len(), expected_rows);
                 assert!(window.mode_line.text.contains("projects"));
                 assert!(
                     window
@@ -930,6 +962,7 @@ mod tests {
         cx.run_until_parked();
         editor.read_with(cx, |e, _| {
             for window in &e.painted {
+                assert_eq!(window.rows.len(), expected_rows - 1);
                 assert!(
                     window
                         .rows

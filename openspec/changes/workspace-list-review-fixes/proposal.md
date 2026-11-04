@@ -10,6 +10,7 @@ Review of the workspace list found distracting internal buffers, lost session la
 - Retain session model/effort item-quality faces from the shared session helper.
 - Bind `g` to refresh, show its hint, and preserve selected row identity in every window sharing the list, including informational buffer rows.
 - Put one real horizontal separator between every pair of adjacent projects, independent of folds and emptiness.
+- Keep each fitted snapshot row on one visual row at every font/window width, even when ordinary buffers wrap.
 - Update the workspace-list contracts and automate the review cases.
 
 ## Capabilities

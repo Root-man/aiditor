@@ -867,6 +867,90 @@ mod tests {
     }
 
     #[test]
+    fn workspace_list_entries_stay_on_one_visual_row_before_fitting_and_scrolling() {
+        let mut h = workspaces();
+        let project = h.core.current_workspace().project;
+        h.core
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project)
+            .unwrap()
+            .project
+            .primary
+            .path = PathBuf::from(format!("/{}", "long-project-root/".repeat(12)));
+        h.core
+            .workspaces
+            .iter_mut()
+            .find(|w| w.project == project)
+            .unwrap()
+            .name = "long-workspace-name-".repeat(8);
+        h.open(&format!("{}.rs", "long-file-name-".repeat(8)));
+        let (terminal, _) = h.core.create_terminal("long-terminal-name", 2, 10);
+        h.send(crate::Msg::TerminalOutput {
+            id: terminal,
+            bytes: format!("\x1b]133;C;cmdline_url={}\x07", "long-command-".repeat(20))
+                .into_bytes(),
+        });
+        h.keys("C-x t l C-x 3 C-x 3");
+        let snapshot = h.text();
+        let expected: Vec<_> = (0..h.core.current().len_lines()).collect();
+        let point_line = h.core.current().line_col(h.point()).unwrap().0;
+        for font_size in [12., 20., 32.] {
+            h.core.settings.font_size = font_size;
+            for width in [900., 1200., 1800.] {
+                for _ in 0..2 {
+                    h.send(crate::Msg::Resize {
+                        width,
+                        height: 2000.,
+                        cell_width: font_size * 0.6,
+                    });
+                    for window in h.core.frame().windows {
+                        let numbers: Vec<_> =
+                            window.display.lines.iter().map(|l| l.number).collect();
+                        assert_eq!(
+                            numbers, expected,
+                            "font {font_size}, frame {width}, window {}",
+                            window.rect.width
+                        );
+                        let (row, _) = window.display.cursor.expect("point is visible");
+                        assert_eq!(window.display.lines[row].number, point_line);
+                    }
+                    h.keys("M-x toggle-truncate-lines RET");
+                }
+            }
+        }
+        assert_eq!(h.text(), snapshot);
+        h.keys("M-x next-line RET");
+        assert_eq!(
+            h.core.current().line_col(h.point()).unwrap().0,
+            point_line + 1
+        );
+        h.keys("n n");
+        let selected = row(&h);
+        for width in [900., 1200., 900.] {
+            h.send(crate::Msg::Resize {
+                width,
+                height: 140.,
+                cell_width: 19.2,
+            });
+            for window in h.core.frame().windows {
+                let numbers: Vec<_> = window.display.lines.iter().map(|l| l.number).collect();
+                assert_eq!(
+                    numbers,
+                    (numbers[0]..numbers[0] + numbers.len()).collect::<Vec<_>>()
+                );
+                let (at, _) = window
+                    .display
+                    .cursor
+                    .expect("point stays within the viewport");
+                assert!(at < h.core.settings.text_rows(window.rect.height));
+            }
+            assert_eq!(row(&h), selected);
+            assert_eq!(h.core.windows.window.top_row(), 0);
+        }
+    }
+
+    #[test]
     fn fitted_location_cuts_keep_the_retained_segment_faces() {
         let h = workspaces();
         let theme = &h.core.settings.theme;
