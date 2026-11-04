@@ -310,7 +310,7 @@ pub struct Buffer {
     pub major_mode: &'static str,
     /// Names the minor modes' keymaps in `Core`, highest priority first.
     pub minor_modes: Vec<&'static str>,
-    pub(crate) workspace_rows: Vec<(usize, WorkspaceId)>,
+    pub(crate) workspace_rows: Vec<(usize, crate::workspace_list::Row)>,
     /// The point of the last window that stopped showing this buffer, where the next one starts.
     pub point: MarkerId,
     /// In copy mode, each command's marks in the text, sorted by start.

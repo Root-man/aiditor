@@ -831,7 +831,10 @@ mod tests {
         h.keys("C-x t l");
         assert_eq!(
             h.text(),
-            "Workspaces — RET switch, n/p move, q quit\n\none\n└── a\n    └── *scratch*<a>\ntwo\n└── * b\n    └── *scratch*<b>"
+            format!(
+                "Workspaces — RET switch, n/p move, q quit\n\none (/aiditor-test/one)\n└── a\n    └── *scratch*<a>\ntwo (/aiditor-test/two)\n└── * b\n    └── *scratch*<b>\napp (/aiditor-test/app) · no workspaces\nhome ({}) · no workspaces",
+                h.core.projects[0].project.primary.path.display()
+            )
         );
     }
 

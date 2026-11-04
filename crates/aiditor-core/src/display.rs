@@ -828,6 +828,33 @@ pub fn build(
 /// `buffer`'s mode line with point at `line`:`col`, each buffer type adding its segments.
 fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     let segment = |text: &str, face| vec![(text.to_string(), face)];
+    if buffer.major_mode == "workspace-list-mode" {
+        use crate::workspace_list::Row;
+        let projects = buffer
+            .workspace_rows
+            .iter()
+            .filter(|(_, row)| matches!(row, Row::Project(_)))
+            .count();
+        let workspaces = buffer.workspace_rows.len() - projects;
+        let position = buffer
+            .workspace_rows
+            .partition_point(|(row, _)| *row < line)
+            .max(1);
+        return ModeLine {
+            left: vec![
+                segment(&buffer.name, FaceName::ModeLine),
+                segment(
+                    &format!("{projects} projects, {workspaces} workspaces"),
+                    FaceName::ModeLineDim,
+                ),
+            ],
+            right: vec![segment(
+                &format!("{position}/{}", buffer.workspace_rows.len()),
+                FaceName::ModeLine,
+            )],
+            path: None,
+        };
+    }
     let (state, state_face) = match (buffer.read_only, buffer.modified()) {
         (true, _) => ("%%", FaceName::StatusFailed),
         (_, true) => ("**", FaceName::StatusModified),

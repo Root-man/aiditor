@@ -575,7 +575,7 @@ mod tests {
         h.keys("C-x t l M-<");
         assert_eq!(
             h.frame(800., 600.).windows[0].display.mode_line.text(),
-            "%% *Workspaces*  1:0"
+            "*Workspaces* │ 1 projects, 1 workspaces  1/2"
         );
         h.keys("q M-z C-x b *Messages* RET M-<");
         assert_eq!(
