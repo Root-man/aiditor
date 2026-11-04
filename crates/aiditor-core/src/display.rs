@@ -138,7 +138,7 @@ impl ModeLine {
 }
 
 /// `text` less `excess` chars from its start, keeping its end after a `…`; nothing if that is all.
-fn shorten(text: &str, excess: usize) -> String {
+pub(crate) fn shorten(text: &str, excess: usize) -> String {
     let len = text.chars().count();
     match len > excess {
         true => (['…'].into_iter())
@@ -171,7 +171,7 @@ pub(crate) fn share_room(a: usize, b: usize, room: usize) -> (usize, usize) {
 }
 
 /// `spans` cut to `keep` chars, the last being `…`.
-fn cut(spans: Vec<Span>, keep: usize) -> Vec<Span> {
+pub(crate) fn cut(spans: Vec<Span>, keep: usize) -> Vec<Span> {
     if keep >= chars(&spans) {
         return spans;
     }

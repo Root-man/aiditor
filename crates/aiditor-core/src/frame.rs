@@ -208,6 +208,16 @@ impl Core {
                     display.mode_line.right.insert(0, vec![unwatched]);
                 }
                 let bar_cols = ((rect.width - 2. * TEXT_INSET) / cell_width) as usize;
+                if buffers
+                    .get(window.buffer())
+                    .unwrap()
+                    .workspace_list
+                    .is_some()
+                    && (bar_cols < crate::workspace_list::WIDE_COLUMNS
+                        || display.mode_line.text().chars().count() > bar_cols)
+                {
+                    display.mode_line.left.truncate(1);
+                }
                 let mode_line = display.mode_line.draw(bar_cols, selected, &settings.theme);
                 display::FrameWindow {
                     id,
@@ -325,6 +335,9 @@ pub(crate) fn window_display(
     let mut display = display::build(
         buffer, top, drawn, point, mark, settings, shown, wrap, roots, search,
     );
+    if let Some(snapshot) = &buffer.workspace_list {
+        snapshot.fit(&mut display.lines, cols, &settings.theme);
+    }
     if let Some(terminal) = buffer.terminal().filter(|_| !buffer.copy_mode()) {
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }

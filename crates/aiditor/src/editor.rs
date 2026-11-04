@@ -862,6 +862,85 @@ mod tests {
     }
 
     #[gpui::test]
+    fn workspace_list_fits_half_a_900px_frame_and_refits_on_resize(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "body");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("workspace-rename");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("invalid-site-redirects-in-the-user-graphql-server");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("changed");
+        cx.simulate_keystrokes("ctrl-x t l ctrl-x 3");
+        cx.simulate_resize(gpui::size(px(900.), px(600.)));
+        cx.run_until_parked();
+        let snapshot = editor.read_with(cx, |e, _| e.core.text());
+        let point = editor.read_with(cx, |e, _| e.core.point());
+        editor.read_with(cx, |e, _| {
+            for window in &e.painted {
+                assert!((window.bounds.size.width - px(449.5)).abs() < px(10.));
+                assert_eq!(window.mode_line.text.as_ref(), "*Workspaces*");
+                assert!(window.mode_line_right.text.contains('/'));
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.contains("* invalid-site-")
+                            && r.text.text.trim_end().ends_with('…'))
+                );
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.trim_end().ends_with('●'))
+                );
+                for row in &window.rows {
+                    assert!(
+                        row.text.width <= window.bounds.size.width - px(24.),
+                        "{}",
+                        row.text.text
+                    );
+                }
+            }
+        });
+        cx.simulate_resize(gpui::size(px(3000.), px(600.)));
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            assert_eq!(e.core.text(), snapshot);
+            assert_eq!(e.core.point(), point);
+            for window in &e.painted {
+                assert!(window.mode_line.text.contains("projects"));
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.contains("● unsaved"))
+                );
+                assert!(window.rows.iter().any(|r| {
+                    r.text
+                        .text
+                        .contains("invalid-site-redirects-in-the-user-graphql-server")
+                }));
+            }
+        });
+        cx.simulate_resize(gpui::size(px(900.), px(600.)));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), snapshot);
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            for window in &e.painted {
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.starts_with("  ▸ * "))
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
     fn workspace_list_echo_hints_wrap_and_give_messages_and_windows_their_space(
         cx: &mut TestAppContext,
     ) {

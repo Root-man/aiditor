@@ -9,6 +9,8 @@ use crate::{
 };
 use std::path::PathBuf;
 
+pub(crate) const WIDE_COLUMNS: usize = 20 + 1 + 46 + 3 + 26;
+
 struct Entry {
     row: Option<Row>,
     folded: bool,
@@ -30,7 +32,7 @@ impl Row {
 }
 
 impl Entry {
-    fn render(&self, buffer: &mut Buffer) {
+    fn labels(&self) -> (String, String, &[(String, FaceName)]) {
         let mut name = self.name.clone();
         if !self.children.is_empty() {
             let marker = if matches!(self.row, Some(Row::Project(_))) {
@@ -48,6 +50,8 @@ impl Entry {
                 self.children.len(),
                 if self.children.len() == 1 { "" } else { "s" }
             )
+        } else if project && self.children.is_empty() {
+            format!("{} · no workspaces", self.location)
         } else {
             self.location.clone()
         };
@@ -57,9 +61,120 @@ impl Entry {
             &self.state
         };
 
+        (name, location.escape_debug().to_string(), state)
+    }
+
+    fn fit(&self, cols: usize, theme: &crate::settings::Theme) -> Vec<crate::display::Span> {
+        use crate::display::{Span, cut, share_room, shorten};
+        let (name, location, state) = self.labels();
+        let span = |text: String, face| Span {
+            text,
+            face: theme.face(face),
+            fold: false,
+        };
+        let narrow = cols < WIDE_COLUMNS;
+        let mut status = Vec::new();
+        for (text, face) in state {
+            let text = if narrow {
+                match text.chars().next() {
+                    Some('●' | '⊘' | '◉') => text.chars().take(1).collect(),
+                    Some('[') => "⊘".into(),
+                    Some('e') => "●".into(),
+                    _ => text.clone(),
+                }
+            } else {
+                text.clone()
+            };
+            status.push(span(text, *face));
+        }
+        let state_len: usize = status.iter().map(|s| s.text.chars().count()).sum();
+        let project = matches!(self.row, Some(Row::Project(_)));
+        let location = if narrow {
+            if project {
+                self.location.escape_debug().to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            location
+        };
+        let state_width = if narrow {
+            2.max(state_len)
+        } else {
+            26.max(state_len)
+        };
+        let gap = if state_width > 0 {
+            if narrow { 2 } else { 3 }
+        } else {
+            0
+        };
+        let state_width = state_width.min(cols);
+        let room = cols.saturating_sub(state_width + gap);
+        let name_len = name.chars().count();
+        let location_len = location.chars().count();
+        let location_width = if narrow {
+            location_len
+        } else {
+            46.max(location_len)
+        };
+        let location_gap = usize::from(location_width > 0) * if narrow { 2 } else { 1 };
+        let (name_room, location_room) =
+            share_room(name_len, location_width, room.saturating_sub(location_gap));
+        let mut name_spans = vec![span(
+            name.chars().take(self.column).collect(),
+            FaceName::SessionThought,
+        )];
+        let face_start = if self
+            .face
+            .contains(&FaceRef::Face(FaceName::WorkspaceCurrent))
+        {
+            4
+        } else {
+            self.column
+        };
+        if face_start < self.column {
+            name_spans[0].text = name.chars().take(face_start).collect();
+        }
+        name_spans.push(Span {
+            text: name.chars().skip(face_start).collect(),
+            face: theme.resolve(&self.face),
+            fold: false,
+        });
+        let mut out = cut(name_spans, name_room);
+        let name_width: usize = out.iter().map(|s| s.text.chars().count()).sum();
+        if location_room > 0 {
+            let location = if location_len > location_room {
+                shorten(&location, location_len - location_room)
+            } else {
+                location
+            };
+            out.push(span(
+                " ".repeat(room.saturating_sub(name_width + location_room)),
+                FaceName::Annotation,
+            ));
+            out.push(span(location.clone(), FaceName::Annotation));
+            out.push(span(
+                " ".repeat(location_room.saturating_sub(location.chars().count())),
+                FaceName::Annotation,
+            ));
+        }
+        if state_width > 0 {
+            let used: usize = out.iter().map(|s| s.text.chars().count()).sum();
+            out.push(span(
+                " ".repeat(cols.saturating_sub(state_width + used)),
+                FaceName::Annotation,
+            ));
+            let padding = state_width.saturating_sub(state_len);
+            out.push(span(" ".repeat(padding), FaceName::Annotation));
+            out.extend(cut(status, state_width));
+        }
+        cut(out, cols)
+    }
+
+    fn render(&self, buffer: &mut Buffer) {
+        let (name, location, state) = self.labels();
         let start = buffer.len_chars() + usize::from(buffer.len_chars() > 0);
         let name_len = name.chars().count();
-        let location = location.escape_debug().to_string();
         let state_len: usize = state.iter().map(|(s, _)| s.chars().count()).sum();
         let mut line = format!(
             "{} {}{}   {}",
@@ -128,29 +243,56 @@ impl Snapshot {
             .flat_map(|p| std::iter::once(p).chain(p.children.iter()))
     }
 
+    fn visible(&self) -> Vec<Option<&Entry>> {
+        fn visit<'a>(entry: &'a Entry, rows: &mut Vec<Option<&'a Entry>>) {
+            rows.push(Some(entry));
+            if !entry.folded {
+                for child in &entry.children {
+                    visit(child, rows);
+                }
+                if matches!(entry.row, Some(Row::Project(_))) && !entry.children.is_empty() {
+                    rows.push(None);
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        for entry in &self.entries {
+            visit(entry, &mut rows);
+        }
+        rows
+    }
+
+    pub(crate) fn fit(
+        &self,
+        lines: &mut [crate::display::Line],
+        cols: usize,
+        theme: &crate::settings::Theme,
+    ) {
+        if cols == usize::MAX {
+            return;
+        }
+        let rows = self.visible();
+        for line in lines {
+            if let Some(Some(entry)) = rows.get(line.number) {
+                line.spans = entry.fit(cols, theme);
+                line.aligned = true;
+            }
+        }
+    }
+
     fn render(&self, buffer: &mut Buffer) {
         buffer.remove_properties(0..buffer.len_chars());
         buffer.set_text("");
         buffer.workspace_rows.clear();
-        fn render(entry: &Entry, buffer: &mut Buffer) {
-            let start = buffer.len_chars() + usize::from(buffer.len_chars() > 0);
-            entry.render(buffer);
-            if let Some(row) = entry.row {
-                buffer
-                    .workspace_rows
-                    .push((buffer.line_col(start).expect("just inserted").0, row));
-            }
-            if !entry.folded {
-                for child in &entry.children {
-                    render(child, buffer);
+        for (line, entry) in self.visible().into_iter().enumerate() {
+            if let Some(entry) = entry {
+                entry.render(buffer);
+                if let Some(row) = entry.row {
+                    buffer.workspace_rows.push((line, row));
                 }
-                if matches!(entry.row, Some(Row::Project(_))) && !entry.children.is_empty() {
-                    buffer.insert_output(buffer.len_chars(), "\n");
-                }
+            } else {
+                buffer.insert_output(buffer.len_chars(), "\n");
             }
-        }
-        for entry in &self.entries {
-            render(entry, buffer);
         }
         buffer.set_saved();
     }
@@ -271,11 +413,6 @@ impl Ctx<'_> {
                 .filter(|w| w.project == *project_id)
                 .collect();
 
-            let empty = if workspaces.is_empty() {
-                " · no workspaces"
-            } else {
-                ""
-            };
             let mut project_entry = Entry {
                 row: Some(Row::Project(*project_id)),
                 folded: folded(Row::Project(*project_id), false),
@@ -283,7 +420,7 @@ impl Ctx<'_> {
                 name: format!("  {}", project.name.escape_debug()),
                 column: 2,
                 face: vec![FaceRef::Bold],
-                location: format!("{}{empty}", project.primary.path.to_string_lossy()),
+                location: project.primary.path.to_string_lossy().into_owned(),
                 state: workspaces
                     .iter()
                     .filter_map(|w| core.workspace_activity(w.id))
@@ -533,6 +670,141 @@ mod tests {
             .window
             .set_point(&mut h.core.buffers, at)
             .unwrap();
+    }
+
+    fn drawn(spans: &[crate::display::Span]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn rows_fit_names_roots_and_state_faces_at_several_widths() {
+        let h = workspaces();
+        let theme = &h.core.settings.theme;
+        let mut entry = Entry {
+            row: Some(Row::Project(ProjectId(0))),
+            folded: true,
+            children: Vec::new(),
+            name: "  long-project-name-éééééééééééééééé".into(),
+            column: 2,
+            face: vec![FaceRef::Bold],
+            location: "/a/very/long/primary/root/project".into(),
+            state: vec![("● awaiting permission".into(), FaceName::StatusWaiting)],
+        };
+        let narrow = entry.fit(48, theme);
+        assert!(narrow.iter().any(|s| s.text.ends_with('…') && s.face.bold));
+        assert!(
+            narrow
+                .iter()
+                .any(|s| s.text.starts_with('…') && s.text.ends_with("project"))
+        );
+        assert!(
+            narrow
+                .iter()
+                .any(|s| s.text == "●" && s.face == theme.face(FaceName::StatusWaiting))
+        );
+        assert!(drawn(&entry.fit(120, theme)).contains("● awaiting permission"));
+        for cols in 0..150 {
+            assert!(
+                drawn(&entry.fit(cols, theme)).chars().count() <= cols,
+                "{cols}"
+            );
+        }
+        entry.row = None;
+        entry.state = vec![
+            ("● unsaved".into(), FaceName::StatusModified),
+            (" ".into(), FaceName::Annotation),
+            ("⊘ read-only".into(), FaceName::StatusFailed),
+            (" ".into(), FaceName::Annotation),
+            ("[conflict]".into(), FaceName::StatusFailed),
+        ];
+        assert!(drawn(&entry.fit(48, theme)).ends_with("● ⊘ ⊘"));
+        entry.state = vec![("exit 101".into(), FaceName::StatusFailed)];
+        assert!(
+            entry
+                .fit(48, theme)
+                .iter()
+                .any(|s| s.text == "●" && s.face == theme.face(FaceName::StatusFailed))
+        );
+    }
+
+    #[test]
+    fn resize_refits_the_same_snapshot_and_unequal_windows_independently() {
+        let mut h = workspaces();
+        let current = h.core.workspace();
+        h.core
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == current)
+            .unwrap()
+            .name = "invalid-site-redirects-in-the-user-graphql-server".into();
+        h.keys("C-x t l TAB");
+        let text = h.text();
+        let point = h.point();
+        let rows = h.core.current().workspace_rows.clone();
+        h.core.buffers.create("later");
+        let wide = h.frame(1440., 900.).windows.remove(0);
+        assert!(drawn(&wide.mode_line.left).contains("2 projects, 3 workspaces"));
+        assert!(
+            wide.display
+                .lines
+                .iter()
+                .any(|l| drawn(&l.spans).contains("2 buffers"))
+        );
+        h.keys("C-x 3");
+        let half = h.frame(900., 600.).windows.remove(0);
+        let (line, col) = half.display.cursor.unwrap();
+        assert_eq!(col, 6);
+        assert!(
+            drawn(&half.display.lines[line].spans)
+                .trim_end()
+                .ends_with('…')
+        );
+        assert_eq!(drawn(&half.mode_line.left), "*Workspaces*");
+        assert_eq!(drawn(&half.mode_line.right), "3/5");
+        assert!(half.display.lines[line].decorations.contains(
+            &crate::buffer::Decoration::Background(FaceName::CompletionSelected)
+        ));
+        assert!(
+            half.display.lines[line]
+                .spans
+                .iter()
+                .any(|s| s.text.starts_with("* ") && s.face.bold)
+        );
+        h.keys("C-x 3");
+        let unequal = h.frame(900., 600.);
+        let names: Vec<_> = unequal
+            .windows
+            .iter()
+            .map(|w| {
+                let line = w
+                    .display
+                    .lines
+                    .iter()
+                    .find(|l| {
+                        l.number
+                            == rows
+                                .iter()
+                                .find(|(_, r)| *r == Row::Workspace(current))
+                                .unwrap()
+                                .0
+                    })
+                    .unwrap();
+                drawn(&line.spans)
+            })
+            .collect();
+        assert!(names[0].chars().count() < names[2].chars().count());
+        h.keys("C-x 1");
+        let restored = h.frame(1440., 900.).windows.remove(0);
+        assert_eq!(restored.display.lines, wide.display.lines);
+        assert_eq!(h.text(), text);
+        assert_eq!(h.point(), point);
+        assert_eq!(h.core.current().workspace_rows, rows);
+        assert_eq!(row(&h), Row::Workspace(current));
+        h.keys("TAB");
+        assert!(h.text().lines().any(|l| l.trim() == "notes.txt"));
+        h.keys("RET");
+        assert_eq!(h.core.workspace(), current);
+        assert_eq!(h.text(), "");
     }
 
     #[test]
