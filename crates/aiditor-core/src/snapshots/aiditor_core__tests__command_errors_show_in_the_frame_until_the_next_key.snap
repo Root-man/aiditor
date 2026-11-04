@@ -252,6 +252,7 @@ FrameDisplay {
     message: Some(
         "boom",
     ),
+    key_hints: [],
     minibuffer: None,
     hint: None,
     title: "a.txt | main | home",

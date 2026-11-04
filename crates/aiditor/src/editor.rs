@@ -168,6 +168,7 @@ impl Editor {
         &self,
         minibuffer: Option<aiditor_core::display::Minibuffer>,
         message: Option<String>,
+        key_hints: &[(&str, &str)],
         font: &Font,
         cell: Pixels,
         window: &Window,
@@ -354,7 +355,29 @@ impl Editor {
                 });
                 div().child(prompt).children(candidates).children(padding)
             }
-            None => div().child(row(mode_line_height).px(inset).child(message)),
+            None if !key_hints.is_empty() => div()
+                .debug_selector(|| "echo-key-hints".into())
+                .px(inset)
+                .flex()
+                .flex_wrap()
+                .gap_x(cell * 3.)
+                .children(key_hints.iter().enumerate().map(|(i, (key, action))| {
+                    let text = format!("{key} {action}");
+                    let runs = crate::element::key_hint_runs(&text, key.len(), font, theme);
+                    row(mode_line_height)
+                        .debug_selector(move || format!("echo-key-hint-{i}"))
+                        .flex_none()
+                        // shortcut: an action wider than the frame clips; split its words if narrower frames need it.
+                        .max_w_full()
+                        .w(cell * text.chars().count() as f32)
+                        .child(StyledText::new(text).with_runs(runs))
+                })),
+            None => div().child(
+                row(mode_line_height)
+                    .debug_selector(|| "echo-message".into())
+                    .px(inset)
+                    .child(message),
+            ),
         }
     }
 
@@ -642,7 +665,14 @@ impl Render for Editor {
         };
         let line = || row(line_height);
         let hint = self.hint_rows(frame.hint, cell);
-        let echo = self.echo_area(frame.minibuffer, frame.message, &font, cell, window);
+        let echo = self.echo_area(
+            frame.minibuffer,
+            frame.message,
+            frame.key_hints,
+            &font,
+            cell,
+            window,
+        );
         let workspaces = self.workspace_bar(frame.workspaces, &font, cell);
         let root = div()
             .track_focus(&self.focus)
@@ -829,6 +859,122 @@ mod tests {
         cx.update(|window, _| window.remove_window());
         drop(editor);
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn workspace_list_echo_hints_wrap_and_give_messages_and_windows_their_space(
+        cx: &mut TestAppContext,
+    ) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "body");
+        cx.simulate_keystrokes("ctrl-x 3 ctrl-x t l");
+        cx.run_until_parked();
+        let height = editor.read_with(cx, |e, _| px(e.core.settings().mode_line_height()));
+        cx.simulate_resize(gpui::size(px(720.), px(600.)));
+        cx.run_until_parked();
+        let wide = cx.debug_bounds("echo-key-hints").unwrap();
+        assert_eq!(wide.size.height, height);
+        let bottoms = editor.read_with(cx, |e, _| {
+            e.painted
+                .iter()
+                .map(|w| w.bounds.bottom())
+                .collect::<Vec<_>>()
+        });
+        for (theme, key, dim, background, foreground) in [
+            ("dark", 0xfabd2f, 0xa89984, 0x282828, 0xebdbb2),
+            ("light", 0xb57614, 0x7c6f64, 0xfbf1c7, 0x3c3836),
+        ] {
+            let settings = format!(
+                "theme = '{theme}'\n[themes.{theme}.faces]\ndefault = {{ fg = {foreground}, bg = {background} }}\nworkspace-current = {{ fg = {key} }}\nmode-line-dim = {{ fg = {dim} }}"
+            );
+            editor.update(cx, |e, cx| {
+                e.handle(Msg::SettingsLoaded(Ok(Some(settings))), cx)
+            });
+            cx.run_until_parked();
+            editor.update_in(cx, |e, window, _| {
+                assert_eq!(e.core.settings().theme_name, theme);
+                let font = e.font(window).0;
+                let theme = &e.core.settings().theme;
+                let runs = crate::element::key_hint_runs("RET switch", 3, &font, theme);
+                assert_eq!(runs[0].font.weight, gpui::FontWeight::BOLD);
+                assert_eq!(theme.background(), background);
+                assert_eq!(runs[0].color, rgb(key).into());
+                assert_eq!(runs[1].color, rgb(dim).into());
+                assert_eq!((runs[0].len, runs[1].len), (3, 7));
+                assert_eq!(runs[0].background_color, None);
+            });
+            cx.simulate_resize(gpui::size(px(280.), px(600.)));
+            cx.run_until_parked();
+            let narrow = cx.debug_bounds("echo-key-hints").unwrap();
+            assert_eq!(narrow.size.height, height * 2.);
+            assert_eq!(
+                cx.debug_bounds("echo-key-hint-0").unwrap().top(),
+                narrow.top()
+            );
+            assert_eq!(
+                cx.debug_bounds("echo-key-hint-3").unwrap().top(),
+                narrow.top() + height
+            );
+            editor.read_with(cx, |e, _| {
+                for (window, bottom) in e.painted.iter().zip(&bottoms) {
+                    assert_eq!(window.bounds.bottom(), *bottom - height);
+                }
+            });
+            cx.simulate_resize(gpui::size(px(720.), px(600.)));
+            cx.run_until_parked();
+            assert_eq!(
+                cx.debug_bounds("echo-key-hints").unwrap().size.height,
+                height
+            );
+        }
+        cx.simulate_resize(gpui::size(px(280.), px(600.)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("alt-> enter");
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.message().map(str::to_string)),
+            Some("Select a project or workspace row".into())
+        );
+        // GPUI retains removed debug selectors; check context and painted height instead.
+        assert!(editor.update(cx, |e, _| e.core.frame().key_hints.is_empty()));
+        assert_eq!(cx.debug_bounds("echo-message").unwrap().size.height, height);
+        editor.read_with(cx, |e, _| {
+            for window in &e.painted {
+                assert_eq!(window.bounds.bottom(), px(600.) - height);
+            }
+        });
+        editor.update(cx, |e, cx| e.handle(Msg::Tick, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.core.message().map(str::to_string)),
+            Some("Select a project or workspace row".into())
+        );
+        cx.simulate_keystrokes("n");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("echo-key-hints").unwrap().size.height,
+            height * 2.
+        );
+        cx.simulate_keystrokes("ctrl-x o");
+        cx.run_until_parked();
+        assert!(editor.update(cx, |e, _| e.core.frame().key_hints.is_empty()));
+        cx.simulate_keystrokes("ctrl-x o");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("echo-key-hints").unwrap().size.height,
+            height * 2.
+        );
+        cx.simulate_keystrokes("alt-x");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("minibuffer-prompt").is_some());
+        assert!(editor.update(cx, |e, _| e.core.frame().key_hints.is_empty()));
+        cx.simulate_input("workspace-list");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("echo-key-hints").unwrap().size.height,
+            height * 2.
+        );
     }
 
     #[gpui::test]

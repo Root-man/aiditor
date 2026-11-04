@@ -622,6 +622,34 @@ pub(crate) fn completion_runs(
     runs
 }
 
+pub(crate) fn key_hint_runs(
+    text: &str,
+    key_len: usize,
+    font: &Font,
+    theme: &Theme,
+) -> Vec<TextRun> {
+    vec![
+        text_run(
+            key_len,
+            Face {
+                fg: theme.face(FaceName::WorkspaceCurrent).fg,
+                bold: true,
+                ..Face::default()
+            },
+            false,
+            font,
+            theme,
+        ),
+        text_run(
+            text.len() - key_len,
+            theme.face(FaceName::ModeLineDim),
+            false,
+            font,
+            theme,
+        ),
+    ]
+}
+
 pub(crate) fn grep_runs(text: &str, font: &Font, theme: &Theme) -> Vec<TextRun> {
     let number = text.find(':').expect("grep line number");
     vec![

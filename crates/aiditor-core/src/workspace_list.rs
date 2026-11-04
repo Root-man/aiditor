@@ -57,7 +57,7 @@ impl Entry {
             &self.state
         };
 
-        let start = buffer.len_chars() + 1;
+        let start = buffer.len_chars() + usize::from(buffer.len_chars() > 0);
         let name_len = name.chars().count();
         let location = location.escape_debug().to_string();
         let state_len: usize = state.iter().map(|(s, _)| s.chars().count()).sum();
@@ -72,7 +72,8 @@ impl Entry {
         for (text, _) in state {
             line.push_str(text);
         }
-        buffer.insert_output(start - 1, &format!("\n{line}"));
+        let separator = if buffer.len_chars() == 0 { "" } else { "\n" };
+        buffer.insert_output(buffer.len_chars(), &format!("{separator}{line}"));
         let mut named = |range, refs| {
             buffer
                 .add_property(range, Prop::Named(refs))
@@ -129,10 +130,10 @@ impl Snapshot {
 
     fn render(&self, buffer: &mut Buffer) {
         buffer.remove_properties(0..buffer.len_chars());
-        buffer.set_text("Workspaces — RET switch, n/p move, q quit\n");
+        buffer.set_text("");
         buffer.workspace_rows.clear();
         fn render(entry: &Entry, buffer: &mut Buffer) {
-            let start = buffer.len_chars() + 1;
+            let start = buffer.len_chars() + usize::from(buffer.len_chars() > 0);
             entry.render(buffer);
             if let Some(row) = entry.row {
                 buffer
@@ -222,6 +223,13 @@ pub(crate) enum Row {
     Project(ProjectId),
     Workspace(WorkspaceId),
 }
+
+pub(crate) const HINTS: &[(&str, &str)] = &[
+    ("n/p", "move"),
+    ("RET", "switch"),
+    ("TAB", "fold"),
+    ("q", "quit"),
+];
 
 const MODE: &str = "workspace-list-mode";
 
@@ -528,6 +536,45 @@ mod tests {
     }
 
     #[test]
+    fn echo_hints_follow_selection_and_yield_to_messages_and_prompts() {
+        use std::time::Duration;
+        let mut h = workspaces();
+        h.keys("C-x 3 C-x t l");
+        assert_eq!(h.core.frame().key_hints, HINTS);
+        assert!(h.text().starts_with("▾ p "));
+        h.keys("C-x o");
+        assert_eq!(h.core.frame().key_hints, &[]);
+        h.keys("C-x o");
+        assert_eq!(h.core.frame().key_hints, HINTS);
+        let at = h.core.current().char_idx(3, 0).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, at)
+            .unwrap();
+        h.keys("RET");
+        assert_eq!(
+            h.core.frame().message.as_deref(),
+            Some("Select a project or workspace row")
+        );
+        assert_eq!(h.core.frame().key_hints, &[]);
+        h.start_timer(Duration::from_millis(1), None, crate::Msg::Tick);
+        h.advance(Duration::from_millis(2));
+        assert_eq!(
+            h.core.frame().message.as_deref(),
+            Some("Select a project or workspace row")
+        );
+        h.keys("n");
+        assert_eq!(h.core.frame().key_hints, HINTS);
+        h.keys("M-x");
+        let frame = h.core.frame();
+        assert_eq!(frame.minibuffer.unwrap().prompt, "M-x ");
+        assert_eq!(frame.key_hints, &[]);
+        h.keys("workspace-list RET");
+        assert_eq!(h.core.frame().key_hints, HINTS);
+    }
+
+    #[test]
     fn folds_keep_point_children_state_and_snapshot_until_refresh() {
         let mut h = workspaces();
         let current = h.core.workspace();
@@ -538,7 +585,7 @@ mod tests {
         h.keys("TAB");
         assert_eq!(row(&h), Row::Workspace(current));
         assert_eq!(h.point(), point);
-        assert_eq!(contents(&h)[4], "▸ * b 2 buffers");
+        assert_eq!(contents(&h)[2], "▸ * b 2 buffers");
         h.core.buffers.create("later");
         h.keys("TAB");
         assert_eq!(h.text(), original);
@@ -548,7 +595,7 @@ mod tests {
         assert_eq!(row(&h), Row::Project(project));
         assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 2);
         assert_eq!(
-            &contents(&h)[2..4],
+            &contents(&h)[0..2],
             ["▸ p /aiditor-test · 2 workspaces", "▾ q /aiditor-test"]
         );
         assert_eq!(
@@ -556,18 +603,18 @@ mod tests {
             "*Workspaces* │ 2 projects, 3 workspaces  1/3"
         );
         h.keys("TAB n");
-        assert_eq!(contents(&h)[3], "▾ a 1 buffer");
+        assert_eq!(contents(&h)[1], "▾ a 1 buffer");
         h.keys("n TAB p p TAB C-x t l");
         assert_eq!(row(&h), Row::Project(project));
-        assert_eq!(contents(&h)[2], "▸ p /aiditor-test · 2 workspaces");
+        assert_eq!(contents(&h)[0], "▸ p /aiditor-test · 2 workspaces");
         h.keys("TAB n");
-        assert_eq!(contents(&h)[3], "▾ a 1 buffer");
+        assert_eq!(contents(&h)[1], "▾ a 1 buffer");
         h.keys("n");
-        assert_eq!(contents(&h)[5], "▸ * b 3 buffers");
+        assert_eq!(contents(&h)[3], "▸ * b 3 buffers");
         h.keys("q C-x t l");
         assert_eq!(row(&h), Row::Workspace(current));
-        assert_eq!(contents(&h)[3], "▸ a 1 buffer");
-        assert_eq!(contents(&h)[4], "▾ * b 3 buffers");
+        assert_eq!(contents(&h)[1], "▸ a 1 buffer");
+        assert_eq!(contents(&h)[2], "▾ * b 3 buffers");
         assert!(contents(&h).iter().any(|s| s == "later"));
     }
 
@@ -602,7 +649,7 @@ mod tests {
         h.keys("C-x t l");
         let original = h.text();
         let blank = h.core.current().workspace_rows[3].0 - 1;
-        for line in [0, 1, 5, blank] {
+        for line in [3, 4, blank] {
             let at = h.core.current().char_idx(line, 0).unwrap();
             h.core
                 .windows
@@ -765,7 +812,7 @@ mod tests {
             h.keys("C-x t l");
             let snapshot = h.text();
             assert_eq!(
-                &contents(&h)[5..],
+                &contents(&h)[3..],
                 [
                     "▾ p /aiditor-test",
                     "▾ * task 8 buffers · 1 unsaved",
@@ -820,7 +867,7 @@ mod tests {
             }
             let (cursor_line, cursor_col) = display.cursor.unwrap();
             assert_eq!(cursor_col, 6);
-            assert_eq!(display.lines[cursor_line].number, 6);
+            assert_eq!(display.lines[cursor_line].number, 4);
             assert!(
                 display.lines[cursor_line]
                     .decorations
@@ -829,7 +876,7 @@ mod tests {
             let where_columns: Vec<_> = display
                 .lines
                 .iter()
-                .filter(|l| [6, 8, 12, 13].contains(&l.number))
+                .filter(|l| [4, 6, 10, 11].contains(&l.number))
                 .map(|l| {
                     let mut column = 0;
                     for span in &l.spans {
@@ -854,7 +901,7 @@ mod tests {
             h.keys("p");
             let display = h.frame(1440., 900.).windows.remove(0).display;
             let (line, column) = display.cursor.unwrap();
-            assert_eq!((display.lines[line].number, column), (5, 2));
+            assert_eq!((display.lines[line].number, column), (3, 2));
             assert!(
                 display.lines[line]
                     .decorations
@@ -875,11 +922,11 @@ mod tests {
             buffer.conflict = Some(0);
             h.keys("C-x t l");
             assert_eq!(
-                contents(&h)[10],
+                contents(&h)[8],
                 "dirty.rs src/ ● unsaved ⊘ read-only [conflict]"
             );
             let display = h.frame(1440., 900.).windows.remove(0).display;
-            let row = display.lines.iter().find(|l| l.number == 10).unwrap();
+            let row = display.lines.iter().find(|l| l.number == 8).unwrap();
             for (text, face) in [
                 ("● unsaved", FaceName::StatusModified),
                 ("⊘ read-only", FaceName::StatusFailed),
@@ -896,7 +943,7 @@ mod tests {
             buffer.conflict = None;
             buffer.set_saved();
             h.keys("C-x t l");
-            assert_eq!(contents(&h)[6], "▾ * task 8 buffers");
+            assert_eq!(contents(&h)[4], "▾ * task 8 buffers");
         }
     }
 
@@ -946,8 +993,6 @@ mod tests {
         assert_eq!(
             contents(&h),
             [
-                "Workspaces — RET switch, n/p move, q quit",
-                "",
                 "▾ p /aiditor-test",
                 "▸ a 1 buffer",
                 "▾ * b 2 buffers",
@@ -985,8 +1030,6 @@ mod tests {
         assert_eq!(
             contents(&h),
             [
-                "Workspaces — RET switch, n/p move, q quit",
-                "",
                 "▾ app /aiditor-test/first",
                 "▸ a\\nnext 1 buffer",
                 "",
@@ -1036,13 +1079,13 @@ mod tests {
         let point = h.point();
         let selected = h.core.windows.selected;
         h.core.switch_to_workspace("other").unwrap();
-        h.keys("C-x t l M-< n RET");
+        h.keys("C-x t l M-< RET");
         assert_eq!(h.core.current_workspace().project, project);
         assert_eq!(h.core.current_workspace().name, "a");
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
         assert_eq!(h.core.windows.selected, selected);
         assert_eq!((h.text(), h.point()), ("body".into(), point));
-        h.keys("C-x t l M-< n RET");
+        h.keys("C-x t l M-< RET");
         assert_eq!(h.text(), "body");
     }
 
@@ -1067,7 +1110,7 @@ mod tests {
             h.core.add_project(Loaded::ad_hoc(name, &h.path(name)));
         }
         h.new_workspace("d", "q");
-        h.keys("C-x t l M-< n n");
+        h.keys("C-x t l M-< n");
         let line = h.frame(1400., 600.).windows[0].display.mode_line.text();
         assert_eq!(line, "*Workspaces* │ 5 projects, 4 workspaces  2/9");
         h.keys("TAB");
@@ -1179,7 +1222,7 @@ mod tests {
         h.keys("C-x t l");
         let workspace = h.core.workspace();
         let list = h.core.windows.window.buffer();
-        for line in [0, 5] {
+        for line in [3, 4] {
             let at = h.core.current().char_idx(line, 0).unwrap();
             let window = &h.core.windows.window;
             window.set_point(&mut h.core.buffers, at).unwrap();
@@ -1236,13 +1279,13 @@ mod tests {
         h.open("added.txt");
         h.keys("C-x t l");
         assert_eq!(h.core.windows.window.buffer(), list);
-        assert_eq!(&contents(&h)[6..8], ["added.txt", "notes.txt"]);
+        assert_eq!(&contents(&h)[4..6], ["added.txt", "notes.txt"]);
         let notes = h.core.buffers.find_here("notes.txt").unwrap();
         h.core.kill_buffer(notes);
         h.core.rename_workspace("renamed").unwrap();
         h.keys("C-x t l");
         assert_eq!(
-            &contents(&h)[4..9],
+            &contents(&h)[2..7],
             [
                 "▾ * renamed 2 buffers",
                 "*scratch*",
