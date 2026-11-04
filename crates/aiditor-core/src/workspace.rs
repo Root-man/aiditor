@@ -829,12 +829,28 @@ mod tests {
         h.keys("C-x t 2 one RET RET C-x t r a RET C-x t 2 two RET RET C-x t r b RET");
         h.core.kill_workspace(h.core.workspaces()[0].id).unwrap();
         h.keys("C-x t l");
+        let lines: Vec<_> = h
+            .text()
+            .lines()
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
         assert_eq!(
-            h.text(),
-            format!(
-                "Workspaces — RET switch, n/p move, q quit\n\none (/aiditor-test/one)\n└── a\n    └── *scratch*<a>\ntwo (/aiditor-test/two)\n└── * b\n    └── *scratch*<b>\napp (/aiditor-test/app) · no workspaces\nhome ({}) · no workspaces",
-                h.core.projects[0].project.primary.path.display()
-            )
+            lines,
+            [
+                "Workspaces — RET switch, n/p move, q quit".into(),
+                "".into(),
+                "one /aiditor-test/one".into(),
+                "a 1 buffer".into(),
+                "*scratch*".into(),
+                "two /aiditor-test/two".into(),
+                "* b 1 buffer".into(),
+                "*scratch*".into(),
+                "app /aiditor-test/app · no workspaces".into(),
+                format!(
+                    "home {} · no workspaces",
+                    h.core.projects[0].project.primary.path.display()
+                ),
+            ]
         );
     }
 

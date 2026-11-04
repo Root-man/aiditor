@@ -53,6 +53,14 @@ pub(crate) enum Activity {
 }
 
 impl Activity {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::Working => "● working",
+            Self::Failed => "● exited",
+            Self::Waiting => "● awaiting permission",
+        }
+    }
+
     pub(crate) fn face(self) -> FaceName {
         match self {
             Self::Working => FaceName::StatusRunning,
@@ -229,8 +237,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn mode_line(&self) -> ModeLine {
-        let segment = |text: &str, face| vec![(text.replace(char::is_control, " "), face)];
+    pub(crate) fn model_effort(&self) -> Vec<(String, FaceName)> {
         let options = self
             .session
             .as_ref()
@@ -262,6 +269,17 @@ impl Session {
         if model.len() == 2 {
             model.insert(1, (" · ".into(), FaceName::ModeLineDim));
         }
+        model
+    }
+
+    pub(crate) fn mode_line(&self) -> ModeLine {
+        let segment = |text: &str, face| vec![(text.replace(char::is_control, " "), face)];
+        let options = self
+            .session
+            .as_ref()
+            .and_then(|s| s.config_options.as_deref())
+            .unwrap_or_default();
+        let model = self.model_effort();
         let mut left = Vec::new();
         if !model.is_empty() {
             left.push(model);
@@ -284,12 +302,7 @@ impl Session {
         left.push(segment(title, FaceName::ModeLineBufferId));
         let mut right = Vec::new();
         if let Some(activity) = self.activity() {
-            let text = match activity {
-                Activity::Working => "● working",
-                Activity::Failed => "● exited",
-                Activity::Waiting => "● awaiting permission",
-            };
-            right.push(segment(text, activity.face()));
+            right.push(segment(activity.text(), activity.face()));
         }
         if let Some((used, size)) = self.usage.filter(|(_, size)| *size > 0) {
             let percent = u128::from(used.min(size)) * 100 / u128::from(size);
@@ -5330,6 +5343,111 @@ mod tests {
         assert_eq!(dots(&mut h), vec![face(&h, FaceName::StatusFailed)]);
         h.core.kill_workspace(work).unwrap();
         assert_eq!(dots(&mut h), vec![]);
+    }
+
+    #[test]
+    fn workspace_list_sessions_show_model_effort_and_the_bars_urgent_state() {
+        let mut h = session();
+        let config = [
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "opus",
+                vec![SessionConfigSelectOption::new("opus", "Opus 5.5")],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "effort",
+                "Effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(config.to_vec()),
+        });
+        h.keys("a RET");
+        for (step, word, face) in [
+            (0, "● working", FaceName::StatusRunning),
+            (1, "● exited", FaceName::StatusFailed),
+            (2, "● awaiting permission", FaceName::StatusWaiting),
+        ] {
+            if step == 1 {
+                h.keys("M-x agent-start RET claude RET");
+                h.send(Msg::AgentStarted {
+                    id: AgentId(1),
+                    result: Err("failed".into()),
+                });
+            } else if step == 2 {
+                ask(&mut h, 1, "one", Some("First"));
+            }
+            h.keys("C-x t l");
+            let snapshot = h.text();
+            assert!(
+                snapshot
+                    .lines()
+                    .find(|s| s.starts_with("    * work "))
+                    .unwrap()
+                    .ends_with(word)
+            );
+            assert!(snapshot.lines().any(|s| s.starts_with("      *claude* ")
+                && s.contains("Opus 5.5 · High")
+                && s.ends_with(if step == 2 { word } else { "● working" })));
+            let dark = h.core.settings.theme.clone();
+            for light in [false, true] {
+                h.core.settings.theme = dark.clone();
+                if light {
+                    for (face, fg) in [
+                        (FaceName::Annotation, 0x7c6f64),
+                        (FaceName::StatusRunning, 0x79740e),
+                        (FaceName::StatusFailed, 0x9d0006),
+                        (FaceName::StatusWaiting, 0xb57614),
+                    ] {
+                        h.core.settings.theme.faces.get_mut(&face).unwrap().fg = Some(fg);
+                    }
+                }
+                let frame = h.frame(1440., 900.);
+                let fg = h.core.settings.theme.face(face).fg;
+                assert!(
+                    frame
+                        .workspaces
+                        .iter()
+                        .any(|s| s.text == " ●" && s.face.fg == fg)
+                );
+                let row = frame.windows[0]
+                    .display
+                    .lines
+                    .iter()
+                    .find(|l| l.spans.iter().any(|s| s.text.contains("* work")))
+                    .unwrap();
+                assert!(row.spans.iter().any(|s| s.text == word && s.face.fg == fg));
+                let annotation = h.core.settings.theme.face(FaceName::Annotation).fg;
+                assert!(
+                    frame.windows[0]
+                        .display
+                        .lines
+                        .iter()
+                        .flat_map(|l| &l.spans)
+                        .any(|s| s.text.trim() == "Opus 5.5 · High" && s.face.fg == annotation)
+                );
+            }
+            h.core.settings.theme = dark;
+            if step == 2 {
+                exited(&mut h, 0, 1);
+                assert_eq!(h.text(), snapshot);
+                h.keys("C-x t l");
+                assert!(
+                    h.text()
+                        .lines()
+                        .find(|s| s.starts_with("    * work "))
+                        .unwrap()
+                        .ends_with("● exited")
+                );
+            }
+            h.keys("q");
+        }
     }
 
     #[test]
