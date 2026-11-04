@@ -1788,6 +1788,18 @@ milestones:
             acceptance:
               - "Each gap listed is fixed, or docs/editor.md records why it stays"
               - "A design check against frame 6 finds no unexplained gaps"
+          - key: m6-md-tables
+            title: "Render markdown tables in session buffers"
+            body: |
+              GFM pipe tables in agent messages, thoughts and tool-call bodies show as raw text today. `markdown::render` handles `tree-sitter-md`'s `pipe_table` as it does other markup: the text stays markdown, so search and copy yield it, and only the display changes. Columns are as wide as their widest cell's visible text, inline markup hidden; each `|` with its padding becomes a `Display` of padding and `│`; the delimiter row draws as `├──┼──┤`; `:--`, `:-:` and `--:` align their column; the header row is bold. A table wider than the window wraps as other text does; record in docs/editor.md whether that stays. Cells are measured in chars, so wide characters misalign.
+            acceptance:
+              - "A table in an agent message draws aligned columns with box-drawn separators and a bold header"
+              - "Column alignment follows the delimiter row"
+              - "Inline markup in cells is hidden and not counted in column widths"
+              - "Search and copy see the table's markdown"
+              - "C-n, C-p and C-f move sensibly across a drawn table"
+              - "A table still streaming redraws as rows arrive"
+              - "Tests cover widths, alignment, markup in cells and a ragged table"
       - key: m6-prompt
         title: "Prompt context and commands"
         labels: [acp, frontend]
