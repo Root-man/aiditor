@@ -74,6 +74,21 @@ fn span(text: impl Into<String>, face: Face) -> Span {
 }
 
 impl Core {
+    pub(crate) fn workspace_activity(
+        &self,
+        workspace: crate::workspace::WorkspaceId,
+    ) -> Option<Activity> {
+        self.agents
+            .values()
+            .filter(|s| {
+                self.buffers
+                    .get(s.buffer)
+                    .is_some_and(|b| b.workspace == Some(workspace))
+            })
+            .filter_map(|s| s.activity())
+            .max()
+    }
+
     pub(crate) fn workspace_modeline(&self, cols: usize) -> Vec<Span> {
         let entries: Vec<_> = self
             .workspaces
@@ -82,16 +97,7 @@ impl Core {
                 project: self.project_name(w.project).replace(char::is_control, " "),
                 workspace: w.name.replace(char::is_control, " "),
                 current: w.id == self.workspace(),
-                activity: self
-                    .agents
-                    .values()
-                    .filter(|s| {
-                        self.buffers
-                            .get(s.buffer)
-                            .is_some_and(|b| b.workspace == Some(w.id))
-                    })
-                    .filter_map(|s| s.activity())
-                    .max(),
+                activity: self.workspace_activity(w.id),
             })
             .collect();
         fit(&entries, cols, &self.settings.theme)

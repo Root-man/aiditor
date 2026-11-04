@@ -657,7 +657,7 @@ pub fn build(
                 let used = before + 1 + rest(range.end);
                 // An indented line is drawn that many columns in, so it ends that much sooner.
                 let indent = buffer.line_indent(text.char_to_line(pos));
-                let fits = used + indent <= row_width;
+                let fits = shown.end != usize::MAX && used + indent <= row_width;
                 line.aligned |= fits;
                 let spaces = if fits {
                     last_col - indent - used + 1
@@ -811,6 +811,16 @@ pub fn build(
         (false, true) => "Bot".to_string(),
         (false, false) => format!("{}%", first * 100 / text.len_chars()),
     };
+    if buffer.major_mode == "workspace-list-mode"
+        && let Some(number) = cursor
+            .map(|(l, _)| lines[l].number)
+            .filter(|n| buffer.workspace_rows.iter().any(|(line, _)| line == n))
+    {
+        for line in lines.iter_mut().filter(|l| l.number == number) {
+            line.decorations
+                .push(Decoration::Background(FaceName::CompletionSelected));
+        }
+    }
     WindowDisplay {
         lines,
         cursor,
@@ -875,7 +885,7 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
 }
 
 /// The mode line of terminal `buffer`, with point at `line`:`col` in copy mode.
-fn terminal_mode_line(
+pub(crate) fn terminal_mode_line(
     buffer: &Buffer,
     terminal: &crate::terminal::Terminal,
     line: usize,
@@ -917,7 +927,7 @@ fn terminal_mode_line(
 
 /// The mode line of `buffer`, which visits `file`, with the current project's `roots`, the active
 /// `region`, point at `at` and the window's `position` in the buffer.
-fn file_mode_line(
+pub(crate) fn file_mode_line(
     buffer: &Buffer,
     file: &Path,
     roots: &[PathBuf],
