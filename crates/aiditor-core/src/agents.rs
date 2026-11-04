@@ -899,6 +899,7 @@ impl Core {
     /// Renders and ends session `id`'s stream, if any, writing its time: a message's clock time
     /// or a thought's header. They wait until now as its first line may still be growing.
     fn end_stream(&mut self, id: AgentId) {
+        self.trim_message(id);
         self.render_stream(id);
         let Some(session) = self.agents.get_mut(&id) else {
             return;
@@ -930,6 +931,40 @@ impl Core {
         }
         if thought {
             session.end_thought(buffer, header);
+        }
+    }
+
+    /// Drops the newlines a streamed message ends with, as Claude's does before a tool call, so
+    /// one blank line still separates it from the next block.
+    fn trim_message(&mut self, id: AgentId) {
+        let Some(session) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let Some(Stream {
+            start,
+            block: Block::Message(_),
+            ..
+        }) = &session.stream
+        else {
+            return;
+        };
+        let start = buffer.marker(*start).expect("live while streaming");
+        let end = session.end(buffer) - "\n\n".len();
+        let text = buffer.text().slice(start..end);
+        let n = text
+            .chars_at(end - start)
+            .reversed()
+            .take_while(|&c| c == '\n')
+            .count();
+        if n > 0 {
+            buffer.replace_output(end - n..end, "");
+            session.stream.as_mut().expect("matched above").dirty = true;
+            if let Some(message) = session.messages.last_mut() {
+                message.len -= n;
+            }
         }
     }
 
@@ -3928,6 +3963,18 @@ mod tests {
     }
 
     const LS_INPUT: &str = "```\n$ ls\n```";
+
+    #[test]
+    fn a_message_ending_in_newlines_keeps_one_blank_line_before_a_call() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, "Let me look.\n\n");
+        tool(&mut h, ls());
+        assert_eq!(
+            shown(&mut h, 10)[2..5],
+            ["Let me look.", "", "▸ ●   Running ls"]
+        );
+    }
 
     #[test]
     fn a_tool_call_starts_folded_and_updates_in_place() {
