@@ -838,13 +838,13 @@ mod tests {
             lines,
             [
                 "▾ one /aiditor-test/one".into(),
-                "▸ a 1 buffer".into(),
+                "a 0 buffers".into(),
                 "".into(),
                 "▾ two /aiditor-test/two".into(),
-                "▾ * b 1 buffer".into(),
-                "*scratch*".into(),
+                "* b 0 buffers".into(),
                 "".into(),
                 "app /aiditor-test/app · no workspaces".into(),
+                "".into(),
                 format!(
                     "home {} · no workspaces",
                     h.core.projects[0].project.primary.path.display()

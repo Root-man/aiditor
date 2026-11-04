@@ -862,6 +862,118 @@ mod tests {
     }
 
     #[gpui::test]
+    fn workspace_list_fits_half_a_900px_frame_and_refits_on_resize(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "body");
+        cx.simulate_keystrokes("alt-x");
+        cx.simulate_input("workspace-rename");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("invalid-site-redirects-in-the-user-graphql-server");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("changed");
+        cx.simulate_keystrokes("ctrl-x t l ctrl-x 3");
+        cx.simulate_resize(gpui::size(px(900.), px(600.)));
+        cx.run_until_parked();
+        let snapshot = editor.read_with(cx, |e, _| e.core.text());
+        let point = editor.read_with(cx, |e, _| e.core.point());
+        let expected_rows = snapshot.lines().count();
+        for font_size in [12., 28.] {
+            editor.update(cx, |e, cx| {
+                e.handle(
+                    Msg::SettingsLoaded(Ok(Some(format!("font_size = {font_size}")))),
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            editor.update(cx, |e, _| {
+                for window in e.core.frame().windows {
+                    assert_eq!(
+                        window
+                            .display
+                            .lines
+                            .iter()
+                            .map(|l| l.number)
+                            .collect::<Vec<_>>(),
+                        (0..expected_rows).collect::<Vec<_>>()
+                    );
+                }
+            });
+            editor.read_with(cx, |e, _| {
+                for window in &e.painted {
+                    assert_eq!(window.rows.len(), expected_rows);
+                }
+            });
+        }
+        editor.read_with(cx, |e, _| {
+            for window in &e.painted {
+                assert!((window.bounds.size.width - px(449.5)).abs() < px(10.));
+                assert_eq!(window.mode_line.text.as_ref(), "*Workspaces*");
+                assert!(window.mode_line_right.text.contains('/'));
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.contains("* invalid-site-")
+                            && r.text.text.trim_end().ends_with('…'))
+                );
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.trim_end().ends_with('●'))
+                );
+                for row in &window.rows {
+                    assert!(
+                        row.text.width <= window.bounds.size.width - px(24.),
+                        "{}",
+                        row.text.text
+                    );
+                }
+            }
+        });
+        editor.update(cx, |e, cx| {
+            e.handle(Msg::SettingsLoaded(Ok(Some("font_size = 16".into()))), cx)
+        });
+        cx.simulate_resize(gpui::size(px(3000.), px(600.)));
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            assert_eq!(e.core.text(), snapshot);
+            assert_eq!(e.core.point(), point);
+            for window in &e.painted {
+                assert_eq!(window.rows.len(), expected_rows);
+                assert!(window.mode_line.text.contains("projects"));
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.contains("● unsaved"))
+                );
+                assert!(window.rows.iter().any(|r| {
+                    r.text
+                        .text
+                        .contains("invalid-site-redirects-in-the-user-graphql-server")
+                }));
+            }
+        });
+        cx.simulate_resize(gpui::size(px(900.), px(600.)));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), snapshot);
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            for window in &e.painted {
+                assert_eq!(window.rows.len(), expected_rows - 1);
+                assert!(
+                    window
+                        .rows
+                        .iter()
+                        .any(|r| r.text.text.starts_with("  ▸ * "))
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
     fn workspace_list_echo_hints_wrap_and_give_messages_and_windows_their_space(
         cx: &mut TestAppContext,
     ) {
@@ -903,7 +1015,7 @@ mod tests {
                 assert_eq!((runs[0].len, runs[1].len), (3, 7));
                 assert_eq!(runs[0].background_color, None);
             });
-            cx.simulate_resize(gpui::size(px(280.), px(600.)));
+            cx.simulate_resize(gpui::size(px(360.), px(600.)));
             cx.run_until_parked();
             let narrow = cx.debug_bounds("echo-key-hints").unwrap();
             assert_eq!(narrow.size.height, height * 2.);
@@ -927,7 +1039,7 @@ mod tests {
                 height
             );
         }
-        cx.simulate_resize(gpui::size(px(280.), px(600.)));
+        cx.simulate_resize(gpui::size(px(360.), px(600.)));
         cx.run_until_parked();
         cx.simulate_keystrokes("alt-> enter");
         cx.run_until_parked();
@@ -1005,7 +1117,7 @@ mod tests {
         });
         cx.simulate_keystrokes("tab");
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), original);
-        cx.simulate_keystrokes("p tab");
+        cx.simulate_keystrokes("p g tab");
         assert!(
             editor
                 .read_with(cx, |e, _| e.core.text())

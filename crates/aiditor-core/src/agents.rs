@@ -5384,6 +5384,144 @@ mod tests {
     }
 
     #[test]
+    fn workspace_list_counts_only_files_terminals_and_registered_sessions() {
+        let mut h = session();
+        h.open("app/ internal.rs");
+        h.keys("changed");
+        h.core.create_terminal(" hidden terminal", 2, 10);
+        let fake = h.core.buffers.create("*codex*");
+        h.core.buffers.get_mut(fake).unwrap().major_mode = MODE;
+        h.core.buffers.create("ordinary fileless");
+        h.send(Msg::AgentStderr {
+            id: AgentId(0),
+            line: "stderr".into(),
+        });
+        h.keys("C-x t l");
+        let rows: Vec<_> = h
+            .text()
+            .lines()
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[1], "▾ * work 3 buffers · 1 unsaved");
+        assert!(rows.iter().any(|s| s.starts_with("internal.rs ")));
+        assert!(rows.iter().any(|s| s == "hidden terminal"));
+        assert!(rows.iter().any(|s| s == "*claude*"));
+        let empty = h
+            .core
+            .new_workspace("empty", h.core.current_workspace().project);
+        h.core.switch_workspace(empty).unwrap();
+        h.keys("C-x t l");
+        let row = h
+            .text()
+            .lines()
+            .find(|s| s.contains("* empty "))
+            .unwrap()
+            .to_string();
+        assert!(row.starts_with("    * empty "));
+        assert_eq!(
+            row.split_whitespace().collect::<Vec<_>>().join(" "),
+            "* empty 0 buffers"
+        );
+    }
+
+    #[test]
+    fn workspace_list_retains_session_quality_faces_and_safe_labels_across_resize() {
+        let mut h = session();
+        let config = |model: &'static str, effort: &'static str| {
+            vec![
+                SessionConfigOption::select(
+                    "model",
+                    "Model",
+                    model,
+                    vec![SessionConfigSelectOption::new(
+                        model,
+                        format!("{model}\nlabel"),
+                    )],
+                )
+                .category(SessionConfigOptionCategory::Model),
+                SessionConfigOption::select(
+                    "effort",
+                    "Effort",
+                    effort,
+                    vec![SessionConfigSelectOption::new(
+                        effort,
+                        format!("{effort}\tlabel"),
+                    )],
+                )
+                .category(SessionConfigOptionCategory::ThoughtLevel),
+            ]
+        };
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(config("opus", "high")),
+        });
+        let labels = h.core.agents[&AgentId(0)].model_effort();
+        h.keys("C-x t l");
+        let snapshot = h.text();
+        assert_eq!(snapshot.lines().count(), 3);
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(config("haiku", "low")),
+        });
+        let dark = h.core.settings.theme.clone();
+        for light in [false, true] {
+            h.core.settings.theme = dark.clone();
+            if light {
+                h.core
+                    .settings
+                    .theme
+                    .faces
+                    .get_mut(&FaceName::QualityLegendary)
+                    .unwrap()
+                    .fg = Some(0x8f3f71);
+                h.core
+                    .settings
+                    .theme
+                    .faces
+                    .get_mut(&FaceName::QualityRare)
+                    .unwrap()
+                    .fg = Some(0x076678);
+            }
+            let unbounded = h.display(30);
+            for display in [unbounded, h.frame(1440., 900.).windows.remove(0).display] {
+                for (label, face) in &labels {
+                    assert!(
+                        display
+                            .lines
+                            .iter()
+                            .flat_map(|l| &l.spans)
+                            .any(|s| s.text == *label
+                                && s.face.fg == h.core.settings.theme.face(*face).fg),
+                        "{label}: {display:?}"
+                    );
+                }
+            }
+            let narrow = h.frame(450., 900.).windows.remove(0).display;
+            assert!(
+                narrow
+                    .lines
+                    .iter()
+                    .any(|l| l.spans.iter().any(|s| s.text.contains("*claude*")))
+            );
+            let restored = h.frame(1440., 900.).windows.remove(0).display;
+            for (label, face) in &labels {
+                assert!(
+                    restored
+                        .lines
+                        .iter()
+                        .flat_map(|l| &l.spans)
+                        .any(|s| s.text == *label
+                            && s.face.fg == h.core.settings.theme.face(*face).fg)
+                );
+            }
+            assert_eq!(h.text(), snapshot);
+        }
+        h.keys("g");
+        assert!(h.text().contains("haiku label · low label"));
+    }
+
+    #[test]
     fn workspace_list_sessions_show_model_effort_and_the_bars_urgent_state() {
         let mut h = session();
         let config = [
@@ -5468,15 +5606,17 @@ mod tests {
                     .find(|l| l.spans.iter().any(|s| s.text.contains("* work")))
                     .unwrap();
                 assert!(row.spans.iter().any(|s| s.text == word && s.face.fg == fg));
-                let annotation = h.core.settings.theme.face(FaceName::Annotation).fg;
-                assert!(
-                    frame.windows[0]
-                        .display
-                        .lines
-                        .iter()
-                        .flat_map(|l| &l.spans)
-                        .any(|s| s.text.trim() == "Opus 5.5 · High" && s.face.fg == annotation)
-                );
+                for (label, face) in h.core.agents[&AgentId(0)].model_effort() {
+                    assert!(
+                        frame.windows[0]
+                            .display
+                            .lines
+                            .iter()
+                            .flat_map(|l| &l.spans)
+                            .any(|s| s.text == label
+                                && s.face.fg == h.core.settings.theme.face(face).fg)
+                    );
+                }
             }
             h.core.settings.theme = dark;
             if step == 2 {
