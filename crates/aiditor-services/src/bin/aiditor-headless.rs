@@ -98,6 +98,7 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
             // Key scripts run against files nothing else touches.
             Effect::SetClipboard(_)
             | Effect::OpenWithSystem(_)
+            | Effect::OpenUrl(_)
             | Effect::LoadConfiguration { .. }
             | Effect::Watch(_)
             | Effect::CaptureEnvironment { .. } => continue,

@@ -87,7 +87,8 @@ impl App {
                 Effect::Terminal(_)
                 | Effect::Recovery(_)
                 | Effect::SetClipboard(_)
-                | Effect::OpenWithSystem(_) => {}
+                | Effect::OpenWithSystem(_)
+                | Effect::OpenUrl(_) => {}
                 Effect::Grep(_)
                 | Effect::LoadConfiguration { .. }
                 | Effect::CaptureEnvironment { .. }

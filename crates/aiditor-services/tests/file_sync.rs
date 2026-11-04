@@ -93,7 +93,10 @@ impl Editor {
                 Effect::File(op) if self.hold_operations => self.operations.push(op),
                 Effect::File(op) => replies.push(files::run(op)),
                 Effect::Watch(set) => self.watcher.set(set),
-                Effect::Recovery(_) | Effect::SetClipboard(_) | Effect::OpenWithSystem(_) => {}
+                Effect::Recovery(_)
+                | Effect::SetClipboard(_)
+                | Effect::OpenWithSystem(_)
+                | Effect::OpenUrl(_) => {}
                 Effect::Grep(_)
                 | Effect::LoadConfiguration { .. }
                 | Effect::CaptureEnvironment { .. }
