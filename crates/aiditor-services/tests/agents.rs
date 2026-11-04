@@ -770,6 +770,19 @@ async fn s_tab_cycles_the_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn agent_select_model_sets_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut live = Live::new(dir.path(), "{}");
+    live.start().await;
+    live.keys("M-x agent-select-model RET fast RET");
+    (live.pump(Some(|m| matches!(m, Msg::AgentConfigured { .. })))).await;
+    let mode_line = live.core.frame().windows[0].display.mode_line.text();
+    assert!(mode_line.starts_with("fast │ [auto]"), "{mode_line}");
+    live.call("kill-buffer", &[&live.core.current().name.clone(), "yes"]);
+    live.gone().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_agent_that_stops_speaking_is_terminated() {
     let dir = tempfile::tempdir().unwrap();
     let script_text = r#"{"session": [{"sleep": 100}, "closeStdout", {"sleep": 10000}]}"#;

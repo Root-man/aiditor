@@ -167,27 +167,34 @@ async fn prompts_past_the_script_end_the_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn setting_the_mode_reports_it() {
-    /// The `mode` option's current value.
-    fn mode(options: &[SessionConfigOption]) -> Option<&str> {
-        let option = options.iter().find(|o| o.id.0.as_ref() == "mode")?;
+async fn setting_the_mode_and_model_reports_them() {
+    /// The current value of option `id`.
+    fn current<'a>(options: &'a [SessionConfigOption], id: &str) -> Option<&'a str> {
+        let option = options.iter().find(|o| o.id.0.as_ref() == id)?;
         match &option.kind {
             SessionConfigKind::Select(select) => Some(&select.current_value.0),
             _ => None,
         }
     }
     let mut fake = fake("").await;
+    let set = SetSessionConfigOptionRequest::new(SESSION, "model", "fast");
+    let answer = fake.agent.send_request(set).block_task().await.unwrap();
+    assert_eq!(current(&answer.config_options, "model"), Some("fast"));
+    fake.event().await;
     let set = SetSessionConfigOptionRequest::new(SESSION, "mode", "plan");
     let answer = fake.agent.send_request(set).block_task().await.unwrap();
-    assert_eq!(mode(&answer.config_options), Some("plan"));
+    assert_eq!(current(&answer.config_options, "mode"), Some("plan"));
+    assert_eq!(current(&answer.config_options, "model"), Some("fast"));
     let update = fake.event().await;
     assert!(
         matches!(&update, Event::Update(SessionUpdate::ConfigOptionUpdate(update))
-            if mode(&update.config_options) == Some("plan")),
+            if current(&update.config_options, "mode") == Some("plan")),
         "{update:?}"
     );
-    let set = SetSessionConfigOptionRequest::new(SESSION, "mode", "nope");
-    fake.agent.send_request(set).block_task().await.unwrap_err();
+    for (id, value) in [("mode", "nope"), ("model", "plan"), ("effort", "fast")] {
+        let set = SetSessionConfigOptionRequest::new(SESSION, id, value);
+        fake.agent.send_request(set).block_task().await.unwrap_err();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
