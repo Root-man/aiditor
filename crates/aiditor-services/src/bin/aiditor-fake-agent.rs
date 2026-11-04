@@ -37,13 +37,24 @@ const MODES: [&str; 2] = ["auto", "plan"];
 type Rest = (Vec<Step>, PathBuf, ConnectionTo<Client>, CancellationToken);
 static REST: Mutex<Option<Rest>> = Mutex::new(None);
 
-/// The session's config options: the `mode` select set to `current`.
-fn options(current: &str) -> Vec<SessionConfigOption> {
-    let values = MODES
-        .map(|id| SessionConfigSelectOption::new(id, id))
-        .to_vec();
-    let mode = SessionConfigOption::select("mode", "Mode", current.to_owned(), values);
-    vec![mode.category(SessionConfigOptionCategory::Mode)]
+const MODELS: [&str; 2] = ["default", "fast"];
+/// The current mode and model.
+static CURRENT: Mutex<[&str; 2]> = Mutex::new([MODES[0], MODELS[0]]);
+
+/// The session's config options: the `mode` and `model` selects at their current values.
+fn options() -> Vec<SessionConfigOption> {
+    let [mode, model] = *CURRENT.lock().unwrap();
+    let select = |id: &str, current: &str, values: [&'static str; 2], category| {
+        let values = values
+            .map(|v| SessionConfigSelectOption::new(v, v))
+            .to_vec();
+        SessionConfigOption::select(id.to_owned(), id.to_owned(), current.to_owned(), values)
+            .category(category)
+    };
+    vec![
+        select("mode", mode, MODES, SessionConfigOptionCategory::Mode),
+        select("model", model, MODELS, SessionConfigOptionCategory::Model),
+    ]
 }
 
 #[derive(Default, Deserialize)]
@@ -310,8 +321,7 @@ async fn main() -> agent_client_protocol::Result<()> {
                 eprintln!("cwd={}", request.cwd.display());
                 eprintln!("dirs={}", dirs(&request.additional_directories));
                 eprintln!("A={}", std::env::var("A").unwrap_or_default());
-                let options = options(MODES[0]);
-                responder.respond(NewSessionResponse::new(SESSION).config_options(options))?;
+                responder.respond(NewSessionResponse::new(SESSION).config_options(options()))?;
                 // shortcut: a cancel after the first prompt can't stop `session` steps still
                 // running; give them their own token if a test needs that.
                 let cancel = {
@@ -342,7 +352,7 @@ async fn main() -> agent_client_protocol::Result<()> {
                     client.send_notification(update)?;
                 }
                 load_state.lock().unwrap().cwd = request.cwd;
-                responder.respond(LoadSessionResponse::new().config_options(options(MODES[0])))
+                responder.respond(LoadSessionResponse::new().config_options(options()))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -368,15 +378,18 @@ async fn main() -> agent_client_protocol::Result<()> {
                    responder,
                    client: ConnectionTo<Client>| {
                 let value = request.value.as_value_id().map(|v| &*v.0);
-                let Some(value) =
-                    value.filter(|v| MODES.contains(v) && &*request.config_id.0 == "mode")
-                else {
+                let (slot, values) = match &*request.config_id.0 {
+                    "mode" => (0, &MODES[..]),
+                    "model" => (1, &MODELS[..]),
+                    _ => (0, &[][..]),
+                };
+                let Some(&value) = values.iter().find(|v| Some(**v) == value) else {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::invalid_params());
                 };
-                responder.respond(SetSessionConfigOptionResponse::new(options(value)))?;
-                let update =
-                    SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options(value)));
+                CURRENT.lock().unwrap()[slot] = value;
+                responder.respond(SetSessionConfigOptionResponse::new(options()))?;
+                let update = SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options()));
                 client.send_notification(SessionNotification::new(SESSION, update))
             },
             agent_client_protocol::on_receive_request!(),

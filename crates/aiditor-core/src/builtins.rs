@@ -749,6 +749,15 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_cycle_mode(),
         },
         Command {
+            name: "agent-select-model",
+            spec: ArgSpec {
+                annotation: Some(|core, name| core.model_note(name)),
+                preselect: Some(|core, _| core.model_at()),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.agent_select_model(args),
+        },
+        Command {
             name: "agent-command",
             spec: ArgSpec {
                 prompts: &["Command: "],

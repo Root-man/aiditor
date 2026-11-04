@@ -83,8 +83,9 @@ pub(crate) struct Session {
     /// The session it loads instead of opening one, and the buffer it was loaded from, which
     /// shows it once loaded if still selected.
     load: Option<(SessionId, BufferId)>,
-    /// The mode value last sent with `session/set_config_option`, for a refusal's note.
-    mode_sent: Option<String>,
+    /// What was last sent with `session/set_config_option`, as `mode <value>` or `model
+    /// <value>`, for a refusal's note.
+    sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
     /// A `session/prompt` waits for its answer; its working line is the last block.
@@ -156,16 +157,24 @@ fn session_name(agent: &str, workspace: &str, title: Option<&str>) -> String {
     }
 }
 
-/// The session's mode: the first config option of category `mode`, when it is a select.
+/// The first select config option of `category`: the session's mode or model.
+fn select_option(
+    options: &[SessionConfigOption],
+    category: SessionConfigOptionCategory,
+) -> Option<(&SessionConfigId, &SessionConfigSelect)> {
+    options.iter().find_map(|o| match &o.kind {
+        SessionConfigKind::Select(select) if o.category.as_ref() == Some(&category) => {
+            Some((&o.id, select))
+        }
+        _ => None,
+    })
+}
+
+/// The session's mode: the first select config option of category `mode`.
 fn mode_option(
     options: &[SessionConfigOption],
 ) -> Option<(&SessionConfigId, &SessionConfigSelect)> {
-    let option =
-        (options.iter()).find(|o| o.category == Some(SessionConfigOptionCategory::Mode))?;
-    match &option.kind {
-        SessionConfigKind::Select(select) => Some((&option.id, select)),
-        _ => None,
-    }
+    select_option(options, SessionConfigOptionCategory::Mode)
 }
 
 fn options(select: &SessionConfigSelect) -> Vec<&SessionConfigSelectOption> {
@@ -228,13 +237,7 @@ impl Session {
             .and_then(|s| s.config_options.as_deref());
         let options = options.unwrap_or_default();
         let label = |category| {
-            let option = options.iter().find(|o| {
-                o.category.as_ref() == Some(&category)
-                    && matches!(o.kind, SessionConfigKind::Select(_))
-            })?;
-            let SessionConfigKind::Select(select) = &option.kind else {
-                return None;
-            };
+            let (_, select) = select_option(options, category)?;
             let values = self::options(select);
             Some(
                 values
@@ -1075,6 +1078,51 @@ impl Core {
             .ok_or_else(|| "Not in an agent session buffer".into())
     }
 
+    /// The current session, once its `session/new` is answered and while its agent runs.
+    fn ready_session(&mut self) -> Result<(AgentId, &mut Session), String> {
+        let (id, session) = self.current_session()?;
+        let agent = &session.agent;
+        match (&session.session, session.ended) {
+            (_, true) => Err(format!("{agent} session has ended")),
+            (None, _) => Err(format!("{agent} is not ready")),
+            _ => Ok((id, session)),
+        }
+    }
+
+    /// The values of the current session's model option, groups flattened; none outside a
+    /// session buffer.
+    fn session_models(
+        &self,
+    ) -> (
+        Vec<&SessionConfigSelectOption>,
+        Option<&SessionConfigValueId>,
+    ) {
+        let buffer = self.windows.window.buffer();
+        let session =
+            (self.agents.values().find(|s| s.buffer == buffer)).and_then(|s| s.session.as_ref());
+        let options = (session.and_then(|s| s.config_options.as_deref())).unwrap_or_default();
+        match select_option(options, SessionConfigOptionCategory::Model) {
+            Some((_, select)) => (self::options(select), Some(&select.current_value)),
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// The `Model:` annotation of the value named `name`: its description's first line.
+    pub(crate) fn model_note(&self, name: &str) -> Option<String> {
+        let model = self
+            .session_models()
+            .0
+            .into_iter()
+            .find(|v| v.name == name)?;
+        Some(model.description.as_deref()?.lines().next()?.to_owned())
+    }
+
+    /// Where the current model is among the `Model:` candidates, else 0.
+    pub(crate) fn model_at(&self) -> usize {
+        let (values, current) = self.session_models();
+        (values.iter().position(|v| Some(&v.value) == current)).unwrap_or(0)
+    }
+
     /// The current session's slash commands; none outside a session buffer.
     pub(crate) fn session_commands(&self) -> &[AvailableCommand] {
         let buffer = self.windows.window.buffer();
@@ -1244,7 +1292,7 @@ impl Ctx<'_> {
             held: Some(spawn),
             session: None,
             load: load.map(|id| (id, from)),
-            mode_sent: None,
+            sent: None,
             ended: false,
             turn: None,
             stream: None,
@@ -1322,7 +1370,7 @@ impl Ctx<'_> {
                                 default.as_str(),
                             );
                             set = Some(AgentOp::SetConfigOption { id, request });
-                            session.mode_sent = Some(default.clone());
+                            session.sent = Some(format!("mode {default}"));
                         }
                     }
                     (Some(default), _) => note = Some(format!("{agent} has no mode {default}")),
@@ -1867,13 +1915,9 @@ impl Ctx<'_> {
 
     /// `agent-cycle-mode`: sets the session's mode option to its next value, wrapping around.
     pub(crate) fn agent_cycle_mode(&mut self) -> Result<(), String> {
-        let (id, session) = self.core.current_session()?;
+        let (id, session) = self.core.ready_session()?;
         let agent = &session.agent;
-        let ready = match (&session.session, session.ended) {
-            (_, true) => Err(format!("{agent} session has ended")),
-            (None, _) => Err(format!("{agent} is not ready")),
-            (Some(ready), _) => Ok(ready),
-        }?;
+        let ready = session.session.as_ref().expect("ready");
         let options = ready.config_options.as_deref().unwrap_or_default();
         let no_modes = || format!("{agent} has no modes");
         let (config, select) = mode_option(options).ok_or_else(no_modes)?;
@@ -1889,7 +1933,37 @@ impl Ctx<'_> {
             config.clone(),
             (*next).clone(),
         );
-        session.mode_sent = Some(next.to_string());
+        session.sent = Some(format!("mode {next}"));
+        (self.effects).push(Effect::Agent(AgentOp::SetConfigOption { id, request }));
+        Ok(())
+    }
+
+    /// `agent-select-model`: asks for a value of the session's model option by name, then sets
+    /// the option to it.
+    pub(crate) fn agent_select_model(&mut self, args: Args) -> Result<(), String> {
+        let (id, session) = self.core.ready_session()?;
+        let agent = &session.agent;
+        let ready = session.session.as_ref().expect("ready");
+        let options = ready.config_options.as_deref().unwrap_or_default();
+        let no_model = || format!("{agent} has no model choice");
+        let (config, select) =
+            select_option(options, SessionConfigOptionCategory::Model).ok_or_else(no_model)?;
+        let values = self::options(select);
+        let Some(name) = args.strings.first() else {
+            let names: Vec<String> = values.iter().map(|v| v.name.clone()).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let command = self.core.commands["agent-select-model"];
+            return self.read_string(command, args, "Model: ".into(), Some(&names));
+        };
+        let value = (values.iter().find(|v| v.name == *name))
+            .ok_or_else(|| format!("{agent} has no model {name}"))?;
+        let sent = format!("model {}", value.value);
+        let request = SetSessionConfigOptionRequest::new(
+            ready.session_id.clone(),
+            config.clone(),
+            value.value.clone(),
+        );
+        session.sent = Some(sent);
         (self.effects).push(Effect::Agent(AgentOp::SetConfigOption { id, request }));
         Ok(())
     }
@@ -1937,8 +2011,8 @@ impl Ctx<'_> {
                 }
             }
             Err(err) => {
-                let (agent, value) = (&session.agent, session.mode_sent.as_deref());
-                let note = format!("{agent} could not set mode {}: {err}", value.unwrap_or(""));
+                let (agent, sent) = (&session.agent, session.sent.as_deref());
+                let note = format!("{agent} could not set {}: {err}", sent.unwrap_or(""));
                 core.log(&note);
             }
         }
@@ -1974,8 +2048,8 @@ impl Ctx<'_> {
 mod tests {
     use agent_client_protocol_schema::v1::{
         AvailableCommandsUpdate, ConfigOptionUpdate, ContentChunk, ImageContent, PlanEntryPriority,
-        PlanEntryStatus, SessionConfigSelectOption, SessionUpdate, ToolCallLocation,
-        ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
+        PlanEntryStatus, SessionConfigSelectGroup, SessionConfigSelectOption, SessionUpdate,
+        ToolCallLocation, ToolCallUpdateFields, ToolKind, UnstructuredCommandInput,
     };
 
     use super::*;
@@ -5287,6 +5361,89 @@ mod tests {
         exited(&mut h, 0, 1);
         ops(&mut h);
         h.keys("S-TAB");
+        assert_eq!(h.core.message(), Some("claude session has ended"));
+        assert!(ops(&mut h).is_empty());
+    }
+
+    fn models(current: &'static str, grouped: bool) -> Vec<SessionConfigOption> {
+        let opus = SessionConfigSelectOption::new("opus", "Opus").description("Most capable\nmore");
+        let sonnet = SessionConfigSelectOption::new("sonnet", "Sonnet");
+        let model = match grouped {
+            false => SessionConfigOption::select("model", "Model", current, vec![opus, sonnet]),
+            true => SessionConfigOption::select(
+                "model",
+                "Model",
+                current,
+                vec![
+                    SessionConfigSelectGroup::new("a", "A", vec![opus]),
+                    SessionConfigSelectGroup::new("b", "B", vec![sonnet]),
+                ],
+            ),
+        };
+        let mut options = options("auto");
+        options.push(model.category(SessionConfigOptionCategory::Model));
+        options
+    }
+
+    #[test]
+    fn agent_select_model_sets_the_picked_model() {
+        for grouped in [false, true] {
+            let mut h = session();
+            let configured = |h: &mut Harness, result| {
+                h.send(Msg::AgentConfigured {
+                    id: AgentId(0),
+                    result,
+                });
+            };
+            configured(&mut h, Ok(models("sonnet", grouped)));
+            h.keys("M-x agent-select-model RET");
+            assert_eq!(h.core.minibuffer().unwrap().prompt, "Model: ");
+            assert_eq!(
+                listed(&mut h),
+                (vec!["Opus".into(), "Sonnet".into()], Some(1))
+            );
+            assert_eq!(
+                h.core.minibuffer().unwrap().annotations,
+                ["Most capable", ""]
+            );
+            h.keys("C-p RET");
+            assert_eq!(ops(&mut h), ["set 0 s model=opus"]);
+            configured(&mut h, Ok(models("opus", grouped)));
+            assert!(h.display(5).mode_line.text().starts_with("Opus │ [auto]"));
+            h.keys("M-x agent-select-model RET Sonnet RET");
+            assert_eq!(ops(&mut h), ["set 0 s model=sonnet"]);
+            configured(&mut h, Err("no".into()));
+            assert!(messages(&h).contains("claude could not set model sonnet: no\n"));
+            assert!(h.display(5).mode_line.text().starts_with("Opus │"));
+        }
+    }
+
+    #[test]
+    fn agent_select_model_needs_a_ready_session_with_a_model() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        h.keys("M-x agent-select-model RET");
+        assert_eq!(h.core.message(), Some("claude is not ready"));
+        assert!(h.core.minibuffer().is_none());
+        ready(&mut h, 0);
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(vec![]),
+        });
+        h.keys("M-x agent-select-model RET");
+        assert_eq!(h.core.message(), Some("claude has no model choice"));
+        assert!(h.core.minibuffer().is_none());
+        h.send(Msg::AgentConfigured {
+            id: AgentId(0),
+            result: Ok(models("opus", false)),
+        });
+        h.keys("M-x agent-select-model RET Haiku RET");
+        assert_eq!(h.core.message(), Some("claude has no model Haiku"));
+        assert!(ops(&mut h).is_empty());
+        exited(&mut h, 0, 1);
+        ops(&mut h);
+        h.keys("M-x agent-select-model RET");
         assert_eq!(h.core.message(), Some("claude session has ended"));
         assert!(ops(&mut h).is_empty());
     }
