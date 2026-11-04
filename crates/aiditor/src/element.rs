@@ -60,6 +60,8 @@ pub(crate) struct Row {
     pub(crate) top: Pixels,
     pub(crate) height: Pixels,
     decorations: Vec<Decoration>,
+    /// Where an `HRule` decoration shows, as x from the window's left.
+    gaps: Vec<Range<Pixels>>,
     /// How far right of the text's start its text and background start.
     indent: Pixels,
     /// Its label in the gutter, if the window has one, and the label's x from the window's left.
@@ -229,9 +231,24 @@ impl Element for FrameElement {
                         let label = shape(label.clone(), &[run]);
                         (text_x - px(GUTTER_RIGHT) - label.width, label)
                     });
+                    let start = text_x + indent;
+                    let gaps = match line
+                        .decorations
+                        .iter()
+                        .any(|d| matches!(d, Decoration::HRule(_)))
+                    {
+                        true => rule_gaps(
+                            &text.text,
+                            |i| start + text.x_for_index(i),
+                            bounds.size.width,
+                            cell,
+                        ),
+                        false => Vec::new(),
+                    };
                     let row = Row {
                         top,
                         height,
+                        gaps,
                         decorations: line.decorations.clone(),
                         indent,
                         number,
@@ -397,21 +414,39 @@ impl Element for FrameElement {
                             true => p.text_x + row.indent,
                             false => px(0.),
                         };
-                        let (x, width, color) = match *decoration {
+                        let (h, one) = (row.height, px(1.));
+                        // Each quad is x, y, width and height from the row's left top.
+                        let (color, quads) = match *decoration {
                             Decoration::Background(name) if left > px(0.) => {
-                                (left, width - left - p.text_right, theme.face(name).bg)
+                                let w = width - left - p.text_right;
+                                (theme.face(name).bg, vec![(left, px(0.), w, h)])
                             }
-                            Decoration::Background(name) => (left, width, theme.face(name).bg),
-                            Decoration::Rule(name) => (px(0.), px(2.), theme.face(name).fg),
-                            Decoration::Bar(name) => (px(0.), px(3.), theme.face(name).fg),
-                            Decoration::Indent(_) => (px(0.), px(0.), None),
+                            Decoration::Background(name) => {
+                                (theme.face(name).bg, vec![(left, px(0.), width, h)])
+                            }
+                            Decoration::Rule(name) => {
+                                (theme.face(name).fg, vec![(px(0.), px(0.), px(2.), h)])
+                            }
+                            Decoration::Bar(name) => {
+                                (theme.face(name).fg, vec![(px(0.), px(0.), px(3.), h)])
+                            }
+                            Decoration::Indent(_) => (None, Vec::new()),
+                            Decoration::Border { top, face } => {
+                                let y = if top { px(0.) } else { h - one };
+                                (theme.face(face).fg, vec![(px(0.), y, width, one)])
+                            }
+                            Decoration::HRule(face) => {
+                                let y = (h / 2.).floor();
+                                let gaps =
+                                    row.gaps.iter().map(|g| (g.start, y, g.end - g.start, one));
+                                (theme.face(face).fg, gaps.collect())
+                            }
                         };
-                        if let Some(color) = color {
-                            let at = origin + point(x, px(0.));
-                            window.paint_quad(fill(
-                                Bounds::new(at, size(width, row.height)),
-                                rgb(color),
-                            ));
+                        for (x, y, w, h) in quads {
+                            if let Some(color) = color {
+                                let at = origin + point(x, y);
+                                window.paint_quad(fill(Bounds::new(at, size(w, h)), rgb(color)));
+                            }
                         }
                     }
                     if let Some((x, number)) = &row.number {
@@ -765,4 +800,45 @@ pub(crate) fn line_runs(
         }
     }
     (text, runs, cursor, boxes)
+}
+
+/// The stretches of a row with no glyph, a cell clear of the glyphs beside them, as x from the
+/// window's left: from its left edge, between glyphs and to `right`. `x` is a byte's x.
+fn rule_gaps(
+    text: &str,
+    x: impl Fn(usize) -> Pixels,
+    right: Pixels,
+    cell: Pixels,
+) -> Vec<Range<Pixels>> {
+    let (mut gaps, mut from) = (Vec::new(), Some(px(0.)));
+    for (i, c) in text.char_indices() {
+        match (c == ' ', from) {
+            (true, None) => from = Some(x(i) + cell),
+            (false, Some(start)) => {
+                gaps.push(start..x(i) - cell);
+                from = None;
+            }
+            _ => {}
+        }
+    }
+    gaps.push(from.unwrap_or_else(|| x(text.len()) + cell)..right);
+    gaps.retain(|g| g.end > g.start);
+    gaps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rule_fills_the_gaps_a_cell_clear_of_the_text() {
+        // Ten-pixel cells, the text starting two cells in.
+        let x = |i: usize| px(20. + 10. * i as f32);
+        let gaps = rule_gaps("Worked 2m 05s     13:58:12", x, px(400.), px(10.));
+        assert_eq!(
+            gaps,
+            [px(0.)..px(10.), px(160.)..px(190.), px(290.)..px(400.)]
+        );
+        assert_eq!(rule_gaps("", x, px(100.), px(10.)), [px(0.)..px(100.)]);
+    }
 }

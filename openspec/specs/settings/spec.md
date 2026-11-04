@@ -215,3 +215,14 @@ Settings SHALL accept a nonnegative integer `paste_fold_lines`, bundled as 20. I
 - **GIVEN** valid settings are in effect
 - **WHEN** settings with `paste_fold_lines = -1` or a string are loaded
 - **THEN** the settings error names the key and the prior settings remain
+
+### Requirement: Quality and prompt-band faces
+`themes.default` SHALL also define `quality-poor`, `quality-common`, `quality-uncommon`, `quality-rare`, `quality-epic`, `quality-legendary`, `quality-artifact` and `session-user-rule`, and `session-user` SHALL set a foreground and bold besides its background. Each SHALL be overridable in a theme as every face is.
+
+#### Scenario: Overriding a quality colour
+- **WHEN** the user file sets `[themes.default.faces] quality-legendary = { fg = 0x123456 }` and `C-x C-r` reloads it
+- **THEN** a session using a legendary model draws its model name in that colour in the selected window
+
+#### Scenario: Bundled faces
+- **WHEN** no user file is loaded
+- **THEN** all eight faces have a foreground, and `session-user` has a background, a foreground and bold

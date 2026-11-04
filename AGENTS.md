@@ -19,12 +19,13 @@ The approved designs are in [docs/design](docs/design), exported from the [aidit
 - **3 · Project grep** ([Grep.dc.html](docs/design/Grep.dc.html)): hits grouped by file, match highlighting in the previewed buffer, the fixed-width count and the searching state.
 - **4 · find-file** ([FindFile.dc.html](docs/design/FindFile.dc.html)): the `*/16` count, directories in their own face, and annotations for mode bits, size and age.
 - **5 · Terminal** ([Terminal.dc.html](docs/design/Terminal.dc.html)): test output, with the exit status and input mode in the mode line.
-- **6 · Agent session, monospace** ([Session.dc.html](docs/design/Session.dc.html)): the interactive session buffer: messages, timings and the working timer, collapsed tool groups and tool-call blocks, the permission request, file chips and the growing prompt.
+- **6 · Agent session, monospace** ([Session.dc.html](docs/design/Session.dc.html)): the interactive session buffer: the summary rule and ruled prompt between turns, messages, timings to the second and the working timer, collapsed tool groups and tool-call blocks, the permission request, file chips and the growing prompt.
 - **6b · Session prompt** ([SessionPrompt.dc.html](docs/design/SessionPrompt.dc.html)): `@` references, `/` commands, `agent-attach-file` and folded pastes.
 - **6c · File chips** ([FileLinks.dc.html](docs/design/FileLinks.dc.html)): the chip's kinds and states, and file links in agent prose.
 - **6d · Questions: choices** ([QuestionChoices.dc.html](docs/design/QuestionChoices.dc.html)): one choice, several choices and previews.
 - **6e · Questions: several questions and forms** ([QuestionForms.dc.html](docs/design/QuestionForms.dc.html)): folded questions, own answer, every form field type and minibuffer checks.
 - **6f · Questions: URL, non-blocking, answered** ([QuestionStates.dc.html](docs/design/QuestionStates.dc.html)): URL requests, questions beside a running turn, answered rows and a question while you type.
+- **6g · Telling turns apart and mode line colours** ([SessionTurns.dc.html](docs/design/SessionTurns.dc.html)): six ways to separate turns (frame 6 uses D and F), and the item-quality colours for model and effort and the green/yellow/red `ctx`.
 - **7 · Agent session, rich** ([SessionRich.dc.html](docs/design/SessionRich.dc.html)): a sketch for M7, with proportional prose and cards. Not approved; see below.
 - **8 · Welcome dashboard** ([Dashboard.dc.html](docs/design/Dashboard.dc.html)): a sketch for M7. Not approved; see below.
 - **9 · Mode line study** ([ModeLines.dc.html](docs/design/ModeLines.dc.html)): the workspace modeline and every buffer type's mode line, where each segment lives, and the rules.

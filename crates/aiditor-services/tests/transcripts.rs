@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{AgentRequest, Error, PromptRequest, SessionUpdate};
 use aiditor_core::key::{Key, KeyCode, parse_keys};
+use aiditor_core::settings::FaceName;
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
 use aiditor_services::agents::Agents;
 use serde_json::Value;
@@ -403,13 +404,21 @@ async fn committed_transcripts_replay_through_the_core() {
         replay.run(&lines).await;
         let name = path.display();
         let frame = replay.core.frame();
-        let model = &frame.windows[0].display.mode_line.left[0][0].0;
-        let expected = match path.file_stem().unwrap().to_str().unwrap() {
-            "claude" => "Opus 5.5 · Medium",
-            "codex" => "6.1 Sol · High",
+        let segment = &frame.windows[0].display.mode_line.left[0];
+        let model: String = segment.iter().map(|(t, _)| t.as_str()).collect();
+        let faces: Vec<_> = segment.iter().map(|(_, f)| *f).collect();
+        let (expected, quality) = match path.file_stem().unwrap().to_str().unwrap() {
+            "claude" => ("Opus 5.5 · Medium", FaceName::QualityUncommon),
+            "codex" => ("6.1 Sol · High", FaceName::QualityRare),
             other => panic!("unexpected transcript {other}"),
         };
         assert_eq!(model, expected, "{name}: model and effort display names");
+        let epic = FaceName::QualityEpic;
+        assert_eq!(
+            faces,
+            [epic, FaceName::ModeLineDim, quality],
+            "{name}: quality faces"
+        );
         assert_eq!(replay.updates, updates, "{name}: typed updates");
         assert!(requests > 0, "{name} has a permission request");
         assert_eq!(replay.requests, requests, "{name}: agent requests");

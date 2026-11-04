@@ -98,8 +98,8 @@ impl Editor {
         });
         // The launch's messages ran before there was a watcher to send their watch set to.
         watcher.set(core.watch_set());
-        let (clock, clock_task) = Self::start_clock(clock::read, cx);
-        _ = tx.try_send(Msg::Clock(clock.clone()));
+        let (time, clock_task) = Self::start_clock(clock::read, cx);
+        _ = tx.try_send(Msg::Clock(time));
         let recovery = args.recovery_dir.map(|dir| {
             let runtime = tokio::runtime::Handle::current();
             let tx = tx.clone();
@@ -116,7 +116,7 @@ impl Editor {
             focus: cx.focus_handle(),
             tx,
             timer: None,
-            clock,
+            clock: clock::minute_text(time),
             title: String::new(),
             _clock_task: clock_task,
             config_dir: args.config_dir,
@@ -408,19 +408,20 @@ impl Editor {
     }
 
     fn start_clock(
-        mut read: impl FnMut() -> (String, Duration) + 'static,
+        mut read: impl FnMut() -> Duration + 'static,
         cx: &mut Context<Self>,
-    ) -> (String, Task<()>) {
-        let (text, mut delay) = read();
+    ) -> (Duration, Task<()>) {
+        let first = read();
         let task = cx.spawn(async move |this, cx| {
+            let mut delay = clock::until_next_minute(first);
             loop {
                 cx.background_executor().timer(delay).await;
-                let (text, next) = read();
-                delay = next;
+                let time = read();
+                delay = clock::until_next_minute(time);
                 if this
                     .update(cx, |editor, cx| {
-                        editor.clock = text.clone();
-                        editor.handle(Msg::Clock(text), cx);
+                        editor.clock = clock::minute_text(time);
+                        editor.handle(Msg::Clock(time), cx);
                     })
                     .is_err()
                 {
@@ -428,7 +429,7 @@ impl Editor {
                 }
             }
         });
-        (text, task)
+        (first, task)
     }
 
     fn drain(mut rx: mpsc::Receiver<Msg>, cx: &mut Context<Self>) {
@@ -1411,17 +1412,17 @@ mod tests {
         let (editor, cx) = editor(cx, "");
         editor.update(cx, |e, cx| {
             let mut reads = 0;
-            let (text, task) = Editor::start_clock(
+            let (time, task) = Editor::start_clock(
                 move || {
                     reads += 1;
                     match reads {
-                        1 => ("20:41".into(), Duration::from_millis(250)),
-                        _ => ("20:42".into(), Duration::from_secs(60)),
+                        1 => Duration::from_millis((20 * 3600 + 41 * 60 + 59) * 1000 + 750),
+                        _ => Duration::from_secs(20 * 3600 + 42 * 60),
                     }
                 },
                 cx,
             );
-            e.clock = text;
+            e.clock = clock::minute_text(time);
             e._clock_task = task;
             cx.notify();
         });
@@ -1434,8 +1435,8 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(editor.read_with(cx, |e, _| e.clock.clone()), "20:42");
         assert_eq!(
-            editor.read_with(cx, |e, _| e.core.clock().map(String::from)),
-            Some("20:42".into())
+            editor.read_with(cx, |e, _| e.core.clock()),
+            Some("20:42:00".into())
         );
         let clock = cx.debug_bounds("workspace-clock").unwrap();
         let entries = cx.debug_bounds("workspace-entries").unwrap();

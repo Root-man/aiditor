@@ -81,7 +81,8 @@ status-waiting = { fg = 0xe5e510 }
 status-running = { fg = 0x0dbc79 }
 status-failed = { fg = 0xf14c4c }
 status-info = { fg = 0x569cd6 }
-session-user = { bg = 0x2a2a2a }
+session-user = { fg = 0xffffff, bg = 0x2a2a2a, bold = true }
+session-user-rule = { fg = 0x5a5a5a }
 session-thought = { fg = 0x808080 }
 session-block = { bg = 0x2a2a2a }
 session-code = { fg = 0xce9178 }
@@ -93,6 +94,14 @@ permission = { bg = 0x3c3c3c }
 link = { fg = 0xce9178, underline = true }
 attachment = { bg = 0x3c3c3c, box = 0x5a5a5a }
 message-at-point = { fg = 0xffcc00 }
+# A session's model and effort, by item quality.
+quality-poor = { fg = 0x928374 }
+quality-common = { fg = 0xebdbb2 }
+quality-uncommon = { fg = 0xb8bb26 }
+quality-rare = { fg = 0x83a598 }
+quality-epic = { fg = 0xd3869b }
+quality-legendary = { fg = 0xfe8019 }
+quality-artifact = { fg = 0xe6cc80 }
 
 # Code's faces by tree-sitter capture name; one without an entry takes its longest dotted
 # prefix's (`function.method` falls back to `function`), and none means the default face.

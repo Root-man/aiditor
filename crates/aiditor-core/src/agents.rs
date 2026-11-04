@@ -236,24 +236,35 @@ impl Session {
             .as_ref()
             .and_then(|s| s.config_options.as_deref());
         let options = options.unwrap_or_default();
+        // The current value's display name, falling back to the value, and the value.
         let label = |category| {
             let (_, select) = select_option(options, category)?;
+            let value = select.current_value.to_string();
             let values = self::options(select);
-            Some(
-                values
-                    .iter()
-                    .find(|v| v.value == select.current_value)
-                    .map_or_else(|| select.current_value.to_string(), |v| v.name.clone()),
-            )
+            let name = values.iter().find(|v| v.value == select.current_value);
+            Some((
+                name.map_or_else(|| value.clone(), |v| v.name.clone()),
+                value,
+            ))
         };
-        let labels = [
-            label(SessionConfigOptionCategory::Model),
-            label(SessionConfigOptionCategory::ThoughtLevel),
-        ];
-        let model = labels.into_iter().flatten().collect::<Vec<_>>().join(" · ");
+        let model = label(SessionConfigOptionCategory::Model).map(|(name, value)| {
+            let face = model_quality(&name).or_else(|| model_quality(&value));
+            (
+                name.replace(char::is_control, " "),
+                face.unwrap_or(FaceName::ModeLineDim),
+            )
+        });
+        let effort = label(SessionConfigOptionCategory::ThoughtLevel).map(|(name, value)| {
+            let face = effort_quality(&value).unwrap_or(FaceName::ModeLineDim);
+            (name.replace(char::is_control, " "), face)
+        });
+        let mut model: Vec<_> = model.into_iter().chain(effort).collect();
+        if model.len() == 2 {
+            model.insert(1, (" · ".into(), FaceName::ModeLineDim));
+        }
         let mut left = Vec::new();
         if !model.is_empty() {
-            left.push(segment(&model, FaceName::ModeLineDim));
+            left.push(model);
         }
         if let Some((_, mode)) = mode_option(options) {
             let face = match mode.current_value.0.as_ref() {
@@ -282,7 +293,12 @@ impl Session {
         }
         if let Some((used, size)) = self.usage.filter(|(_, size)| *size > 0) {
             let percent = u128::from(used.min(size)) * 100 / u128::from(size);
-            right.push(segment(&format!("ctx {percent}%"), FaceName::ModeLineDim));
+            let face = match percent {
+                0..50 => FaceName::StatusRunning,
+                50..80 => FaceName::StatusWaiting,
+                _ => FaceName::StatusFailed,
+            };
+            right.push(segment(&format!("ctx {percent}%"), face));
         }
         ModeLine {
             left,
@@ -290,6 +306,32 @@ impl Session {
             path: None,
         }
     }
+}
+
+/// A model's item quality, from a family word in `name` such as `Opus 5.5` or `gpt-6-astra`.
+fn model_quality(name: &str) -> Option<FaceName> {
+    let words = name.split(|c: char| !c.is_alphanumeric());
+    words.map(str::to_lowercase).find_map(|w| match w.as_str() {
+        "fable" | "astra" => Some(FaceName::QualityLegendary),
+        "opus" | "sol" => Some(FaceName::QualityEpic),
+        "sonnet" | "terra" => Some(FaceName::QualityRare),
+        "haiku" | "luna" => Some(FaceName::QualityUncommon),
+        _ => None,
+    })
+}
+
+/// An effort's item quality, from its value.
+fn effort_quality(value: &str) -> Option<FaceName> {
+    Some(match value {
+        "default" => FaceName::QualityPoor,
+        "low" => FaceName::QualityCommon,
+        "medium" => FaceName::QualityUncommon,
+        "high" => FaceName::QualityRare,
+        "xhigh" => FaceName::QualityEpic,
+        "max" => FaceName::QualityLegendary,
+        "ultra" => FaceName::QualityArtifact,
+        _ => return None,
+    })
 }
 
 /// A tool call's block: a header line, then its content when it has any.
@@ -431,7 +473,7 @@ impl Core {
     /// rendered as markdown by the next frame.
     fn output(&mut self, id: AgentId, text: &str, block: Block) {
         let now = self.now();
-        let clock = self.clock.clone();
+        let clock = self.clock();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -511,11 +553,15 @@ impl Core {
             last.len += text.chars().count();
             let range = start + PROMPT.len()..start + last.len;
             render(buffer, range.clone(), false, None);
-            self.chips.paint(buffer, range.clone());
-            user_lines(buffer, range, false);
+            self.chips.paint(buffer, range);
+            // Its first line's band and borders go on again, the bottom one moving down.
+            buffer.remove_properties(start..start + 1);
+            prompt_glyph(buffer, start);
+            user_lines(buffer, start..start + last.len);
             return;
         }
         self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
+        let clock = self.clock();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -526,15 +572,15 @@ impl Core {
         render(buffer, end - text.chars().count()..end, false, None);
         self.chips.paint(buffer, end - text.chars().count()..end);
         if let (true, Some(clock), Some(message)) =
-            (session.live(), &self.clock, session.messages.last_mut())
+            (session.live(), clock, session.messages.last_mut())
         {
             let at = line_end(buffer, end - text.chars().count());
-            message.len += put_time(buffer, at, clock);
+            message.len += put_time(buffer, at, &clock);
         }
         let echo = end - text.chars().count() - PROMPT.len();
         prompt_glyph(buffer, echo);
         let end = session.end(buffer) - "\n\n".len();
-        user_lines(buffer, echo..end, true);
+        user_lines(buffer, echo..end);
     }
 
     /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
@@ -891,6 +937,7 @@ impl Core {
     fn settle_turn(&mut self, id: AgentId) {
         self.end_stream(id);
         let now = self.now();
+        let clock = self.clock();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -902,9 +949,16 @@ impl Core {
         let end = session.end(buffer) - "\n\n".len();
         let text = format!("Worked {}", long_duration(now - turn.start));
         let start = end + "\n\n".len() - turn.len;
-        let len = retime(buffer, start..end, &text, FaceName::SessionThought);
-        if let Some(clock) = &self.clock {
-            put_time(buffer, start + len, clock);
+        let len = retime(buffer, start..end, &text, FaceName::Annotation);
+        // Frame 6's summary rule: two columns in, a line through the rest of the row.
+        for line in [
+            Decoration::Indent(2),
+            Decoration::HRule(FaceName::Separator),
+        ] {
+            (buffer.add_property(start..start + 1, Prop::Line(line))).expect("the working line");
+        }
+        if let Some(clock) = clock {
+            put_time(buffer, start + len, &clock);
         }
     }
 
@@ -1704,6 +1758,7 @@ impl Ctx<'_> {
             return Ok(());
         }
         core.end_stream(id);
+        let clock = core.clock();
         let session = core.agents.get_mut(&id).expect("found above");
         let b = core
             .buffers
@@ -1728,11 +1783,11 @@ impl Ctx<'_> {
         };
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
-        if let Some(clock) = &core.clock {
+        if let Some(clock) = clock {
             let at = session.paste_line_end(b, start);
-            message.len += put_time(b, at, clock);
+            message.len += put_time(b, at, &clock);
         }
-        user_lines(b, echo..echo + message.len, true);
+        user_lines(b, echo..echo + message.len);
         let end = b.len_chars();
         let session = core.agents.get_mut(&id).expect("found above");
         session.fold_pastes(b, start);
@@ -2442,7 +2497,7 @@ mod tests {
     #[test]
     fn a_long_yank_previews_four_lines_and_sends_every_line() {
         let mut h = session();
-        h.send(Msg::Clock("12:34".into()));
+        h.clock("12:34:00");
         h.send(Msg::Insert {
             text: "before ".into(),
             replace: None,
@@ -2476,7 +2531,7 @@ mod tests {
         );
         let rows = session_rows(&mut h);
         assert!(rows[0].contains("≡ Pasted 21 lines"));
-        assert!(rows[0].ends_with("12:34"));
+        assert!(rows[0].ends_with("12:34:00"));
         h.keys("M-< C-u 9 C-f TAB");
         let rows = session_rows(&mut h);
         assert_eq!(
@@ -3232,6 +3287,12 @@ mod tests {
         let user = Decoration::Background(FaceName::SessionUser);
         let line = drawn_line(&mut h, "❯ see b");
         assert!(line.decorations.contains(&user));
+        let border = |top| Decoration::Border {
+            top,
+            face: FaceName::SessionUserRule,
+        };
+        let borders = (line.decorations.iter()).filter(|d| matches!(d, Decoration::Border { .. }));
+        assert_eq!(borders.collect::<Vec<_>>(), [&border(true), &border(false)]);
         assert!(!drawn_line(&mut h, "c").decorations.contains(&user));
     }
 
@@ -3430,10 +3491,25 @@ mod tests {
         assert_eq!(lines[1].0, "b");
         assert!(lines[0].1.contains(&user) && lines[1].1.contains(&user));
         assert!(!lines[2].1.contains(&user), "the blank line after it");
+        let border = |top| Decoration::Border {
+            top,
+            face: FaceName::SessionUserRule,
+        };
+        assert!(lines[0].1.contains(&border(true)) && !lines[0].1.contains(&border(false)));
+        assert!(lines[1].1.contains(&border(false)) && !lines[1].1.contains(&border(true)));
+        let theme = &h.core.settings().theme;
+        let user_face = theme.face(FaceName::SessionUser);
+        let b = &frame.windows[0].display.lines[1].spans[0];
+        assert_eq!(
+            (b.face.fg, b.face.bold),
+            (user_face.fg, true),
+            "the text in session-user"
+        );
         let prompt = lines
             .iter()
             .find(|(t, _)| t.starts_with("❯ ") && t.len() == "❯ ".len());
-        assert!(!prompt.expect("the live prompt").1.contains(&user));
+        let prompt = prompt.expect("the live prompt");
+        assert!(!prompt.1.contains(&user) && !prompt.1.contains(&border(true)));
         let glyph = &frame.windows[0].display.lines[0].spans[0];
         let info = h.core.settings().theme.face(FaceName::StatusInfo);
         assert_eq!(
@@ -3505,6 +3581,7 @@ mod tests {
         let b = h.core.current();
         let prompt = |p: &Prop| match p {
             Prop::Display(pieces) => pieces[0].0 == "❯",
+            Prop::Line(Decoration::Border { face, .. }) => *face == FaceName::SessionUserRule,
             _ => *p == Prop::Line(Decoration::Background(FaceName::SessionUser)),
         };
         (b.properties())
@@ -3600,8 +3677,11 @@ mod tests {
     #[test]
     fn a_streamed_block_renders_when_the_frame_is_built() {
         let rendered = |h: &Harness| {
-            let own = |t: &String| t.starts_with("Work");
-            (props(h).into_iter().filter(|(t, _)| !own(t))).collect::<Vec<_>>()
+            let own = |(t, p): &(String, Prop)| {
+                t.starts_with("Work")
+                    || matches!(p, Prop::Line(Decoration::Indent(2) | Decoration::HRule(_)))
+            };
+            (props(h).into_iter().filter(|p| !own(p))).collect::<Vec<_>>()
         };
         let mut h = session();
         h.keys("a RET");
@@ -4320,6 +4400,28 @@ mod tests {
             drawn.contains(text)
         });
         line.unwrap_or_else(|| panic!("{text:?} drawn"))
+    }
+
+    #[test]
+    fn a_settled_turn_is_drawn_as_a_rule_however_it_ends() {
+        let rule = Decoration::HRule(FaceName::Separator);
+        for end in 0..4 {
+            let mut h = session();
+            h.keys("a RET");
+            let working = drawn_line(&mut h, "Working for");
+            assert!(!working.decorations.contains(&rule), "running: no rule");
+            match end {
+                0 => prompted(&mut h, Ok(StopReason::EndTurn)),
+                1 => prompted(&mut h, Ok(StopReason::Cancelled)),
+                2 => prompted(&mut h, Err("Internal error")),
+                _ => exited(&mut h, 0, 1),
+            }
+            let worked = drawn_line(&mut h, "Worked");
+            assert!(worked.decorations.contains(&rule), "ending {end}");
+            assert_eq!(worked.indent(), 2);
+            let face = h.core.settings().theme.face(FaceName::Annotation);
+            assert_eq!(worked.spans[0].face.fg, face.fg);
+        }
     }
 
     #[test]
@@ -5169,6 +5271,114 @@ mod tests {
     }
 
     #[test]
+    fn context_usage_is_coloured_by_how_full_it_is() {
+        use agent_client_protocol_schema::v1::UsageUpdate;
+        let mut h = session();
+        for (used, face) in [
+            (49, FaceName::StatusRunning),
+            (50, FaceName::StatusWaiting),
+            (79, FaceName::StatusWaiting),
+            (80, FaceName::StatusFailed),
+        ] {
+            let usage = SessionUpdate::UsageUpdate(UsageUpdate::new(used, 100));
+            update(&mut h, 0, usage);
+            let right = h.display(5).mode_line.right;
+            assert_eq!(right[0], vec![(format!("ctx {used}%"), face)]);
+        }
+    }
+
+    #[test]
+    fn model_and_effort_are_coloured_by_item_quality() {
+        use FaceName::*;
+        let mut h = session();
+        for (value, name, effort, faces) in [
+            ("opus", "Opus 5.5", "high", (QualityEpic, QualityRare)),
+            (
+                "gpt-6-astra",
+                "6 Astra",
+                "ultra",
+                (QualityLegendary, QualityArtifact),
+            ),
+            (
+                "gpt-6-luna",
+                "6 Luna",
+                "low",
+                (QualityUncommon, QualityCommon),
+            ),
+            (
+                "fable",
+                "Fable 5.1",
+                "max",
+                (QualityLegendary, QualityLegendary),
+            ),
+            (
+                "sonnet",
+                "Sonnet 5.5",
+                "medium",
+                (QualityRare, QualityUncommon),
+            ),
+            (
+                "haiku",
+                "Haiku 5.5",
+                "xhigh",
+                (QualityUncommon, QualityEpic),
+            ),
+            (
+                "default",
+                "Default (recommended)",
+                "default",
+                (ModeLineDim, QualityPoor),
+            ),
+            (
+                "claude-opus-4-8",
+                "Opus 4.8",
+                "turbo",
+                (QualityEpic, ModeLineDim),
+            ),
+            ("gpt-5.6-sol", "5.6 Sol", "high", (QualityEpic, QualityRare)),
+            (
+                "gpt-5.6-terra",
+                "5.6 Terra",
+                "high",
+                (QualityRare, QualityRare),
+            ),
+            ("solo", "Solo", "high", (ModeLineDim, QualityRare)),
+        ] {
+            let model = SessionConfigOption::select(
+                "model",
+                "Model",
+                value,
+                vec![SessionConfigSelectOption::new(value, name)],
+            );
+            let level = SessionConfigOption::select(
+                "effort",
+                "Effort",
+                effort,
+                vec![SessionConfigSelectOption::new(
+                    effort,
+                    effort.to_uppercase(),
+                )],
+            );
+            let mut options = options("auto");
+            options.push(model.category(SessionConfigOptionCategory::Model));
+            options.push(level.category(SessionConfigOptionCategory::ThoughtLevel));
+            h.send(Msg::AgentConfigured {
+                id: AgentId(0),
+                result: Ok(options),
+            });
+            assert_eq!(
+                h.display(5).mode_line.left[0],
+                vec![
+                    (name.to_string(), faces.0),
+                    (" · ".to_string(), ModeLineDim),
+                    (effort.to_uppercase(), faces.1),
+                ],
+                "{name} · {effort}"
+            );
+        }
+    }
+
+    #[test]
     fn session_frame_spans_follow_active_inactive_and_narrow_windows() {
         let mut h = session();
         info(&mut h, 0, serde_json::json!({"title":"A session title"}));
@@ -5518,19 +5728,19 @@ mod tests {
     #[test]
     fn messages_show_their_clock_times_and_the_turn_its_length() {
         let mut h = session();
-        h.send(Msg::Clock("14:01".into()));
+        h.clock("14:01:05");
         h.keys("h i RET");
-        h.send(Msg::Clock("14:03".into()));
-        h.advance(secs(5));
+        h.clock("14:03:00");
+        h.advance(Duration::from_millis(22_600));
         agent_chunk(&mut h, "m", "Hi\nthere");
-        h.send(Msg::Clock("14:04".into()));
+        h.clock("14:04:00");
         h.advance(secs(120));
         // Stamped when it arrived; the line goes in when the block ends.
         agent_chunk(&mut h, "m", "!");
         prompted(&mut h, Ok(StopReason::EndTurn));
         assert_eq!(
             h.core.text(),
-            "> hi 14:01\n\nHi 14:03\nthere!\n\nWorked 2m 05s 14:04\n\n> "
+            "> hi 14:01:05\n\nHi 14:03:22\nthere!\n\nWorked 2m 22s 14:06:00\n\n> "
         );
         assert_eq!(
             props(&h)
@@ -5540,9 +5750,20 @@ mod tests {
             3
         );
         let annotation = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
-        assert!(props(&h).contains(&("14:03".into(), annotation)));
+        assert!(props(&h).contains(&("14:03:22".into(), annotation)));
         // The message's lines still cover its whole block.
-        assert_eq!(message_list(&h)[1].1, "Hi 14:03\nthere!");
+        assert_eq!(message_list(&h)[1].1, "Hi 14:03:22\nthere!");
+    }
+
+    #[test]
+    fn the_clock_counts_on_from_the_frontends_and_wraps_at_midnight() {
+        let mut h = session();
+        assert_eq!(h.core.clock(), None);
+        h.clock("23:59:58");
+        h.advance(Duration::from_millis(1_600));
+        assert_eq!(h.core.clock().as_deref(), Some("23:59:59"));
+        h.advance(Duration::from_millis(1_400));
+        assert_eq!(h.core.clock().as_deref(), Some("00:00:01"));
     }
 
     #[test]
@@ -6167,7 +6388,7 @@ mod tests {
         let mut h = work();
         h.keys("M-x agent-start RET claude RET");
         ops(&mut h);
-        h.send(Msg::Clock("14:01".into()));
+        h.clock("14:01:00");
         let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
         loading.load = Some(("old".into(), loading.buffer));
         let user = ContentChunk::new("old".into());
@@ -6187,7 +6408,7 @@ mod tests {
         assert!(h.core.text().contains("Ran ls\n"), "no arrival, no time");
         chunk(&mut h, "live");
         h.keys("a RET");
-        assert!(h.core.text().contains("live 14:01\n"));
+        assert!(h.core.text().contains("live 14:01:06\n"));
     }
 
     #[test]
