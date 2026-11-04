@@ -1,5 +1,7 @@
 //! The built-in commands.
 
+use agent_client_protocol_schema::v1::SessionConfigOptionCategory::{Model, ThoughtLevel};
+
 use crate::Core;
 use crate::command::{ArgSpec, Args, Command, Prefix, Preview};
 use crate::key::{Key, KeyCode};
@@ -751,11 +753,20 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "agent-select-model",
             spec: ArgSpec {
-                annotation: Some(|core, name| core.model_note(name)),
-                preselect: Some(|core, _| core.model_at()),
+                annotation: Some(|core, name| core.value_note(Model, name)),
+                preselect: Some(|core, _| core.value_at(Model)),
                 ..ArgSpec::default()
             },
-            handler: |ctx, args| ctx.agent_select_model(args),
+            handler: |ctx, args| ctx.agent_select(args, Model, "model"),
+        },
+        Command {
+            name: "agent-select-effort",
+            spec: ArgSpec {
+                annotation: Some(|core, name| core.value_note(ThoughtLevel, name)),
+                preselect: Some(|core, _| core.value_at(ThoughtLevel)),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.agent_select(args, ThoughtLevel, "effort"),
         },
         Command {
             name: "agent-command",

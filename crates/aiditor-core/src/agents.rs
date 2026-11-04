@@ -83,8 +83,8 @@ pub(crate) struct Session {
     /// The session it loads instead of opening one, and the buffer it was loaded from, which
     /// shows it once loaded if still selected.
     load: Option<(SessionId, BufferId)>,
-    /// What was last sent with `session/set_config_option`, as `mode <value>` or `model
-    /// <value>`, for a refusal's note.
+    /// What was last sent with `session/set_config_option`, as `mode <value>`, `model
+    /// <value>` or `effort <value>`, for a refusal's note.
     sent: Option<String>,
     /// Whether the agent failed to start or exited; its buffers stay until killed.
     ended: bool,
@@ -1089,10 +1089,11 @@ impl Core {
         }
     }
 
-    /// The values of the current session's model option, groups flattened; none outside a
-    /// session buffer.
-    fn session_models(
+    /// The values of the current session's `category` option (model or effort), groups
+    /// flattened; none outside a session buffer.
+    fn session_values(
         &self,
+        category: SessionConfigOptionCategory,
     ) -> (
         Vec<&SessionConfigSelectOption>,
         Option<&SessionConfigValueId>,
@@ -1101,25 +1102,27 @@ impl Core {
         let session =
             (self.agents.values().find(|s| s.buffer == buffer)).and_then(|s| s.session.as_ref());
         let options = (session.and_then(|s| s.config_options.as_deref())).unwrap_or_default();
-        match select_option(options, SessionConfigOptionCategory::Model) {
+        match select_option(options, category) {
             Some((_, select)) => (self::options(select), Some(&select.current_value)),
             None => (Vec::new(), None),
         }
     }
 
-    /// The `Model:` annotation of the value named `name`: its description's first line.
-    pub(crate) fn model_note(&self, name: &str) -> Option<String> {
-        let model = self
-            .session_models()
-            .0
-            .into_iter()
-            .find(|v| v.name == name)?;
-        Some(model.description.as_deref()?.lines().next()?.to_owned())
+    /// The `Model:` or `Effort:` annotation of the value named `name`: its description's first
+    /// line.
+    pub(crate) fn value_note(
+        &self,
+        category: SessionConfigOptionCategory,
+        name: &str,
+    ) -> Option<String> {
+        let (values, _) = self.session_values(category);
+        let value = values.into_iter().find(|v| v.name == name)?;
+        Some(value.description.as_deref()?.lines().next()?.to_owned())
     }
 
-    /// Where the current model is among the `Model:` candidates, else 0.
-    pub(crate) fn model_at(&self) -> usize {
-        let (values, current) = self.session_models();
+    /// Where the current value is among the `Model:` or `Effort:` candidates, else 0.
+    pub(crate) fn value_at(&self, category: SessionConfigOptionCategory) -> usize {
+        let (values, current) = self.session_values(category);
         (values.iter().position(|v| Some(&v.value) == current)).unwrap_or(0)
     }
 
@@ -1938,26 +1941,31 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// `agent-select-model`: asks for a value of the session's model option by name, then sets
-    /// the option to it.
-    pub(crate) fn agent_select_model(&mut self, args: Args) -> Result<(), String> {
+    /// `agent-select-model` and `agent-select-effort`: asks for a value of the session's
+    /// `category` option, called `word`, by name, then sets the option to it.
+    pub(crate) fn agent_select(
+        &mut self,
+        args: Args,
+        category: SessionConfigOptionCategory,
+        word: &str,
+    ) -> Result<(), String> {
         let (id, session) = self.core.ready_session()?;
         let agent = &session.agent;
         let ready = session.session.as_ref().expect("ready");
         let options = ready.config_options.as_deref().unwrap_or_default();
-        let no_model = || format!("{agent} has no model choice");
-        let (config, select) =
-            select_option(options, SessionConfigOptionCategory::Model).ok_or_else(no_model)?;
+        let none = || format!("{agent} has no {word} choice");
+        let (config, select) = select_option(options, category).ok_or_else(none)?;
         let values = self::options(select);
         let Some(name) = args.strings.first() else {
             let names: Vec<String> = values.iter().map(|v| v.name.clone()).collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            let command = self.core.commands["agent-select-model"];
-            return self.read_string(command, args, "Model: ".into(), Some(&names));
+            let command = self.core.commands[format!("agent-select-{word}").as_str()];
+            let prompt = format!("{}{}: ", word[..1].to_uppercase(), &word[1..]);
+            return self.read_string(command, args, prompt, Some(&names));
         };
         let value = (values.iter().find(|v| v.name == *name))
-            .ok_or_else(|| format!("{agent} has no model {name}"))?;
-        let sent = format!("model {}", value.value);
+            .ok_or_else(|| format!("{agent} has no {word} {name}"))?;
+        let sent = format!("{word} {}", value.value);
         let request = SetSessionConfigOptionRequest::new(
             ready.session_id.clone(),
             config.clone(),
@@ -5445,6 +5453,54 @@ mod tests {
         ops(&mut h);
         h.keys("M-x agent-select-model RET");
         assert_eq!(h.core.message(), Some("claude session has ended"));
+        assert!(ops(&mut h).is_empty());
+    }
+
+    /// The model options with an effort option over `values`, the last one current.
+    fn efforts(values: &[(&'static str, &'static str)]) -> Vec<SessionConfigOption> {
+        let current = values.last().unwrap().0;
+        let values = (values.iter())
+            .map(|&(id, name)| SessionConfigSelectOption::new(id, name).description(id))
+            .collect::<Vec<_>>();
+        let mut options = models("opus", false);
+        let effort = SessionConfigOption::select("effort", "Effort", current, values);
+        options.push(effort.category(SessionConfigOptionCategory::ThoughtLevel));
+        options
+    }
+
+    #[test]
+    fn agent_select_effort_sets_the_picked_effort() {
+        let mut h = session();
+        let configured = |h: &mut Harness, result| {
+            h.send(Msg::AgentConfigured {
+                id: AgentId(0),
+                result,
+            });
+        };
+        configured(&mut h, Ok(efforts(&[("low", "Low"), ("high", "High")])));
+        h.keys("M-x agent-select-effort RET");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Effort: ");
+        assert_eq!(listed(&mut h), (vec!["Low".into(), "High".into()], Some(1)));
+        assert_eq!(h.core.minibuffer().unwrap().annotations, ["low", "high"]);
+        h.keys("C-p RET");
+        assert_eq!(ops(&mut h), ["set 0 s effort=low"]);
+        configured(&mut h, Ok(efforts(&[("high", "High"), ("low", "Low")])));
+        assert!(h.display(5).mode_line.text().starts_with("Opus · Low │"));
+        // A model change reports other efforts; the list follows.
+        configured(&mut h, Ok(efforts(&[("low", "Low"), ("max", "Max")])));
+        h.keys("M-x agent-select-effort RET");
+        assert_eq!(listed(&mut h), (vec!["Low".into(), "Max".into()], Some(1)));
+        h.keys("C-g");
+        h.keys("M-x agent-select-effort RET High RET");
+        assert_eq!(h.core.message(), Some("claude has no effort High"));
+        h.keys("M-x agent-select-effort RET Low RET");
+        assert_eq!(ops(&mut h), ["set 0 s effort=low"]);
+        configured(&mut h, Err("no".into()));
+        assert!(messages(&h).contains("claude could not set effort low: no\n"));
+        configured(&mut h, Ok(models("opus", false)));
+        h.keys("M-x agent-select-effort RET");
+        assert_eq!(h.core.message(), Some("claude has no effort choice"));
+        assert!(h.core.minibuffer().is_none());
         assert!(ops(&mut h).is_empty());
     }
 
