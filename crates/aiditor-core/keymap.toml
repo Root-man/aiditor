@@ -100,6 +100,7 @@
 # Copy, cut and paste are in keymap-macos.toml and keymap-linux.toml.
 
 [workspace-list-mode]
+"TAB" = "workspace-list-toggle"
 "n" = "workspace-list-next"
 "p" = "workspace-list-previous"
 "C-n" = "workspace-list-next"

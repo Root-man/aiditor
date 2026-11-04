@@ -522,6 +522,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.workspace_list_visit(),
         },
         Command {
+            name: "workspace-list-toggle",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.workspace_list_toggle(),
+        },
+        Command {
             name: "workspace-list-quit",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.workspace_list_quit(),

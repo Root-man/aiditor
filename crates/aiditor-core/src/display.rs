@@ -839,13 +839,11 @@ pub fn build(
 fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     let segment = |text: &str, face| vec![(text.to_string(), face)];
     if buffer.major_mode == "workspace-list-mode" {
-        use crate::workspace_list::Row;
-        let projects = buffer
-            .workspace_rows
-            .iter()
-            .filter(|(_, row)| matches!(row, Row::Project(_)))
-            .count();
-        let workspaces = buffer.workspace_rows.len() - projects;
+        let (projects, workspaces) = buffer
+            .workspace_list
+            .as_ref()
+            .expect("list has a snapshot")
+            .counts();
         let position = buffer
             .workspace_rows
             .partition_point(|(row, _)| *row < line)
