@@ -562,6 +562,7 @@ FrameDisplay {
         },
     ],
     message: None,
+    key_hints: [],
     minibuffer: None,
     hint: None,
     title: "a.txt | main | home",

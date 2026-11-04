@@ -837,8 +837,6 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "Workspaces — RET switch, n/p move, q quit".into(),
-                "".into(),
                 "▾ one /aiditor-test/one".into(),
                 "▸ a 1 buffer".into(),
                 "".into(),

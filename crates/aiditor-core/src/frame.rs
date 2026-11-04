@@ -236,6 +236,14 @@ impl Core {
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
+            key_hints: if self.current().workspace_list.is_some()
+                && self.message.is_none()
+                && self.prompts.minibuffer.is_none()
+            {
+                crate::workspace_list::HINTS
+            } else {
+                &[]
+            },
             minibuffer: self.minibuffer(),
             hint: self.hint(),
             title,
