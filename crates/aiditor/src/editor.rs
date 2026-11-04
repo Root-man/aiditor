@@ -982,7 +982,7 @@ mod tests {
                 assert_eq!((runs[0].len, runs[1].len), (3, 7));
                 assert_eq!(runs[0].background_color, None);
             });
-            cx.simulate_resize(gpui::size(px(280.), px(600.)));
+            cx.simulate_resize(gpui::size(px(360.), px(600.)));
             cx.run_until_parked();
             let narrow = cx.debug_bounds("echo-key-hints").unwrap();
             assert_eq!(narrow.size.height, height * 2.);
@@ -1006,7 +1006,7 @@ mod tests {
                 height
             );
         }
-        cx.simulate_resize(gpui::size(px(280.), px(600.)));
+        cx.simulate_resize(gpui::size(px(360.), px(600.)));
         cx.run_until_parked();
         cx.simulate_keystrokes("alt-> enter");
         cx.run_until_parked();
@@ -1084,7 +1084,7 @@ mod tests {
         });
         cx.simulate_keystrokes("tab");
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), original);
-        cx.simulate_keystrokes("p tab");
+        cx.simulate_keystrokes("p g tab");
         assert!(
             editor
                 .read_with(cx, |e, _| e.core.text())

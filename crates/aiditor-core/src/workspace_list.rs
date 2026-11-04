@@ -2,7 +2,7 @@
 
 use crate::{
     Core, Ctx,
-    buffer::{Buffer, FaceRef, Prop},
+    buffer::{Buffer, BufferId, Decoration, FaceRef, Prop},
     project::ProjectId,
     settings::FaceName,
     workspace::WorkspaceId,
@@ -18,8 +18,23 @@ struct Entry {
     name: String,
     column: usize,
     face: Vec<FaceRef>,
-    location: String,
+    location: crate::display::Segment,
+    buffer: Option<BufferId>,
     state: Vec<(String, FaceName)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Row(Row),
+    Buffer(BufferId),
+}
+
+impl Entry {
+    fn target(&self) -> Option<Target> {
+        self.row
+            .map(Target::Row)
+            .or_else(|| self.buffer.map(Target::Buffer))
+    }
 }
 
 impl Row {
@@ -32,7 +47,7 @@ impl Row {
 }
 
 impl Entry {
-    fn labels(&self) -> (String, String, &[(String, FaceName)]) {
+    fn labels(&self) -> (String, crate::display::Segment, &[(String, FaceName)]) {
         let mut name = self.name.clone();
         if !self.children.is_empty() {
             let marker = if matches!(self.row, Some(Row::Project(_))) {
@@ -43,25 +58,32 @@ impl Entry {
             name.replace_range(marker..marker + 1, if self.folded { "▸" } else { "▾" });
         }
         let project = matches!(self.row, Some(Row::Project(_)));
-        let location = if project && self.folded && !self.children.is_empty() {
+        let mut location: crate::display::Segment = self
+            .location
+            .iter()
+            .map(|(text, face)| (text.escape_debug().to_string(), *face))
+            .collect();
+        let summary = if project && self.folded && !self.children.is_empty() {
             format!(
-                "{} · {} workspace{}",
-                self.location,
+                " · {} workspace{}",
                 self.children.len(),
                 if self.children.len() == 1 { "" } else { "s" }
             )
         } else if project && self.children.is_empty() {
-            format!("{} · no workspaces", self.location)
+            " · no workspaces".into()
         } else {
-            self.location.clone()
+            String::new()
         };
+        if !summary.is_empty() {
+            location.push((summary, FaceName::Annotation));
+        }
         let state = if project && !self.folded {
             &[][..]
         } else {
             &self.state
         };
 
-        (name, location.escape_debug().to_string(), state)
+        (name, location, state)
     }
 
     fn fit(&self, cols: usize, theme: &crate::settings::Theme) -> Vec<crate::display::Span> {
@@ -91,9 +113,12 @@ impl Entry {
         let project = matches!(self.row, Some(Row::Project(_)));
         let location = if narrow {
             if project {
-                self.location.escape_debug().to_string()
+                self.location
+                    .iter()
+                    .map(|(s, f)| (s.escape_debug().to_string(), *f))
+                    .collect()
             } else {
-                String::new()
+                Vec::new()
             }
         } else {
             location
@@ -111,7 +136,7 @@ impl Entry {
         let state_width = state_width.min(cols);
         let room = cols.saturating_sub(state_width + gap);
         let name_len = name.chars().count();
-        let location_len = location.chars().count();
+        let location_len: usize = location.iter().map(|(s, _)| s.chars().count()).sum();
         let location_width = if narrow {
             location_len
         } else {
@@ -143,18 +168,27 @@ impl Entry {
         let mut out = cut(name_spans, name_room);
         let name_width: usize = out.iter().map(|s| s.text.chars().count()).sum();
         if location_room > 0 {
-            let location = if location_len > location_room {
-                shorten(&location, location_len - location_room)
-            } else {
-                location
-            };
             out.push(span(
                 " ".repeat(room.saturating_sub(name_width + location_room)),
                 FaceName::Annotation,
             ));
-            out.push(span(location.clone(), FaceName::Annotation));
+            let mut skip = location_len.saturating_sub(location_room);
+            let mut shortened = skip == 0;
+            for (text, face) in location {
+                let len = text.chars().count();
+                let text = if shortened {
+                    text
+                } else if skip >= len {
+                    skip -= len;
+                    continue;
+                } else {
+                    shortened = true;
+                    shorten(&text, skip)
+                };
+                out.push(span(text, face));
+            }
             out.push(span(
-                " ".repeat(location_room.saturating_sub(location.chars().count())),
+                " ".repeat(location_room.saturating_sub(location_len)),
                 FaceName::Annotation,
             ));
         }
@@ -175,12 +209,13 @@ impl Entry {
         let (name, location, state) = self.labels();
         let start = buffer.len_chars() + usize::from(buffer.len_chars() > 0);
         let name_len = name.chars().count();
+        let location_text: String = location.iter().map(|(s, _)| s.as_str()).collect();
         let state_len: usize = state.iter().map(|(s, _)| s.chars().count()).sum();
         let mut line = format!(
             "{} {}{}   {}",
             name,
-            location,
-            " ".repeat(46usize.saturating_sub(location.chars().count())),
+            location_text,
+            " ".repeat(46usize.saturating_sub(location_text.chars().count())),
             " ".repeat(26usize.saturating_sub(state_len))
         );
         let state_at = start + line.chars().count();
@@ -207,10 +242,13 @@ impl Entry {
             self.column
         };
         named(start + face_start..start + name_len, self.face.clone());
-        named(
-            start + name_len + 1..state_at,
-            vec![FaceRef::Face(FaceName::Annotation)],
-        );
+        let mut at = start + name_len + 1;
+        for (text, face) in &location {
+            let end = at + text.chars().count();
+            named(at..end, vec![FaceRef::Face(*face)]);
+            at = end;
+        }
+        named(at..state_at, vec![FaceRef::Face(FaceName::Annotation)]);
         let mut at = state_at;
         for (text, face) in state {
             let end = at + text.chars().count();
@@ -250,16 +288,63 @@ impl Snapshot {
                 for child in &entry.children {
                     visit(child, rows);
                 }
-                if matches!(entry.row, Some(Row::Project(_))) && !entry.children.is_empty() {
-                    rows.push(None);
-                }
             }
         }
         let mut rows = Vec::new();
-        for entry in &self.entries {
+        for (i, entry) in self.entries.iter().enumerate() {
+            if i > 0 {
+                rows.push(None);
+            }
             visit(entry, &mut rows);
         }
         rows
+    }
+
+    fn selection(&self, buffer: &Buffer, point: usize) -> (Vec<Target>, usize) {
+        let (line, col) = buffer.line_col(point).unwrap_or_default();
+        let visible = self.visible();
+        let selected = visible
+            .iter()
+            .take(line + 1)
+            .rev()
+            .flatten()
+            .next()
+            .and_then(|e| e.target());
+        for project in &self.entries {
+            let parent = project.target().expect("project identity");
+            if selected == Some(parent) {
+                return (vec![parent], col);
+            }
+            for workspace in &project.children {
+                let owner = workspace.target().expect("workspace identity");
+                if selected == Some(owner) {
+                    return (vec![owner, parent], col);
+                }
+                for buffer in &workspace.children {
+                    let target = buffer.target().expect("buffer identity");
+                    if selected == Some(target) {
+                        return (vec![target, owner, parent], col);
+                    }
+                }
+            }
+        }
+        (Vec::new(), col)
+    }
+
+    fn point(&self, buffer: &Buffer, targets: &[Target], col: usize) -> Option<usize> {
+        let visible = self.visible();
+        for (i, target) in targets.iter().enumerate() {
+            if let Some((line, Some(entry))) = visible
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.is_some_and(|e| e.target() == Some(*target)))
+            {
+                return buffer
+                    .char_idx(line, if i == 0 { col } else { entry.column })
+                    .ok();
+            }
+        }
+        None
     }
 
     pub(crate) fn fit(
@@ -291,7 +376,14 @@ impl Snapshot {
                     buffer.workspace_rows.push((line, row));
                 }
             } else {
-                buffer.insert_output(buffer.len_chars(), "\n");
+                buffer.insert_output(buffer.len_chars(), "\n ");
+                let end = buffer.len_chars();
+                buffer
+                    .add_property(
+                        end - 1..end,
+                        Prop::Line(Decoration::HRule(FaceName::Separator)),
+                    )
+                    .expect("separator row exists");
             }
         }
         buffer.set_saved();
@@ -303,9 +395,9 @@ fn details(
     id: crate::buffer::BufferId,
     buffer: &Buffer,
     roots: &[PathBuf],
-) -> (String, Vec<(String, FaceName)>) {
+) -> (crate::display::Segment, crate::display::Segment) {
     if let Some(session) = core.agents.values().find(|s| s.buffer == id) {
-        let location = session.model_effort().into_iter().map(|(s, _)| s).collect();
+        let location = session.model_effort();
         let state = session
             .activity()
             .map(|a| (a.text().to_string(), a.face()))
@@ -326,7 +418,7 @@ fn details(
             .flatten()
             .filter(|(_, f)| matches!(f, FaceName::StatusRunning | FaceName::StatusFailed))
             .collect();
-        return (location, state);
+        return (vec![(location, FaceName::Annotation)], state);
     }
     let location = buffer
         .file
@@ -357,7 +449,7 @@ fn details(
             state.push((text.into(), face));
         }
     }
-    (location, state)
+    (vec![(location, FaceName::Annotation)], state)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,6 +462,7 @@ pub(crate) const HINTS: &[(&str, &str)] = &[
     ("n/p", "move"),
     ("RET", "switch"),
     ("TAB", "fold"),
+    ("g", "refresh"),
     ("q", "quit"),
 ];
 
@@ -385,6 +478,17 @@ impl Ctx<'_> {
             .recent()
             .find(|(_, b)| b.major_mode == MODE && b.workspace == Some(current))
             .map(|(id, _)| id);
+        let selections: Vec<_> = found
+            .map(|id| {
+                let buffer = core.buffers.get(id).unwrap();
+                let snapshot = buffer.workspace_list.as_ref().expect("list has a snapshot");
+                std::iter::once((core.windows.selected, &core.windows.window))
+                    .chain(core.windows.others.iter().map(|(&id, w)| (id, w)))
+                    .filter(|(_, w)| w.buffer() == id)
+                    .map(|(id, w)| (id, snapshot.selection(buffer, w.point(&core.buffers))))
+                    .collect()
+            })
+            .unwrap_or_default();
         let old = found.and_then(|id| core.buffers.get(id).unwrap().workspace_list.as_ref());
         let folded = |row, default| {
             old.and_then(|snapshot| snapshot.entries().find(|e| e.row == Some(row)))
@@ -420,7 +524,11 @@ impl Ctx<'_> {
                 name: format!("  {}", project.name.escape_debug()),
                 column: 2,
                 face: vec![FaceRef::Bold],
-                location: project.primary.path.to_string_lossy().into_owned(),
+                location: vec![(
+                    project.primary.path.to_string_lossy().into_owned(),
+                    FaceName::Annotation,
+                )],
+                buffer: None,
                 state: workspaces
                     .iter()
                     .filter_map(|w| core.workspace_activity(w.id))
@@ -433,10 +541,11 @@ impl Ctx<'_> {
                 let mut buffers: Vec<_> = core
                     .buffers
                     .recent()
-                    .filter(|(_, b)| {
+                    .filter(|(id, b)| {
                         b.workspace == Some(workspace.id)
-                            && !b.name.starts_with(' ')
-                            && b.major_mode != MODE
+                            && (b.file.is_some()
+                                || b.terminal().is_some()
+                                || core.agents.values().any(|session| session.buffer == *id))
                     })
                     .collect();
                 buffers.sort_unstable_by(|(_, a), (_, b)| a.name.cmp(&b.name));
@@ -469,7 +578,8 @@ impl Ctx<'_> {
                     } else {
                         Vec::new()
                     },
-                    location,
+                    location: vec![(location, FaceName::Annotation)],
+                    buffer: None,
                     state: activity
                         .map(|a| (a.text().to_string(), a.face()))
                         .into_iter()
@@ -487,6 +597,7 @@ impl Ctx<'_> {
                         column: 6,
                         face: vec![FaceRef::Face(FaceName::ModeLineDim)],
                         location,
+                        buffer: Some(id),
                         state,
                     });
                 }
@@ -523,8 +634,30 @@ impl Ctx<'_> {
             .expect("current workspace or its project is listed")
             .0;
         let point = buffer.char_idx(line, target.column())?;
+        let selected_preserved = selections
+            .iter()
+            .any(|(id, _)| *id == core.windows.selected);
+        let snapshot = buffer.workspace_list.as_ref().expect("list has a snapshot");
+        let points: Vec<_> = selections
+            .into_iter()
+            .map(|(id, (targets, col))| {
+                (id, snapshot.point(buffer, &targets, col).unwrap_or(point))
+            })
+            .collect();
         core.switch_to(id);
-        self.goto(point)
+        for (id, point) in points {
+            let window = if id == core.windows.selected {
+                &core.windows.window
+            } else {
+                core.windows.others.get(&id).expect("sharing window exists")
+            };
+            window.set_point(&mut core.buffers, point)?;
+        }
+        if selected_preserved {
+            Ok(())
+        } else {
+            self.goto(point)
+        }
     }
 
     fn workspace_list_rows(&self) -> Result<&[(usize, Row)], String> {
@@ -628,9 +761,11 @@ mod tests {
         let mut h = Harness::new(&[]);
         let launch = h.core.workspace();
         h.new_workspace("a", "p");
+        h.open("a.txt");
         h.new_workspace("b", "p");
         h.open("notes.txt");
         h.new_workspace("c", "q");
+        h.open("c.txt");
         h.core.kill_workspace(launch).unwrap();
         h.core.projects.retain(|p| p.project.name != "home");
         h.core.switch_to_workspace("b").unwrap();
@@ -687,7 +822,11 @@ mod tests {
             name: "  long-project-name-éééééééééééééééé".into(),
             column: 2,
             face: vec![FaceRef::Bold],
-            location: "/a/very/long/primary/root/project".into(),
+            location: vec![(
+                "/a/very/long/primary/root/project".into(),
+                FaceName::Annotation,
+            )],
+            buffer: None,
             state: vec![("● awaiting permission".into(), FaceName::StatusWaiting)],
         };
         let narrow = entry.fit(48, theme);
@@ -728,6 +867,39 @@ mod tests {
     }
 
     #[test]
+    fn fitted_location_cuts_keep_the_retained_segment_faces() {
+        let h = workspaces();
+        let theme = &h.core.settings.theme;
+        let entry = Entry {
+            row: None,
+            folded: false,
+            children: Vec::new(),
+            name: "      session".into(),
+            column: 6,
+            face: vec![FaceRef::Face(FaceName::ModeLineDim)],
+            buffer: None,
+            location: vec![
+                ("very-long-model-name-".repeat(4), FaceName::QualityEpic),
+                (" · ".into(), FaceName::ModeLineDim),
+                ("High".into(), FaceName::QualityRare),
+            ],
+            state: Vec::new(),
+        };
+        let spans = entry.fit(WIDE_COLUMNS, theme);
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text.starts_with('…') && s.face == theme.face(FaceName::QualityEpic))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text == "High" && s.face == theme.face(FaceName::QualityRare))
+        );
+        assert_eq!(drawn(&spans).chars().count(), WIDE_COLUMNS);
+    }
+
+    #[test]
     fn resize_refits_the_same_snapshot_and_unequal_windows_independently() {
         let mut h = workspaces();
         let current = h.core.workspace();
@@ -741,14 +913,16 @@ mod tests {
         let text = h.text();
         let point = h.point();
         let rows = h.core.current().workspace_rows.clone();
-        h.core.buffers.create("later");
+        let list = h.core.windows.window.buffer();
+        h.open("later");
+        h.core.switch_to(list);
         let wide = h.frame(1440., 900.).windows.remove(0);
         assert!(drawn(&wide.mode_line.left).contains("2 projects, 3 workspaces"));
         assert!(
             wide.display
                 .lines
                 .iter()
-                .any(|l| drawn(&l.spans).contains("2 buffers"))
+                .any(|l| drawn(&l.spans).contains("1 buffer"))
         );
         h.keys("C-x 3");
         let half = h.frame(900., 600.).windows.remove(0);
@@ -808,6 +982,135 @@ mod tests {
     }
 
     #[test]
+    fn refresh_keeps_each_windows_row_identity_and_falls_back_to_visible_owners() {
+        let mut h = workspaces();
+        let current = h.core.workspace();
+        let a = h.core.workspaces[0].id;
+        let project = h.core.current_workspace().project;
+        let notes = h.core.buffers.find_here("notes.txt").unwrap();
+        h.keys("C-x t l");
+        select(&mut h, Row::Project(project));
+        h.keys("g");
+        assert_eq!(row(&h), Row::Project(project));
+        select(&mut h, Row::Workspace(a));
+        let old_line = h.core.current().line_col(h.point()).unwrap().0;
+        h.core.workspaces.swap(0, 2);
+        h.keys("g");
+        assert_eq!(row(&h), Row::Workspace(a));
+        assert!(h.core.current().line_col(h.point()).unwrap().0 > old_line);
+        select(&mut h, Row::Workspace(current));
+        h.keys("C-x 2");
+        let buffer_line = h
+            .core
+            .current()
+            .workspace_list
+            .as_ref()
+            .unwrap()
+            .visible()
+            .iter()
+            .position(|e| e.is_some_and(|e| e.buffer == Some(notes)))
+            .unwrap();
+        let point = h.core.current().char_idx(buffer_line, 8).unwrap();
+        h.core
+            .windows
+            .window
+            .set_point(&mut h.core.buffers, point)
+            .unwrap();
+        h.frame(1440., 140.);
+        h.keys("C-x o");
+        select(&mut h, Row::Workspace(a));
+        let list = h.core.windows.window.buffer();
+        h.open("before-notes.txt");
+        h.core.switch_to(list);
+        select(&mut h, Row::Workspace(a));
+        h.keys("M-x workspace-list RET");
+        assert_eq!(row(&h), Row::Workspace(a));
+        h.keys("C-x o");
+        let (line, col) = h.core.current().line_col(h.point()).unwrap();
+        assert_eq!(col, 8);
+        assert!(
+            h.core
+                .current()
+                .text()
+                .line(line)
+                .to_string()
+                .contains("notes.txt")
+        );
+        let before = h
+            .frame(1440., 140.)
+            .windows
+            .iter()
+            .find(|w| w.selected)
+            .unwrap()
+            .display
+            .lines[0]
+            .number;
+        h.keys("g");
+        let after = h
+            .frame(1440., 140.)
+            .windows
+            .iter()
+            .find(|w| w.selected)
+            .unwrap()
+            .display
+            .lines[0]
+            .number;
+        assert_eq!(after, before);
+        h.core.kill_buffer(notes);
+        h.keys("g");
+        assert_eq!(row(&h), Row::Workspace(current));
+        assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 6);
+        h.keys("C-x o");
+        assert_eq!(row(&h), Row::Workspace(a));
+        h.core.kill_workspace(a).unwrap();
+        h.keys("g");
+        assert_eq!(row(&h), Row::Project(project));
+        assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 2);
+    }
+
+    #[test]
+    fn horizontal_rules_separate_open_folded_and_empty_projects() {
+        let mut h = workspaces();
+        let empty = h
+            .core
+            .add_project(Loaded::ad_hoc("empty", &h.path("empty")));
+        let project = h.core.current_workspace().project;
+        h.keys("C-x t l");
+        for keys in ["", "p p TAB", "g", "TAB"] {
+            h.keys(keys);
+            for width in [1440., 450., 240.] {
+                let frame = h.frame(width, 900.);
+                let lines = &frame.windows[0].display.lines;
+                let rules: Vec<_> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| {
+                        l.decorations
+                            .contains(&Decoration::HRule(FaceName::Separator))
+                    })
+                    .collect();
+                assert_eq!(rules.len(), 2);
+                for (i, line) in rules {
+                    assert!(i > 0 && i + 1 < lines.len());
+                    assert_eq!(drawn(&line.spans), " ");
+                    assert!(
+                        h.core
+                            .current()
+                            .workspace_rows
+                            .iter()
+                            .any(|(row, _)| *row == line.number + 1)
+                    );
+                }
+            }
+        }
+        select(&mut h, Row::Project(project));
+        h.keys("TAB n n");
+        assert_eq!(row(&h), Row::Workspace(h.core.workspaces[2].id));
+        h.keys("n");
+        assert_eq!(row(&h), Row::Project(empty));
+    }
+
+    #[test]
     fn echo_hints_follow_selection_and_yield_to_messages_and_prompts() {
         use std::time::Duration;
         let mut h = workspaces();
@@ -857,8 +1160,10 @@ mod tests {
         h.keys("TAB");
         assert_eq!(row(&h), Row::Workspace(current));
         assert_eq!(h.point(), point);
-        assert_eq!(contents(&h)[2], "▸ * b 2 buffers");
-        h.core.buffers.create("later");
+        assert_eq!(contents(&h)[2], "▸ * b 1 buffer");
+        let list = h.core.windows.window.buffer();
+        h.open("later");
+        h.core.switch_to(list);
         h.keys("TAB");
         assert_eq!(h.text(), original);
         h.keys("p TAB");
@@ -867,8 +1172,8 @@ mod tests {
         assert_eq!(row(&h), Row::Project(project));
         assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 2);
         assert_eq!(
-            &contents(&h)[0..2],
-            ["▸ p /aiditor-test · 2 workspaces", "▾ q /aiditor-test"]
+            &contents(&h)[0..3],
+            ["▸ p /aiditor-test · 2 workspaces", "", "▾ q /aiditor-test"]
         );
         assert_eq!(
             h.frame(1440., 900.).windows[0].display.mode_line.text(),
@@ -882,11 +1187,11 @@ mod tests {
         h.keys("TAB n");
         assert_eq!(contents(&h)[1], "▾ a 1 buffer");
         h.keys("n");
-        assert_eq!(contents(&h)[3], "▸ * b 3 buffers");
+        assert_eq!(contents(&h)[3], "▸ * b 2 buffers");
         h.keys("q C-x t l");
         assert_eq!(row(&h), Row::Workspace(current));
         assert_eq!(contents(&h)[1], "▸ a 1 buffer");
-        assert_eq!(contents(&h)[2], "▾ * b 3 buffers");
+        assert_eq!(contents(&h)[2], "▾ * b 2 buffers");
         assert!(contents(&h).iter().any(|s| s == "later"));
     }
 
@@ -1023,7 +1328,7 @@ mod tests {
             .name = "renamed".into();
         h.keys("C-x t l");
         assert!(contents(&h).iter().any(|s| s == "▾ renamed 1 buffer"));
-        assert!(contents(&h).iter().any(|s| s == "▸ added 1 buffer"));
+        assert!(contents(&h).iter().any(|s| s == "added 0 buffers"));
         select(&mut h, Row::Workspace(added));
         h.keys("RET");
         assert_eq!(h.core.workspace(), added);
@@ -1087,8 +1392,7 @@ mod tests {
                 &contents(&h)[3..],
                 [
                     "▾ p /aiditor-test",
-                    "▾ * task 8 buffers · 1 unsaved",
-                    "*scratch*",
+                    "▾ * task 7 buffers · 1 unsaved",
                     "clean.rs src/",
                     "conflict.rs src/ [conflict]",
                     "dirty.rs src/ ● unsaved",
@@ -1148,12 +1452,12 @@ mod tests {
             let where_columns: Vec<_> = display
                 .lines
                 .iter()
-                .filter(|l| [4, 6, 10, 11].contains(&l.number))
+                .filter(|l| [4, 5, 9, 10].contains(&l.number))
                 .map(|l| {
                     let mut column = 0;
                     for span in &l.spans {
                         if [
-                            "8 buffers · 1 unsaved",
+                            "7 buffers · 1 unsaved",
                             "src/",
                             "vendor/",
                             "/aiditor-test/app",
@@ -1194,11 +1498,11 @@ mod tests {
             buffer.conflict = Some(0);
             h.keys("C-x t l");
             assert_eq!(
-                contents(&h)[8],
+                contents(&h)[7],
                 "dirty.rs src/ ● unsaved ⊘ read-only [conflict]"
             );
             let display = h.frame(1440., 900.).windows.remove(0).display;
-            let row = display.lines.iter().find(|l| l.number == 8).unwrap();
+            let row = display.lines.iter().find(|l| l.number == 7).unwrap();
             for (text, face) in [
                 ("● unsaved", FaceName::StatusModified),
                 ("⊘ read-only", FaceName::StatusFailed),
@@ -1215,7 +1519,7 @@ mod tests {
             buffer.conflict = None;
             buffer.set_saved();
             h.keys("C-x t l");
-            assert_eq!(contents(&h)[4], "▾ * task 8 buffers");
+            assert_eq!(contents(&h)[4], "▾ * task 7 buffers");
         }
     }
 
@@ -1267,8 +1571,7 @@ mod tests {
             [
                 "▾ p /aiditor-test",
                 "▸ a 1 buffer",
-                "▾ * b 2 buffers",
-                "*scratch*",
+                "▾ * b 1 buffer",
                 "notes.txt",
                 "",
                 "▾ q /aiditor-test",
@@ -1295,7 +1598,7 @@ mod tests {
         let second = h.core.add_project(Loaded::ad_hoc("app", &h.path("second")));
         let a = h.core.new_workspace("a\nnext", first);
         let b = h.core.new_workspace("b", second);
-        h.core.buffers.create("tab\tname");
+        h.open("tab\tname");
         h.core.kill_workspace(launch).unwrap();
         h.core.projects.retain(|p| p.project.name != "home");
         h.keys("C-x t l");
@@ -1303,12 +1606,11 @@ mod tests {
             contents(&h),
             [
                 "▾ app /aiditor-test/first",
-                "▸ a\\nnext 1 buffer",
+                "a\\nnext 0 buffers",
                 "",
                 "▾ app /aiditor-test/second",
-                "▾ * b 2 buffers",
-                "*scratch*",
-                "tab\\tname"
+                "▾ * b 1 buffer",
+                "tab\\tname /aiditor-test/"
             ]
         );
         assert_eq!(row(&h), Row::Workspace(b));
@@ -1326,9 +1628,10 @@ mod tests {
         h.keys("C-x t l");
         let rows = contents(&h);
         assert_eq!(
-            &rows[rows.len() - 2..],
+            &rows[rows.len() - 3..],
             [
                 "alpha /aiditor-test/alpha · no workspaces",
+                "",
                 "zeta /aiditor-test/zeta · no workspaces"
             ]
         );
@@ -1407,7 +1710,7 @@ mod tests {
         for window in h.frame(1400., 600.).windows {
             assert_eq!(
                 window.display.mode_line.text(),
-                "*Workspaces* │ 6 projects, 4 workspaces  6/10"
+                "*Workspaces* │ 6 projects, 4 workspaces  2/10"
             );
         }
     }
@@ -1551,20 +1854,14 @@ mod tests {
         h.open("added.txt");
         h.keys("C-x t l");
         assert_eq!(h.core.windows.window.buffer(), list);
-        assert_eq!(&contents(&h)[4..6], ["added.txt", "notes.txt"]);
+        assert_eq!(&contents(&h)[3..5], ["added.txt", "notes.txt"]);
         let notes = h.core.buffers.find_here("notes.txt").unwrap();
         h.core.kill_buffer(notes);
         h.core.rename_workspace("renamed").unwrap();
         h.keys("C-x t l");
         assert_eq!(
-            &contents(&h)[2..7],
-            [
-                "▾ * renamed 2 buffers",
-                "*scratch*",
-                "added.txt",
-                "",
-                "▾ q /aiditor-test"
-            ]
+            &contents(&h)[2..6],
+            ["▾ * renamed 1 buffer", "added.txt", "", "▾ q /aiditor-test"]
         );
         h.core.kill_workspace(b).unwrap();
         assert_eq!(h.core.windows.window.buffer(), other_list);
