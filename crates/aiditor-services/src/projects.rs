@@ -143,10 +143,7 @@ mod tests {
         // As a user does: from a/, DEL up to the parent, then pick a listed directory.
         let start = format!("C-a C-k {}/ DEL", a.display());
         keys(&mut core, &format!("C-x p c app RET {start} C-n RET"));
-        keys(
-            &mut core,
-            &format!("C-x p a app RET {start} b RET Docs RET"),
-        );
+        keys(&mut core, &format!("C-x p a app RET {start} b RET"));
         keys(&mut core, "C-x p d app RET claude RET");
         assert_eq!(
             core.message(),
@@ -156,10 +153,7 @@ mod tests {
         assert_eq!(core.projects()[..], loaded.iter().collect::<Vec<_>>());
         let p = &loaded[0];
         assert_eq!((&p.primary.path, &p.roots[0].path), (&a, &b));
-        assert_eq!(
-            (p.roots[0].role.as_str(), p.default_agent.as_deref()),
-            ("Docs", Some("claude"))
-        );
+        assert_eq!(p.default_agent.as_deref(), Some("claude"));
     }
 
     #[test]

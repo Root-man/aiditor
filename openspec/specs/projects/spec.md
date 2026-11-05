@@ -2,12 +2,12 @@
 
 ## Purpose
 
-The project file: a TOML file in the editor's config dir naming a primary repo, additional roots with role lines and a default agent, and how the editor loads and validates it.
+The project file: a TOML file in the editor's config dir naming a primary repo, the default working directory for the project's operations, additional roots and a default agent, and how the editor loads and validates it.
 
 ## Requirements
 
 ### Requirement: Project file format
-A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional boolean `watch` defaulting to true, an optional `ignore` list of gitignore-syntax patterns, an optional `env` table of string variables, a `primary` table and zero or more `roots` tables. Each root SHALL have a `path` and a `role`; a missing role SHALL mean an empty one, a missing `ignore` an empty list, and a missing `env` no variables. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore` and `env` as they are in the file.
+A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional boolean `watch` defaulting to true, an optional `ignore` list of gitignore-syntax patterns, an optional `env` table of string variables, a `primary` table and zero or more `roots` tables. Each root SHALL have only a `path`; a missing `ignore` an empty list, and a missing `env` no variables. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore` and `env` as they are in the file.
 
 #### Scenario: Full file
 - **WHEN** a project file sets a name, a default agent, a primary root and two additional roots
@@ -19,7 +19,7 @@ A project SHALL be a TOML file in the `projects` directory of the editor's confi
 
 #### Scenario: Minimal file
 - **WHEN** a project file sets only a name and a primary path
-- **THEN** the project has no default agent, no ignore patterns, no env variables, no additional roots and an empty primary role
+- **THEN** the project has no default agent, no ignore patterns, no env variables, and no additional roots
 
 #### Scenario: Ignore patterns
 - **WHEN** a project file sets `ignore = ["*", "!notes/"]`
@@ -34,7 +34,7 @@ A project SHALL be a TOML file in the `projects` directory of the editor's confi
 - **THEN** the file still holds the `[env]` table and its comment
 
 ### Requirement: Invalid project files are rejected with a clear error
-A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, a role spanning more than one line, an ignore pattern that is not a valid gitignore pattern, or an `env` variable whose value is not a string, whose name is empty or holds `=` or NUL, or whose value holds NUL SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
+A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, an ignore pattern that is not a valid gitignore pattern, or an `env` variable whose value is not a string, whose name is empty or holds `=` or NUL, or whose value holds NUL SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
 
 #### Scenario: Relative path
 - **WHEN** a project file's primary path is `src`
@@ -120,18 +120,18 @@ The editor SHALL read every `*.toml` file in the projects directory at launch an
 - **THEN** the retained definition and its index are released while unrelated projects and workspaces remain usable
 
 ### Requirement: Project commands are keys and M-x commands
-The editor SHALL provide `project-create`, `project-add-root`, `project-remove-root`, `project-set-role`, `project-set-default-agent`, `project-set-watch`, `project-open-file`, `project-save`, `project-switch`, `project-index` and `project-find-file`, each runnable through `M-x` and bound under the `C-x p` prefix. Every command but `project-create`, `project-save`, `project-switch` and `project-find-file` SHALL first prompt `Project: ` completing over the loaded projects' names.
+The editor SHALL provide `project-create`, `project-add-root`, `project-remove-root`, `project-set-default-agent`, `project-set-watch`, `project-open-file`, `project-save`, `project-switch`, `project-index` and `project-find-file`, each runnable through `M-x` and bound under the `C-x p` prefix. Every command but `project-create`, `project-save`, `project-switch` and `project-find-file` SHALL first prompt `Project: ` completing over the loaded projects' names.
 
 #### Scenario: Keys
 - **WHEN** `C-x p` is pressed and the prefix hint shows
-- **THEN** it lists a key for each of the eleven project commands
+- **THEN** it lists a key for each of the ten project commands
 
 #### Scenario: Unknown project
 - **WHEN** a project command is given a name no loaded project has
 - **THEN** nothing changes and the echo area says there is no project with that name
 
 ### Requirement: Create a project
-`project-create` SHALL prompt for a name and a primary root directory, completing file names, and write a project file `<name>.toml` in the projects directory with that name and primary and an empty role. It SHALL refuse a name that is empty, contains `/` or starts with `.`, a name a loaded project already has, and a file that already exists, writing nothing.
+`project-create` SHALL prompt for a name and a primary root directory, completing file names, and write a project file `<name>.toml` in the projects directory with that name and primary. It SHALL refuse a name that is empty, contains `/` or starts with `.`, a name a loaded project already has, and a file that already exists, writing nothing.
 
 #### Scenario: New project
 - **WHEN** `project-create` is answered `app` and `/r/app/`
@@ -145,12 +145,12 @@ The editor SHALL provide `project-create`, `project-add-root`, `project-remove-r
 - **WHEN** the config dir has no `projects` directory and a project is created
 - **THEN** the directory is made and the file written in it
 
-### Requirement: Edit a project's roots, roles and default agent
-`project-add-root` SHALL add a directory, completing file names, with a role as an additional root; a relative one is taken from the current buffer's directory and a trailing `/` dropped. `project-remove-root` SHALL remove one of the additional roots, never the primary. `project-set-role` SHALL set any root's role. `project-set-default-agent` SHALL set the default agent, completing over the registered agents' names, empty text removing it; a name that is not a registered agent SHALL leave the project unchanged and say so in the echo area.
+### Requirement: Edit a project's roots and default agent
+`project-add-root` SHALL add a directory, completing file names, as an additional root; a relative one is taken from the current buffer's directory and a trailing `/` dropped. `project-remove-root` SHALL remove one of the additional roots, never the primary. `project-set-default-agent` SHALL set the default agent, completing over the registered agents' names, empty text removing it; a name that is not a registered agent SHALL leave the project unchanged and say so in the echo area.
 
 #### Scenario: Add a root
-- **WHEN** `project-add-root` adds `/r/zed` with role `GPUI source` to a project
-- **THEN** the project lists `/r/zed` after its other roots with that role
+- **WHEN** `project-add-root` adds `/r/zed` to a project
+- **THEN** the project lists `/r/zed` after its other roots
 
 #### Scenario: Remove the primary
 - **WHEN** `project-remove-root` is answered with the primary root's path
@@ -165,7 +165,7 @@ The editor SHALL provide `project-create`, `project-add-root`, `project-remove-r
 - **THEN** the project is unchanged and the echo area names `gemini` as not a registered agent
 
 ### Requirement: Edits are checked and keep the rest of the file
-An edit to a project that has a file SHALL rewrite that file, keeping its comments, key order and every part the edit does not change. An edit SHALL be refused, with the file unchanged and the reason in the echo area, when the result would be rejected as a project file (an overlapping root, a missing directory, a role on more than one line) or when an existing file on disk differs from the text last loaded or written. A file that has been deleted SHALL be recreated with the checked edited definition, since no existing disk content is lost. A refused edit SHALL leave the loaded project unchanged. A disk conflict SHALL direct the user to reload with `C-x C-r`; other failures SHALL retain their specific cause. Project creation and saving an ad-hoc project SHALL continue to refuse an existing target file.
+An edit to a project that has a file SHALL rewrite that file, keeping its comments, key order and every part the edit does not change. An edit SHALL be refused, with the file unchanged and the reason in the echo area, when the result would be rejected as a project file (an overlapping root, a missing directory) or when an existing file on disk differs from the text last loaded or written. A file that has been deleted SHALL be recreated with the checked edited definition, since no existing disk content is lost. A refused edit SHALL leave the loaded project unchanged. A disk conflict SHALL direct the user to reload with `C-x C-r`; other failures SHALL retain their specific cause. Project creation and saving an ad-hoc project SHALL continue to refuse an existing target file.
 
 #### Scenario: Comments survive
 - **GIVEN** a project file has a comment line
@@ -179,12 +179,12 @@ An edit to a project that has a file SHALL rewrite that file, keeping its commen
 
 #### Scenario: Changed on disk
 - **GIVEN** the project file changed on disk after it was loaded
-- **WHEN** a role is then set
+- **WHEN** the default agent is then set
 - **THEN** the file keeps the disk version and the echo area says it changed on disk and directs the user to `C-x C-r`
 
 #### Scenario: Deleted project file
 - **GIVEN** a loaded project's file was deleted and its roots remain valid
-- **WHEN** a role is set
+- **WHEN** the default agent is set
 - **THEN** the file is recreated with the edited definition and preserved comments, and the loaded project reflects the successful write
 
 #### Scenario: A file appears during creation
@@ -203,7 +203,7 @@ An edit to a project that has a file SHALL rewrite that file, keeping its commen
 A project without a file (ad-hoc) SHALL be edited in memory by the edit commands, with the same checks except the directory and disk checks. `project-save` SHALL complete over the ad-hoc projects and write the chosen one to `<name>.toml` in the projects directory, with the same refusals as `project-create`; afterwards it SHALL be a project with that file. A saved file SHALL load back as the same project.
 
 #### Scenario: Save
-- **WHEN** an ad-hoc project with a role and an additional root is saved
+- **WHEN** an ad-hoc project with an additional root is saved
 - **THEN** `projects/<name>.toml` is written and reading it gives a project equal to the ad-hoc one
 
 #### Scenario: Save a project with a file

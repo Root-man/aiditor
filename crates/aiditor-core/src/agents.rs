@@ -3005,10 +3005,7 @@ mod tests {
         let mut h = session();
         let buffer = h.core.windows.window.buffer();
         let other = h.path("other/app");
-        h.core.projects[0].project.roots.push(Root {
-            path: other,
-            role: String::new(),
-        });
+        h.core.projects[0].project.roots.push(Root { path: other });
         h.index_reply("app", &["src/main.rs"], &["app", "app/src"]);
         h.index_reply("other/app", &["lib.rs"], &["other/app", "other/app/empty"]);
         h.keys("@");
@@ -3272,15 +3269,11 @@ mod tests {
     #[test]
     fn project_roots_reach_the_spawn_and_prompts_carry_the_user_input() {
         let mut h = work();
-        let project = &mut h.core.projects[0].project;
-        project.primary.role = "The app".into();
         let lib = Root {
             path: h.path("lib"),
-            role: String::new(),
         };
         let docs = Root {
             path: h.path("docs"),
-            role: "Docs".into(),
         };
         h.core.projects[0].project.roots = vec![lib, docs];
         h.keys("M-x agent-start RET claude RET");
@@ -4409,7 +4402,6 @@ mod tests {
         h.index_reply("app", &["src/a.rs", "src/main.rs"], &["app", "app/src"]);
         let other = crate::project::Root {
             path: h.path("other"),
-            role: String::new(),
         };
         h.core.projects[0].project.roots.push(other);
         h.index_reply("other", &["lib/b.rs"], &["other", "other/lib"]);

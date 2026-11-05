@@ -508,10 +508,7 @@ mod tests {
         let (app, lib) = (h.path("app"), h.path("lib"));
         let project = &mut h.core.projects[0].project;
         project.primary.path = app;
-        project.roots = vec![Root {
-            path: lib,
-            role: String::new(),
-        }];
+        project.roots = vec![Root { path: lib }];
         h
     }
 
@@ -559,10 +556,7 @@ mod tests {
         ] {
             let mut h = grepping(&[], &[]);
             let docs = h.path("docs");
-            h.core.projects[0].project.roots.push(Root {
-                path: docs,
-                role: String::new(),
-            });
+            h.core.projects[0].project.roots.push(Root { path: docs });
             h.core.current_mut().file = file.map(|p| h.path(p));
             h.keys("C-x p g");
             let op = search(&mut h);
@@ -579,7 +573,6 @@ mod tests {
         let nested = h.path("app/lib");
         h.core.projects[0].project.roots.push(Root {
             path: nested.clone(),
-            role: String::new(),
         });
         h.core.current_mut().file = Some(nested.join("a"));
         h.keys("C-x p g");
@@ -638,7 +631,6 @@ mod tests {
         let project = &mut h.core.projects[0].project;
         project.roots.push(Root {
             path: other.clone(),
-            role: String::new(),
         });
         project.ignore = vec!["target/".into()];
         let origin = h.core.windows.window.buffer();

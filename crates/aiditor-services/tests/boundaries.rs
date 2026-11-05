@@ -97,15 +97,16 @@ fn project_edits_recreate_deleted_files_keep_comments_and_report_typed_conflicts
     let file = root.join("p.toml");
     let mut d = project_driver(root);
     fs::remove_file(&file).unwrap();
-    d.call("project-set-role", &["p", &root.to_string_lossy(), "Main"]);
+    d.call("project-set-default-agent", &["p", "claude"]);
     let recreated = fs::read_to_string(&file).unwrap();
     assert!(recreated.starts_with("# retained comment\n"));
     assert!(recreated.contains("watch = false # choice"));
     let loaded = projects::read(root).pop().unwrap().unwrap();
-    assert_eq!(loaded.project.primary.role, "Main");
-    assert_eq!(d.core.projects().last().unwrap().primary.role, "Main");
+    assert_eq!(loaded.project.default_agent.as_deref(), Some("claude"));
+    let agent = |d: &Driver| d.core.projects().last().unwrap().default_agent.clone();
+    assert_eq!(agent(&d).as_deref(), Some("claude"));
     fs::write(&file, format!("{recreated}# external\n")).unwrap();
-    d.call("project-set-role", &["p", &root.to_string_lossy(), "Other"]);
+    d.call("project-set-default-agent", &["p", ""]);
     assert!(
         d.core
             .message()
@@ -116,7 +117,7 @@ fn project_edits_recreate_deleted_files_keep_comments_and_report_typed_conflicts
         fs::read_to_string(&file).unwrap(),
         format!("{recreated}# external\n")
     );
-    assert_eq!(d.core.projects().last().unwrap().primary.role, "Main");
+    assert_eq!(agent(&d).as_deref(), Some("claude"));
     d.hold_files = true;
     d.call("project-create", &["new", &root.to_string_lossy()]);
     let op = d.files.pop_front().unwrap();

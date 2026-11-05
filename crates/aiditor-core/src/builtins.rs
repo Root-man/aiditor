@@ -297,7 +297,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-add-root",
             spec: ArgSpec {
                 project: true,
-                prompts: &["Project: ", "Add root: ", "Role: "],
+                prompts: &["Project: ", "Add root: "],
                 completion: Some(projects_then_free),
                 files: Some(1),
                 directories: true,
@@ -312,25 +312,11 @@ pub(crate) fn builtins() -> Vec<Command> {
                 prompts: &["Project: ", "Remove root: "],
                 completion: Some(|core, args| match args.strings.len() {
                     0 => core.project_names(false),
-                    _ => core.root_paths(args, false),
+                    _ => core.root_paths(args),
                 }),
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.remove_root(&args),
-        },
-        Command {
-            name: "project-set-role",
-            spec: ArgSpec {
-                project: true,
-                prompts: &["Project: ", "Root: ", "Role: "],
-                completion: Some(|core, args| match args.strings.len() {
-                    0 => core.project_names(false),
-                    1 => core.root_paths(args, true),
-                    _ => Vec::new(),
-                }),
-                ..ArgSpec::default()
-            },
-            handler: |ctx, args| ctx.set_role(&args),
         },
         Command {
             name: "project-set-default-agent",

@@ -688,7 +688,6 @@ mod tests {
         agents.get_mut("claude").unwrap().default_mode = Some("plan".into());
         let lib = Root {
             path: h.path("lib"),
-            role: "Lib".into(),
         };
         h.core.projects[0].project.roots.push(lib);
         let list = h.core.windows.window.buffer();

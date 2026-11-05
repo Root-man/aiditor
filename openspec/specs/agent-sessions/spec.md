@@ -114,10 +114,10 @@ Starting or loading a session SHALL pass every root of the project but the prima
 - **THEN** `*Messages*` holds `claude can't take additional directories`
 
 ### Requirement: Prompts carry user input
-Every prompt, including the first prompt of a new or loaded session, SHALL carry only the user's text and explicitly attached content. Project scope SHALL be sent through `cwd` and `additionalDirectories`, without adding root paths or role lines to prompts.
+Every prompt, including the first prompt of a new or loaded session, SHALL carry only the user's text and explicitly attached content. Project scope SHALL be sent through `cwd` and `additionalDirectories`, without adding root paths to prompts.
 
-#### Scenario: The first prompt in a project with roles
-- **GIVEN** a project with primary `app` (role `The app`) and roots `lib` and `docs` (role `Docs`)
+#### Scenario: The first prompt in a project with additional roots
+- **GIVEN** a project with primary `app` and roots `lib` and `docs`
 - **WHEN** the first prompt `hi` is sent in a new session
 - **THEN** the request holds the single text block `hi`, and the session buffer shows only `hi`
 
@@ -127,7 +127,7 @@ Every prompt, including the first prompt of a new or loaded session, SHALL carry
 - **THEN** its request holds the single text block `again`
 
 #### Scenario: A loaded session
-- **GIVEN** a loaded session in a project with additional roots and role lines
+- **GIVEN** a loaded session in a project with additional roots
 - **WHEN** the prompt `x` is sent
 - **THEN** its request holds the single text block `x`
 

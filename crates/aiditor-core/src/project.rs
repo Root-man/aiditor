@@ -1,4 +1,4 @@
-//! Project files: a primary repo and additional roots, each with a role line.
+//! Project files: a primary repo and additional roots.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -49,8 +49,6 @@ fn is_true(value: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Root {
     pub path: PathBuf,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub role: String,
 }
 
 /// A project and the file it lives in, with the text last read from or written to it; no file
@@ -103,7 +101,6 @@ impl Loaded {
     pub(crate) fn ad_hoc(name: &str, root: &Path) -> Self {
         let primary = Root {
             path: root.to_path_buf(),
-            role: String::new(),
         };
         let project = Project {
             name: name.into(),
@@ -139,12 +136,6 @@ impl Project {
         for root in project.all_roots() {
             if !root.path.is_absolute() {
                 return Err(format!("{} is not absolute", root.path.display()));
-            }
-            if root.role.contains('\n') {
-                return Err(format!(
-                    "the role of {} is not one line",
-                    root.path.display()
-                ));
             }
         }
         crate::settings::check_env(&project.env)?;
@@ -186,7 +177,6 @@ pub fn sync(doc: &mut DocumentMut, project: &Project) {
         .as_table_like_mut()
         .expect("a loaded project's primary is a table");
     set(primary, "path", &project.primary.path.to_string_lossy());
-    set(primary, "role", &project.primary.role);
     let mut old: Vec<Table> = match doc.remove("roots") {
         Some(Item::ArrayOfTables(roots)) => roots.into_iter().collect(),
         Some(Item::Value(Value::Array(roots))) => (roots.into_iter())
@@ -208,7 +198,6 @@ pub fn sync(doc: &mut DocumentMut, project: &Project) {
             .position(same)
             .map_or_else(Table::new, |i| old.remove(i));
         set(&mut table, "path", &path);
-        set(&mut table, "role", &root.role);
         table.set_position(start);
         roots.push(table);
     }
@@ -245,11 +234,9 @@ MIX_ENV = "test"
 
 [primary]
 path = "/r/aiditor"
-role = "The editor itself"
 
 [[roots]]
 path = "/r/zed"
-role = "GPUI source, read only"
 
 [[roots]]
 path = "/r/notes"
@@ -262,10 +249,8 @@ path = "/r/notes"
         assert_eq!(p.default_agent.as_deref(), Some("claude"));
         assert_eq!(p.ignore, ["*", "!notes/"]);
         assert_eq!(p.env, BTreeMap::from([("MIX_ENV".into(), "test".into())]));
-        assert_eq!(p.primary.role, "The editor itself");
         let paths: Vec<_> = p.roots.iter().map(|r| r.path.to_str().unwrap()).collect();
         assert_eq!(paths, ["/r/zed", "/r/notes"]);
-        assert_eq!(p.roots[1].role, "");
         let text = toml::to_string(&p).unwrap();
         assert_eq!(Project::parse(&text).unwrap(), p, "{text}");
     }
@@ -276,7 +261,6 @@ path = "/r/notes"
         assert!(p.watch);
         assert_eq!((p.default_agent.as_ref(), p.roots.len()), (None, 0));
         assert!(p.ignore.is_empty() && p.env.is_empty());
-        assert_eq!(p.primary.role, "");
         assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
     }
 
@@ -373,11 +357,7 @@ path = "/r/notes"
                 &format!("name = \"x\"\n{primary}\n[[roots]]\npath = \"../y\""),
                 "../y is not absolute",
             ),
-            (
-                &format!("name = \"x\"\n{primary}\nrole = \"a\\nb\""),
-                "not one line",
-            ),
-            (&format!("name = \"x\"\n{primary}\nrol = \"a\""), "rol"),
+            (&format!("name = \"x\"\n{primary}\nrole = \"a\""), "role"),
             (
                 &format!("name = \"x\"\n{primary}\n[[roots]]\npath = \"/r/x/v/lib\""),
                 "/r/x/v/lib is inside /r/x",
@@ -409,12 +389,10 @@ ignore = ["target/"] # project commands leave this alone
 
 [primary]
 path = "/r/aiditor"
-role = "The editor itself"
 
 # GPUI
 [[roots]]
 path = "/r/zed"
-role = "GPUI source"
 
 [[roots]]
 path = "/r/notes"
@@ -428,13 +406,10 @@ path = "/r/notes"
             "an unchanged project leaves the text alone"
         );
         p.default_agent = None;
-        p.primary.role = "Editor".into();
+        p.primary.path = "/r/editor".into();
         p.roots.swap(0, 1);
-        p.roots[0].role = "Notes".into();
-        p.roots[1].role.clear();
         p.roots.push(Root {
             path: "/r/new".into(),
-            role: "New".into(),
         });
         sync(&mut doc, &p);
         let got = doc.to_string();
@@ -450,8 +425,8 @@ path = "/r/notes"
         let inline = "name = \"x\"\nprimary = { path = \"/r/x\" }\nroots = [{ path = \"/r/y\" }]\n";
         let mut p = Project::parse(inline).unwrap();
         let mut doc: DocumentMut = inline.parse().unwrap();
-        p.primary.role = "X".into();
-        p.roots[0].role = "Y".into();
+        p.primary.path = "/r/x2".into();
+        p.roots[0].path = "/r/y2".into();
         sync(&mut doc, &p);
         assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
     }

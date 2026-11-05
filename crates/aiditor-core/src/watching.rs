@@ -848,10 +848,7 @@ mod tests {
             default_agent: None,
             ignore: vec!["*.log".into()],
             env: Default::default(),
-            primary: Root {
-                path: h.path("a"),
-                role: String::new(),
-            },
+            primary: Root { path: h.path("a") },
             roots: Vec::new(),
         };
         h.core.add_project(Loaded {
@@ -999,10 +996,7 @@ mod tests {
             .unwrap()
             .project
             .roots
-            .push(Root {
-                path: b,
-                role: String::new(),
-            });
+            .push(Root { path: b });
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, []);
         assert!(h.core.message().unwrap().contains("directories = 4"));
@@ -1030,10 +1024,10 @@ mod tests {
         let mut h = indexed();
         h.open("a/x");
         h.send(Msg::Tick);
-        let strings = vec!["p".into(), h.path("a").display().to_string(), "Main".into()];
+        let strings = vec!["p".into(), "claude".into()];
         let mut ctx = h.ctx();
         ctx.call(
-            "project-set-role",
+            "project-set-default-agent",
             Args {
                 strings,
                 ..Args::default()

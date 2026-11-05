@@ -116,14 +116,12 @@ impl Core {
         }
     }
 
-    /// The root paths of the project named by the first string, without the primary unless
-    /// `primary`.
-    pub(crate) fn root_paths(&self, args: &Args, primary: bool) -> Vec<String> {
+    /// The additional roots' paths of the project named by the first string.
+    pub(crate) fn root_paths(&self, args: &Args) -> Vec<String> {
         let Ok(i) = self.project_arg(args) else {
             return Vec::new();
         };
-        (self.projects[i].project.all_roots())
-            .skip(usize::from(!primary))
+        (self.projects[i].project.roots.iter())
             .map(|root| root.path.display().to_string())
             .collect()
     }
@@ -326,7 +324,6 @@ impl Ctx<'_> {
             env: Default::default(),
             primary: Root {
                 path: self.core.root_path(primary),
-                role: String::new(),
             },
             roots: Vec::new(),
         };
@@ -407,9 +404,8 @@ impl Ctx<'_> {
 
     pub(crate) fn add_root(&mut self, args: &Args) -> Result<(), String> {
         let path = self.core.root_path(&args.strings[1]);
-        let role = args.strings[2].clone();
         self.edit_project(args, |p| {
-            p.roots.push(Root { path, role });
+            p.roots.push(Root { path });
             Ok(())
         })
     }
@@ -420,17 +416,6 @@ impl Ctx<'_> {
             let i = (p.roots.iter().position(|r| r.path == path))
                 .ok_or_else(|| format!("{} is not an additional root of {name}", path.display()))?;
             p.roots.remove(i);
-            Ok(())
-        })
-    }
-
-    pub(crate) fn set_role(&mut self, args: &Args) -> Result<(), String> {
-        let (name, path) = (&args.strings[0], self.core.root_path(&args.strings[1]));
-        self.edit_project(args, |p| {
-            let root = (std::iter::once(&mut p.primary).chain(&mut p.roots))
-                .find(|r| r.path == path)
-                .ok_or_else(|| format!("{} is not a root of {name}", path.display()))?;
-            root.role = args.strings[2].clone();
             Ok(())
         })
     }
@@ -811,10 +796,7 @@ mod tests {
             default_agent: None,
             ignore: Vec::new(),
             env: Default::default(),
-            primary: Root {
-                path: h.path("a"),
-                role: String::new(),
-            },
+            primary: Root { path: h.path("a") },
             roots: Vec::new(),
         };
         Loaded {
@@ -850,20 +832,14 @@ mod tests {
             Some(&*format!("Wrote {}", file.display()))
         );
         let text = format!("name = \"app\"\n\n[primary]\npath = \"{a}\"\n");
-        assert_eq!(project_text(&h, "app"), text, "no empty roots or role");
+        assert_eq!(project_text(&h, "app"), text, "no empty roots");
         let p = Project::parse(&text).unwrap();
         assert_eq!(h.core.projects(), [&p]);
         // Typing filters the list; `./` takes the directory typed.
-        h.keys(&format!("C-x p a app RET C-a C-k {tmp}/b RET Bee RET"));
+        h.keys(&format!("C-x p a app RET C-a C-k {tmp}/b RET"));
         h.keys(&format!("C-x p c two RET C-a C-k {tmp}/b/ RET"));
         let (app, two) = (project(&h, "app"), project(&h, "two"));
-        assert_eq!(
-            app.roots,
-            [Root {
-                path: h.path("b"),
-                role: "Bee".into()
-            }]
-        );
+        assert_eq!(app.roots, [Root { path: h.path("b") }]);
         assert_eq!(two.primary.path, h.path("b"));
         for (name, err) in [
             ("app", "Project app already exists"),
@@ -904,8 +880,7 @@ mod tests {
             dir: Some(h.path("projects")),
             projects: vec![Ok(loaded)],
         });
-        call(&mut h, "project-add-root", &["app", &format!("{b}/"), "B"]);
-        call(&mut h, "project-set-role", &["app", &a, "Main"]);
+        call(&mut h, "project-add-root", &["app", &format!("{b}/")]);
         call(&mut h, "project-set-default-agent", &["app", "claude"]);
         call(&mut h, "project-set-watch", &["app", "false"]);
         let disk = project_text(&h, "app");
@@ -915,18 +890,9 @@ mod tests {
         let p = Project::parse(&disk).unwrap();
         assert_eq!(p, project(&h, "app"));
         assert!(!p.watch);
-        assert_eq!(
-            (p.primary.role.as_str(), p.default_agent.as_deref()),
-            ("Main", Some("claude"))
-        );
-        assert_eq!(
-            p.roots,
-            [Root {
-                path: h.path("b"),
-                role: "B".into()
-            }]
-        );
-        let err = call(&mut h, "project-add-root", &["app", &format!("{a}/x"), ""]);
+        assert_eq!(p.default_agent.as_deref(), Some("claude"));
+        assert_eq!(p.roots, [Root { path: h.path("b") }]);
+        let err = call(&mut h, "project-add-root", &["app", &format!("{a}/x")]);
         assert_eq!(err, Some(format!("{a}/x is inside {a}")));
         let err = call(&mut h, "project-remove-root", &["app", &a]);
         assert_eq!(err, Some(format!("{a} is not an additional root of app")));
@@ -935,7 +901,7 @@ mod tests {
         assert_eq!(project_text(&h, "app"), disk, "refusals write nothing");
         let before = project(&h, "app");
         h.collect_effects = true;
-        call(&mut h, "project-set-role", &["app", &a, "Ours"]);
+        call(&mut h, "project-set-default-agent", &["app", ""]);
         let intent = std::mem::take(&mut h.effects)
             .into_iter()
             .find_map(|effect| match effect {
@@ -977,8 +943,7 @@ mod tests {
             projects: vec![Ok(loaded)],
         });
         let b = h.path("b").display().to_string();
-        call(&mut h, "project-add-root", &["tmp", &b, "B"]);
-        call(&mut h, "project-set-role", &["tmp", &b, "Bee"]);
+        call(&mut h, "project-add-root", &["tmp", &b]);
         call(&mut h, "project-set-watch", &["tmp", "false"]);
         let err = call(&mut h, "project-open-file", &["tmp"]);
         assert_eq!(
@@ -987,7 +952,7 @@ mod tests {
         );
         assert_eq!(h.core.projects[h.core.project("tmp").unwrap()].file, None);
         let edited = project(&h, "tmp");
-        assert_eq!(edited.roots[0].role, "Bee");
+        assert_eq!(edited.roots[0].path, h.path("b"));
         assert!(!edited.watch);
         call(&mut h, "project-save", &["tmp"]);
         assert_eq!(Project::parse(&project_text(&h, "tmp")).unwrap(), edited);
@@ -1082,7 +1047,6 @@ mod tests {
             "project-create",
             "project-add-root",
             "project-remove-root",
-            "project-set-role",
             "project-set-default-agent",
             "project-set-watch",
             "project-open-file",
@@ -1102,10 +1066,7 @@ mod tests {
         h.index_reply("b", &["x"], &["b"]);
         let mut loaded = ad_hoc(&h);
         for root in ["b"].iter().chain(roots) {
-            loaded.project.roots.push(Root {
-                path: h.path(root),
-                role: String::new(),
-            });
+            loaded.project.roots.push(Root { path: h.path(root) });
         }
         h.core.add_project(loaded);
         h
@@ -1410,7 +1371,6 @@ mod tests {
         let (mut h, mut loaded) = saved_finder();
         loaded.project.roots.push(Root {
             path: h.path("new/lib"),
-            role: String::new(),
         });
         let names: Vec<_> = (0..12).map(|i| format!("f{i:02}")).collect();
         h.index_reply(
@@ -1522,7 +1482,6 @@ mod tests {
         let (mut h, mut loaded) = saved_finder();
         loaded.project.roots.push(Root {
             path: h.path("new/lib"),
-            role: String::new(),
         });
         h.send(Msg::ProjectsLoaded {
             dir: None,

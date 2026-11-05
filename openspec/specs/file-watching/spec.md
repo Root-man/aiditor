@@ -134,7 +134,7 @@ Before adding project root watches, the editor SHALL count files and kept direct
 
 #### Scenario: An edit or reload keeps the watches
 - **GIVEN** a watched project, or one refused over its limit
-- **WHEN** a role edit or `C-x C-r` re-walks its unchanged roots and patterns
+- **WHEN** a default-agent edit or `C-x C-r` re-walks its unchanged roots and patterns
 - **THEN** its root watches and mode line stay as they were throughout, and an unchanged refusal is not reported again
 
 ### Requirement: Recovery restores directory watch coverage

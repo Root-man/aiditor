@@ -2505,7 +2505,6 @@ mod tests {
         let mut h = Harness::new(&[("api/src/a.rs", ""), ("web/b.rs", "")]);
         let root = |path: &std::path::Path| crate::project::Root {
             path: path.to_path_buf(),
-            role: String::new(),
         };
         let project = &mut h.core.projects[0].project;
         project.primary.path = "/aiditor-test/api".into();

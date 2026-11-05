@@ -474,7 +474,6 @@ mod tests {
             .roots
             .push(crate::project::Root {
                 path: "/missing".into(),
-                role: String::new(),
             });
         request(&mut h, project, false);
         let next = walks(&mut h).pop().unwrap();
