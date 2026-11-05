@@ -114,7 +114,11 @@ impl Core {
         for (index, listing) in list.agents.iter().enumerate() {
             match &listing.answer {
                 None => lines.push(format!("Listing {}...", listing.name)),
-                Some(Err(err)) => lines.push(format!("{}: {err}", listing.name)),
+                // On one line, so each row's line number holds.
+                Some(Err(err)) => {
+                    let err = err.split_whitespace().collect::<Vec<_>>().join(" ");
+                    lines.push(format!("{}: {err}", listing.name));
+                }
                 Some(Ok(infos)) => sessions.extend(infos.iter().map(|info| {
                     let time = timestamp(info.updated_at.as_deref());
                     (index, info, time)
@@ -547,8 +551,17 @@ mod tests {
              claude                    none\n\
              claude                    Bad"
         );
-        answer(&mut h, requests[1].0, Err("codex can't list sessions"));
-        assert!(body(&h).starts_with("codex: codex can't list sessions\nclaude  "));
+        answer(
+            &mut h,
+            requests[1].0,
+            Err("closed: {\n  \"method\": \"initialize\"\n}"),
+        );
+        assert!(body(&h).starts_with("codex: closed: { \"method\": \"initialize\" }\nclaude  "));
+        h.keys("n RET");
+        assert_eq!(
+            h.core.session_state("claude", &"none".into()),
+            Some("[loading]")
+        );
     }
 
     #[test]
