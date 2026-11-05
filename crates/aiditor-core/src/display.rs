@@ -243,7 +243,7 @@ pub struct FrameDisplay {
     /// The echo area's text, if a message is shown.
     pub message: Option<String>,
     /// Contextual key/action hints for the selected buffer, when no message or prompt is up.
-    pub key_hints: &'static [(&'static str, &'static str)],
+    pub key_hints: Vec<(String, &'static str)>,
     /// The open minibuffer, if any.
     pub minibuffer: Option<Minibuffer>,
     /// The which-key hint, once a pending prefix's delay has passed.
@@ -858,10 +858,14 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
                     FaceName::ModeLineDim,
                 ),
             ],
-            right: vec![segment(
-                &format!("{position}/{}", buffer.workspace_rows.len()),
-                FaceName::ModeLine,
-            )],
+            // An empty list has no position.
+            right: (!buffer.workspace_rows.is_empty())
+                .then(|| {
+                    let rows = buffer.workspace_rows.len();
+                    segment(&format!("{position}/{rows}"), FaceName::ModeLine)
+                })
+                .into_iter()
+                .collect(),
             path: None,
         };
     }

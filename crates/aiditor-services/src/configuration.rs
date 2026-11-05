@@ -172,6 +172,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("settings.toml"), "font_size = 18").unwrap();
         let mut core = Core::default();
+        core.launch(dir.path(), dir.path());
         let id = request(call(&mut core, "reload-settings", &[]));
         let (started, running) = std::sync::mpsc::channel();
         let (release, held) = std::sync::mpsc::channel();

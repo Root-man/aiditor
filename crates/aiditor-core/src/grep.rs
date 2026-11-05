@@ -301,7 +301,7 @@ impl Ctx<'_> {
             let (path, line, col) = (hit.root.join(&hit.path), hit.line, hit.col);
             return self.find_file_at(&path, line, col);
         }
-        let project = self.core.current_workspace().project;
+        let project = self.core.current_workspace()?.project;
         let loaded = &self.core.projects[self.core.project_at(project)?].project;
         let roots: Vec<PathBuf> = loaded.all_roots().map(|root| root.path.clone()).collect();
         let ignore = loaded.ignore.clone();
@@ -680,6 +680,7 @@ mod tests {
                 text.as_bytes().to_vec(),
                 crate::buffer::hash(text.as_bytes()),
             ))),
+            root: None,
         });
         assert_eq!((h.text(), h.point()), (text.into(), 7));
     }

@@ -608,8 +608,10 @@ struct Live {
 impl Live {
     fn new(dir: &Path, script_text: &str) -> Self {
         let (key, path) = script(dir, script_text);
+        let mut core = Core::default();
+        core.launch(dir, dir);
         let mut live = Live {
-            core: Core::default(),
+            core,
             agents: Agents::default(),
             rx: None,
             pid: None,

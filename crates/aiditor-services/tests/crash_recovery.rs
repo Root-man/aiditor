@@ -73,6 +73,7 @@ fn an_obstructed_auto_save_retries_without_input_and_recovers_on_relaunch() {
     let (dir, file) = (root.path().join("recovery"), root.path().join("a.txt"));
     fs::write(&file, "world\n").unwrap();
     let mut probe = Core::default();
+    probe.launch(&file, file.parent().unwrap());
     probe.open(&file, aiditor_services::files::read(&file).unwrap());
     probe.handle(
         Instant::now(),

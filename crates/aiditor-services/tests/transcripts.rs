@@ -248,8 +248,11 @@ struct Replay {
 
 impl Replay {
     fn new(transcript: &Path) -> Self {
+        let mut core = Core::default();
+        let dir = transcript.parent().unwrap();
+        core.launch(dir, dir);
         let mut replay = Replay {
-            core: Core::default(),
+            core,
             agents: Agents::default(),
             rx: None,
             stderr: Vec::new(),

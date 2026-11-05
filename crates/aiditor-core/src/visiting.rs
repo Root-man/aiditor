@@ -365,9 +365,13 @@ impl Ctx<'_> {
 }
 
 impl Core {
-    /// The current buffer's directory: its file's, its terminal's, else the working directory.
+    /// The current buffer's directory: its file's, its terminal's, else the working directory, or
+    /// the home directory in the lobby.
     pub(crate) fn directory(&self) -> PathBuf {
-        (self.buffer_directory()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        let home = || std::env::home_dir().filter(|_| self.workspace().is_none());
+        (self.buffer_directory())
+            .or_else(home)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
     }
 
     /// The current buffer's file's directory, or its terminal's.
@@ -420,6 +424,7 @@ impl Core {
         intent: VisitIntent,
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
+        root: Option<PathBuf>,
     ) {
         let valid = self.pending_visit.as_ref().is_some_and(|pending| {
             pending.intent == intent
@@ -433,6 +438,11 @@ impl Core {
         let pending = self.pending_visit.take().expect("validated visit");
         match result {
             Ok(file) => {
+                // A visit from the lobby leaves it for the file's project, as a launch does.
+                if intent.workspace.is_none() {
+                    let root = root.unwrap_or_else(|| path.parent().unwrap_or(&path).into());
+                    self.launch(&path, &root);
+                }
                 self.visit(&path, file, true);
                 if self.buffers.visiting(&path) == Some(self.windows.window.buffer())
                     && let Some((line, col)) = pending.destination
@@ -526,9 +536,13 @@ impl Core {
         let next = replacement(&self.buffers, id, self.buffers.workspace);
         // Killed first, so a new scratch gets its name.
         _ = self.buffers.kill(id);
-        let next = next.unwrap_or_else(|| {
-            let name = self.current_workspace().name.clone();
-            self.buffers.create_scratch(&name)
+        let next = next.unwrap_or_else(|| match self.current_workspace() {
+            Ok(workspace) => {
+                let name = workspace.name.clone();
+                self.buffers.create_scratch(&name)
+            }
+            // The lobby's last buffer gives way to `*Messages*`, made empty if need be.
+            Err(_) => self.messages(),
         });
         self.windows.replace_buffer(&mut self.buffers, id, next);
         for workspace in &mut self.workspaces {
@@ -536,19 +550,23 @@ impl Core {
                 continue;
             };
             // Every live workspace keeps its `*scratch*`, so `next` is only a guard.
-            let theirs = replacement(&self.buffers, id, workspace.id).unwrap_or(next);
+            let theirs = replacement(&self.buffers, id, Some(workspace.id)).unwrap_or(next);
             windows.replace_buffer(&mut self.buffers, id, theirs);
         }
     }
 }
 
 /// The most recent listed buffer but `id` that belongs to `workspace` or to none.
-fn replacement(buffers: &Buffers, id: BufferId, workspace: WorkspaceId) -> Option<BufferId> {
+fn replacement(
+    buffers: &Buffers,
+    id: BufferId,
+    workspace: Option<WorkspaceId>,
+) -> Option<BufferId> {
     (buffers.recent())
         .find(|&(b, buffer)| {
             b != id
                 && !buffer.name.starts_with(' ')
-                && buffer.workspace.is_none_or(|w| w == workspace)
+                && buffer.workspace.is_none_or(|w| Some(w) == workspace)
         })
         .map(|(b, _)| b)
 }
@@ -611,6 +629,7 @@ mod tests {
                 text.as_bytes().to_vec(),
                 crate::buffer::hash(text.as_bytes()),
             ))),
+            root: None,
         }
     }
 
@@ -622,7 +641,7 @@ mod tests {
         h.keys("editing");
         h.send(opened(intent, path.clone(), "visited"));
         assert_eq!(h.core.current().file, Some(path));
-        assert_eq!(h.core.current().workspace, Some(intent.workspace));
+        assert_eq!(h.core.current().workspace, intent.workspace);
         assert_eq!(h.text(), "visited");
         assert_eq!(
             h.core.buffers.get(origin).unwrap().text().to_string(),
@@ -638,7 +657,7 @@ mod tests {
     fn abandoned_visits_leave_navigation_prompts_and_echo_unchanged() {
         let changes: [fn(&mut Harness); 7] = [
             |h| {
-                let origin = h.core.workspace();
+                let origin = h.core.workspace().unwrap();
                 h.new_workspace("away", "home");
                 h.core.switch_workspace(origin).unwrap();
             },
@@ -649,7 +668,7 @@ mod tests {
                 h.keys("C-x 2 C-x 0");
             },
             |h| {
-                let origin = h.core.workspace();
+                let origin = h.core.workspace().unwrap();
                 h.new_workspace("away", "home");
                 h.core.kill_workspace(origin).unwrap();
             },
@@ -671,7 +690,7 @@ mod tests {
                 change(&mut h);
                 h.core.echo("new interaction".into());
                 let before = (
-                    h.core.workspace(),
+                    h.core.workspace().unwrap(),
                     h.core.windows.selected,
                     h.text(),
                     h.point(),
@@ -682,13 +701,14 @@ mod tests {
                         intent,
                         path,
                         result: Err("obsolete error".into()),
+                        root: None,
                     }
                 } else {
                     opened(intent, path, "late")
                 });
                 assert_eq!(
                     (
-                        h.core.workspace(),
+                        h.core.workspace().unwrap(),
                         h.core.windows.selected,
                         h.text(),
                         h.point(),
@@ -1161,7 +1181,7 @@ mod tests {
         // `x` matches neither `*scratch*<w>` nor `*Messages*`, so `RET` takes it as typed.
         let mut h = Harness::new(&[("x", "1")]);
         h.open("x");
-        let main = h.core.workspace();
+        let main = h.core.workspace().unwrap();
         let w = h.new_workspace("w", "p");
         h.keys("C-x k x RET");
         assert_eq!(h.core.message(), Some("No such buffer x"));
@@ -1560,6 +1580,7 @@ mod tests {
             },
             path: h.path("d/a.txt"),
             result: Ok(None),
+            root: None,
         });
         assert_eq!(
             (h.core.buffers.recent().count(), h.text().as_str()),

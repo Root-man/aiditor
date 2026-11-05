@@ -23,6 +23,7 @@ fn main() {
         .expect("usage: aiditor-headless RECOVERY_DIR FILE SCRIPT");
     let (dir, file) = (PathBuf::from(dir), std::path::absolute(file).unwrap());
     let mut core = Core::default();
+    core.launch(&file, file.parent().unwrap());
     core.open(&file, files::read(&file).unwrap());
     let (tx, completions) = mpsc::channel();
     let mut service = Some(recovery::spawn(dir.clone(), move |msg| {

@@ -202,7 +202,7 @@ fn language_pins_refresh_all_workspaces_without_project_watches() {
         "watch = false",
     );
     editor.wait_for_language("Rust 1.99.0");
-    let first = editor.core.workspace();
+    let first = editor.core.workspace().unwrap();
     let second = editor
         .core
         .new_workspace("second", editor.core.project_id("sync").unwrap());
@@ -248,7 +248,7 @@ fn atomic_external_saves_revert_every_clean_copy_and_leave_other_buffers_alone()
         editor.core.watch_set().roots,
         vec![(editor.root.clone(), vec![])]
     );
-    let first = editor.core.workspace();
+    let first = editor.core.workspace().unwrap();
     editor.open("other.txt");
     editor.keys("kept SPC C-x C-s");
     let other_tick = editor.core.current().tick();
@@ -299,7 +299,7 @@ fn atomic_external_saves_revert_every_clean_copy_and_leave_other_buffers_alone()
 fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
     let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "original\n")], "");
-    let dirty = editor.core.workspace();
+    let dirty = editor.core.workspace().unwrap();
     let base = editor.core.current().disk;
     editor.keys("mine SPC");
     let tick = editor.core.current().tick();
@@ -347,7 +347,7 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
 fn an_own_save_updates_the_other_workspace_and_preserves_its_own_undo() {
     let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "original\n")], "");
-    let observer = editor.core.workspace();
+    let observer = editor.core.workspace().unwrap();
     let saving = editor
         .core
         .new_workspace("saving", editor.core.project_id("sync").unwrap());
@@ -524,7 +524,7 @@ fn recovery_crossing_the_limit_keeps_visited_file_synchronization() {
 fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() {
     let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "base\n")], "");
-    let first = editor.core.workspace();
+    let first = editor.core.workspace().unwrap();
     editor.hold_operations = true;
     editor.keys("first SPC C-x C-s");
     let second = editor
@@ -605,7 +605,7 @@ fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() 
 fn held_reverts_keep_new_edits_and_apply_only_to_their_original_buffer() {
     let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "base\n"), ("other.txt", "other\n")], "");
-    let first = editor.core.workspace();
+    let first = editor.core.workspace().unwrap();
     let second = editor
         .core
         .new_workspace("second", editor.core.project_id("sync").unwrap());

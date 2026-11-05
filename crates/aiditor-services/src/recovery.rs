@@ -150,9 +150,11 @@ fn read(file: &Path) -> io::Result<(u64, Recovered)> {
     let h: Header = serde_json::from_str(header)?;
     // An unreadable visited file opens as missing; its save then fails rather than overwrite it.
     let disk = (h.path.as_deref()).and_then(|p| files::read(p).ok().flatten());
+    let root = (h.path.as_deref()).map(|p| files::root(p).to_path_buf());
     let recovered = Recovered {
         file: file.to_owned(),
         name: h.name,
+        root,
         path: h.path,
         hash: h.hash,
         text: text.into(),
@@ -191,6 +193,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("recovery");
         let (mut core, t0) = (Core::default(), Instant::now());
+        core.launch(Path::new("/nonexistent/a"), Path::new("/nonexistent"));
         core.open(Path::new("/nonexistent/a"), None);
         let insert = |text: &str| Msg::Insert {
             text: text.into(),
@@ -309,6 +312,7 @@ mod tests {
         let file = root.path().join("visited");
         fs::write(&file, "disk").unwrap();
         let mut core = Core::default();
+        core.launch(&file, file.parent().unwrap());
         core.open(&file, files::read(&file).unwrap());
         let t0 = Instant::now();
         let insert = |s: &str| Msg::Insert {

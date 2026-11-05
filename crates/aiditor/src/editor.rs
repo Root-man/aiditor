@@ -168,7 +168,7 @@ impl Editor {
         &self,
         minibuffer: Option<aiditor_core::display::Minibuffer>,
         message: Option<String>,
-        key_hints: &[(&str, &str)],
+        key_hints: &[(String, &str)],
         font: &Font,
         cell: Pixels,
         window: &Window,
@@ -668,7 +668,7 @@ impl Render for Editor {
         let echo = self.echo_area(
             frame.minibuffer,
             frame.message,
-            frame.key_hints,
+            &frame.key_hints,
             &font,
             cell,
             window,
@@ -772,6 +772,7 @@ mod tests {
             let path = dir.path().join("t.txt");
             std::fs::write(&path, text).unwrap();
             let mut core = Core::default();
+            core.launch(&path, path.parent().unwrap());
             core.open(&path, files::read(&path).unwrap());
             // The fixture has no Tokio runtime for the file's repository lookup.
             core.handle(Instant::now(), Msg::Tick);
@@ -839,10 +840,6 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
         let (editor, cx) = editor(cx, "");
-        editor.update(cx, |e, _| {
-            let path = e.core.current().file.clone().unwrap();
-            e.core.launch(&path, path.parent().unwrap());
-        });
         let (maps, _) = keymap::parse(&keymap::BUNDLED, None, |_| Some("any")).unwrap();
         let mut script = Vec::new();
         for map in maps.values() {
@@ -969,6 +966,52 @@ mod tests {
                         .iter()
                         .any(|r| r.text.text.starts_with("  ▸ * "))
                 );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn the_lobby_shows_its_hints_and_wraps_them(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let channel = aiditor_services::channel();
+            Editor::new(Core::default(), Args::default(), channel, window, cx)
+        });
+        cx.update(|window, cx| window.focus(&editor.read(cx).focus));
+        let height = editor.read_with(cx, |e, _| px(e.core.settings().mode_line_height()));
+        cx.simulate_resize(gpui::size(px(1400.), px(600.)));
+        cx.run_until_parked();
+        assert_eq!(
+            editor.update(cx, |e, _| e.core.frame().key_hints.len()),
+            6,
+            "the lobby's hints"
+        );
+        assert_eq!(
+            cx.debug_bounds("echo-key-hints").unwrap().size.height,
+            height
+        );
+        cx.simulate_resize(gpui::size(px(360.), px(600.)));
+        cx.run_until_parked();
+        let narrow = cx.debug_bounds("echo-key-hints").unwrap();
+        assert!(narrow.size.height >= height * 2., "{narrow:?}");
+        let last = cx.debug_bounds("echo-key-hint-5").unwrap();
+        assert!(last.top() > narrow.top(), "the last hint wraps");
+        // Styled as the list's: bold keys in `workspace-current`, labels in `mode-line-dim`.
+        let settings = "theme = 'dark'\n[themes.dark.faces]\nworkspace-current = { fg = 0xfabd2f }\nmode-line-dim = { fg = 0xa89984 }";
+        editor.update(cx, |e, cx| {
+            e.handle(Msg::SettingsLoaded(Ok(Some(settings.into()))), cx)
+        });
+        cx.run_until_parked();
+        editor.update_in(cx, |e, window, _| {
+            let font = e.font(window).0;
+            for (key, action) in e.core.frame().key_hints {
+                let text = format!("{key} {action}");
+                let theme = &e.core.settings().theme;
+                let runs = crate::element::key_hint_runs(&text, key.len(), &font, theme);
+                assert_eq!(runs[0].font.weight, gpui::FontWeight::BOLD, "{text}");
+                assert_eq!(runs[0].color, rgb(0xfabd2f).into(), "{text}");
+                assert_eq!(runs[1].color, rgb(0xa89984).into(), "{text}");
+                assert_eq!((runs[0].len, runs[1].len), (key.len(), action.len() + 1));
             }
         });
     }
@@ -1817,14 +1860,10 @@ mod tests {
             config_dir: Some(dir.path().to_owned()),
             ..Args::default()
         };
+        let mut core = Core::default();
+        core.launch(dir.path(), dir.path());
         let (editor, cx) = cx.add_window_view(|window, cx| {
-            Editor::new(
-                Core::default(),
-                args,
-                aiditor_services::channel(),
-                window,
-                cx,
-            )
+            Editor::new(core, args, aiditor_services::channel(), window, cx)
         });
         cx.update(|window, cx| window.focus(&editor.read(cx).focus));
         let projects = dir.path().join("projects");
@@ -1879,7 +1918,7 @@ mod tests {
         }
         let mut core = Core::default();
         core.launch(&root, &root);
-        let first = core.workspace();
+        let first = core.workspace().unwrap();
         let project = core.project_id("repo").unwrap();
         let second = core.new_workspace("second", project);
         core.switch_workspace(first).unwrap();
@@ -1962,7 +2001,7 @@ mod tests {
         runtime.block_on(runtime.spawn_blocking(|| {})).unwrap();
         cx.run_until_parked();
         assert_eq!(
-            editor.read_with(cx, |e, _| (e.core.workspace(), e.core.text())),
+            editor.read_with(cx, |e, _| (e.core.workspace().unwrap(), e.core.text())),
             (second, "other workspace".into())
         );
         editor.update(cx, |e, cx| {
@@ -2069,6 +2108,7 @@ mod tests {
         let source = tempdir();
         let path = source.path().join("t.txt");
         std::fs::write(&path, "").unwrap();
+        core.launch(&path, path.parent().unwrap());
         core.open(&path, files::read(&path).unwrap());
         core.handle(Instant::now(), Msg::Tick);
         let (editor, cx) =
@@ -3278,6 +3318,7 @@ mod tests {
         std::fs::write(&path, "fn main() {}\n").unwrap();
         std::fs::write(dir.path().join(".tool-versions"), "rust 1.99.0").unwrap();
         let mut core = Core::default();
+        core.launch(&path, path.parent().unwrap());
         core.open(&path, files::read(&path).unwrap());
         let effects = core.handle(Instant::now(), Msg::Tick);
         for effect in effects {

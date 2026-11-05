@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use aiditor_core::{Core, Msg};
@@ -32,15 +32,6 @@ const FONT: &str = if cfg!(target_os = "macos") {
 
 const USAGE: &str =
     "usage: aiditor [--config-dir DIR] [--debug] [FILE | FOLDER] | --bench-ui OUTPUT";
-
-/// The ad-hoc project root for `file`: the nearest directory above it holding `.git`, else its
-/// folder.
-fn root(file: &Path) -> &Path {
-    let folder = file.parent().unwrap_or(file);
-    (folder.ancestors())
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(folder)
-}
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -159,7 +150,7 @@ fn main() {
                 eprintln!("aiditor: {}: {err}", path.display());
                 std::process::exit(1);
             });
-            core.launch(&path, root(&path));
+            core.launch(&path, files::root(&path));
             core.open(&path, file);
         }
     }
@@ -251,6 +242,7 @@ mod tests {
             tx.blocking_send(msg).unwrap();
         });
         let mut core = Core::default();
+        core.launch(&file, file.parent().unwrap());
         core.open(&file, None);
         let t0 = Instant::now();
         let insert = || Msg::Insert {
@@ -346,26 +338,6 @@ mod tests {
         assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/c")));
         assert!(args.debug);
         assert!(!parse(&[]).unwrap().debug);
-    }
-
-    #[test]
-    fn a_file_s_root_is_its_git_repo_or_folder() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        assert_eq!(root(&repo.join("src/x.rs")), repo);
-        assert_eq!(root(&repo.join("x.rs")), repo);
-        let notes = dir.path().join("notes");
-        assert_eq!(root(&notes.join("a.txt")), notes, "outside any repo");
-        let worktree = dir.path().join("worktree");
-        std::fs::create_dir(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), "gitdir: ../repo/.git").unwrap();
-        assert_eq!(
-            root(&worktree.join("x.rs")),
-            worktree,
-            "a worktree's .git file"
-        );
     }
 
     #[test]

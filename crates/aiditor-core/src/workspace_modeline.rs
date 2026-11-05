@@ -90,13 +90,17 @@ impl Core {
     }
 
     pub(crate) fn workspace_modeline(&self, cols: usize) -> Vec<Span> {
+        // The lobby has no workspace to show.
+        if self.workspace().is_none() {
+            return Vec::new();
+        }
         let entries: Vec<_> = self
             .workspaces
             .iter()
             .map(|w| Entry {
                 project: self.project_name(w.project).replace(char::is_control, " "),
                 workspace: w.name.replace(char::is_control, " "),
-                current: w.id == self.workspace(),
+                current: Some(w.id) == self.workspace(),
                 activity: self.workspace_activity(w.id),
             })
             .collect();
