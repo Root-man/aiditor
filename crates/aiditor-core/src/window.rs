@@ -2,6 +2,7 @@
 
 use crate::buffer::{Buffer, BufferId, Buffers, Error, InsertionType, MarkerId};
 use crate::display::{self, Rect};
+use crate::workspace::WorkspaceId;
 
 /// How many marks the ring keeps, Emacs's `mark-ring-max`.
 const MARK_RING_MAX: usize = 16;
@@ -26,6 +27,10 @@ pub struct Window {
     cols: usize,
     /// The first column shown of point's line; moves only to keep point visible.
     left: usize,
+    /// The buffers shown here before, most recent last, as Emacs's `window-prev-buffers`.
+    prev: Vec<BufferId>,
+    /// The buffers `previous-buffer` left, most recent last, for `next-buffer`.
+    next: Vec<BufferId>,
 }
 
 impl Window {
@@ -45,6 +50,8 @@ impl Window {
             rows: 1,
             cols: 0,
             left: 0,
+            prev: Vec::new(),
+            next: Vec::new(),
         }
     }
 
@@ -60,6 +67,8 @@ impl Window {
             rows: self.rows,
             cols: self.cols,
             left: self.left,
+            prev: self.prev.clone(),
+            next: self.next.clone(),
             ..Window::new(buffers, self.buffer)
         };
         let point = self.point(buffers);
@@ -81,16 +90,86 @@ impl Window {
         }
     }
 
-    /// Shows `buffer` instead, with point at the buffer's point; the old buffer keeps no markers
-    /// of ours.
+    /// Shows `buffer` instead, with point at the buffer's point, making the old buffer the most
+    /// recent previous one; the old buffer keeps no markers of ours.
     pub fn show(&mut self, buffers: &mut Buffers, buffer: BufferId) {
+        let old = self.buffer;
+        if buffer != old {
+            self.prev.retain(|&b| b != old && b != buffer);
+            self.prev.push(old);
+            self.next.clear();
+        }
+        self.display(buffers, buffer);
+    }
+
+    /// Shows `buffer` instead, as `show` does, leaving the history alone.
+    fn display(&mut self, buffers: &mut Buffers, buffer: BufferId) {
         self.release(buffers);
         let (rows, cols) = (self.rows, self.cols);
+        let (prev, next) = (
+            std::mem::take(&mut self.prev),
+            std::mem::take(&mut self.next),
+        );
         *self = Window {
             rows,
             cols,
+            prev,
+            next,
             ..Window::new(buffers, buffer)
         };
+    }
+
+    /// Drops killed buffers from the history and, when the shown buffer was killed, shows the
+    /// most recent listed previous one of `workspace` or none, or `fallback` when none is left.
+    pub(crate) fn drop_killed(
+        &mut self,
+        buffers: &mut Buffers,
+        workspace: Option<WorkspaceId>,
+        fallback: BufferId,
+    ) {
+        let live = |b: &BufferId| buffers.get(*b).is_some();
+        self.prev.retain(live);
+        self.next.retain(live);
+        if !live(&self.buffer) {
+            let ours = |b: &BufferId| {
+                (buffers.get(*b)).is_some_and(|b| {
+                    !b.name.starts_with(' ') && b.workspace.is_none_or(|w| Some(w) == workspace)
+                })
+            };
+            let at = self.prev.iter().rposition(ours);
+            let to = at.map_or(fallback, |at| self.prev.remove(at));
+            self.display(buffers, to);
+        }
+    }
+
+    /// `previous-buffer`, or `next-buffer` when `forward`: shows the most recent buffer of that
+    /// list still live, else the first of `listed` (most recent first; the last when `forward`)
+    /// that isn't shown or in the other list, and puts the buffer it leaves on the other list.
+    /// False when there is no such buffer.
+    pub(crate) fn cycle(
+        &mut self,
+        buffers: &mut Buffers,
+        forward: bool,
+        listed: &[BufferId],
+    ) -> bool {
+        let shown = self.buffer;
+        let (from, to) = match forward {
+            true => (&mut self.next, &mut self.prev),
+            false => (&mut self.prev, &mut self.next),
+        };
+        from.retain(|b| buffers.get(*b).is_some());
+        let mut others = (listed.iter().copied()).filter(|b| *b != shown && !to.contains(b));
+        let target = from.pop().or_else(|| match forward {
+            true => others.next_back(),
+            false => others.next(),
+        });
+        let Some(target) = target else {
+            return false;
+        };
+        to.retain(|&b| b != shown);
+        to.push(shown);
+        self.display(buffers, target);
+        true
     }
 
     pub fn point(&self, buffers: &Buffers) -> usize {
@@ -590,5 +669,35 @@ mod tests {
         let old = buffers.get(old).unwrap();
         let markers = [point, mark, ring].map(|m| old.marker(m));
         assert_eq!(markers, [None; 3]);
+    }
+
+    #[test]
+    fn history_goes_back_and_forward_and_drops_killed_buffers() {
+        let (mut buffers, mut w) = window_on("");
+        let a = w.buffer();
+        let [b, c] = ["b", "c"].map(|n| buffers.create(n));
+        w.show(&mut buffers, b);
+        w.show(&mut buffers, c);
+        let split = w.split(&mut buffers);
+        assert_eq!(
+            (&split.prev, &split.next),
+            (&vec![a, b], &vec![]),
+            "a split copies it"
+        );
+        let mut cycle = |w: &mut Window, forward| {
+            assert!(w.cycle(&mut buffers, forward, &[]));
+            w.buffer()
+        };
+        assert_eq!([false, false, true].map(|f| cycle(&mut w, f)), [b, a, b]);
+        w.show(&mut buffers, c);
+        assert_eq!(
+            (&w.prev, &w.next),
+            (&vec![a, b], &vec![]),
+            "showing forgets the way forward"
+        );
+        buffers.kill(a).unwrap();
+        buffers.kill(c).unwrap();
+        w.drop_killed(&mut buffers, None, b);
+        assert_eq!((w.buffer(), &w.prev), (b, &vec![]));
     }
 }

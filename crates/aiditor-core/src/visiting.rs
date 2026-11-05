@@ -89,6 +89,28 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// `previous-buffer`, or `next-buffer` when `forward`, in the selected window.
+    pub(crate) fn cycle_buffer(&mut self, forward: bool) -> Result<(), String> {
+        self.outside_minibuffer("Cannot switch buffers in minibuffer window")?;
+        let core = &mut *self.core;
+        let listed: Vec<_> = (core.buffers.recent())
+            .filter(|&(id, b)| !b.name.starts_with(' ') && core.buffers.is_here(id))
+            .map(|(id, _)| id)
+            .collect();
+        match core
+            .windows
+            .window
+            .cycle(&mut core.buffers, forward, &listed)
+        {
+            true => {
+                core.pending_visit = None;
+                Ok(())
+            }
+            false if forward => Err("No next buffer".into()),
+            false => Err("No previous buffer".into()),
+        }
+    }
+
     /// Reverts the current buffer from its file, asking first when it is modified.
     pub(crate) fn revert_buffer(&mut self, args: Args) -> Result<(), String> {
         let buffer = self.core.current();
@@ -527,8 +549,9 @@ impl Core {
         names.into_iter().map(|(_, b)| b.name.clone()).collect()
     }
 
-    /// Kills buffer `id`; windows showing it show the most recent listed buffer left of their
-    /// workspace or `*Messages*`, or a new scratch in the current workspace.
+    /// Kills buffer `id`; windows showing it show their previous buffer, else the most recent
+    /// listed buffer left of their workspace or `*Messages*`, or a new scratch in the current
+    /// workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
         if self.windows.window.buffer() == id {
             self.pending_visit = None;
@@ -544,14 +567,15 @@ impl Core {
             // The lobby's last buffer gives way to `*Messages*`, made empty if need be.
             Err(_) => self.messages(),
         });
-        self.windows.replace_buffer(&mut self.buffers, id, next);
+        let current = self.buffers.workspace;
+        self.windows.drop_killed(&mut self.buffers, current, next);
         for workspace in &mut self.workspaces {
             let Some(windows) = &mut workspace.windows else {
                 continue;
             };
             // Every live workspace keeps its `*scratch*`, so `next` is only a guard.
             let theirs = replacement(&self.buffers, id, Some(workspace.id)).unwrap_or(next);
-            windows.replace_buffer(&mut self.buffers, id, theirs);
+            windows.drop_killed(&mut self.buffers, Some(workspace.id), theirs);
         }
     }
 }
@@ -1235,6 +1259,74 @@ mod tests {
             (h.core.windows.tree.leaves().len(), h.core.windows.selected),
             (2, leaves[0])
         );
+    }
+
+    #[test]
+    fn c_x_left_and_right_cycle_each_window_s_buffers() {
+        let files = ["a", "b", "c", "d"].map(|f| (f, ""));
+        let mut h = Harness::new(&files);
+        h.open("a").open("b").open("c");
+        h.keys("C-x <left>");
+        assert_eq!(name(&h), "b");
+        h.keys("C-x <left>");
+        assert_eq!(name(&h), "a");
+        h.keys("C-x <right>");
+        assert_eq!(name(&h), "b");
+        h.keys("C-x b d RET C-x <right>");
+        assert_ne!(name(&h), "b", "showing a buffer forgets the way forward");
+        // Two windows keep their own histories.
+        h.keys("C-x b a RET C-x 3 C-x b b RET C-x o C-x b c RET C-x b d RET");
+        h.keys("C-x <left> C-x o C-x <left>");
+        assert_eq!(shown(&h), ["a", "c"]);
+        h.keys("C-x b C-x <left>");
+        assert_eq!(
+            h.core.message(),
+            Some("Cannot switch buffers in minibuffer window")
+        );
+    }
+
+    #[test]
+    fn c_x_left_without_history_takes_the_workspace_s_buffers() {
+        let mut h = Harness::new(&[("a", "")]);
+        h.open("a");
+        h.new_workspace("w", "p");
+        h.keys("C-x <left>");
+        assert_eq!(
+            h.core.message(),
+            Some("No previous buffer"),
+            "no other buffer here yet"
+        );
+        // That message made `*Messages*`.
+        h.keys("C-x <left>");
+        assert_eq!(name(&h), "*Messages*");
+        h.keys("C-x <right> C-x <right>");
+        assert_eq!(
+            (name(&h), h.core.message()),
+            ("*scratch*<w>", Some("No next buffer"))
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_history_takes_a_buffer_made_in_another_window() {
+        // `x` and `y` match no other buffer's name, so `RET` takes them as typed.
+        for (key, expected) in [("<left>", "y"), ("<right>", "x")] {
+            let mut h = Harness::new(&[]);
+            h.keys("C-x 3 C-x o C-x b x RET C-x b y RET C-x o");
+            h.keys(&format!("C-x {key}"));
+            assert_eq!(name(&h), expected, "C-x {key}: most recent first, or least");
+        }
+    }
+
+    #[test]
+    fn a_killed_buffer_s_windows_go_back_to_their_own_buffers() {
+        let files = ["a", "b", "c"].map(|f| (f, ""));
+        let mut h = Harness::new(&files);
+        h.open("a").open("c");
+        h.keys("C-x 3 C-x b b RET C-x b c RET C-x k RET");
+        assert_eq!(shown(&h), ["b", "a"]);
+        h.open("c");
+        h.keys("C-x k b RET C-x <left>");
+        assert_eq!(name(&h), "a", "b left the history");
     }
 
     #[test]

@@ -42,14 +42,16 @@ impl Windows {
         std::iter::once(&mut self.window).chain(self.others.values_mut())
     }
 
-    pub(crate) fn replace_buffer(
+    /// Drops killed buffers from every window's history; a window that showed one shows its
+    /// previous buffer of `workspace`, or `replacement`.
+    pub(crate) fn drop_killed(
         &mut self,
         buffers: &mut crate::buffer::Buffers,
-        killed: BufferId,
+        workspace: Option<WorkspaceId>,
         replacement: BufferId,
     ) {
-        for window in self.windows_mut().filter(|w| w.buffer() == killed) {
-            window.show(buffers, replacement);
+        for window in self.windows_mut() {
+            window.drop_killed(buffers, workspace, replacement);
         }
     }
 }

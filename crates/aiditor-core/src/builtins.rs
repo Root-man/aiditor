@@ -696,6 +696,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             },
         },
         Command {
+            name: "previous-buffer",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.cycle_buffer(false),
+        },
+        Command {
+            name: "next-buffer",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.cycle_buffer(true),
+        },
+        Command {
             name: "kill-buffer",
             spec: ArgSpec {
                 prompts: &["Kill buffer: "],
