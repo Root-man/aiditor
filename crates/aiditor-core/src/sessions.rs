@@ -746,7 +746,6 @@ mod tests {
         assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
-        // A loaded session already has the roots preamble in its history.
         h.keys("x RET");
         let prompts: Vec<_> = (h.agent_ops.drain(..))
             .filter_map(|op| match op {

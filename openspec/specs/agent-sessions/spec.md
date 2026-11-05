@@ -113,24 +113,23 @@ Starting or loading a session SHALL pass every root of the project but the prima
 - **WHEN** the agent service reports that `claude` can't take additional directories
 - **THEN** `*Messages*` holds `claude can't take additional directories`
 
-### Requirement: The roots preamble
-A new session's first prompt SHALL carry, before the user's text and as its own text block, a preamble listing each root's path with its role line, the primary first and marked as primary. The preamble SHALL be built from the project when the session starts. It SHALL NOT be shown in the session buffer, SHALL NOT be sent on later prompts or by a loaded session, and SHALL be skipped when the project has no other roots and the primary has no role line.
+### Requirement: Prompts carry user input
+Every prompt, including the first prompt of a new or loaded session, SHALL carry only the user's text and explicitly attached content. Project scope SHALL be sent through `cwd` and `additionalDirectories`, without adding root paths or role lines to prompts.
 
-#### Scenario: The first prompt carries the preamble
-- **WHEN** the first prompt `hi` is sent in a new session of a project with primary `app` (role `The app`) and root `lib` (no role)
-- **THEN** the request's blocks are the text `Project roots:\n- <app> (primary): The app\n- <lib>` and then `hi`, and the session buffer shows only `hi`
+#### Scenario: The first prompt in a project with roles
+- **GIVEN** a project with primary `app` (role `The app`) and roots `lib` and `docs` (role `Docs`)
+- **WHEN** the first prompt `hi` is sent in a new session
+- **THEN** the request holds the single text block `hi`, and the session buffer shows only `hi`
 
-#### Scenario: Later prompts carry none
-- **WHEN** a second prompt is sent in that session
-- **THEN** its request holds only the user's text
+#### Scenario: Later prompts
+- **GIVEN** a session whose first turn has ended
+- **WHEN** the next prompt `again` is sent
+- **THEN** its request holds the single text block `again`
 
-#### Scenario: A loaded session carries none
-- **WHEN** the first prompt is sent in a loaded session
-- **THEN** its request holds only the user's text
-
-#### Scenario: Nothing to list
-- **WHEN** the first prompt is sent in a project with no other roots and no role line on the primary
-- **THEN** its request holds only the user's text
+#### Scenario: A loaded session
+- **GIVEN** a loaded session in a project with additional roots and role lines
+- **WHEN** the prompt `x` is sent
+- **THEN** its request holds the single text block `x`
 
 ### Requirement: Updates for unknown or ended sessions are dropped
 A `session/update` notification for an unknown or ended session SHALL be dropped without changing any buffer's text.

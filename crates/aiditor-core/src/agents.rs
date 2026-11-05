@@ -23,7 +23,7 @@ use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, 
 use crate::command::Args;
 use crate::display::ModeLine;
 use crate::markdown;
-use crate::project::{Project, ProjectId};
+use crate::project::ProjectId;
 use crate::settings::FaceName;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 
@@ -116,29 +116,11 @@ pub(crate) struct Session {
     group: Option<usize>,
     /// The tool groups, in transcript order.
     groups: Vec<Group>,
-    /// The roots preamble a new session's first prompt carries, if there is anything to list.
-    preamble: Option<String>,
     /// The buffer's tick when the prompt area's chips were last painted.
     painted: u64,
     /// The slash commands from the latest `available_commands_update`, hidden ones left out.
     commands: Vec<AvailableCommand>,
     pastes: Vec<pastes::Paste>,
-}
-
-/// The project's roots with their role lines, the primary first; `None` with nothing to list.
-fn preamble(project: &Project) -> Option<String> {
-    if project.roots.is_empty() && project.primary.role.is_empty() {
-        return None;
-    }
-    let mut text = "Project roots:".to_owned();
-    let others = project.roots.iter().map(|root| (root, ""));
-    for (root, primary) in std::iter::once((&project.primary, " (primary)")).chain(others) {
-        text += &format!("\n- {}{primary}", root.path.display());
-        if !root.role.is_empty() {
-            text += &format!(": {}", root.role);
-        }
-    }
-    Some(text)
 }
 
 fn session_title(title: Option<&str>) -> String {
@@ -1355,7 +1337,6 @@ impl Ctx<'_> {
         let env = (agent.env.into_iter()).chain(loaded.env.clone()).collect();
         let cwd = loaded.primary.path.clone();
         let roots = loaded.roots.iter().map(|r| r.path.clone()).collect();
-        let preamble = preamble(loaded).filter(|_| load.is_none());
         let id = AgentId(core.next_agent);
         core.next_agent += 1;
         let log = core.buffers.create(&log);
@@ -1408,7 +1389,6 @@ impl Ctx<'_> {
             run: Vec::new(),
             group: None,
             groups: Vec::new(),
-            preamble,
             painted: 0,
             commands: Vec::new(),
             pastes: Vec::new(),
@@ -1877,9 +1857,7 @@ impl Ctx<'_> {
             start: self.now,
             len: working.chars().count() + "\n\n".len(),
         });
-        let preamble = session.preamble.take().into_iter().map(Into::into);
-        let blocks = preamble.chain(core.chips.blocks(&input)).collect();
-        let request = PromptRequest::new(session_id, blocks);
+        let request = PromptRequest::new(session_id, core.chips.blocks(&input));
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
         self.goto(end)
@@ -2905,7 +2883,6 @@ mod tests {
     fn a_prompt_is_sent_and_its_reply_streams_above_the_prompt() {
         let mut h = session();
         h.keys("h e l l o RET");
-        // No other roots and no role line: nothing to list, so no preamble.
         assert_eq!(ops(&mut h), [r#"prompt 0 s "hello""#]);
         assert_eq!(h.core.text(), "> hello\n\nWorking for 0s\n\n> ");
         assert_eq!(h.core.point(), 27);
@@ -3293,7 +3270,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_sessions_first_prompt_carries_the_roots_preamble() {
+    fn project_roots_reach_the_spawn_and_prompts_carry_the_user_input() {
         let mut h = work();
         let project = &mut h.core.projects[0].project;
         project.primary.role = "The app".into();
@@ -3315,17 +3292,11 @@ mod tests {
             .collect();
         assert_eq!(roots, [vec![h.path("lib"), h.path("docs")]]);
         ready(&mut h, 0);
-        // Taken at start: a root added later waits for the next start.
+        // Taken at start: root changes wait for the next start.
         h.core.projects[0].project.roots.clear();
         ops(&mut h);
         h.keys("h i RET");
-        let preamble = format!(
-            "Project roots:\n- {} (primary): The app\n- {}\n- {}: Docs",
-            h.path("app").display(),
-            h.path("lib").display(),
-            h.path("docs").display()
-        );
-        assert_eq!(ops(&mut h), [format!(r#"prompt 0 s {preamble:?} "hi""#)]);
+        assert_eq!(ops(&mut h), [r#"prompt 0 s "hi""#]);
         assert_eq!(h.core.text(), "> hi\n\nWorking for 0s\n\n> ");
         prompted(&mut h, Ok(StopReason::EndTurn));
         h.keys("a g a i n RET");
