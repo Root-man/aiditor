@@ -321,7 +321,7 @@ mod tests {
         let mut h = Harness::new(&[("src/a.rs", ""), (".tool-versions", "rust 1.99.0")]);
         h.open("src/a.rs");
         h.send(Msg::Tick);
-        let first = h.core.workspace();
+        let first = h.core.workspace().unwrap();
         assert!(mode_line(&mut h).contains("Rust 1.99.0"));
         assert!(h.watched.files.contains(&h.path("src/mise.toml")));
         h.new_workspace("second", "home");

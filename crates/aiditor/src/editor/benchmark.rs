@@ -202,7 +202,9 @@ pub(crate) fn run(output: PathBuf) {
             "// probe 0000\n{}",
             "fn item() -> usize { 42 }\n".repeat(10_000)
         );
-        core.open(&output.with_extension("rs"), Some((source.into_bytes(), 0)));
+        let file = output.with_extension("rs");
+        core.launch(&file, file.parent().unwrap());
+        core.open(&file, Some((source.into_bytes(), 0)));
         let window = cx
             .open_window(WindowOptions::default(), |window, cx| {
                 cx.new(|cx| {

@@ -119,7 +119,7 @@ impl Ctx<'_> {
                 "aiditor was started from a shell, so it uses the inherited environment".into(),
             );
         }
-        let project = self.core.current_workspace().project;
+        let project = self.core.current_workspace()?.project;
         self.capture_environment(project);
         let name = self.core.project_name(project);
         self.core
@@ -132,7 +132,7 @@ impl Ctx<'_> {
     pub(crate) fn getenv(&mut self, args: Args) -> Result<(), String> {
         let core = &mut *self.core;
         let name = &args.strings[0];
-        let project = core.current_workspace().project;
+        let project = core.current_workspace()?.project;
         let overrides = &core.projects[core.project_at(project)?].project.env;
         let value = match core.environments.get(&project) {
             _ if overrides.contains_key(name) => overrides.get(name).cloned(),

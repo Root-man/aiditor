@@ -54,7 +54,7 @@ fn production_visit_save_and_index_replies_can_be_held() {
     );
     d.settle();
     assert_eq!(d.core.text(), "original");
-    let origin = d.core.workspace();
+    let origin = d.core.workspace().unwrap();
     d.keys("saved SPC C-x");
     d.send(Msg::Key(parse_keys("C-s").unwrap()[0]));
     assert_eq!(
@@ -67,7 +67,7 @@ fn production_visit_save_and_index_replies_can_be_held() {
         .core
         .new_workspace("second", d.core.project_id("p").unwrap());
     d.settle();
-    assert_eq!(d.core.workspace(), second);
+    assert_eq!(d.core.workspace().unwrap(), second);
     assert_eq!(d.core.text(), "");
     d.core.switch_workspace(origin).unwrap();
     assert_eq!(d.core.current().disk, Some(hash(b"saved original\n")));
@@ -184,7 +184,7 @@ fn queued_saves_finish_or_cancel_quit_and_workspace_kill_without_losing_edits() 
             let dir = tempfile::tempdir().unwrap();
             let mut d = project_driver(dir.path());
             let project = d.core.project_id("p").unwrap();
-            let origin = d.core.workspace();
+            let origin = d.core.workspace().unwrap();
             d.core.new_workspace("other", project);
             d.core.switch_workspace(origin).unwrap();
             if action == "save-some" {
@@ -210,7 +210,7 @@ fn queued_saves_finish_or_cancel_quit_and_workspace_kill_without_losing_edits() 
             }
             let op = d.files.pop_front().expect("queued save");
             assert!(matches!(op, aiditor_core::FileOp::Save { .. }));
-            assert_eq!(d.core.workspace(), origin);
+            assert_eq!(d.core.workspace().unwrap(), origin);
             assert!(d.core.current().modified());
             assert!(!d.quit);
             match outcome {
@@ -230,7 +230,7 @@ fn queued_saves_finish_or_cancel_quit_and_workspace_kill_without_losing_edits() 
                 !(success && action == "workspace-kill")
             );
             if !success || action == "save-some" {
-                assert_eq!(d.core.workspace(), origin);
+                assert_eq!(d.core.workspace().unwrap(), origin);
                 assert_eq!(d.core.current().modified(), !success);
                 assert_eq!(
                     d.core.text(),
@@ -259,7 +259,7 @@ fn concurrent_workspace_saves_keep_the_losing_buffers_edits() {
     let mut d = project_driver(dir.path());
     let file = dir.path().join("shared.txt");
     fs::write(&file, "base\n").unwrap();
-    let first = d.core.workspace();
+    let first = d.core.workspace().unwrap();
     d.core
         .open(&file, aiditor_services::files::read(&file).unwrap());
     d.keys("first SPC");
@@ -369,7 +369,7 @@ fn real_inventory_drives_limits_shared_roots_and_ignore_refresh() {
         projects: vec![Ok(loaded), Ok(zero), Ok(off)],
     });
     d.settle();
-    let original = d.core.workspace();
+    let original = d.core.workspace().unwrap();
     d.core
         .new_workspace("zero", d.core.project_id("zero").unwrap());
     d.send(Msg::Tick);
@@ -620,6 +620,7 @@ fn recovered_text_conflicts_with_a_changed_file_and_can_be_compared() {
         hash: Some(hash(b"base\n")),
         text: "recovered\n".into(),
         disk: aiditor_services::files::read(&path).unwrap(),
+        root: None,
     }]));
     d.keys("RET C-x C-s");
     assert!(d.core.message().unwrap().contains("changed on disk"));

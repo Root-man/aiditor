@@ -140,6 +140,8 @@ pub enum Msg {
         intent: VisitIntent,
         path: PathBuf,
         result: Result<Option<(Vec<u8>, u64)>, String>,
+        /// For a visit from the lobby, the ad-hoc project root `path` would get.
+        root: Option<PathBuf>,
     },
     /// Prepared preview text, owned by one selection in one prompt session.
     Previewed {
@@ -315,6 +317,8 @@ pub struct Recovered {
     pub text: String,
     /// The visited file's bytes and hash now, `None` when there is no file.
     pub disk: Option<(Vec<u8>, u64)>,
+    /// The ad-hoc project root the visited file would get, for recovering it in the lobby.
+    pub root: Option<PathBuf>,
 }
 
 /// The repository of a visited file, as the mode line shows it.
@@ -409,7 +413,8 @@ pub enum Effect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisitIntent {
     pub request: u64,
-    pub workspace: WorkspaceId,
+    /// `None`: a visit from the lobby, which makes the file's workspace.
+    pub workspace: Option<WorkspaceId>,
     pub window: WindowId,
 }
 
@@ -652,6 +657,9 @@ impl Ctx<'_> {
             .commands
             .get(name)
             .ok_or_else(|| format!("No command named {name}"))?;
+        if command.spec.workspace {
+            self.core.current_workspace()?;
+        }
         if command.spec.region && args.region.is_none() {
             let core = &*self.core;
             let point = core.windows.window.point(&core.buffers);
@@ -768,7 +776,8 @@ impl Ctx<'_> {
                 intent,
                 path,
                 result,
-            } => self.core.on_opened(intent, path, result),
+                root,
+            } => self.core.on_opened(intent, path, result, root),
             Msg::Previewed { request, result } => {
                 self.core.on_previewed(request, result, &mut self.effects)
             }
@@ -799,6 +808,12 @@ impl Ctx<'_> {
             Msg::ProjectsLoaded { dir, projects } => {
                 self.core.projects_dir = dir;
                 self.core.reconcile_projects(projects);
+                // The lobby list shows every project, so it follows the loaded ones.
+                if self.core.workspace().is_none() && self.core.current().workspace_list.is_some() {
+                    self.core
+                        .list_workspaces()
+                        .expect("a refreshed list has its point");
+                }
                 let indexed: Vec<_> = self.core.index.keys().copied().collect();
                 for id in indexed {
                     self.core
@@ -1043,12 +1058,11 @@ pub struct Core {
 
 impl Default for Core {
     fn default() -> Self {
-        // The launch workspace's project until `launch` names another.
-        let home = std::env::home_dir().unwrap_or_else(|| "/".into());
-        let name = buffer::file_name(&home);
+        // The lobby until `launch` makes a workspace; its list fills in below.
         let mut buffers = Buffers::default();
-        let scratch = buffers.create_scratch(&name);
-        let window = Window::new(&mut buffers, scratch);
+        let list = buffers.create("*Workspaces*");
+        buffers.get_mut(list).expect("just created").major_mode = workspace_list::MODE;
+        let window = Window::new(&mut buffers, list);
         let mut commands = HashMap::new();
         for c in builtins::builtins() {
             assert!(
@@ -1065,8 +1079,8 @@ impl Default for Core {
                 others: HashMap::new(),
                 tree: Tree::Leaf(WindowId(0)),
             },
-            workspaces: vec![Workspace::new(WorkspaceId::default(), &name, ProjectId(0))],
-            next_workspace: 1,
+            workspaces: Vec::new(),
+            next_workspace: 0,
             shown: 0,
             frame_size: (0., 0., 0.),
             next_window: 1,
@@ -1090,8 +1104,8 @@ impl Default for Core {
             recenter: 0,
             kills: KillRing::default(),
             settings: Settings::default(),
-            projects: vec![Entry::new(ProjectId(0), Loaded::ad_hoc(&name, &home))],
-            next_project: 1,
+            projects: Vec::new(),
+            next_project: 0,
             project_writes: 0,
             reload: configuration::Reload::default(),
             pending_project_writes: HashMap::new(),
@@ -1106,7 +1120,7 @@ impl Default for Core {
             then_kill: None,
             autosave: autosave::Autosave::default(),
             watch: watching::Watch::default(),
-            focused: scratch,
+            focused: list,
             terminals: BTreeMap::new(),
             next_terminal: 0,
             agents: BTreeMap::new(),
@@ -1122,6 +1136,7 @@ impl Default for Core {
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");
         core.keymaps = keymaps;
+        core.list_workspaces().expect("a new list has its point");
         core
     }
 }
@@ -1135,14 +1150,19 @@ impl Core {
 
     /// Appends `line` to `*Messages*`, making the buffer if there is none.
     fn log(&mut self, line: &str) {
-        let id = self.buffers.find("*Messages*").unwrap_or_else(|| {
+        let id = self.messages();
+        let buffer = self.buffers.get_mut(id).expect("found or created");
+        buffer.append(&format!("{line}\n"));
+    }
+
+    /// `*Messages*`, made if there is none.
+    pub(crate) fn messages(&mut self) -> BufferId {
+        self.buffers.find("*Messages*").unwrap_or_else(|| {
             let id = self.buffers.create("*Messages*");
             let buffer = self.buffers.get_mut(id).expect("just created");
             (buffer.read_only, buffer.unkillable, buffer.workspace) = (true, true, None);
             id
-        });
-        let buffer = self.buffers.get_mut(id).expect("found or created");
-        buffer.append(&format!("{line}\n"));
+        })
     }
 
     /// Shows `msg` on the message line, after what a load already put there this key.

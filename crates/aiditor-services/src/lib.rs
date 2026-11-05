@@ -43,6 +43,8 @@ mod tests {
             }
         });
         let mut core = Core::default();
+        let dir = std::env::temp_dir();
+        core.launch(&dir, &dir);
         while let Some(msg) = rx.recv().await {
             core.handle(Instant::now(), msg);
         }

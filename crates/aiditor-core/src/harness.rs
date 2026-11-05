@@ -58,8 +58,11 @@ impl Harness {
         let dir = PathBuf::from("/aiditor-test");
         let mut core = Core::default();
         // Named the same whatever `$HOME` is, so scratch names, titles and snapshots don't vary.
-        core.rename_workspace("main").unwrap();
-        core.projects[0].project.name = "home".into();
+        let home = std::env::home_dir().unwrap_or_else(|| "/".into());
+        let project = core.add_project(crate::project::Loaded::ad_hoc("home", &home));
+        // The lobby's window goes with the lobby, so `main`'s can take its id, as tests expect.
+        core.next_window = 0;
+        core.new_workspace("main", project);
         // Tests count a window's columns; those of the gutter turn it on.
         core.settings.line_numbers = crate::settings::LineNumbers::Off;
         let mut harness = Harness {
@@ -140,6 +143,15 @@ impl Harness {
                 text: (*text).into(),
             })
             .collect()));
+    }
+
+    /// A harness in the lobby: no workspace, and no project until the test loads some.
+    pub fn lobby(files: &[(&str, &str)]) -> Self {
+        let mut h = Harness::new(files);
+        let main = h.core.workspace().unwrap();
+        h.core.kill_workspace(main).unwrap();
+        h.core.projects.clear();
+        h
     }
 
     pub fn new_workspace(&mut self, name: &str, project: &str) -> crate::workspace::WorkspaceId {
@@ -310,6 +322,9 @@ impl Harness {
                                 intent: *intent,
                                 path: path.clone(),
                                 result,
+                                // The test dir holds no `.git`, so a file's root is its folder.
+                                root: (intent.workspace.is_none())
+                                    .then(|| path.parent().unwrap().to_path_buf()),
                             })
                         }
                         FileOp::Preview(request) => {
@@ -473,7 +488,7 @@ impl Harness {
 fn collected_saves_can_be_answered_in_reverse_order_across_workspaces() {
     let mut h = Harness::new(&[]);
     h.collect_effects = true;
-    let first = h.core.workspace();
+    let first = h.core.workspace().unwrap();
     let path = h.path("held.txt");
     h.core
         .open(&path, Some((b"original".to_vec(), hash(b"original"))));
@@ -501,7 +516,7 @@ fn collected_saves_can_be_answered_in_reverse_order_across_workspaces() {
     for reply in replies.into_iter().rev() {
         h.send(reply);
     }
-    assert_eq!(h.core.workspace(), second);
+    assert_eq!(h.core.workspace().unwrap(), second);
     assert_eq!(h.text(), "second original\n");
     assert_eq!(
         h.core.buffers.get(second_buffer).unwrap().disk,

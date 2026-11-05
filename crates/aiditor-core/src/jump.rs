@@ -10,7 +10,10 @@ impl Core {
     /// Records the selected window's position as one a jump leaves, emptying the forward list.
     pub(crate) fn push_jump(&mut self) {
         let (id, point) = (self.windows.window.buffer(), self.point());
-        let current = self.workspace();
+        // The lobby keeps no jumps.
+        let Some(current) = self.workspace() else {
+            return;
+        };
         let ws = (self.workspaces.iter_mut().find(|w| w.id == current)).expect("current is live");
         let buffer = self.buffers.get_mut(id).expect("window buffer is live");
         let mut gone = std::mem::take(&mut ws.forward);
@@ -27,7 +30,7 @@ impl Core {
     /// live and not where point is, putting point's position on the other list.
     pub(crate) fn xref_go(&mut self, forward: bool) -> Result<(), String> {
         let (id, point) = (self.windows.window.buffer(), self.point());
-        let current = self.workspace();
+        let current = self.workspace().ok_or("No workspace")?;
         let ws = (self.workspaces.iter_mut().find(|w| w.id == current)).expect("current is live");
         let (from, to) = match forward {
             false => (&mut ws.back, &mut ws.forward),
@@ -79,7 +82,7 @@ mod tests {
 
     /// The current workspace's back list as (buffer name, position), oldest first.
     fn back(h: &Harness) -> Vec<(String, usize)> {
-        let ws = h.core.current_workspace();
+        let ws = h.core.current_workspace().unwrap();
         (ws.back.iter())
             .map(|&(b, m)| {
                 let buffer = h.core.buffers.get(b).unwrap();
@@ -119,7 +122,7 @@ mod tests {
             [pos("*scratch*<main>", 0), pos("a.txt", 0)],
             "a repeat is not recorded"
         );
-        let (b, oldest) = h.core.current_workspace().back[0];
+        let (b, oldest) = h.core.current_workspace().unwrap().back[0];
         for p in 1..=100 {
             h.core
                 .windows
@@ -271,7 +274,7 @@ mod tests {
     fn each_workspace_has_its_own_history() {
         let mut h = Harness::new(&[("a.txt", "a"), ("b.txt", "b")]);
         h.open("a.txt").open("b.txt");
-        let one = h.core.workspace();
+        let one = h.core.workspace().unwrap();
         h.new_workspace("two", "home");
         h.keys("M-,");
         assert_eq!(h.core.message(), Some("At start of xref history"));
@@ -286,7 +289,7 @@ mod tests {
         let two = h.new_workspace("two", "home");
         h.send(Msg::Log("hi".into())).keys("C-x b *Messages* RET");
         h.open("a.txt");
-        let (b, m) = *h.core.current_workspace().back.last().unwrap();
+        let (b, m) = *h.core.current_workspace().unwrap().back.last().unwrap();
         assert_eq!(h.core.buffers.get(b).unwrap().name, "*Messages*");
         h.core.kill_workspace(two).unwrap();
         assert_eq!(h.core.buffers.get(b).unwrap().marker(m), None);

@@ -369,6 +369,11 @@ impl Snapshot {
         buffer.remove_properties(0..buffer.len_chars());
         buffer.set_text("");
         buffer.workspace_rows.clear();
+        if self.entries.is_empty() {
+            buffer.insert_output(0, "No projects");
+            let refs = vec![FaceRef::Face(FaceName::Annotation)];
+            (buffer.add_property(0..11, Prop::Named(refs))).expect("just inserted");
+        }
         for (line, entry) in self.visible().into_iter().enumerate() {
             if let Some(entry) = entry {
                 entry.render(buffer);
@@ -458,30 +463,74 @@ pub(crate) enum Row {
     Workspace(WorkspaceId),
 }
 
-pub(crate) const HINTS: &[(&str, &str)] = &[
-    ("n/p", "move"),
-    ("RET", "switch"),
-    ("TAB", "fold"),
-    ("g", "refresh"),
-    ("q", "quit"),
+/// The echo line's actions: the commands whose keys a hint shows, `/`-joined, and its label.
+pub(crate) const HINTS: &[(&[&str], &str)] = &[
+    (&["workspace-list-next", "workspace-list-previous"], "move"),
+    (&["workspace-list-visit"], "switch"),
+    (&["workspace-list-toggle"], "fold"),
+    (&["workspace-list"], "refresh"),
+    (&["workspace-list-quit"], "quit"),
 ];
 
-const MODE: &str = "workspace-list-mode";
+/// The lobby's: `q` has nothing to go back to, so the ways out of the lobby take its place.
+pub(crate) const LOBBY_HINTS: &[(&[&str], &str)] = &[
+    (&["workspace-list-next", "workspace-list-previous"], "move"),
+    (&["workspace-list-visit"], "switch"),
+    (&["workspace-list-toggle"], "fold"),
+    (&["workspace-list"], "refresh"),
+    (&["find-file"], "find file"),
+    (&["project-switch"], "project"),
+];
+
+impl Core {
+    /// `hints` with the keys that run their commands now, leaving out an action none is bound to.
+    pub(crate) fn key_hints(
+        &self,
+        hints: &[(&[&str], &'static str)],
+    ) -> Vec<(String, &'static str)> {
+        let keys = |command| {
+            let keys = self.where_is(command)?;
+            Some(
+                keys.iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        };
+        (hints.iter())
+            .filter_map(|(commands, label)| {
+                let keys: Vec<_> = commands.iter().filter_map(|c| keys(c)).collect();
+                (!keys.is_empty()).then(|| (keys.join("/"), *label))
+            })
+            .collect()
+    }
+}
+
+pub(crate) const MODE: &str = "workspace-list-mode";
 
 impl Ctx<'_> {
     pub(crate) fn list_workspaces(&mut self) -> Result<(), String> {
         self.outside_minibuffer("Can't list workspaces in the minibuffer")?;
-        let core = &mut *self.core;
+        self.core.list_workspaces()
+    }
+}
+
+impl Core {
+    /// Opens or refreshes the current workspace's list, or the lobby's, in the selected window.
+    pub(crate) fn list_workspaces(&mut self) -> Result<(), String> {
+        let core = self;
         let current = core.workspace();
         let found = core
             .buffers
             .recent()
-            .find(|(_, b)| b.major_mode == MODE && b.workspace == Some(current))
+            .find(|(_, b)| b.major_mode == MODE && b.workspace == current)
             .map(|(id, _)| id);
         let selections: Vec<_> = found
             .map(|id| {
                 let buffer = core.buffers.get(id).unwrap();
-                let snapshot = buffer.workspace_list.as_ref().expect("list has a snapshot");
+                let Some(snapshot) = buffer.workspace_list.as_ref() else {
+                    return Vec::new();
+                };
                 std::iter::once((core.windows.selected, &core.windows.window))
                     .chain(core.windows.others.iter().map(|(&id, w)| (id, w)))
                     .filter(|(_, w)| w.buffer() == id)
@@ -562,7 +611,7 @@ impl Ctx<'_> {
                     location.push_str(&format!(" · {unsaved} unsaved"));
                 }
                 let activity = core.workspace_activity(workspace.id);
-                let current = workspace.id == current;
+                let current = Some(workspace.id) == current;
                 let mut workspace_entry = Entry {
                     row: Some(Row::Workspace(workspace.id)),
                     folded: folded(Row::Workspace(workspace.id), !current),
@@ -612,28 +661,24 @@ impl Ctx<'_> {
         let snapshot = Snapshot { entries };
         snapshot.render(buffer);
         buffer.workspace_list = Some(snapshot);
-        let target = if buffer
-            .workspace_rows
-            .iter()
-            .any(|(_, r)| *r == Row::Workspace(current))
-        {
-            Row::Workspace(current)
-        } else {
-            Row::Project(
-                core.workspaces
-                    .iter()
-                    .find(|w| w.id == current)
-                    .unwrap()
-                    .project,
-            )
+        let rows = &buffer.workspace_rows;
+        let target = match current {
+            Some(c) if rows.iter().any(|(_, r)| *r == Row::Workspace(c)) => Some(Row::Workspace(c)),
+            Some(c) => Some(Row::Project(
+                core.workspaces.iter().find(|w| w.id == c).unwrap().project,
+            )),
+            // The lobby starts on its first project, if any.
+            None => rows.first().map(|(_, r)| *r),
         };
-        let line = buffer
-            .workspace_rows
-            .iter()
-            .find(|(_, row)| *row == target)
-            .expect("current workspace or its project is listed")
-            .0;
-        let point = buffer.char_idx(line, target.column())?;
+        let point = match target {
+            Some(target) => {
+                let line = (rows.iter().find(|(_, row)| *row == target))
+                    .expect("current workspace or its project is listed")
+                    .0;
+                buffer.char_idx(line, target.column())?
+            }
+            None => 0,
+        };
         let selected_preserved = selections
             .iter()
             .any(|(id, _)| *id == core.windows.selected);
@@ -653,16 +698,17 @@ impl Ctx<'_> {
             };
             window.set_point(&mut core.buffers, point)?;
         }
-        if selected_preserved {
-            Ok(())
-        } else {
-            self.goto(point)
+        if !selected_preserved {
+            core.windows.window.set_point(&mut core.buffers, point)?;
         }
+        Ok(())
     }
+}
 
+impl Ctx<'_> {
     fn workspace_list_rows(&self) -> Result<&[(usize, Row)], String> {
         let buffer = self.core.current();
-        if buffer.major_mode != MODE || buffer.workspace_rows.is_empty() {
+        if buffer.major_mode != MODE || buffer.workspace_list.is_none() {
             return Err("Not in a workspace list".into());
         }
         Ok(&buffer.workspace_rows)
@@ -671,15 +717,14 @@ impl Ctx<'_> {
     pub(crate) fn workspace_list_move(&mut self, forward: bool) -> Result<(), String> {
         let rows = self.workspace_list_rows()?;
         let line = self.core.current().line_col(self.core.point())?.0;
+        // An empty lobby list has nowhere to go.
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return Ok(());
+        };
         let target = if forward {
-            rows.iter()
-                .find(|(l, _)| *l > line)
-                .unwrap_or(rows.last().expect("nonempty"))
+            rows.iter().find(|(l, _)| *l > line).unwrap_or(last)
         } else {
-            rows.iter()
-                .rev()
-                .find(|(l, _)| *l < line)
-                .unwrap_or(&rows[0])
+            rows.iter().rev().find(|(l, _)| *l < line).unwrap_or(first)
         };
         self.goto(self.core.current().char_idx(target.0, target.1.column())?)
     }
@@ -746,6 +791,10 @@ impl Ctx<'_> {
 
     pub(crate) fn workspace_list_quit(&mut self) -> Result<(), String> {
         self.workspace_list_rows()?;
+        // The lobby has nothing to go back to.
+        if self.core.workspace().is_none() {
+            return Ok(());
+        }
         let id = self.core.windows.window.buffer();
         self.core.kill_buffer(id);
         Ok(())
@@ -759,7 +808,7 @@ mod tests {
 
     fn workspaces() -> Harness {
         let mut h = Harness::new(&[]);
-        let launch = h.core.workspace();
+        let launch = h.core.workspace().unwrap();
         h.new_workspace("a", "p");
         h.open("a.txt");
         h.new_workspace("b", "p");
@@ -869,7 +918,7 @@ mod tests {
     #[test]
     fn workspace_list_entries_stay_on_one_visual_row_before_fitting_and_scrolling() {
         let mut h = workspaces();
-        let project = h.core.current_workspace().project;
+        let project = h.core.current_workspace().unwrap().project;
         h.core
             .projects
             .iter_mut()
@@ -986,7 +1035,7 @@ mod tests {
     #[test]
     fn resize_refits_the_same_snapshot_and_unequal_windows_independently() {
         let mut h = workspaces();
-        let current = h.core.workspace();
+        let current = h.core.workspace().unwrap();
         h.core
             .workspaces
             .iter_mut()
@@ -1061,16 +1110,16 @@ mod tests {
         h.keys("TAB");
         assert!(h.text().lines().any(|l| l.trim() == "notes.txt"));
         h.keys("RET");
-        assert_eq!(h.core.workspace(), current);
+        assert_eq!(h.core.workspace().unwrap(), current);
         assert_eq!(h.text(), "");
     }
 
     #[test]
     fn refresh_keeps_each_windows_row_identity_and_falls_back_to_visible_owners() {
         let mut h = workspaces();
-        let current = h.core.workspace();
+        let current = h.core.workspace().unwrap();
         let a = h.core.workspaces[0].id;
-        let project = h.core.current_workspace().project;
+        let project = h.core.current_workspace().unwrap().project;
         let notes = h.core.buffers.find_here("notes.txt").unwrap();
         h.keys("C-x t l");
         select(&mut h, Row::Project(project));
@@ -1158,7 +1207,7 @@ mod tests {
         let empty = h
             .core
             .add_project(Loaded::ad_hoc("empty", &h.path("empty")));
-        let project = h.core.current_workspace().project;
+        let project = h.core.current_workspace().unwrap().project;
         h.keys("C-x t l");
         for keys in ["", "p p TAB", "g", "TAB"] {
             h.keys(keys);
@@ -1194,17 +1243,61 @@ mod tests {
         assert_eq!(row(&h), Row::Project(empty));
     }
 
+    const LIST: &[(&str, &str)] = &[
+        ("n/p", "move"),
+        ("RET", "switch"),
+        ("TAB", "fold"),
+        ("g", "refresh"),
+        ("q", "quit"),
+    ];
+
+    const LOBBY: &[(&str, &str)] = &[
+        ("n/p", "move"),
+        ("RET", "switch"),
+        ("TAB", "fold"),
+        ("g", "refresh"),
+        ("C-x C-f", "find file"),
+        ("C-x p p", "project"),
+    ];
+
+    fn shown(hints: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
+        hints.iter().map(|&(k, a)| (k.into(), a)).collect()
+    }
+
+    #[test]
+    fn hints_show_the_keys_bound_now() {
+        let mut h = Harness::lobby(&[]);
+        let keymap = concat!(
+            "[global]\n\"C-x p p\" = \"beginning-of-buffer\"\n\"C-c p p\" = \"project-switch\"\n",
+            "\"C-x C-f\" = \"beginning-of-buffer\"\n",
+            "[workspace-list-mode]\n\"p\" = \"beginning-of-buffer\"\n\"g\" = \"beginning-of-buffer\"\n",
+        );
+        h.send(crate::Msg::KeymapLoaded(Ok(Some(keymap.into()))));
+        let hints = h.core.frame().key_hints;
+        // `p` falls back to `<up>`, `g` to the global `C-x t l`, and `find-file` has no key left.
+        assert_eq!(
+            hints,
+            shown(&[
+                ("n/<up>", "move"),
+                ("RET", "switch"),
+                ("TAB", "fold"),
+                ("C-x t l", "refresh"),
+                ("C-c p p", "project"),
+            ])
+        );
+    }
+
     #[test]
     fn echo_hints_follow_selection_and_yield_to_messages_and_prompts() {
         use std::time::Duration;
         let mut h = workspaces();
         h.keys("C-x 3 C-x t l");
-        assert_eq!(h.core.frame().key_hints, HINTS);
+        assert_eq!(h.core.frame().key_hints, shown(LIST));
         assert!(h.text().starts_with("▾ p "));
         h.keys("C-x o");
-        assert_eq!(h.core.frame().key_hints, &[]);
+        assert!(h.core.frame().key_hints.is_empty());
         h.keys("C-x o");
-        assert_eq!(h.core.frame().key_hints, HINTS);
+        assert_eq!(h.core.frame().key_hints, shown(LIST));
         let at = h.core.current().char_idx(3, 0).unwrap();
         h.core
             .windows
@@ -1216,7 +1309,7 @@ mod tests {
             h.core.frame().message.as_deref(),
             Some("Select a project or workspace row")
         );
-        assert_eq!(h.core.frame().key_hints, &[]);
+        assert!(h.core.frame().key_hints.is_empty());
         h.start_timer(Duration::from_millis(1), None, crate::Msg::Tick);
         h.advance(Duration::from_millis(2));
         assert_eq!(
@@ -1224,20 +1317,20 @@ mod tests {
             Some("Select a project or workspace row")
         );
         h.keys("n");
-        assert_eq!(h.core.frame().key_hints, HINTS);
+        assert_eq!(h.core.frame().key_hints, shown(LIST));
         h.keys("M-x");
         let frame = h.core.frame();
         assert_eq!(frame.minibuffer.unwrap().prompt, "M-x ");
-        assert_eq!(frame.key_hints, &[]);
+        assert!(frame.key_hints.is_empty());
         h.keys("workspace-list RET");
-        assert_eq!(h.core.frame().key_hints, HINTS);
+        assert_eq!(h.core.frame().key_hints, shown(LIST));
     }
 
     #[test]
     fn folds_keep_point_children_state_and_snapshot_until_refresh() {
         let mut h = workspaces();
-        let current = h.core.workspace();
-        let project = h.core.current_workspace().project;
+        let current = h.core.workspace().unwrap();
+        let project = h.core.current_workspace().unwrap().project;
         h.keys("C-x t l");
         let original = h.text();
         let point = h.point();
@@ -1283,7 +1376,7 @@ mod tests {
     fn visible_navigation_and_activation_skip_folded_project_children() {
         for (next, previous) in [("n", "p"), ("C-n", "C-p"), ("<down>", "<up>")] {
             let mut h = workspaces();
-            let project = h.core.current_workspace().project;
+            let project = h.core.current_workspace().unwrap().project;
             let q = h.core.workspaces[2].project;
             h.keys("C-x t l");
             select(&mut h, Row::Project(project));
@@ -1296,8 +1389,8 @@ mod tests {
             h.keys(previous);
             assert_eq!(row(&h), Row::Project(project));
             h.keys(next).keys("RET");
-            assert_eq!(h.core.current_workspace().project, q);
-            assert_eq!(h.core.current_workspace().name, "c");
+            assert_eq!(h.core.current_workspace().unwrap().project, q);
+            assert_eq!(h.core.current_workspace().unwrap().name, "c");
         }
     }
 
@@ -1356,7 +1449,7 @@ mod tests {
     #[test]
     fn tab_redraws_the_shared_list_in_splits_and_keeps_the_selected_name() {
         let mut h = workspaces();
-        let current = h.core.workspace();
+        let current = h.core.workspace().unwrap();
         h.keys("C-x t l C-x 2 TAB");
         assert_eq!(row(&h), Row::Workspace(current));
         assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 6);
@@ -1397,11 +1490,11 @@ mod tests {
     fn refresh_retains_folds_by_identity_and_defaults_new_rows() {
         let mut h = workspaces();
         let a = h.core.workspaces[0].id;
-        let project = h.core.current_workspace().project;
+        let project = h.core.current_workspace().unwrap().project;
         h.keys("C-x t l");
         select(&mut h, Row::Workspace(a));
         h.keys("TAB");
-        let current = h.core.workspace();
+        let current = h.core.workspace().unwrap();
         let added = h.core.new_workspace("added", project);
         h.core.switch_workspace(current).unwrap();
         h.core
@@ -1415,7 +1508,7 @@ mod tests {
         assert!(contents(&h).iter().any(|s| s == "added 0 buffers"));
         select(&mut h, Row::Workspace(added));
         h.keys("RET");
-        assert_eq!(h.core.workspace(), added);
+        assert_eq!(h.core.workspace().unwrap(), added);
     }
 
     #[test]
@@ -1618,7 +1711,7 @@ mod tests {
         h.open("first/src/a.rs");
         let second = h
             .core
-            .new_workspace("two", h.core.current_workspace().project);
+            .new_workspace("two", h.core.current_workspace().unwrap().project);
         h.core.switch_workspace(second).unwrap();
         h.open("first/src/a.rs");
         h.core
@@ -1662,7 +1755,7 @@ mod tests {
                 "▸ c 1 buffer"
             ]
         );
-        assert_eq!(row(&h), Row::Workspace(h.core.workspace()));
+        assert_eq!(row(&h), Row::Workspace(h.core.workspace().unwrap()));
         assert!(h.core.current().read_only);
         assert_eq!(
             (h.core.current().file.as_ref(), h.core.current().modified()),
@@ -1677,7 +1770,7 @@ mod tests {
     #[test]
     fn equal_project_names_and_multiline_labels_keep_their_identity() {
         let mut h = Harness::new(&[]);
-        let launch = h.core.workspace();
+        let launch = h.core.workspace().unwrap();
         let first = h.core.add_project(Loaded::ad_hoc("app", &h.path("first")));
         let second = h.core.add_project(Loaded::ad_hoc("app", &h.path("second")));
         let a = h.core.new_workspace("a\nnext", first);
@@ -1699,7 +1792,7 @@ mod tests {
         );
         assert_eq!(row(&h), Row::Workspace(b));
         h.keys("p p RET");
-        assert_eq!(h.core.workspace(), a);
+        assert_eq!(h.core.workspace().unwrap(), a);
     }
 
     #[test]
@@ -1720,8 +1813,8 @@ mod tests {
             ]
         );
         h.keys("n n n RET");
-        assert_eq!(h.core.current_workspace().project, alpha);
-        assert_eq!(h.core.current_workspace().name, "alpha");
+        assert_eq!(h.core.current_workspace().unwrap().project, alpha);
+        assert_eq!(h.core.current_workspace().unwrap().name, "alpha");
         assert_eq!(h.core.current().name, "*scratch*<alpha>");
         h.core.switch_to_workspace("b").unwrap();
         assert_eq!(h.core.current().name, "notes.txt");
@@ -1730,7 +1823,7 @@ mod tests {
     #[test]
     fn project_activation_uses_identity_and_the_most_recent_workspace() {
         let mut h = workspaces();
-        let project = h.core.current_workspace().project;
+        let project = h.core.current_workspace().unwrap().project;
         let other = h.core.add_project(Loaded::ad_hoc("p", &h.path("other")));
         h.core.new_workspace("other", other);
         h.core.switch_to_workspace("a").unwrap();
@@ -1739,8 +1832,8 @@ mod tests {
         let selected = h.core.windows.selected;
         h.core.switch_to_workspace("other").unwrap();
         h.keys("C-x t l M-< RET");
-        assert_eq!(h.core.current_workspace().project, project);
-        assert_eq!(h.core.current_workspace().name, "a");
+        assert_eq!(h.core.current_workspace().unwrap().project, project);
+        assert_eq!(h.core.current_workspace().unwrap().name, "a");
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
         assert_eq!(h.core.windows.selected, selected);
         assert_eq!((h.text(), h.point()), ("body".into(), point));
@@ -1860,14 +1953,14 @@ mod tests {
         let mut h = workspaces();
         h.core.switch_to_workspace("a").unwrap();
         h.keys("target C-x 2 C-b");
-        let a = h.core.workspace();
+        let a = h.core.workspace().unwrap();
         let selected = h.core.windows.selected;
         let point = h.point();
         h.core.switch_to_workspace("b").unwrap();
-        let b = h.core.workspace();
+        let b = h.core.workspace().unwrap();
         h.keys("C-x t l");
         h.keys("p RET");
-        assert_eq!(h.core.workspace(), a);
+        assert_eq!(h.core.workspace().unwrap(), a);
         assert_eq!(h.core.windows.selected, selected);
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
         assert_eq!((h.text(), h.point()), ("target".into(), point));
@@ -1879,7 +1972,7 @@ mod tests {
     fn informational_and_stale_rows_leave_the_list_available() {
         let mut h = workspaces();
         h.keys("C-x t l");
-        let workspace = h.core.workspace();
+        let workspace = h.core.workspace().unwrap();
         let list = h.core.windows.window.buffer();
         for line in [3, 4] {
             let at = h.core.current().char_idx(line, 0).unwrap();
@@ -1888,7 +1981,7 @@ mod tests {
             h.keys("RET");
             assert_eq!(h.core.message(), Some("Select a project or workspace row"));
             assert_eq!(
-                (h.core.workspace(), h.core.windows.window.buffer()),
+                (h.core.workspace().unwrap(), h.core.windows.window.buffer()),
                 (workspace, list)
             );
         }
@@ -1902,7 +1995,7 @@ mod tests {
         h.keys("RET");
         assert_eq!(h.core.message(), Some("No such workspace"));
         assert_eq!(
-            (h.core.workspace(), h.core.windows.window.buffer()),
+            (h.core.workspace().unwrap(), h.core.windows.window.buffer()),
             (workspace, list)
         );
     }
@@ -1919,14 +2012,14 @@ mod tests {
             assert_eq!(h.text(), "bodynpq");
             h.keys("C-x t l");
             assert_eq!(h.core.current().name, "*Workspaces*");
-            assert_eq!(row(&h), Row::Workspace(h.core.workspace()));
+            assert_eq!(row(&h), Row::Workspace(h.core.workspace().unwrap()));
         }
     }
 
     #[test]
     fn refresh_reuses_the_list_and_workspace_teardown_releases_it() {
         let mut h = workspaces();
-        let b = h.core.workspace();
+        let b = h.core.workspace().unwrap();
         h.keys("C-x t l");
         let list = h.core.windows.window.buffer();
         h.keys("C-x t o");
@@ -1952,5 +2045,60 @@ mod tests {
         h.keys("C-x t l q C-x t l");
         assert_eq!(h.core.current().name, "*Workspaces*");
         assert_eq!(h.core.current().workspace_rows.len(), 4);
+    }
+
+    fn mode_line(h: &mut Harness) -> String {
+        h.frame(800., 600.).windows[0].display.mode_line.text()
+    }
+
+    #[test]
+    fn the_empty_lobby_list_says_no_projects() {
+        let mut h = Harness::lobby(&[]);
+        h.keys("g");
+        assert_eq!(
+            (h.core.current().name.as_str(), h.text().as_str()),
+            ("*Workspaces*", "No projects")
+        );
+        assert_eq!(
+            mode_line(&mut h).trim_end(),
+            "*Workspaces* │ 0 projects, 0 workspaces"
+        );
+        h.keys("n p TAB");
+        assert_eq!((h.core.message(), h.point()), (None, 0));
+    }
+
+    #[test]
+    fn the_lobby_list_starts_on_its_first_project_and_ret_leaves_the_lobby() {
+        let mut h = Harness::lobby(&[]);
+        for name in ["alpha", "beta"] {
+            let project = Loaded::ad_hoc(name, &h.path(name));
+            h.core.add_project(project);
+        }
+        h.keys("g");
+        assert_eq!(row(&h), Row::Project(h.core.project_id("alpha").unwrap()));
+        assert!(mode_line(&mut h).ends_with("2 projects, 0 workspaces  1/2"));
+        // `q` and `C-g` have nothing to go back to.
+        h.keys("q C-g");
+        assert_eq!(
+            (h.core.workspace(), h.core.current().name.as_str()),
+            (None, "*Workspaces*")
+        );
+        h.keys("n RET");
+        assert_eq!(h.core.current().name, "*scratch*<beta>");
+        let workspace = h.core.current_workspace().unwrap();
+        assert_eq!(h.core.project_name(workspace.project), "beta");
+        assert!(h.core.buffers.find("*Workspaces*").is_none());
+    }
+
+    #[test]
+    fn the_lobby_hints_name_the_ways_out() {
+        let mut h = Harness::lobby(&[]);
+        assert_eq!(h.core.frame().key_hints, shown(LOBBY));
+        let main = h.new_workspace("w", "p");
+        h.keys("C-x t l");
+        assert_eq!(
+            (h.core.workspace(), h.core.frame().key_hints),
+            (Some(main), shown(LIST))
+        );
     }
 }

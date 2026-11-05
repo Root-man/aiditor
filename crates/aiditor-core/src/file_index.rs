@@ -551,7 +551,7 @@ mod tests {
             dir: None,
             projects: vec![],
         });
-        h.core.kill_workspace(h.core.workspace()).unwrap();
+        h.core.kill_workspace(h.core.workspace().unwrap()).unwrap();
         h.core.echo("remaining workspace".into());
         h.send(answer(&first, &["late"], 1));
         assert_eq!(walks(&mut h).len(), 0);

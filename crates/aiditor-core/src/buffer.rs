@@ -103,15 +103,15 @@ pub struct Buffers {
     map: BTreeMap<BufferId, Buffer>,
     /// Every buffer, most recently shown first; new buffers go last, as in Emacs's `buffer-list`.
     recent: Vec<BufferId>,
-    /// The current workspace, which owns every buffer made from now on.
-    pub(crate) workspace: WorkspaceId,
+    /// The current workspace, which owns every buffer made from now on; `None` in the lobby.
+    pub(crate) workspace: Option<WorkspaceId>,
 }
 
 impl Buffers {
     pub fn create(&mut self, name: &str) -> BufferId {
         self.add(Buffer {
             name: name.to_string(),
-            workspace: Some(self.workspace),
+            workspace: self.workspace,
             content: Content::Text(Rope::new()),
             file: None,
             crlf: false,
@@ -224,14 +224,16 @@ impl Buffers {
 
     /// Buffer `id` belongs to the current workspace or to none.
     pub fn is_here(&self, id: BufferId) -> bool {
-        self.map[&id].workspace.is_none_or(|w| w == self.workspace)
+        self.map[&id]
+            .workspace
+            .is_none_or(|w| Some(w) == self.workspace)
     }
 
     /// The current workspace's buffer visiting `path`.
     pub fn visiting(&self, path: &Path) -> Option<BufferId> {
         self.map
             .iter()
-            .find(|(_, b)| b.workspace == Some(self.workspace) && b.file.as_deref() == Some(path))
+            .find(|(_, b)| b.workspace == self.workspace && b.file.as_deref() == Some(path))
             .map(|(&id, _)| id)
     }
 

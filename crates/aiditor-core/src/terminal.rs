@@ -617,7 +617,7 @@ impl Ctx<'_> {
     /// current buffer's directory or the project's primary root.
     pub(crate) fn vterm(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
-        let workspace = core.current_workspace();
+        let workspace = core.current_workspace()?;
         let name = (1..)
             .map(|n| format!("vterm{n}<{}>", workspace.name))
             .find(|name| core.buffers.find(name).is_none())
@@ -1911,7 +1911,7 @@ mod tests {
             h.new_workspace("fix", "home");
             h.keys("M-x vterm RET M-x vterm RET");
             ops(&mut h);
-            let fix = h.core.workspace();
+            let fix = h.core.workspace().unwrap();
             h.core.kill_workspace(fix).unwrap();
             h.send(Msg::Tick);
             assert_eq!(ops(&mut h), ["kill 0", "kill 1"]);

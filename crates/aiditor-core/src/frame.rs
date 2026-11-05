@@ -110,8 +110,10 @@ impl Core {
 
     /// The roots of the current workspace's project.
     fn roots(&self) -> Vec<PathBuf> {
-        let project = self.current_workspace().project;
-        (self.projects.iter().find(|p| p.id == project)).map_or(Vec::new(), |p| {
+        let Ok(workspace) = self.current_workspace() else {
+            return Vec::new();
+        };
+        (self.projects.iter().find(|p| p.id == workspace.project)).map_or(Vec::new(), |p| {
             p.project.all_roots().map(|r| r.path.clone()).collect()
         })
     }
@@ -126,10 +128,9 @@ impl Core {
 
     /// Every window's display model, laid out in the size last reported by `Msg::Resize`.
     pub fn frame(&mut self) -> display::FrameDisplay {
-        let unwatched = self
-            .projects
-            .iter()
-            .any(|p| p.id == self.current_workspace().project && !self.project_watched(p));
+        let unwatched = self.projects.iter().any(|p| {
+            self.current_workspace().is_ok_and(|w| w.project == p.id) && !self.project_watched(p)
+        });
         let roots = self.roots();
         let (width, height, cell_width) = self.frame_size;
         let cell = (cell_width, self.settings.line_height());
@@ -231,14 +232,15 @@ impl Core {
             })
             .collect();
         let buffer = self.current();
-        let workspace = self.current_workspace();
-        let title = format!(
-            "{}{} | {} | {}",
+        let mut title = format!(
+            "{}{}",
             buffer.name,
-            if buffer.modified() { " *" } else { "" },
-            workspace.name,
-            self.project_name(workspace.project)
+            if buffer.modified() { " *" } else { "" }
         );
+        if let Ok(workspace) = self.current_workspace() {
+            let project = self.project_name(workspace.project);
+            title = format!("{title} | {} | {project}", workspace.name);
+        }
         // A monospace advance is linear in the font size.
         let cols = ((width - 2. * TEXT_INSET) * self.settings.font_size
             / (cell_width * self.settings.workspace_font_size())) as usize;
@@ -250,9 +252,12 @@ impl Core {
                 && self.message.is_none()
                 && self.prompts.minibuffer.is_none()
             {
-                crate::workspace_list::HINTS
+                self.key_hints(match self.workspace() {
+                    Some(_) => crate::workspace_list::HINTS,
+                    None => crate::workspace_list::LOBBY_HINTS,
+                })
             } else {
-                &[]
+                Vec::new()
             },
             minibuffer: self.minibuffer(),
             hint: self.hint(),
@@ -640,7 +645,7 @@ mod tests {
     fn the_title_names_the_buffer_workspace_and_project() {
         let mut h = Harness::new(&[("t.txt", "")]);
         h.open("t.txt");
-        let main = h.core.workspace();
+        let main = h.core.workspace().unwrap();
         assert_eq!(h.frame(80., 100.).title, "t.txt | main | home");
         h.keys("x");
         assert_eq!(h.frame(80., 100.).title, "t.txt * | main | home");
@@ -731,7 +736,7 @@ mod tests {
                 .map(|s| s.text.as_str())
                 .collect::<String>()
         };
-        let main = h.core.workspace();
+        let main = h.core.workspace().unwrap();
         assert_eq!(names(&mut h), "home › main");
         h.keys("C-x 3 C-x o");
         h.open("t.txt");

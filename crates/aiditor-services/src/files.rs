@@ -92,10 +92,15 @@ pub fn run(op: FileOp) -> Msg {
         }
         FileOp::Open { intent, path } => {
             let result = read(&path).map_err(|err| format!("{}: {err}", path.display()));
+            let root = intent
+                .workspace
+                .is_none()
+                .then(|| root(&path).to_path_buf());
             Msg::Opened {
                 intent,
                 path,
                 result,
+                root,
             }
         }
         FileOp::Preview(request) => {
@@ -251,6 +256,15 @@ fn changed(path: &Path) -> bool {
         .stderr(Stdio::null())
         .output();
     status.is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
+/// The ad-hoc project root for `file`: the nearest directory above it holding `.git`, else its
+/// folder.
+pub fn root(file: &Path) -> &Path {
+    let folder = file.parent().unwrap_or(file);
+    (folder.ancestors())
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(folder)
 }
 
 /// The file's bytes and their hash, or `None` when there is no file.
@@ -1496,5 +1510,46 @@ mod tests {
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
         result.unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_file_s_root_is_its_git_repo_or_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        assert_eq!(root(&repo.join("src/x.rs")), repo);
+        assert_eq!(root(&repo.join("x.rs")), repo);
+        let notes = dir.path().join("notes");
+        assert_eq!(root(&notes.join("a.txt")), notes, "outside any repo");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../repo/.git").unwrap();
+        assert_eq!(
+            root(&worktree.join("x.rs")),
+            worktree,
+            "a worktree's .git file"
+        );
+    }
+
+    #[test]
+    fn a_lobby_visit_reply_carries_the_file_s_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let open = |workspace| {
+            let intent = aiditor_core::VisitIntent {
+                request: 1,
+                workspace,
+                window: Default::default(),
+            };
+            let path = repo.join("src/x.rs");
+            match run(FileOp::Open { intent, path }) {
+                Msg::Opened { root, .. } => root,
+                _ => panic!("not opened"),
+            }
+        };
+        assert_eq!(open(None), Some(repo.clone()));
+        assert_eq!(open(Some(Default::default())), None, "only the lobby's");
     }
 }

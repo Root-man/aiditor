@@ -1750,7 +1750,7 @@ mod tests {
             "RET runs from the window as it was"
         );
         h.keys("C-c p C-n C-g C-x o");
-        let (main, w) = (h.core.workspace(), h.new_workspace("w", "p"));
+        let (main, w) = (h.core.workspace().unwrap(), h.new_workspace("w", "p"));
         h.core.switch_workspace(main).unwrap();
         // Window 1 is selected now, so the prompt opens from it.
         let before = h.core.windows.window.buffer();

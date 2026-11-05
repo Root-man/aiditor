@@ -1261,8 +1261,8 @@ impl Core {
 
     /// The current project's `default_agent` among `agent_names`, else the first.
     pub(crate) fn default_agent_index(&self) -> usize {
-        let project = self.current_workspace().project;
-        let default = (self.project_at(project).ok())
+        let default = (self.current_workspace().ok())
+            .and_then(|w| self.project_at(w.project).ok())
             .and_then(|at| self.projects[at].project.default_agent.as_ref());
         default
             .and_then(|name| self.settings.agents.keys().position(|n| n == name))
@@ -1343,7 +1343,7 @@ impl Ctx<'_> {
         let agent = (core.settings.agents.get(name))
             .ok_or_else(|| format!("{name:?} is not a registered agent"))?
             .clone();
-        let workspace = core.current_workspace();
+        let workspace = core.current_workspace()?;
         let (project, log, title, workspace) = (
             workspace.project,
             format!("*{name} stderr*<{}>", workspace.name),
@@ -1748,7 +1748,7 @@ impl Ctx<'_> {
     // shortcut: a snapshot, not following a running command; RET refreshes it.
     fn show_tool_output(&mut self, id: AgentId, call: &ToolCallId) -> Result<(), String> {
         let core = &mut *self.core;
-        let workspace = core.current_workspace().name.clone();
+        let workspace = core.current_workspace()?.name.clone();
         let session = core.agents.get_mut(&id).expect("found by the caller");
         let tool = session.tools.get_mut(call).expect("found by the caller");
         let term = tool.term.as_ref();
@@ -2344,10 +2344,10 @@ mod tests {
         assert_eq!(name(&h), "*codex*<work>");
         assert_eq!((h.core.text(), h.core.point()), ("> ".into(), 2));
         let session = h.core.current();
-        assert!(!session.read_only && session.workspace == Some(h.core.workspace()));
+        assert!(!session.read_only && session.workspace == h.core.workspace());
         let log = h.core.buffers.find("*codex stderr*<work>").unwrap();
         let log = h.core.buffers.get(log).unwrap();
-        assert!(log.read_only && log.workspace == Some(h.core.workspace()));
+        assert!(log.read_only && log.workspace == h.core.workspace());
     }
 
     #[test]
@@ -3872,8 +3872,8 @@ mod tests {
     #[test]
     fn inactive_workspace_streams_finalize_hidden_blocks_and_kill_safely() {
         let mut h = session();
-        let workspace = h.core.current_workspace().id;
-        let project = h.core.current_workspace().project;
+        let workspace = h.core.current_workspace().unwrap().id;
+        let project = h.core.current_workspace().unwrap().project;
         h.core.new_workspace("other", project);
         chunk(&mut h, "**a**");
         h.joined_frame(800., 600.);
@@ -5031,7 +5031,7 @@ mod tests {
     fn hidden_tool_output_waits_for_its_session_to_be_shown() {
         for workspace in [false, true] {
             let mut h = session();
-            let work = h.core.workspace();
+            let work = h.core.workspace().unwrap();
             let buffer = h.core.windows.window.buffer();
             tool(&mut h, command());
             output(&mut h, "terminal_output", "t", "initial\n");
@@ -5305,7 +5305,7 @@ mod tests {
     #[test]
     fn workspace_dots_follow_owned_sessions_even_while_another_workspace_is_current() {
         let mut h = session();
-        let work = h.core.workspace();
+        let work = h.core.workspace().unwrap();
         let working = h.core.windows.window.buffer();
         let dots = |h: &mut Harness| {
             h.joined_frame(1600., 600.)
@@ -5349,8 +5349,8 @@ mod tests {
     fn folded_workspace_list_project_uses_urgent_state_across_workspaces() {
         let mut h = session();
         h.keys("running RET");
-        let first = h.core.workspace();
-        let project = h.core.current_workspace().project;
+        let first = h.core.workspace().unwrap();
+        let project = h.core.current_workspace().unwrap().project;
         let second = h.core.new_workspace("other", project);
         h.core.switch_workspace(second).unwrap();
         h.keys("M-x agent-start RET claude RET");
@@ -5409,7 +5409,7 @@ mod tests {
         assert!(rows.iter().any(|s| s == "*claude*"));
         let empty = h
             .core
-            .new_workspace("empty", h.core.current_workspace().project);
+            .new_workspace("empty", h.core.current_workspace().unwrap().project);
         h.core.switch_workspace(empty).unwrap();
         h.keys("C-x t l");
         let row = h
@@ -6947,12 +6947,12 @@ mod tests {
     #[test]
     fn killing_a_workspace_stops_its_agents_without_a_crash_note() {
         let mut h = work();
-        let work = h.core.workspace();
+        let work = h.core.workspace().unwrap();
         h.new_workspace("fix", "home");
         h.keys("M-x agent-start RET claude RET");
         ready(&mut h, 0);
         ops(&mut h);
-        let fix = h.core.workspace();
+        let fix = h.core.workspace().unwrap();
         h.core.switch_workspace(work).unwrap();
         h.core.kill_workspace(fix).unwrap();
         h.send(Msg::Tick);

@@ -395,12 +395,16 @@ pub(crate) fn builtins() -> Vec<Command> {
         },
         Command {
             name: "project-capture-environment",
-            spec: ArgSpec::default(),
+            spec: ArgSpec {
+                workspace: true,
+                ..ArgSpec::default()
+            },
             handler: |ctx, _| ctx.recapture_environment(),
         },
         Command {
             name: "getenv",
             spec: ArgSpec {
+                workspace: true,
                 prompts: &["Get value of environment variable: "],
                 ..ArgSpec::default()
             },
@@ -410,6 +414,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-find-file",
             // Asks its own question, so it can start indexing before the prompt opens.
             spec: ArgSpec {
+                workspace: true,
                 unselected: true,
                 preview: Some(|core, c| {
                     let finder = core.prompts.minibuffer.as_ref()?.finder.as_ref()?;
@@ -423,6 +428,7 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "project-grep",
             // Asks its own question, which names the project; the hits are matched already.
             spec: ArgSpec {
+                workspace: true,
                 grep_hits: true,
                 filter: Some(crate::command::Filter::Items(|_, items| {
                     (0..items.len()).collect()
@@ -443,7 +449,7 @@ pub(crate) fn builtins() -> Vec<Command> {
                     if args.strings.is_empty() {
                         core.projects
                             .iter()
-                            .position(|p| p.id == core.current_workspace().project)
+                            .position(|p| core.current_workspace().is_ok_and(|w| w.project == p.id))
                             .unwrap_or(0)
                     } else {
                         0
@@ -459,6 +465,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "workspace-switch",
             spec: ArgSpec {
+                workspace: true,
                 prompts: &["Switch to workspace: "],
                 completion: Some(|core, _| core.workspace_names(false)),
                 ..ArgSpec::default()
@@ -467,17 +474,24 @@ pub(crate) fn builtins() -> Vec<Command> {
         },
         Command {
             name: "workspace-next",
-            spec: ArgSpec::default(),
+            spec: ArgSpec {
+                workspace: true,
+                ..ArgSpec::default()
+            },
             handler: |ctx, args| ctx.core.cycle_workspace(args.count()),
         },
         Command {
             name: "workspace-previous",
-            spec: ArgSpec::default(),
+            spec: ArgSpec {
+                workspace: true,
+                ..ArgSpec::default()
+            },
             handler: |ctx, args| ctx.core.cycle_workspace(args.count().saturating_neg()),
         },
         Command {
             name: "workspace-rename",
             spec: ArgSpec {
+                workspace: true,
                 prompts: &["Rename workspace to: "],
                 ..ArgSpec::default()
             },
@@ -486,6 +500,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "workspace-kill",
             spec: ArgSpec {
+                workspace: true,
                 prompts: &["Kill workspace: "],
                 completion: Some(|core, _| core.workspace_names(true)),
                 ..ArgSpec::default()
@@ -494,9 +509,12 @@ pub(crate) fn builtins() -> Vec<Command> {
         },
         Command {
             name: "workspace-kill-current",
-            spec: ArgSpec::default(),
+            spec: ArgSpec {
+                workspace: true,
+                ..ArgSpec::default()
+            },
             handler: |ctx, args| {
-                let strings = vec![ctx.core.current_workspace().name.clone()];
+                let strings = vec![ctx.core.current_workspace()?.name.clone()];
                 ctx.call("workspace-kill", Args { strings, ..args });
                 Ok(())
             },
@@ -703,6 +721,7 @@ pub(crate) fn builtins() -> Vec<Command> {
         Command {
             name: "agent-start",
             spec: ArgSpec {
+                workspace: true,
                 prompts: &["Agent: "],
                 completion: Some(|core, _| core.agent_names()),
                 preselect: Some(|core, _| core.default_agent_index()),
@@ -712,7 +731,10 @@ pub(crate) fn builtins() -> Vec<Command> {
         },
         Command {
             name: "agent-sessions",
-            spec: ArgSpec::default(),
+            spec: ArgSpec {
+                workspace: true,
+                ..ArgSpec::default()
+            },
             handler: |ctx, _| ctx.agent_sessions(),
         },
         Command {
@@ -828,7 +850,10 @@ pub(crate) fn builtins() -> Vec<Command> {
         },
         Command {
             name: "vterm",
-            spec: ArgSpec::default(),
+            spec: ArgSpec {
+                workspace: true,
+                ..ArgSpec::default()
+            },
             handler: |ctx, _| ctx.vterm(),
         },
         Command {

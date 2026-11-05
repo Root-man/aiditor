@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::key::Key;
+use crate::key::{Key, KeyCode};
 use crate::keymap::{self, Binding, Keymap};
 use crate::{Core, display};
 
@@ -47,8 +47,8 @@ impl Core {
             .chain(modes.filter_map(|mode| self.keymaps.get(*mode)))
     }
 
-    /// The shortest key sequence that runs `command` under keymap layering, the first in
-    /// `kbd` text order among equally short ones.
+    /// The shortest key sequence that runs `command` under keymap layering; among equally short
+    /// ones, the one with the fewest modified or named keys, then the first in `kbd` text order.
     pub(crate) fn where_is(&self, command: &str) -> Option<Vec<Key>> {
         fn walk(map: &Keymap, keys: &mut Vec<Key>, command: &str, found: &mut Vec<Vec<Key>>) {
             for (key, binding) in map.bindings() {
@@ -75,9 +75,14 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        found
-            .into_iter()
-            .min_by_key(|keys| (keys.len(), text(keys)))
+        found.into_iter().min_by_key(|keys| {
+            let plain = |k: &&Key| matches!(k.code, KeyCode::Char(_)) && **k == Key::plain(k.code);
+            (
+                keys.len(),
+                keys.iter().filter(|k| !plain(k)).count(),
+                text(keys),
+            )
+        })
     }
 
     /// The hint for the pending prefix, once its delay has passed. Each next key shows the
@@ -412,5 +417,17 @@ mod tests {
         assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"")));
         h.keys("C-g");
         assert_eq!(h.core.message(), Some("Quit"));
+    }
+
+    #[test]
+    fn where_is_prefers_plain_keys_among_equally_short_ones() {
+        let mut h = Harness::new(&[]);
+        let keymap = "[global]\n\"C-n\" = \"recenter-top-bottom\"\n\"<f5>\" = \"recenter-top-bottom\"\n\"z\" = \"recenter-top-bottom\"";
+        h.send(Msg::KeymapLoaded(Ok(Some(keymap.into()))));
+        let keys = h.core.where_is("recenter-top-bottom").unwrap();
+        assert_eq!(
+            keys,
+            [crate::key::Key::plain(crate::key::KeyCode::Char('z'))]
+        );
     }
 }

@@ -196,7 +196,7 @@ impl Ctx<'_> {
         if core.settings.agents.is_empty() {
             return Err("No agents registered".into());
         }
-        let workspace = core.current_workspace();
+        let workspace = core.current_workspace()?;
         let (project, name) = (workspace.project, format!("*Sessions*<{}>", workspace.name));
         let loaded = &core.projects[core.project_at(project)?].project;
         let cwd = loaded.primary.path.clone();
@@ -230,7 +230,7 @@ impl Ctx<'_> {
             .find(|id| {
                 core.buffers
                     .get(**id)
-                    .is_some_and(|b| b.workspace == Some(here))
+                    .is_some_and(|b| b.workspace.is_some() && b.workspace == here)
             })
             .copied();
         let id = found.unwrap_or_else(|| {
@@ -320,7 +320,7 @@ impl Ctx<'_> {
             return Ok(());
         }
         let owner = self.core.buffers.get(buffer).and_then(|b| b.workspace);
-        if let Some(owner) = owner.filter(|w| *w != self.core.workspace()) {
+        if let Some(owner) = owner.filter(|w| Some(*w) != self.core.workspace()) {
             self.core.switch_workspace(owner)?;
         }
         self.core.switch_to(buffer);
@@ -789,7 +789,7 @@ mod tests {
             id: AgentId(0),
             result: Ok(NewSessionResponse::new("c1")),
         });
-        let (work, session) = (h.core.workspace(), h.core.windows.window.buffer());
+        let (work, session) = (h.core.workspace().unwrap(), h.core.windows.window.buffer());
         let other = h.core.new_workspace("other", ProjectId(0));
         h.core.switch_workspace(other).unwrap();
         h.agent_ops.clear();
@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(line(&h), "claude                    [idle] c1");
         h.keys("RET");
         assert_eq!(
-            (h.core.workspace(), h.core.windows.window.buffer()),
+            (h.core.workspace().unwrap(), h.core.windows.window.buffer()),
             (work, session)
         );
     }

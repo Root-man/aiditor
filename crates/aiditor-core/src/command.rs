@@ -27,6 +27,8 @@ pub struct Command {
 pub struct ArgSpec {
     /// Takes the region as a char range.
     pub region: bool,
+    /// Acts on the current workspace, so fails with `No workspace` in the lobby before asking.
+    pub workspace: bool,
     pub project: bool,
     pub unselected: bool,
     pub project_candidates: bool,

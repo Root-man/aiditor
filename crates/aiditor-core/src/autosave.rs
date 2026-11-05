@@ -158,6 +158,18 @@ impl Ctx<'_> {
             let r = core.autosave.recovered.remove(0);
             let mut keep = false;
             if answer.eq_ignore_ascii_case("yes") {
+                // Recovering in the lobby leaves it, for the file's project or else `$HOME`'s.
+                if core.workspace().is_none() {
+                    let home = std::env::home_dir().unwrap_or_else(|| "/".into());
+                    let (path, root) = match &r.path {
+                        Some(path) => {
+                            let parent = || path.parent().unwrap_or(path).to_path_buf();
+                            (path.clone(), r.root.clone().unwrap_or_else(parent))
+                        }
+                        None => (home.clone(), home),
+                    };
+                    core.launch(&path, &root);
+                }
                 let id = match &r.path {
                     Some(path) => {
                         core.visit(path, r.disk, false);
@@ -647,6 +659,7 @@ mod tests {
             path,
             text: text.into(),
             disk: disk.map(|b| (b.clone(), hash(&b))),
+            root: None,
         }
     }
 
@@ -738,6 +751,29 @@ mod tests {
         assert_eq!(h.core.current().disk, Some(hash(b"1\n")));
         assert!(h.core.current().modified());
         assert!(h.core.message().unwrap().contains("changed on disk"));
+    }
+
+    #[test]
+    fn recovering_in_the_lobby_makes_the_file_s_workspace() {
+        let mut h = Harness::lobby(&[("a", "1\n")]);
+        let r = left(&h, Some("a"), "1\n", "1\nx\n");
+        h.send(Msg::Recover(vec![r])).keys("RET");
+        let workspace = h.core.current_workspace().unwrap();
+        assert_eq!(h.core.project_name(workspace.project), "aiditor-test");
+        assert_eq!(h.core.current().workspace, Some(workspace.id));
+        assert!(h.core.current().modified() && h.text() == "1\nx\n");
+        // A fileless one goes to a `$HOME` workspace.
+        let mut h = Harness::lobby(&[]);
+        h.send(Msg::Recover(vec![left(&h, None, "", "notes")]))
+            .keys("RET");
+        let workspace = h.core.current_workspace().unwrap();
+        let home = std::env::home_dir().unwrap();
+        let at = h.core.project_at(workspace.project).unwrap();
+        assert_eq!(h.core.projects[at].project.primary.path, home);
+        assert_eq!(
+            (h.core.current().name.as_str(), h.text().as_str()),
+            ("*scratch*", "notes")
+        );
     }
 
     #[test]

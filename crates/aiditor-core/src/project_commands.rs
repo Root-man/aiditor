@@ -459,7 +459,7 @@ impl Ctx<'_> {
     /// Asks for a file in any root of the current workspace's project and visits it, indexing
     /// the project first when it has no index yet.
     pub(crate) fn project_find_file(&mut self, args: Args) -> Result<(), String> {
-        let project = self.core.current_workspace().project;
+        let project = self.core.current_workspace()?.project;
         if let Some(text) = args.strings.first() {
             let path = self.core.finder(project)?.path(text);
             return self.find_file(&path.to_string_lossy());
@@ -472,7 +472,7 @@ impl Ctx<'_> {
         args: Args,
         references: bool,
     ) -> Result<(), String> {
-        let project = self.core.current_workspace().project;
+        let project = self.core.current_workspace()?.project;
         if let Some(index) = self.core.index.get_mut(&project) {
             // No answer yet, as every answer lists the primary: the pending walk fills the list.
             index.announce_initial();
@@ -547,8 +547,8 @@ mod tests {
             projects: vec![Ok(renamed.clone())],
         });
         assert_eq!(h.core.project_id("new").unwrap(), project);
-        assert_eq!(h.core.current_workspace().name, "task");
-        assert_eq!(h.core.current_workspace().project, project);
+        assert_eq!(h.core.current_workspace().unwrap().name, "task");
+        assert_eq!(h.core.current_workspace().unwrap().project, project);
         assert_eq!((h.text(), h.point()), ("text".into(), point));
         assert_eq!(h.core.current().name, "*scratch*<task>");
         assert_eq!(h.core.frame().windows.len(), 2);
@@ -605,14 +605,14 @@ mod tests {
             h.core.projects[h.core.project_at(a_id).unwrap()].file,
             a.file
         );
-        assert_eq!(h.core.current_workspace().project, b_id);
+        assert_eq!(h.core.current_workspace().unwrap().project, b_id);
         assert!(h.core.index.contains_key(&b_id));
         let moved = saved(&h, "moved.toml", "same");
         h.send(Msg::ProjectsLoaded {
             dir: None,
             projects: vec![Ok(moved.clone())],
         });
-        assert_eq!(h.core.current_workspace().project, b_id);
+        assert_eq!(h.core.current_workspace().unwrap().project, b_id);
         assert_eq!(
             h.core.projects[h
                 .core
@@ -1599,7 +1599,7 @@ mod tests {
     fn a_workspace_switch_releases_prepared_previews() {
         let mut h = findable(&[]);
         h.keys("origin C-f");
-        let main = h.core.workspace();
+        let main = h.core.workspace().unwrap();
         let other = h.new_workspace("other", "tmp");
         h.core.switch_workspace(main).unwrap();
         let original = h.core.windows.window.buffer();

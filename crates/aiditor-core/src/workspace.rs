@@ -90,7 +90,7 @@ impl Core {
             others: HashMap::new(),
             tree: Tree::Leaf(selected),
         };
-        self.show_workspace(id, windows);
+        self.show_workspace(Some(id), windows);
         id
     }
 
@@ -98,42 +98,72 @@ impl Core {
     pub fn switch_workspace(&mut self, id: WorkspaceId) -> Result<(), String> {
         let at = (self.workspaces.iter().position(|w| w.id == id)).ok_or("No such workspace")?;
         if let Some(windows) = self.workspaces[at].windows.take() {
-            self.show_workspace(id, windows);
+            self.show_workspace(Some(id), windows);
         }
         Ok(())
     }
 
-    /// Makes `id` current with `windows` on screen, saving the current workspace's windows.
+    /// Makes `id` current with `windows` on screen, saving the current workspace's windows; `None`
+    /// is the lobby. Leaving the lobby kills its list.
     // shortcut: an open prompt is cancelled; keep it in its workspace once commands can leave the minibuffer.
-    fn show_workspace(&mut self, id: WorkspaceId, windows: Windows) {
+    fn show_workspace(&mut self, id: Option<WorkspaceId>, windows: Windows) {
         self.pending_visit = None;
         self.close_minibuffer();
-        let old = std::mem::replace(&mut self.windows, windows);
+        let mut old = std::mem::replace(&mut self.windows, windows);
         let current = self.buffers.workspace;
-        let current = (self.workspaces.iter_mut().find(|w| w.id == current))
-            .expect("the current workspace is live");
-        current.windows = Some(old);
-        self.shown += 1;
-        let shown = self.shown;
-        let new = (self.workspaces.iter_mut().find(|w| w.id == id)).expect("shown is live");
-        new.shown = shown;
+        match (self.workspaces.iter_mut()).find(|w| Some(w.id) == current) {
+            Some(current) => current.windows = Some(old),
+            // The lobby's windows belong to no workspace.
+            None => old.windows_mut().for_each(|w| w.release(&mut self.buffers)),
+        }
+        if let Some(id) = id {
+            if current.is_none() {
+                let lists: Vec<_> = (self.buffers.recent())
+                    .filter(|(_, b)| b.workspace.is_none() && b.workspace_list.is_some())
+                    .map(|(b, _)| b)
+                    .collect();
+                for list in lists {
+                    _ = self.buffers.kill(list);
+                }
+            }
+            self.shown += 1;
+            let shown = self.shown;
+            let new = (self.workspaces.iter_mut().find(|w| w.id == id)).expect("shown is live");
+            new.shown = shown;
+        }
         self.buffers.workspace = id;
         self.buffers.raise(self.windows.window.buffer());
     }
 
+    /// Shows the lobby: no current workspace, and one window on a fresh `*Workspaces*` that
+    /// belongs to none.
+    pub(crate) fn show_lobby(&mut self) {
+        let messages = self.messages();
+        let selected = WindowId(self.next_window);
+        self.next_window += 1;
+        let windows = Windows {
+            window: Window::new(&mut self.buffers, messages),
+            selected,
+            others: HashMap::new(),
+            tree: Tree::Leaf(selected),
+        };
+        self.show_workspace(None, windows);
+        self.list_workspaces().expect("a new list has its point");
+    }
+
     /// Kills workspace `id`, its windows and every buffer it owns; killing the current one makes
-    /// the one after it current, or the one before when it is last.
+    /// the one after it current, or the one before when it is last, or shows the lobby when it
+    /// is the only one.
     pub fn kill_workspace(&mut self, id: WorkspaceId) -> Result<(), String> {
         let at = (self.workspaces.iter().position(|w| w.id == id)).ok_or("No such workspace")?;
-        if self.workspaces.len() == 1 {
-            return Err("Attempt to delete the sole workspace".into());
-        }
-        if self.buffers.workspace == id {
-            let next = self
-                .workspaces
-                .get(at + 1)
-                .unwrap_or_else(|| &self.workspaces[at - 1]);
-            self.switch_workspace(next.id)?;
+        if self.buffers.workspace == Some(id) {
+            let next = (self.workspaces.get(at + 1))
+                .or_else(|| self.workspaces.get(at.checked_sub(1)?))
+                .map(|w| w.id);
+            match next {
+                Some(next) => self.switch_workspace(next)?,
+                None => self.show_lobby(),
+            }
         }
         let mut killed = self.workspaces.remove(at);
         let windows = killed
@@ -156,28 +186,27 @@ impl Core {
         Ok(())
     }
 
-    /// Binds the launch workspace, in place of its `$HOME` project, to the project `path`
-    /// belongs to, or else to an ad-hoc one at `root`, and names it after that project.
+    /// Leaves the lobby for a workspace, named after it, on the project `path` belongs to, or
+    /// else on an ad-hoc one at `root`.
     pub fn launch(&mut self, path: &Path, root: &Path) {
-        assert_eq!(self.workspaces.len(), 1, "only the launch workspace exists");
-        let home = &self.workspaces[0].project;
-        (self.projects).retain(|p| p.file.is_some() || p.id != *home);
+        assert!(self.workspaces.is_empty(), "launch leaves the lobby");
         let project = self.project_for(path, root);
-        self.workspaces[0].project = project;
         let name = self.project_name(project).to_string();
-        (self.rename_workspace(&name)).expect("the sole workspace's new name is free");
+        self.new_workspace(&name, project);
     }
 
-    pub(crate) fn current_workspace(&self) -> &Workspace {
-        let current = self.workspace();
-        (self.workspaces.iter().find(|w| w.id == current)).expect("current is live")
+    /// The current workspace; `No workspace` in the lobby.
+    pub(crate) fn current_workspace(&self) -> Result<&Workspace, String> {
+        let current = self.workspace().ok_or("No workspace")?;
+        Ok((self.workspaces.iter().find(|w| w.id == current)).expect("current is live"))
     }
 
     pub fn workspaces(&self) -> &[Workspace] {
         &self.workspaces
     }
 
-    pub fn workspace(&self) -> WorkspaceId {
+    /// The current workspace; `None` in the lobby.
+    pub fn workspace(&self) -> Option<WorkspaceId> {
         self.buffers.workspace
     }
 
@@ -185,7 +214,7 @@ impl Core {
     pub(crate) fn workspace_names(&self, current_first: bool) -> Vec<String> {
         let mut workspaces: Vec<&Workspace> = self.workspaces.iter().collect();
         let current = self.workspace();
-        workspaces.sort_by_key(|w| ((w.id == current) != current_first, Reverse(w.shown)));
+        workspaces.sort_by_key(|w| ((Some(w.id) == current) != current_first, Reverse(w.shown)));
         workspaces.into_iter().map(|w| w.name.clone()).collect()
     }
 
@@ -219,8 +248,8 @@ impl Core {
     /// Shows the workspace `n` after the current one in creation order, wrapping; before it
     /// when negative.
     pub(crate) fn cycle_workspace(&mut self, n: i64) -> Result<(), String> {
+        let current = self.workspace().ok_or("No workspace")?;
         let len = self.workspaces.len() as i64;
-        let current = self.workspace();
         let at = (self.workspaces.iter().position(|w| w.id == current)).expect("current is live");
         let to = (at as i64 + n % len).rem_euclid(len) as usize;
         self.switch_workspace(self.workspaces[to].id)
@@ -230,7 +259,7 @@ impl Core {
         if name.trim().is_empty() {
             return Err("Empty workspace name".into());
         }
-        let current = self.workspace();
+        let current = self.workspace().ok_or("No workspace")?;
         if (self.workspaces.iter()).any(|w| w.name == name && w.id != current) {
             return Err(format!("Workspace {name} already exists"));
         }
@@ -264,9 +293,6 @@ impl Ctx<'_> {
     /// or confirmed, asking as `C-x C-c` does.
     pub(crate) fn kill_workspace(&mut self, mut args: Args) -> Result<(), String> {
         let id = self.core.workspace_named(&args.strings[0])?;
-        if self.core.workspaces.len() == 1 {
-            return Err("Attempt to delete the sole workspace".into());
-        }
         let processes = self.process_answer(&mut args);
         let mine = |b: &crate::buffer::Buffer| b.workspace == Some(id);
         let Some(saving) = self.save_some("workspace-kill", args.clone(), 1, mine, "kill")? else {
@@ -327,18 +353,32 @@ mod tests {
     }
 
     #[test]
-    fn launch_has_one_workspace_on_home_and_messages_is_global() {
+    fn launch_is_the_lobby_and_messages_is_global() {
         let core = crate::Core::default();
-        let (w, home) = (&core.workspaces()[0], &core.projects()[0]);
-        assert_eq!(core.workspaces().len(), 1);
+        assert!(core.workspaces().is_empty() && core.projects().is_empty());
+        assert_eq!(core.workspace(), None);
         assert_eq!(
-            (&w.name, core.project_name(w.project)),
-            (&home.name, home.name.as_str())
+            (core.current().name.as_str(), core.current().workspace),
+            ("*Workspaces*", None)
         );
-        assert_eq!(Some(home.primary.path.clone()), std::env::home_dir());
-        assert_eq!(core.current().name, format!("*scratch*<{}>", home.name));
+        // Loaded projects show in the lobby list, and no `$HOME` one.
+        let mut h = lobby_projects();
+        let frame = h.frame(800., 600.);
+        assert!(frame.workspaces.is_empty(), "no workspace in the modeline");
+        assert_eq!(
+            frame.title, "*Workspaces*",
+            "no workspace or project in the title"
+        );
+        let mode_line = frame.windows[0].display.mode_line.text();
+        assert!(mode_line.starts_with("*Workspaces* │") && !mode_line.contains("unwatched"));
+        let list = h.core.text().to_string();
+        assert!(
+            list.contains("app") && list.contains("no workspaces"),
+            "{list}"
+        );
+        assert_eq!(project_names(&h), ["one", "two", "app"]);
         let mut h = Harness::new(&[]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         assert_eq!(owned(&h, Some(default))[0].1, "*scratch*<main>");
         h.keys("C-g");
         assert_eq!(owned(&h, None)[0].1, "*Messages*");
@@ -349,7 +389,7 @@ mod tests {
         let mut h = Harness::new(&[]);
         let w = h.new_workspace("w", "p");
         assert!(h.core.current().unkillable);
-        assert_eq!(h.core.workspace(), w);
+        assert_eq!(h.core.workspace().unwrap(), w);
         assert_eq!(h.core.project_name(h.core.workspaces()[1].project), "p");
         assert_eq!((name(&h), h.text()), ("*scratch*<w>", String::new()));
         assert_eq!(h.core.current().workspace, Some(w));
@@ -392,7 +432,7 @@ mod tests {
     #[test]
     fn killing_a_workspace_kills_its_buffers_and_nothing_else() {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         h.open("a.txt").keys("x");
         let a = h.new_workspace("a", "p");
         h.open("a.txt").open("b.txt").keys("y C-g");
@@ -405,7 +445,11 @@ mod tests {
         let launch = h.core.workspaces()[0].name.clone();
         assert_eq!(names(&h), [launch.as_str(), "b"]);
         assert!(owned(&h, Some(a)).is_empty(), "a's buffers are gone");
-        assert_eq!(h.core.workspace(), b, "another workspace stays current");
+        assert_eq!(
+            h.core.workspace().unwrap(),
+            b,
+            "another workspace stays current"
+        );
         assert_eq!(owned(&h, Some(b)), kept);
         assert_eq!(owned(&h, Some(default)), kept_default);
         assert_eq!(owned(&h, None), messages);
@@ -417,35 +461,57 @@ mod tests {
     #[test]
     fn killing_the_current_workspace_selects_its_neighbour() {
         let mut h = Harness::new(&[]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         let a = h.new_workspace("a", "p");
         let b = h.new_workspace("b", "p");
         h.core.kill_workspace(b).unwrap();
         assert_eq!(
-            (h.core.workspace(), h.core.current().workspace),
+            (h.core.workspace().unwrap(), h.core.current().workspace),
             (a, Some(a))
         );
         let c = h.new_workspace("c", "p");
         h.core.kill_workspace(a).unwrap();
         assert_eq!(
-            h.core.workspace(),
+            h.core.workspace().unwrap(),
             c,
             "killing another keeps the current one"
         );
         h.core.kill_workspace(c).unwrap();
-        assert_eq!(h.core.workspace(), default, "the one before when last");
+        assert_eq!(
+            h.core.workspace().unwrap(),
+            default,
+            "the one before when last"
+        );
         assert_eq!(name(&h), "*scratch*<main>");
     }
 
     #[test]
-    fn the_sole_workspace_cannot_be_killed() {
+    fn killing_the_sole_workspace_shows_the_lobby_and_a_new_one_leaves_it() {
         let mut h = Harness::new(&[]);
-        let default = h.core.workspace();
-        let err = h.core.kill_workspace(default);
-        assert_eq!(err, Err("Attempt to delete the sole workspace".into()));
-        assert_eq!(
-            (h.core.workspaces().len(), name(&h)),
-            (1, "*scratch*<main>")
+        h.core.log("before");
+        h.keys("C-x 2");
+        let sole = h.core.workspace().unwrap();
+        h.core.kill_workspace(sole).unwrap();
+        assert!(h.core.workspaces().is_empty() && h.core.workspace().is_none());
+        assert_eq!(name(&h), "*Workspaces*");
+        assert!(h.core.windows.others.is_empty(), "one window");
+        assert_eq!(h.core.current().workspace, None);
+        assert!(h.core.buffers.find("*scratch*<main>").is_none());
+        h.core.log("in the lobby");
+        // Made from the lobby, a workspace owns its buffers and the lobby list goes.
+        let id = h.new_workspace("w", "p");
+        assert_eq!((h.core.workspace(), name(&h)), (Some(id), "*scratch*<w>"));
+        assert_eq!(h.core.current().workspace, Some(id));
+        assert!(h.core.buffers.find("*Workspaces*").is_none());
+        // `*Messages*` outlives both trips.
+        h.core.kill_workspace(id).unwrap();
+        let messages = h.core.buffers.find("*Messages*").unwrap();
+        let messages = h.core.buffers.get(messages).unwrap();
+        assert!(
+            messages
+                .text()
+                .to_string()
+                .starts_with("before\nin the lobby\n")
         );
     }
 
@@ -467,9 +533,31 @@ mod tests {
     }
 
     #[test]
+    fn killing_a_clean_sole_workspace_by_key_asks_nothing() {
+        for keys in ["C-x t 0", "C-x t k RET"] {
+            let mut h = Harness::new(&[]);
+            h.keys(keys);
+            assert!(h.core.minibuffer().is_none(), "{keys}");
+            assert!(h.core.workspaces().is_empty(), "{keys}");
+            assert_eq!(name(&h), "*Workspaces*");
+        }
+    }
+
+    #[test]
+    fn killing_the_lobby_list_shows_messages() {
+        let mut h = Harness::new(&[]);
+        let sole = h.core.workspace().unwrap();
+        h.core.kill_workspace(sole).unwrap();
+        h.keys("C-x k RET");
+        assert_eq!(name(&h), "*Messages*");
+        h.keys("C-x t l");
+        assert_eq!(name(&h), "*Workspaces*");
+    }
+
+    #[test]
     fn switching_away_and_back_restores_splits_buffers_and_points() {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         h.open("a.txt").keys("C-f C-f C-x 2 C-x o");
         h.open("b.txt").keys("C-f");
         let before = layout(&h);
@@ -491,7 +579,7 @@ mod tests {
     fn switching_preserves_marks_rings_and_scroll() {
         let mut h = Harness::new(&[("a", "zero\none\ntwo\nthree\nfour\n")]);
         h.open("a").keys("C-x 2 C-x o");
-        let origin = h.core.workspace();
+        let origin = h.core.workspace().unwrap();
         let selected = h.core.windows.selected;
         let window = &mut h.core.windows.window;
         window.push_mark(&mut h.core.buffers, 1, true).unwrap();
@@ -501,7 +589,7 @@ mod tests {
         assert_eq!(window.scroll(&h.core.buffers, 3), 1);
         let left = window.hscroll(20, 5);
         let other = h.new_workspace("other", "home");
-        assert_eq!(h.core.workspace(), other);
+        assert_eq!(h.core.workspace().unwrap(), other);
         assert_eq!(name(&h), "*scratch*<other>");
         h.core.switch_workspace(origin).unwrap();
         assert_eq!(h.core.windows.selected, selected);
@@ -519,7 +607,7 @@ mod tests {
     #[test]
     fn window_changes_stay_in_their_workspace() {
         let mut h = Harness::new(&[]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         h.keys("C-x 2");
         let w = h.new_workspace("w", "p");
         h.keys("C-x 3 C-x 3");
@@ -535,7 +623,7 @@ mod tests {
     #[test]
     fn points_follow_edits_made_while_away() {
         let mut h = Harness::new(&[("a.txt", "abc")]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         h.open("a.txt").keys("C-e");
         h.new_workspace("w", "p");
         show(&mut h, "a.txt");
@@ -547,7 +635,7 @@ mod tests {
     #[test]
     fn switching_closes_the_minibuffer_and_to_the_current_one_does_nothing() {
         let mut h = Harness::new(&[]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         h.keys("C-x 2");
         let w = h.new_workspace("w", "p");
         ask(&mut h, &["Text: "]);
@@ -583,7 +671,7 @@ mod tests {
     #[test]
     fn a_killed_buffer_is_replaced_in_a_workspace_that_is_not_current() {
         let mut h = Harness::new(&[("a.txt", "abc"), ("b.txt", "def")]);
-        let default = h.core.workspace();
+        let default = h.core.workspace().unwrap();
         let w = h.new_workspace("w", "p");
         h.open("a.txt");
         h.core.switch_workspace(default).unwrap();
@@ -609,7 +697,17 @@ mod tests {
     /// A harness with a saved project `app` at `app/` with the additional root `lib/`, and
     /// ad-hoc projects `one` and `two`.
     fn projects() -> Harness {
-        let mut h = Harness::new(&[("app/x", ""), ("lib/x", ""), ("new/x", ""), ("f.txt", "")]);
+        load_projects(Harness::new(FILES))
+    }
+
+    /// `projects()` in the lobby.
+    fn lobby_projects() -> Harness {
+        load_projects(Harness::lobby(FILES))
+    }
+
+    const FILES: &[(&str, &str)] = &[("app/x", ""), ("lib/x", ""), ("new/x", ""), ("f.txt", "")];
+
+    fn load_projects(mut h: Harness) -> Harness {
         let (app, lib) = (h.path("app"), h.path("lib"));
         let text = format!(
             "name = \"app\"\n[primary]\npath = \"{}\"\n[[roots]]\npath = \"{}\"",
@@ -630,7 +728,7 @@ mod tests {
 
     /// The current workspace's name and project.
     fn current(h: &Harness) -> (&str, &str) {
-        let id = h.core.workspace();
+        let id = h.core.workspace().unwrap();
         let w = h.core.workspaces().iter().find(|w| w.id == id).unwrap();
         (w.name.as_str(), h.core.project_name(w.project))
     }
@@ -641,7 +739,7 @@ mod tests {
 
     #[test]
     fn a_file_launches_in_the_saved_project_that_contains_it() {
-        let mut h = projects();
+        let mut h = lobby_projects();
         let file = h.path("lib/x");
         h.core.launch(&file, &h.path("lib"));
         assert_eq!((names(&h), current(&h)), (vec!["app"], ("app", "app")));
@@ -650,7 +748,7 @@ mod tests {
 
     #[test]
     fn a_file_outside_saved_projects_gets_an_ad_hoc_project_at_its_root() {
-        let mut h = projects();
+        let mut h = lobby_projects();
         let root = h.path("repo");
         h.core.launch(&root.join("src/x.rs"), &root);
         assert_eq!(current(&h), ("repo", "repo"));
@@ -661,24 +759,23 @@ mod tests {
             None
         );
         // A taken name gets `<2>`, and an ad-hoc project at the root is reused.
-        let mut h = projects();
+        let mut h = lobby_projects();
         h.core.launch(&h.path("x/one/f"), &h.path("x/one"));
         assert_eq!(current(&h), ("one<2>", "one<2>"));
-        let mut h = projects();
+        let mut h = lobby_projects();
         h.core.launch(&h.path("one/f"), &h.path("one"));
         assert_eq!(current(&h).1, "one");
         assert_eq!(project_names(&h), ["one", "two", "app"]);
     }
 
     #[test]
-    fn a_launch_at_home_keeps_the_home_name() {
-        let mut h = Harness::new(&[]);
-        // A fresh core's, since the harness pins the home project's name.
-        let home = crate::Core::default().projects()[0].clone();
-        h.core
-            .launch(&home.primary.path.join("notes.txt"), &home.primary.path);
-        assert_eq!(h.core.projects(), [&home], "the same project, not a `<2>`");
-        assert_eq!(current(&h), (home.name.as_str(), home.name.as_str()));
+    fn a_launch_at_home_is_named_after_it() {
+        let mut h = Harness::lobby(&[]);
+        let home = std::env::home_dir().unwrap();
+        h.core.launch(&home.join("notes.txt"), &home);
+        let name = crate::buffer::file_name(&home);
+        assert_eq!(current(&h), (name.as_str(), name.as_str()));
+        assert_eq!(h.core.projects()[0].primary.path, home);
     }
 
     #[test]
@@ -726,26 +823,26 @@ mod tests {
         let second = h.core.add_project(Loaded::ad_hoc("app", &h.path("second")));
         h.core.new_workspace("second", second);
         h.keys("C-x t 2 RET task RET");
-        assert_eq!(h.core.current_workspace().project, second);
+        assert_eq!(h.core.current_workspace().unwrap().project, second);
         h.keys("C-x t 2 app C-n RET other RET");
         assert_eq!(
-            h.core.current_workspace().project,
+            h.core.current_workspace().unwrap().project,
             second,
             "filtered matches retain identity"
         );
         h.keys("C-x t 2 app RET first RET");
-        assert_eq!(h.core.current_workspace().project, first);
+        assert_eq!(h.core.current_workspace().unwrap().project, first);
     }
 
     #[test]
     fn new_workspace_cancellation_keeps_the_workspace_and_layout() {
         let mut h = projects();
         h.keys("text C-x 2");
-        let workspace = h.core.workspace();
+        let workspace = h.core.workspace().unwrap();
         let selected = h.core.windows.selected;
         for keys in ["C-x t 2 C-g", "C-x t 2 RET C-g"] {
             h.keys(keys);
-            assert_eq!(h.core.workspace(), workspace);
+            assert_eq!(h.core.workspace().unwrap(), workspace);
             assert_eq!(h.core.windows.selected, selected);
             assert_eq!(h.core.windows.tree.leaves().len(), 2);
             assert_eq!(h.text(), "text");
@@ -775,7 +872,7 @@ mod tests {
                 assert_eq!(h.core.workspaces.len(), count);
                 assert_eq!(h.core.message(), Some("Project is no longer loaded"));
             } else {
-                assert_eq!(h.core.current_workspace().project, selected);
+                assert_eq!(h.core.current_workspace().unwrap().project, selected);
                 assert_eq!(current(&h), ("task", "renamed"));
             }
         }
@@ -913,7 +1010,7 @@ mod tests {
         h.keys("M-x agent-start RET claude RET");
         let buffer = h.core.windows.window.buffer();
         h.keys("C-x t 0 RET");
-        assert_eq!(h.core.workspace(), id);
+        assert_eq!(h.core.workspace().unwrap(), id);
         assert_eq!(h.core.windows.window.buffer(), buffer);
         assert!(h.core.live_agent(buffer));
     }
@@ -921,7 +1018,7 @@ mod tests {
     #[test]
     fn declining_process_kill_still_saves_the_yes_buffers() {
         let mut h = modified();
-        let id = h.core.workspace();
+        let id = h.core.workspace().unwrap();
         h.keys("M-x vterm RET C-x t 0 RET");
         assert_eq!(
             h.core.minibuffer().unwrap().prompt,
@@ -930,7 +1027,7 @@ mod tests {
         h.save_reply("x\n");
         h.keys("RET");
         assert_eq!(h.submitted("f.txt"), "x\n");
-        assert_eq!(h.core.workspace(), id);
+        assert_eq!(h.core.workspace().unwrap(), id);
     }
 
     #[test]
@@ -1004,20 +1101,19 @@ mod tests {
     }
 
     #[test]
-    fn the_sole_workspace_is_refused_before_any_question() {
+    fn the_sole_workspace_is_asked_about_then_killed() {
         let mut h = Harness::new(&[("f.txt", "")]);
-        let sole = Some("Attempt to delete the sole workspace");
-        h.open("f.txt").keys("x C-x t 0");
-        assert!(h.core.minibuffer().is_none());
-        assert_eq!(h.core.message(), sole);
-        h.keys("C-x t k RET");
-        assert!(h.core.minibuffer().is_none());
-        assert_eq!(h.core.message(), sole);
+        h.open("f.txt").keys("x C-x t 0 no RET RET");
+        assert_eq!(h.core.workspaces().len(), 1, "declining keeps it");
+        assert_eq!(name(&h), "f.txt");
+        h.keys("C-x t k RET no RET yes RET");
+        assert!(h.core.workspaces().is_empty());
+        assert_eq!(name(&h), "*Workspaces*");
     }
 
     #[test]
     fn a_folder_launches_in_an_ad_hoc_project_that_a_reload_keeps() {
-        let mut h = projects();
+        let mut h = lobby_projects();
         let new = h.path("new");
         h.core.launch(&new, &new);
         assert_eq!((current(&h), name(&h)), (("new", "new"), "*scratch*<new>"));
@@ -1037,7 +1133,7 @@ mod tests {
 
     #[test]
     fn a_folder_inside_a_saved_project_launches_in_it() {
-        let mut h = projects();
+        let mut h = lobby_projects();
         h.core.launch(&h.path("lib/src"), &h.path("lib/src"));
         assert_eq!(current(&h), ("app", "app"));
         assert_eq!(project_names(&h), ["one", "two", "app"]);
@@ -1049,7 +1145,7 @@ mod tests {
         h.keys("C-x t 2 one RET RET C-x t 2 one RET RET C-x t 2 two RET RET");
         let latest = h.core.workspaces()[2].id;
         h.keys("C-x p p one RET");
-        assert_eq!(h.core.workspace(), latest);
+        assert_eq!(h.core.workspace().unwrap(), latest);
         h.keys("C-x t RET one RET C-x t RET two RET C-x p p one RET");
         assert_eq!(current(&h).0, "one", "the one shown last");
         h.keys("C-x p p app RET");
@@ -1073,5 +1169,92 @@ mod tests {
         ] {
             assert!(hint.contains(command), "{command} in {hint}");
         }
+    }
+
+    fn visit(h: &mut Harness, file: &str) {
+        let path = h.path(file).to_string_lossy().into_owned();
+        h.call(
+            "find-file",
+            crate::command::Args {
+                strings: vec![path],
+                ..crate::command::Args::default()
+            },
+        );
+    }
+
+    #[test]
+    fn find_file_from_the_lobby_makes_the_file_s_workspace() {
+        let mut h = lobby_projects();
+        assert_eq!(
+            h.core.directory(),
+            std::env::home_dir().unwrap(),
+            "starts at home"
+        );
+        visit(&mut h, "app/x");
+        assert_eq!((current(&h), name(&h)), (("app", "app"), "x"));
+        assert_eq!(h.core.current().workspace, h.core.workspace());
+        assert!(h.core.buffers.find("*Workspaces*").is_none());
+        // Outside every project, the file's folder, the test dir holding no `.git`.
+        let mut h = lobby_projects();
+        visit(&mut h, "f.txt");
+        assert_eq!(current(&h), ("aiditor-test", "aiditor-test"));
+        let project = h
+            .core
+            .projects()
+            .into_iter()
+            .find(|p| p.name == "aiditor-test");
+        assert_eq!(project.unwrap().primary.path, h.path(""));
+    }
+
+    #[test]
+    fn a_failed_visit_from_the_lobby_stays_in_it() {
+        let mut h = lobby_projects();
+        h.reads.insert(h.path("f.txt"), Err("f.txt: denied".into()));
+        visit(&mut h, "f.txt");
+        assert_eq!(h.core.message(), Some("f.txt: denied"));
+        assert_eq!((h.core.workspace(), name(&h)), (None, "*Workspaces*"));
+        assert_eq!(project_names(&h), ["one", "two", "app"]);
+    }
+
+    #[test]
+    fn workspace_new_and_project_switch_leave_the_lobby() {
+        let mut h = lobby_projects();
+        h.keys("C-x t 2 RET RET");
+        assert_eq!(current(&h), ("one", "one"), "the first project is selected");
+        assert!(h.core.buffers.find("*Workspaces*").is_none());
+        let mut h = lobby_projects();
+        h.keys("C-x 2 C-x p p app RET");
+        assert_eq!((current(&h), name(&h)), (("app", "app"), "*scratch*<app>"));
+        assert!(h.core.windows.others.is_empty(), "one window");
+        assert!(h.core.buffers.find("*Workspaces*").is_none());
+    }
+
+    #[test]
+    fn commands_that_need_a_workspace_fail_in_the_lobby() {
+        for command in [
+            "project-find-file",
+            "project-grep",
+            "vterm",
+            "agent-start",
+            "agent-sessions",
+            "workspace-switch",
+            "workspace-next",
+            "workspace-previous",
+            "workspace-rename",
+            "workspace-kill",
+            "workspace-kill-current",
+            "getenv",
+            "project-capture-environment",
+        ] {
+            let mut h = lobby_projects();
+            h.call(command, crate::command::Args::default());
+            assert_eq!(h.core.message(), Some("No workspace"), "{command}");
+            assert!(h.core.minibuffer().is_none(), "{command} asks nothing");
+            assert_eq!((h.core.workspace(), name(&h)), (None, "*Workspaces*"));
+        }
+        // `workspace-list` refreshes the lobby's.
+        let mut h = lobby_projects();
+        h.keys("C-x t l");
+        assert_eq!((h.core.message(), name(&h)), (None, "*Workspaces*"));
     }
 }
