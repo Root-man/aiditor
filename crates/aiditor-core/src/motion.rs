@@ -1,6 +1,7 @@
 //! Moving point and scrolling.
 
 use crate::Ctx;
+use crate::buffer::Prop;
 use crate::command::Prefix;
 
 /// The `n`th of ascending `marks` after `point`, before it when `n` is negative, or the farthest
@@ -35,8 +36,48 @@ impl Ctx<'_> {
         }
     }
 
+    /// Moves `n` shown chars: hidden text with no placeholder (markdown markup) takes no step,
+    /// and a fold with one, or a `Display` run, is one.
     pub(crate) fn forward_char(&mut self, n: i64) -> Result<(), String> {
-        self.goto_clamped((self.core.point() as i64).saturating_add(n))
+        let buffer = self.core.current();
+        if !buffer.has_folds() {
+            return self.goto_clamped((self.core.point() as i64).saturating_add(n));
+        }
+        let len = buffer.len_chars();
+        // The hidden run holding char `i`, and whether it shows nothing.
+        let fold = |i: usize| {
+            (buffer.properties_near(i..i + 1).into_iter()).find_map(|(r, p)| match p {
+                Prop::Invisible(s) if r.contains(&i) => Some((r, s.is_empty())),
+                Prop::Display(_) if r.contains(&i) => Some((r, false)),
+                _ => None,
+            })
+        };
+        let mut p = self.core.point();
+        for _ in 0..n.unsigned_abs() {
+            let forward = n > 0;
+            if (forward && p == len) || (!forward && p == 0) {
+                return self.goto_clamped(if forward { i64::MAX } else { -1 });
+            }
+            loop {
+                let at = if forward { p } else { p - 1 };
+                match fold(at) {
+                    Some((r, empty)) => {
+                        p = if forward { r.end } else { r.start };
+                        if !empty {
+                            break;
+                        }
+                    }
+                    None => {
+                        p = if forward { p + 1 } else { p - 1 };
+                        break;
+                    }
+                }
+                if (forward && p == len) || (!forward && p == 0) {
+                    break;
+                }
+            }
+        }
+        self.goto(p)
     }
 
     /// Where each visual row of the current window's `line` starts.
@@ -252,6 +293,33 @@ mod tests {
         assert_eq!(h.point(), 5);
         h.keys("<left> <left> <left> <left> <left> <left>");
         assert_eq!(h.point(), 0);
+    }
+
+    #[test]
+    fn left_and_right_skip_hidden_markup_and_cross_a_fold_in_one_step() {
+        use crate::buffer::Prop;
+        let mut h = on("[ab](u) c…d");
+        let id = h.core.windows.window.buffer();
+        let b = h.core.buffers.get_mut(id).unwrap();
+        b.add_property(0..1, Prop::Invisible(String::new()))
+            .unwrap();
+        b.add_property(3..7, Prop::Invisible(String::new()))
+            .unwrap();
+        b.add_property(9..10, Prop::Invisible("…".into())).unwrap();
+        let mut seen = vec![h.point()];
+        for _ in 0..6 {
+            h.keys("<right>");
+            seen.push(h.point());
+        }
+        assert_eq!(seen, [0, 2, 3, 8, 9, 10, 11]);
+        let mut back = vec![];
+        for _ in 0..7 {
+            h.keys("<left>");
+            back.push(h.point());
+        }
+        assert_eq!(back, [10, 9, 8, 7, 2, 1, 0]);
+        h.keys("C-u 3 <right>");
+        assert_eq!(h.point(), 8);
     }
 
     #[test]
