@@ -28,7 +28,7 @@ WindowDisplay {
                     ModeLine,
                 ),
                 (
-                    " *scratch*<main>",
+                    " *scratch*",
                     ModeLine,
                 ),
             ],

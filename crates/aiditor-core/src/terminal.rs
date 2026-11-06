@@ -1784,6 +1784,11 @@ mod tests {
             h.new_workspace("fix", "home");
             h.keys("M-x vterm RET");
             assert_eq!(name(&h), "vterm1<fix>");
+            let line = h.frame(800., 300.).windows.remove(0).display.mode_line;
+            assert_eq!(
+                line.left[0][0].0, "vterm1",
+                "the workspace modeline names the workspace"
+            );
             let one = h.core.buffers.find("vterm1<work>").unwrap();
             h.core.kill_buffer(one);
             h.core.switch_workspace(h.core.workspaces()[0].id).unwrap();
