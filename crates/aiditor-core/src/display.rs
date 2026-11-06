@@ -2479,8 +2479,8 @@ mod tests {
     fn a_buffer_without_a_file_keeps_its_mode_line() {
         let mut h = Harness::new(&[]);
         h.keys("x RET y");
-        let name = h.core.current().name.clone();
-        assert_eq!(h.display(5).mode_line.text(), format!("** {name}  2:1"));
+        assert_eq!(h.core.current().name, "*scratch*<main>");
+        assert_eq!(h.display(5).mode_line.text(), "** *scratch*  2:1");
     }
 
     #[test]

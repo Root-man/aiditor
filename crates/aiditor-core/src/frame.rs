@@ -90,6 +90,7 @@ impl Core {
     #[cfg(test)]
     pub fn display(&mut self, rows: usize) -> display::WindowDisplay {
         let roots = self.roots();
+        let workspace = self.current_workspace().ok().map(|w| w.name.clone());
         let window = &mut self.windows.window;
         let (buffers, settings) = (&mut self.buffers, &self.settings);
         let mut display = window_display(
@@ -100,6 +101,7 @@ impl Core {
             rows,
             usize::MAX,
             &roots,
+            workspace.as_deref(),
             None,
         );
         if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
@@ -132,6 +134,7 @@ impl Core {
             self.current_workspace().is_ok_and(|w| w.project == p.id) && !self.project_watched(p)
         });
         let roots = self.roots();
+        let workspace = self.current_workspace().ok().map(|w| w.name.clone());
         let (width, height, cell_width) = self.frame_size;
         let cell = (cell_width, self.settings.line_height());
         let frame = display::Rect {
@@ -179,7 +182,15 @@ impl Core {
                 let mut display = match session {
                     true => session_display(window, buffers, settings, rect.height, cols, &roots),
                     false => window_display(
-                        window, buffers, settings, rows, drawn, cols, &roots, matches,
+                        window,
+                        buffers,
+                        settings,
+                        rows,
+                        drawn,
+                        cols,
+                        &roots,
+                        workspace.as_deref(),
+                        matches,
                     ),
                 };
                 if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
@@ -300,6 +311,7 @@ pub(crate) fn window_display(
     drawn: usize,
     cols: usize,
     roots: &[PathBuf],
+    workspace: Option<&str>,
     search: Option<&dyn display::Search>,
 ) -> display::WindowDisplay {
     window.set_cols(cols);
@@ -342,6 +354,19 @@ pub(crate) fn window_display(
     );
     if let Some(snapshot) = &buffer.workspace_list {
         snapshot.fit(&mut display.lines, cols, &settings.theme);
+    }
+    // The workspace modeline shows the workspace, so a fileless buffer's name drops its suffix.
+    if let Some(workspace) = workspace.filter(|_| buffer.file.is_none()) {
+        let suffix = format!("<{workspace}>").replace('\n', "^J");
+        // A fileless buffer's name is the last span of the mode line's first segment.
+        let name = display
+            .mode_line
+            .left
+            .first_mut()
+            .and_then(|s| s.last_mut());
+        if let Some((text, _)) = name.filter(|(text, _)| text.ends_with(&suffix)) {
+            text.truncate(text.len() - suffix.len());
+        }
     }
     if let Some(terminal) = buffer.terminal().filter(|_| !buffer.copy_mode()) {
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
@@ -584,7 +609,7 @@ mod tests {
                 names,
                 [
                     "/aiditor-test/a.txt │ Fundamental  [unwatched] │ 1:0 │ All",
-                    "** *scratch*<main>  1:1"
+                    "** *scratch*  1:1"
                 ]
             );
             h.keys("C-x o");
@@ -596,7 +621,7 @@ mod tests {
         let mut h = Harness::new(&[]);
         assert_eq!(
             h.frame(800., 600.).windows[0].display.mode_line.text(),
-            "-- *scratch*<main>  1:0"
+            "-- *scratch*  1:0"
         );
         h.keys("C-x t l M-<");
         assert_eq!(
@@ -608,6 +633,33 @@ mod tests {
             h.frame(800., 600.).windows[0].display.mode_line.text(),
             "%% *Messages*  1:0"
         );
+    }
+
+    #[test]
+    fn a_fileless_mode_line_drops_the_current_workspaces_suffix() {
+        let mut h = Harness::new(&[]);
+        let line = |h: &mut Harness, name: &str| {
+            let id = h.core.buffers.create(name);
+            h.core.buffers.get_mut(id).unwrap().read_only = true;
+            h.core.switch_to(id);
+            h.frame(800., 600.).windows[0].display.mode_line.text()
+        };
+        assert_eq!(
+            line(&mut h, "*claude stderr*<main>"),
+            "%% *claude stderr*  1:0"
+        );
+        assert_eq!(
+            line(&mut h, "*claude stderr*<main>"),
+            "%% *claude stderr*<main><2>  1:0"
+        );
+        assert_eq!(line(&mut h, "x<other>"), "%% x<other>  1:0");
+        assert_eq!(h.core.current().name, "x<other>", "the name keeps it");
+        let messages = h.core.messages();
+        h.core.switch_to(messages);
+        let shown = h.frame(800., 600.).windows[0].display.mode_line.text();
+        assert!(shown.starts_with("%% *Messages*  "), "{shown}");
+        h.core.rename_workspace("a\nb").unwrap();
+        assert_eq!(line(&mut h, "y<a\nb>"), "%% y  1:0");
     }
 
     #[test]

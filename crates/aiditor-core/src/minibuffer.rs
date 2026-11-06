@@ -904,7 +904,7 @@ impl Core {
             count.len() + prompt.chars().count() + if grep { crate::grep::STATUS_COLS } else { 0 },
         );
         let (window, buffers) = (&mut self.windows.window, &mut self.buffers);
-        let display = window_display(window, buffers, &self.settings, 1, 1, cols, &[], None);
+        let display = window_display(window, buffers, &self.settings, 1, 1, cols, &[], None, None);
         Some(display::Minibuffer {
             count,
             prompt,

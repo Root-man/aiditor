@@ -72,7 +72,7 @@ When the mark is set and active, the text between point and mark SHALL be drawn 
 - **THEN** no span has the `region` background
 
 ### Requirement: Each window has a mode line
-The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. For a terminal buffer, the left group SHALL hold its name, then the shell's directory, and the right group the running command, the last command's non-zero exit status, the input mode, then point's line and column in copy mode. For any other buffer not visiting a file, the left group SHALL hold whether it is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then any agent mode, and the right group point's line (from 1) and column (from 0). For a buffer visiting a file, the left group SHALL hold `●` when modified and `⊘` when read-only, the file's directory relative to its project root, after that root's name in a project of several roots, and its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then its major mode. The right group SHALL hold the active region's size, `UTF-8 CRLF` when its file uses CRLF line endings, its branch, point's line and column, then its position.
+The display SHALL end each window with a mode line of two groups of segments, a segment appearing only when it applies. For a terminal buffer, the left group SHALL hold its name, then the shell's directory, and the right group the running command, the last command's non-zero exit status, the input mode, then point's line and column in copy mode. For any other buffer not visiting a file, the left group SHALL hold whether it is read-only (`%%`), modified (`**`) or neither (`--`) with its name, then any agent mode, and the right group point's line (from 1) and column (from 0). The name a terminal's or fileless buffer's mode line shows SHALL leave out a `<workspace>` suffix ending the buffer's name when it names the current workspace, since the workspace modeline already shows it; the buffer's name itself SHALL keep the suffix. For a buffer visiting a file, the left group SHALL hold `●` when modified and `⊘` when read-only, the file's directory relative to its project root, after that root's name in a project of several roots, and its name, then `[deleted]` when its file was deleted on disk or `[conflict]` when its unsaved edits conflict with a change to its file, then its major mode. The right group SHALL hold the active region's size, `UTF-8 CRLF` when its file uses CRLF line endings, its branch, point's line and column, then its position.
 
 #### Scenario: A modified file
 - **WHEN** `src/a.rs` under a project root has been edited and point is on line 3, column 2
@@ -125,6 +125,26 @@ The display SHALL end each window with a mode line of two groups of segments, a 
 #### Scenario: A terminal
 - **WHEN** terminal `t`'s shell is in `/srv` and a command is running
 - **THEN** the left group's segments are `t` and `/srv`, and the right group's `◉ <command>` and `char`
+
+#### Scenario: A workspace's scratch
+- **WHEN** `*scratch*<work>` is shown unmodified in workspace `work`
+- **THEN** the left group is `-- *scratch*`, and the buffer is still named `*scratch*<work>`
+
+#### Scenario: A workspace's terminal
+- **WHEN** `vterm1<work>` is shown in workspace `work` with its shell in `/srv`
+- **THEN** the left group's segments are `vterm1` and `/srv`
+
+#### Scenario: An agent's stderr
+- **WHEN** `*claude stderr*<work>` is shown in workspace `work`
+- **THEN** the left group is `%% *claude stderr*`
+
+#### Scenario: A suffix that doesn't end the name
+- **WHEN** a second stderr buffer `*claude stderr*<work><2>` is shown in workspace `work`
+- **THEN** the left group is `%% *claude stderr*<work><2>`
+
+#### Scenario: A buffer of no workspace
+- **WHEN** `*Messages*` is shown
+- **THEN** the left group is `%% *Messages*`
 
 ### Requirement: The frame display lays windows out by the split tree
 Given the frame's width and height in pixels and the font's cell width, as last reported by the frontend, the frame display SHALL list every window in the split tree's order with its id, its rectangle, whether it is selected, and its window display built for the rectangle's height. A stacked split SHALL give its first part the split's ratio of the space with its text area rounded to whole lines, and a side-by-side split the ratio rounded to whole cells, the second part taking the rest less a 1 px divider between side-by-side parts. The rectangles SHALL tile the frame without overlap.
