@@ -27,6 +27,14 @@ Some(
                 "+prefix",
             ),
             (
+                "<left>",
+                "previous-buffer",
+            ),
+            (
+                "<right>",
+                "next-buffer",
+            ),
+            (
                 "C-c",
                 "save-buffers-kill-terminal",
             ),

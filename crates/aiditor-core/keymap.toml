@@ -84,6 +84,8 @@
 "C-x b" = "switch-to-buffer"
 "C-x 4 b" = "switch-to-buffer-other-window"
 "C-x k" = "kill-buffer"
+"C-x <left>" = "previous-buffer"
+"C-x <right>" = "next-buffer"
 "C-k" = "kill-line"
 "C-s" = "swiper"
 "M-," = "xref-go-back"

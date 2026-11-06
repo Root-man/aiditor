@@ -1115,6 +1115,24 @@ mod tests {
     }
 
     #[test]
+    fn switching_from_the_list_leaves_the_split_as_it_was() {
+        let mut h = workspaces();
+        let a = h.core.workspaces[0].id;
+        h.keys("C-x 3 C-x o");
+        h.open("other.txt");
+        h.keys("C-x o C-x t l");
+        select(&mut h, Row::Workspace(a));
+        h.keys("RET");
+        h.core.switch_to_workspace("b").unwrap();
+        let windows = std::iter::once(&h.core.windows.window).chain(h.core.windows.others.values());
+        let mut shown: Vec<_> = windows
+            .map(|w| h.core.buffers.get(w.buffer()).unwrap().name.as_str())
+            .collect();
+        shown.sort();
+        assert_eq!(shown, ["notes.txt", "other.txt"]);
+    }
+
+    #[test]
     fn refresh_keeps_each_windows_row_identity_and_falls_back_to_visible_owners() {
         let mut h = workspaces();
         let current = h.core.workspace().unwrap();
