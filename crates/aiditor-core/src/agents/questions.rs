@@ -39,8 +39,8 @@ pub(super) type Choice = (String, String, Option<String>, Option<String>);
 pub(super) struct Question {
     pub(super) message: String,
     pub(super) fields: Vec<Field>,
-    /// The field whose options show.
-    pub(super) open: usize,
+    /// The field whose options show; none once the last of several is answered.
+    pub(super) open: Option<usize>,
 }
 
 /// A single-choice or multi-select field.
@@ -218,7 +218,7 @@ pub(super) fn parse(request: &CreateElicitationRequest) -> Option<(Question, Opt
     let question = Question {
         message,
         fields,
-        open: 0,
+        open: Some(0),
     };
     Some((question, tool))
 }
@@ -413,19 +413,19 @@ impl Question {
     }
 
     /// The open field.
-    pub(super) fn field(&self) -> &Field {
-        &self.fields[self.open]
+    pub(super) fn field(&self) -> Option<&Field> {
+        self.fields.get(self.open?)
     }
 
-    pub(super) fn field_mut(&mut self) -> &mut Field {
-        &mut self.fields[self.open]
+    pub(super) fn field_mut(&mut self) -> Option<&mut Field> {
+        self.fields.get_mut(self.open?)
     }
 
     /// The block's lines, frame 6d's for one field and 6e's for several: each with its char
     /// ranges' faces, the box drawn behind them by `render`.
     pub(super) fn lines(&self) -> Vec<(String, Faces)> {
-        let field = self.field();
         if !self.several() {
+            let field = &self.fields[0];
             let header = format!(" Question  {}", self.message);
             let mut lines = vec![(header, vec![(1..9, label())])];
             let title = field.title.as_ref().filter(|t| **t != self.message);
@@ -454,7 +454,14 @@ impl Question {
             lines.push(hint("  ", hints));
             return lines;
         }
-        let header = format!(" Questions  {} of {}", self.open + 1, self.fields.len());
+        let n = self.fields.len();
+        let header = match self.open {
+            Some(i) => format!(" Questions  {} of {n}", i + 1),
+            None => {
+                let answered = self.fields.iter().filter(|f| f.answered().is_some());
+                format!(" Questions  {} of {n} answered", answered.count())
+            }
+        };
         let mut lines = vec![(header, vec![(1..10, label())])];
         let width = (self.fields.iter())
             .map(|f| f.name().chars().count())
@@ -463,11 +470,12 @@ impl Question {
         for (i, f) in self.fields.iter().enumerate() {
             let name = f.name();
             let pad = " ".repeat(width - name.chars().count());
-            let answer = (i != self.open)
+            let open = Some(i) == self.open;
+            let answer = (!open)
                 .then(|| f.answered())
                 .flatten()
                 .map(|a| f.content(&a, &mut BTreeMap::new()));
-            let (marks, mut props) = match (i == self.open, &answer) {
+            let (marks, mut props) = match (open, &answer) {
                 (true, _) => ("▾ ●", vec![(1..2, dim()), (3..4, label())]),
                 (false, Some(_)) => (
                     "▸ ✓",
@@ -481,25 +489,22 @@ impl Question {
                 text.push_str(&format!("{pad}  "));
                 let start = text.chars().count();
                 text.push_str(rest);
-                if i != self.open {
+                if !open {
                     props.push((start..text.chars().count(), dim()));
                 }
             }
             lines.push((text, props));
-            if i == self.open {
+            if open {
                 lines.extend(f.rows(NESTED));
             }
         }
-        let verb = match field.multi {
-            Some(_) => " tick  ",
-            None => " answer  ",
+        let keys = self.field().map(|f| (f.keys(), f.multi.is_some()));
+        let mut hints = match &keys {
+            Some((keys, true)) => vec![(&**keys, " tick  "), ("TAB", " next  ")],
+            Some((keys, false)) => vec![(&**keys, " answer  "), ("TAB", " next  ")],
+            None => vec![("TAB", " open  ")],
         };
-        let hints = [
-            (&*field.keys(), verb),
-            ("TAB", " next  "),
-            ("C-c C-y", " send all  "),
-            ("C-c C-k", " skip all"),
-        ];
+        hints.extend([("C-c C-y", " send all  "), ("C-c C-k", " skip all")]);
         lines.push(hint(" ", &hints));
         lines
     }
@@ -524,12 +529,14 @@ impl Question {
         }
     }
 
-    /// The line of the block the open field's first option is on.
+    /// The line of the block the open field's first option is on; with none open, the last
+    /// field's line.
     pub(super) fn first(&self) -> usize {
-        match self.several() {
-            true => 2 + self.open,
-            false => {
-                let title = self.field().title.as_ref();
+        match (self.several(), self.open) {
+            (true, Some(i)) => 2 + i,
+            (true, None) => self.fields.len(),
+            (false, _) => {
+                let title = self.fields[0].title.as_ref();
                 1 + usize::from(title.is_some_and(|t| *t != self.message))
             }
         }
@@ -537,14 +544,14 @@ impl Question {
 
     /// What line `line` of the block answers with, if anything.
     pub(super) fn answer_at(&self, line: usize) -> Option<Answer> {
-        self.field().answer_at(line.checked_sub(self.first())?)
+        self.field()?.answer_at(line.checked_sub(self.first())?)
     }
 
     /// Why it can't be sent with what it has ticked, if it can't: a block of several checks
     /// each field that has an answer.
     pub(super) fn refusal(&self) -> Option<String> {
         if !self.several() {
-            return self.field().refusal();
+            return self.fields[0].refusal();
         }
         let answered = self.fields.iter().filter(|f| f.answered().is_some());
         answered
@@ -554,7 +561,7 @@ impl Question {
 
     /// Option `i` of the open field's preview, the lines drawn under its row.
     pub(super) fn preview(&self, i: usize) -> Option<Preview> {
-        let field = self.field();
+        let field = self.field()?;
         let text = field.options.get(i)?.3.as_ref()?.replace('\t', "    ");
         let all: Vec<_> = text.lines().collect();
         let shown = match all.len() > PREVIEW_LINES {
@@ -591,7 +598,7 @@ impl Question {
     ) -> (BTreeMap<String, ElicitationContentValue>, String) {
         let mut content = BTreeMap::new();
         if !self.several() {
-            let shown = self.field().content(answer, &mut content);
+            let shown = self.fields[0].content(answer, &mut content);
             return (content, shown);
         }
         let shown: Vec<_> = (self.fields.iter())
@@ -637,7 +644,10 @@ mod tests {
         }));
         let (q, tool) = parse(&r).unwrap();
         assert_eq!(tool, Some("t".into()));
-        assert_eq!(q.field().own, Some(Own::Custom("question_0_custom".into())));
+        assert_eq!(
+            q.fields[0].own,
+            Some(Own::Custom("question_0_custom".into()))
+        );
         let lines = q.lines();
         let texts: Vec<_> = lines.iter().map(|l| l.0.as_str()).collect();
         assert_eq!(
@@ -685,7 +695,7 @@ mod tests {
             "env_note": {"type": "string", "_meta": {"codex": {"role": "user_note"}}},
         }));
         let (q, _) = parse(&r).unwrap();
-        assert_eq!(q.field().options.len(), 2);
+        assert_eq!(q.fields[0].options.len(), 2);
         assert_eq!(q.first(), 1, "a title equal to the message isn't repeated");
         let (content, _) = q.content(&Answer::Own("qa".into()));
         assert_eq!(
@@ -700,7 +710,7 @@ mod tests {
     #[test]
     fn a_bare_enum_is_a_question_without_an_own_answer() {
         let (q, _) = parse(&request(json!({"c": {"type": "string", "enum": ["x"]}}))).unwrap();
-        assert_eq!(q.field().own, None);
+        assert_eq!(q.fields[0].own, None);
         assert_eq!(
             q.lines().last().unwrap().0,
             "  1 answer   RET answer with the row at point   C-c C-k skip"
@@ -729,7 +739,7 @@ mod tests {
             json!({"question_0": []})
         );
         assert_eq!(shown, "Nothing picked");
-        let multi = q.field_mut().multi.as_mut().unwrap();
+        let multi = q.field_mut().unwrap().multi.as_mut().unwrap();
         (multi.ticked[1], multi.own) = (true, Some("mine".into()));
         assert_eq!(q.refusal(), None);
         assert_eq!(q.lines()[2].0, "   2   [x] B");
@@ -745,8 +755,8 @@ mod tests {
             "env_note": {"type": "string", "_meta": {"codex": {"role": "user_note"}}},
         }));
         let (mut q, _) = parse(&r).unwrap();
-        assert_eq!(q.field().options.len(), 1);
-        q.field_mut().multi.as_mut().unwrap().own = Some("qa".into());
+        assert_eq!(q.fields[0].options.len(), 1);
+        q.field_mut().unwrap().multi.as_mut().unwrap().own = Some("qa".into());
         let (content, _) = q.content(&Answer::Ticked);
         assert_eq!(
             serde_json::to_value(content).unwrap(),
@@ -797,7 +807,7 @@ mod tests {
         let (content, shown) = q.content(&Answer::Ticked);
         assert!(content.is_empty());
         assert_eq!(shown, "Nothing answered");
-        (q.fields[0].chosen, q.open) = (Some(Answer::Option(1)), 1);
+        (q.fields[0].chosen, q.open) = (Some(Answer::Option(1)), Some(1));
         assert_eq!(
             texts(&q)[..5],
             [
@@ -816,9 +826,9 @@ mod tests {
             .map(|(r, _)| q.lines()[1].0.chars().skip(r.start).take(r.len()).collect())
             .collect();
         assert_eq!(faced, ["▸", "✓", "Both"]);
-        q.field_mut().multi.as_mut().unwrap().ticked[0] = true;
+        q.field_mut().unwrap().multi.as_mut().unwrap().ticked[0] = true;
         assert_eq!(q.refusal().as_deref(), Some("Tests: Pick at least 2"));
-        q.field_mut().multi.as_mut().unwrap().ticked[1] = true;
+        q.field_mut().unwrap().multi.as_mut().unwrap().ticked[1] = true;
         assert_eq!(q.refusal(), None);
         let (content, shown) = q.content(&Answer::Ticked);
         assert_eq!(

@@ -1849,7 +1849,8 @@ impl Ctx<'_> {
         let Body::Question(question) = &mut session.asks[at].body else {
             unreachable!("ticked as a question");
         };
-        let multi = (question.field_mut().multi.as_mut()).expect("ticked as a multi-select");
+        let field = question.field_mut().expect("ticked in the open field");
+        let multi = (field.multi.as_mut()).expect("ticked as a multi-select");
         match option {
             Some(i) => multi.ticked[i] = !multi.ticked[i],
             None => multi.own = own,
@@ -1861,8 +1862,10 @@ impl Ctx<'_> {
     /// several questions `at`, and opens the next field.
     fn record_answer(&mut self, id: AgentId, at: usize, answer: questions::Answer) {
         self.open_question(id, at, |q| {
-            q.field_mut().chosen = Some(answer);
-            q.open = (q.open + 1).min(q.fields.len() - 1);
+            let open = q.open.expect("answered in the open field");
+            q.fields[open].chosen = Some(answer);
+            // Past the last, every field folds until TAB opens one.
+            q.open = Some(open + 1).filter(|&i| i < q.fields.len());
         });
     }
 
@@ -2040,7 +2043,12 @@ impl Ctx<'_> {
         let asked = self.ask_at_point().and_then(|(id, at, _)| {
             let question = self.core.agents[&id].asks[at].question()?;
             let field = question.field();
-            Some((id, at, field.options.len(), field.own.is_some()))
+            Some((
+                id,
+                at,
+                field.map_or(0, |f| f.options.len()),
+                field.is_some_and(|f| f.own.is_some()),
+            ))
         });
         match (asked, key) {
             (Some((id, at, _, own)), 'o') => {
@@ -2072,7 +2080,7 @@ impl Ctx<'_> {
         let question = self.core.agents[&id].asks[at]
             .question()
             .expect("a question");
-        if question.field().multi.is_some() {
+        if question.field().is_some_and(|f| f.multi.is_some()) {
             let own = match answer {
                 questions::Answer::Own(text) => Some(text),
                 _ => None,
@@ -2088,7 +2096,7 @@ impl Ctx<'_> {
     /// Reads an own answer to session `id`'s pending question `at`, starting from the one it has.
     fn own_answer(&mut self, id: AgentId, at: usize) {
         let question = self.core.agents[&id].asks[at].question();
-        let own = question.and_then(|q| q.field().own_text().map(str::to_owned));
+        let own = (question.and_then(|q| q.field()?.own_text())).map(str::to_owned);
         self.call("agent-answer-own", Args::default());
         if let Some(own) = own {
             _ = self.set_text(&own);
@@ -2099,7 +2107,7 @@ impl Ctx<'_> {
     /// or a block of several.
     fn sendable(&self, id: AgentId, at: usize) -> bool {
         (self.core.agents[&id].asks[at].question())
-            .is_some_and(|q| q.several() || q.field().multi.is_some())
+            .is_some_and(|q| q.several() || q.field().is_some_and(|f| f.multi.is_some()))
     }
 
     /// `agent-answer-own`: answers the question at point with `text`, in its adapter's shape.
@@ -2107,7 +2115,8 @@ impl Ctx<'_> {
         let (id, at) = self
             .ask_at_point()
             .filter(|&(id, at, _)| {
-                (self.core.agents[&id].asks[at].question()).is_some_and(|q| q.field().own.is_some())
+                (self.core.agents[&id].asks[at].question())
+                    .is_some_and(|q| q.field().is_some_and(|f| f.own.is_some()))
             })
             .map(|(id, at, _)| (id, at))
             .ok_or("No question here")?;
@@ -2116,7 +2125,7 @@ impl Ctx<'_> {
             let question = self.core.agents[&id].asks[at]
                 .question()
                 .expect("a question");
-            if question.field().multi.is_some() {
+            if question.field().is_some_and(|f| f.multi.is_some()) {
                 self.tick_question(id, at, None, None);
             } else if question.several() {
                 let Body::Question(q) =
@@ -2124,7 +2133,7 @@ impl Ctx<'_> {
                 else {
                     unreachable!("a question");
                 };
-                q.field_mut().chosen = None;
+                q.field_mut().expect("read in the open field").chosen = None;
                 self.redraw_question(id, at);
             } else {
                 return Err("Answer is empty".into());
@@ -2401,7 +2410,9 @@ impl Ctx<'_> {
         if let Some((id, at, _)) = self.ask_at_point() {
             let question = self.core.agents[&id].asks[at].question();
             if question.is_some_and(|q| q.several()) {
-                self.open_question(id, at, |q| q.open = (q.open + 1) % q.fields.len());
+                self.open_question(id, at, |q| {
+                    q.open = Some(q.open.map_or(0, |i| (i + 1) % q.fields.len()))
+                });
                 return Ok(());
             }
         }
@@ -8299,6 +8310,22 @@ mod tests {
             text.contains(" ▸ ✓ Tests   A\n ▾ ● Commit  One or many?\n      1   One\n"),
             "{text}"
         );
+        // Answering the last folds them all, sending nothing.
+        h.keys("1");
+        let text = h.core.text();
+        assert!(
+            text.contains(
+                " Questions  3 of 3 answered\n ▸ ✓ Status  Both\n ▸ ✓ Tests   A\n ▸ ✓ Commit  One\n \
+                 TAB open  C-c C-y send all  C-c C-k skip all\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(Some(h.point()), before(&h, " ▸ ✓ Commit"));
+        h.keys("1");
+        assert!(
+            ops(&mut h).is_empty(),
+            "a digit with none open does nothing"
+        );
         h.keys("TAB");
         assert!(
             h.core
@@ -8331,12 +8358,12 @@ mod tests {
             ops(&mut h),
             [accepted(
                 1,
-                r#"{"question_0_custom":"Redis","question_1":["a"]}"#
+                r#"{"question_0_custom":"Redis","question_1":["a"],"question_2":"1"}"#
             )]
         );
         let text = h.core.text();
         assert!(
-            text.contains("✓ Which?  Status: Redis; Tests: A\n"),
+            text.contains("✓ Which?  Status: Redis; Tests: A; Commit: One\n"),
             "{text}"
         );
         assert_eq!(visible(&mut h).len(), 4, "the answer folds with its group");
