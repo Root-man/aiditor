@@ -40,9 +40,6 @@ use render::*;
 
 /// The prompt line's text, just before the prompt area.
 const PROMPT: &str = "> ";
-/// Slash commands the editor does itself, left out of the `Command:` prompt: Codex's `plan`, as
-/// `S-TAB` cycles modes.
-const HIDDEN_COMMANDS: &[&str] = &["plan"];
 /// The session buffer's major mode.
 pub(crate) const MODE: &str = "agent-session-mode";
 /// How often a shown session's working line and waiting counters tick.
@@ -123,7 +120,7 @@ pub(crate) struct Session {
     groups: Vec<Group>,
     /// The buffer's tick when the prompt area's chips were last painted.
     painted: u64,
-    /// The slash commands from the latest `available_commands_update`, hidden ones left out.
+    /// The slash commands from the latest `available_commands_update`.
     commands: Vec<AvailableCommand>,
     pastes: Vec<pastes::Paste>,
 }
@@ -1737,9 +1734,7 @@ impl Ctx<'_> {
             }
             SessionUpdate::UsageUpdate(usage) => session.usage = Some((usage.used, usage.size)),
             SessionUpdate::AvailableCommandsUpdate(update) => {
-                session.commands = (update.available_commands.into_iter())
-                    .filter(|c| !HIDDEN_COMMANDS.contains(&c.name.as_str()))
-                    .collect();
+                session.commands = update.available_commands;
             }
             _ => {}
         }
@@ -3749,10 +3744,9 @@ mod tests {
     #[test]
     fn slash_at_the_prompt_start_picks_a_command_with_its_hint() {
         let mut h = session();
-        commands(&mut h, &["review", "plan", "mcp"]);
+        commands(&mut h, &["review", "mcp"]);
         h.keys("/");
         let mb = h.core.minibuffer().unwrap();
-        // `plan` is the editor's own mode switch.
         assert_eq!(mb.candidates, ["review", "mcp"]);
         assert_eq!(mb.annotations, ["[path]  Review changes", "Run mcp"]);
         h.keys("RET");
