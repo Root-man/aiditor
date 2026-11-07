@@ -35,6 +35,7 @@ mod questions;
 mod render;
 pub(crate) use chips::{Chips, is_chip};
 use groups::*;
+pub(crate) use questions::Preview;
 use render::*;
 
 /// The prompt line's text, just before the prompt area.
@@ -211,15 +212,24 @@ impl Session {
         Some(buffer.text().char_to_line(first)..=buffer.text().char_to_line(last))
     }
 
-    /// The buffer line of the question row `point` is on, which frame 6d highlights.
-    pub(crate) fn question_row(&self, buffer: &Buffer, point: usize) -> Option<usize> {
+    /// The buffer line of the question row `point` is on, which frame 6d highlights, and the
+    /// preview of its option, if it has one.
+    pub(crate) fn question_row(
+        &self,
+        buffer: &Buffer,
+        point: usize,
+    ) -> Option<(usize, Option<Preview>)> {
         self.asks.iter().find_map(|ask| {
             let start = buffer.marker(ask.start)?;
             let range = start..=start + ask.len;
             let first = buffer.text().char_to_line(start);
             let line = buffer.text().char_to_line(point);
-            (range.contains(&point) && ask.question()?.answer_at(line - first).is_some())
-                .then_some(line)
+            let question = ask.question().filter(|_| range.contains(&point))?;
+            let preview = match question.answer_at(line - first)? {
+                questions::Answer::Option(i) => question.preview(i),
+                _ => None,
+            };
+            Some((line, preview))
         })
     }
 
@@ -1822,6 +1832,49 @@ impl Ctx<'_> {
         self.close_ask(id, at, &line, Some(response));
     }
 
+    /// Ticks or unticks option `option` of session `id`'s pending multi-select question `at`,
+    /// or its own answer with `None`, which `own` sets.
+    fn tick_question(
+        &mut self,
+        id: AgentId,
+        at: usize,
+        option: Option<usize>,
+        own: Option<String>,
+    ) {
+        let session = self
+            .core
+            .agents
+            .get_mut(&id)
+            .expect("a pending question's session");
+        let ask = &mut session.asks[at];
+        let Body::Question(question) = &mut ask.body else {
+            unreachable!("ticked as a question");
+        };
+        let multi = question.multi.as_mut().expect("ticked as a multi-select");
+        match option {
+            Some(i) => multi.ticked[i] = !multi.ticked[i],
+            None => multi.own = own,
+        }
+        let Some(buffer) = self.core.buffers.get_mut(session.buffer) else {
+            return;
+        };
+        let start = buffer.marker(ask.start).expect("live while pending");
+        // Only `[ ]` and `[x]` change, char for char, so point stays where it is.
+        let old: Vec<_> = buffer
+            .text()
+            .slice(start..start + ask.len)
+            .chars()
+            .collect();
+        let new = rows_text(&ask.body.rows(&ask.title));
+        for (i, (o, n)) in old.into_iter().zip(new.chars()).enumerate() {
+            if o != n {
+                buffer.replace_output(start + i..start + i + 1, &n.to_string());
+            }
+        }
+        buffer.remove_properties(start..start + ask.len);
+        ask.body.render(buffer, start, &ask.title);
+    }
+
     /// Answers session `id`'s pending request `at` with `cancelled` or `cancel`.
     fn cancel_ask(&mut self, id: AgentId, at: usize) {
         let (response, line) = self.core.agents[&id].asks[at].cancelled();
@@ -1840,6 +1893,17 @@ impl Ctx<'_> {
     /// `agent-allow-once`: answers the oldest pending permission request with its first
     /// `allow_once` option, passing questions by.
     pub(crate) fn agent_allow_once(&mut self) -> Result<(), String> {
+        if let Some((id, at, _)) = self
+            .ask_at_point()
+            .filter(|&(id, at, _)| self.multi(id, at))
+        {
+            let question = self.core.agents[&id].asks[at].question();
+            if let Some(refusal) = question.and_then(|q| q.refusal()) {
+                return Err(refusal);
+            }
+            self.answer_question(id, at, questions::Answer::Ticked);
+            return Ok(());
+        }
         let kind = PermissionOptionKind::AllowOnce;
         let (id, session) = self.core.current_session()?;
         let (at, ask, options) = (session.asks.iter().enumerate())
@@ -1912,20 +1976,43 @@ impl Ctx<'_> {
             Some((id, at, question.options.len(), question.own.is_some()))
         });
         match (asked, key) {
-            (Some((_, _, _, own)), 'o') => {
+            (Some((id, at, _, own)), 'o') => {
                 if own {
-                    self.call("agent-answer-own", args);
+                    self.own_answer(id, at);
                 }
             }
             (Some((id, at, options, _)), digit) => {
                 let n = digit.to_digit(10).map_or(0, |d| d as usize);
                 if (1..=options).contains(&n) {
-                    self.answer_question(id, at, questions::Answer::Option(n - 1));
+                    self.pick(id, at, n - 1);
                 }
             }
             (None, _) => self.call("self-insert-command", args),
         }
         Ok(())
+    }
+
+    /// Answers session `id`'s pending question `at` with option `option`, or ticks it in a
+    /// multi-select.
+    fn pick(&mut self, id: AgentId, at: usize, option: usize) {
+        match self.multi(id, at) {
+            true => self.tick_question(id, at, Some(option), None),
+            false => self.answer_question(id, at, questions::Answer::Option(option)),
+        }
+    }
+
+    /// Reads an own answer to session `id`'s pending question `at`, or unticks a multi-select's.
+    fn own_answer(&mut self, id: AgentId, at: usize) {
+        let question = self.core.agents[&id].asks[at].question();
+        match question.and_then(|q| q.multi.as_ref()) {
+            Some(m) if m.own.is_some() => self.tick_question(id, at, None, None),
+            _ => self.call("agent-answer-own", Args::default()),
+        }
+    }
+
+    /// Whether session `id`'s pending request `at` is a multi-select question.
+    fn multi(&self, id: AgentId, at: usize) -> bool {
+        (self.core.agents[&id].asks[at].question()).is_some_and(|q| q.multi.is_some())
     }
 
     /// `agent-answer-own`: answers the question at point with `text`, in its adapter's shape.
@@ -1940,7 +2027,10 @@ impl Ctx<'_> {
         if text.trim().is_empty() {
             return Err("Answer is empty".into());
         }
-        self.answer_question(id, at, questions::Answer::Own(text.trim().into()));
+        match self.multi(id, at) {
+            true => self.tick_question(id, at, None, Some(text.trim().into())),
+            false => self.answer_question(id, at, questions::Answer::Own(text.trim().into())),
+        }
         Ok(())
     }
 
@@ -2077,12 +2167,12 @@ impl Ctx<'_> {
                     self.answer_ask(id, at, Some(line - 1));
                     return Ok(());
                 }
-                Some(Some(answer @ questions::Answer::Option(_))) => {
-                    self.answer_question(id, at, answer);
+                Some(Some(questions::Answer::Option(option))) => {
+                    self.pick(id, at, option);
                     return Ok(());
                 }
                 Some(Some(questions::Answer::Own(_))) => {
-                    self.call("agent-answer-own", Args::default());
+                    self.own_answer(id, at);
                     return Ok(());
                 }
                 _ => {}
@@ -8067,5 +8157,141 @@ mod tests {
             "{}",
             h.core.text()
         );
+    }
+
+    const MULTI: &str = " Question  Which?\n   1   [ ] A\n   2   [ ] B\n   3   [ ] C\n   o   [ ] \
+        Own answer\n  1-3 tick   RET tick at point   C-c C-y send   C-c C-k skip\n";
+
+    /// A Claude-shaped multi-select with options A, B and C and an own answer, taking `bounds`.
+    fn multi_select(h: &mut Harness, request: i64, bounds: Value) {
+        let mut field = serde_json::json!({"type": "array", "items": {"anyOf": [
+            {"const": "a", "title": "A"}, {"const": "b", "title": "B"},
+            {"const": "c", "title": "C"}]}});
+        field
+            .as_object_mut()
+            .unwrap()
+            .extend(bounds.as_object().unwrap().clone());
+        let fields = serde_json::json!({
+            "question_0": field,
+            "question_0_custom": {"type": "string", "title": "Other"},
+        });
+        question(h, request, Some(fields));
+    }
+
+    #[test]
+    fn digits_and_ret_tick_a_multi_select_and_c_c_c_y_sends_it() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        ask(&mut h, 1, "c", Some("Edit"));
+        multi_select(&mut h, 2, serde_json::json!({}));
+        assert!(h.core.text().contains(MULTI), "{}", h.core.text());
+        let at = h.point();
+        h.keys("1 3");
+        assert!(ops(&mut h).is_empty(), "ticking sends nothing");
+        assert!(
+            h.core
+                .text()
+                .contains("   1   [x] A\n   2   [ ] B\n   3   [x] C\n")
+        );
+        assert_eq!(h.point(), at, "point stays");
+        h.keys("RET");
+        assert!(h.core.text().contains("   1   [ ] A\n"), "RET unticks");
+        h.keys("RET o Redis RET");
+        assert!(h.core.text().contains("   o   [x] Own answer\n"));
+        h.keys("C-c C-y");
+        assert_eq!(
+            ops(&mut h),
+            [accepted(
+                2,
+                r#"{"question_0":["a","c"],"question_0_custom":"Redis"}"#
+            )]
+        );
+        assert!(
+            h.core.text().contains("✓ Which?  A, C, Redis\n"),
+            "{}",
+            h.core.text()
+        );
+        // The permission request stayed pending, and C-c C-y in the prompt answers it.
+        h.keys("C-c C-y");
+        assert_eq!(ops(&mut h), ["reply 0 1 allow"]);
+    }
+
+    #[test]
+    fn min_and_max_items_refuse_a_send_without_a_count() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        multi_select(&mut h, 1, serde_json::json!({"minItems": 2, "maxItems": 2}));
+        assert!(h.core.text().contains(MULTI), "no count drawn");
+        h.keys("1 C-c C-y");
+        assert_eq!(h.core.message(), Some("Pick at least 2"));
+        h.keys("2 o x RET C-c C-y");
+        assert_eq!(h.core.message(), Some("Pick at most 2"));
+        assert!(ops(&mut h).is_empty(), "nothing sent");
+        h.keys("o C-c C-y");
+        assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":["a","b"]}"#)]);
+    }
+
+    #[test]
+    fn a_tenth_option_is_picked_with_ret() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        let options: Vec<_> = (1..=12)
+            .map(|n| serde_json::json!({"const": format!("v{n}"), "title": format!("T{n}")}))
+            .collect();
+        let fields = serde_json::json!({"c": {"type": "string", "oneOf": options}});
+        question(&mut h, 1, Some(fields));
+        let text = h.core.text();
+        assert!(text.contains("   9   T9\n       T10\n"), "{text}");
+        assert!(text.contains("  1-9 answer"), "{text}");
+        h.keys("C-n C-n C-n C-n C-n C-n C-n C-n C-n RET");
+        assert_eq!(ops(&mut h), [accepted(1, r#"{"c":"v10"}"#)]);
+    }
+
+    #[test]
+    fn the_preview_follows_point_and_folds_long_text() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        let long: Vec<_> = (1..=12).map(|n| format!("l{n}")).collect();
+        let preview =
+            |p: &str| serde_json::json!({"_claude/askUserQuestionOption": {"preview": p}});
+        let fields = serde_json::json!({"c": {"type": "string", "oneOf": [
+            {"const": "a", "title": "A", "_meta": preview("one\ntwo")},
+            {"const": "b", "title": "B", "_meta": preview(&long.join("\n"))},
+            {"const": "c", "title": "C"}]}});
+        question(&mut h, 1, Some(fields));
+        assert!(
+            h.core
+                .text()
+                .contains("  1-3 answer   C-n C-p preview another   C-c C-k skip"),
+            "{}",
+            h.core.text()
+        );
+        let lines = shown(&mut h, 30);
+        let at = lines.iter().position(|l| l.contains("1   A")).unwrap();
+        assert_eq!(
+            lines[at + 1..at + 4],
+            ["        one ", "        two ", "   2   B"]
+        );
+        let line = drawn_line(&mut h, "one");
+        assert_eq!(
+            line.spans[1].face.bg,
+            h.core.settings().theme.face(FaceName::SessionBlock).bg
+        );
+        assert!(!h.core.text().contains("one"), "not in the buffer");
+        h.keys("C-n");
+        let lines = shown(&mut h, 30);
+        assert!(!lines.iter().any(|l| l.contains("one")), "{lines:?}");
+        let at = lines.iter().position(|l| l.contains("2   B")).unwrap();
+        assert_eq!(lines[at + 1].trim(), "l1");
+        assert_eq!(lines[at + 7].trim(), "l7");
+        assert_eq!(lines[at + 8].trim(), "… 5 more lines");
+        assert!(lines[at + 9].contains("3   C"), "{lines:?}");
+        h.keys("C-n");
+        let lines = shown(&mut h, 30);
+        assert!(!lines.iter().any(|l| l.contains("l1")), "C has none");
     }
 }
