@@ -238,7 +238,7 @@ impl Session {
             Some(Activity::Failed)
         } else if self.asks.iter().any(|a| a.question().is_none()) {
             Some(Activity::Waiting)
-        } else if !self.asks.is_empty() {
+        } else if self.asks.iter().any(Ask::blocks) {
             Some(Activity::Asking)
         } else if self.turn.is_some() {
             Some(Activity::Working)
@@ -313,6 +313,11 @@ impl Session {
         let mut right = Vec::new();
         if let Some(activity) = self.activity() {
             right.push(segment(activity.text(), activity.face()));
+        }
+        match self.asks.iter().filter(|a| !a.blocks()).count() {
+            0 => {}
+            1 => right.push(segment("1 question", FaceName::StatusWaiting)),
+            n => right.push(segment(&format!("{n} questions"), FaceName::StatusWaiting)),
         }
         if let Some((used, size)) = self.usage.filter(|(_, size)| *size > 0) {
             let percent = u128::from(used.min(size)) * 100 / u128::from(size);
@@ -480,6 +485,11 @@ impl Ask {
             Body::Question(q) => Some(q),
             Body::Permission(_) => None,
         }
+    }
+
+    /// Whether the turn waits for it: anything but a non-blocking question.
+    fn blocks(&self) -> bool {
+        !self.question().is_some_and(|q| q.nonblocking)
     }
 
     /// Whether it is a permission request about `tool`, whose row then shows under its folded
@@ -906,13 +916,14 @@ impl Core {
         (question, tool): (questions::Question, Option<ToolCallId>),
     ) {
         let (title, first) = (question.message.clone(), question.first());
+        let nonblocking = question.nonblocking;
         self.show_ask(id, request, tool, title, Body::Question(question));
         let Some(session) = self.agents.get(&id) else {
             return;
         };
         let (buffer, ask) = (session.buffer, session.asks.last().expect("just shown"));
         let b = self.buffers.get(buffer).expect("shown in it");
-        if b.prompt_start() < b.len_chars() {
+        if nonblocking || b.prompt_start() < b.len_chars() {
             if self.windows.window.buffer() == buffer {
                 self.echo("Question waiting: C-c C-q goes to it".into());
             }
@@ -953,6 +964,11 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
+        // A non-blocking question stands apart, so the turn's later calls group below it.
+        let alone = matches!(&body, Body::Question(q) if q.nonblocking) && tool.is_none();
+        if alone {
+            session.end_run(buffer);
+        }
         let rows = body.rows(&title);
         let text = rows_text(&rows);
         let end = session.end(buffer);
@@ -973,6 +989,9 @@ impl Core {
             row,
         });
         session.add_row(buffer, Row::Ask { start: row, len });
+        if alone {
+            session.end_run(buffer);
+        }
         if let Some(g) = session.group {
             session.show_group(buffer, g);
         }
@@ -1431,7 +1450,7 @@ impl Core {
             "[loading]"
         } else if s.session.is_none() {
             "[starting]"
-        } else if !s.asks.is_empty() {
+        } else if s.asks.iter().any(Ask::blocks) {
             "[waiting]"
         } else if s.turn.is_some() {
             "[working]"
@@ -2632,7 +2651,13 @@ impl Ctx<'_> {
             return;
         };
         for _ in 0..session.asks.len() {
-            self.cancel_ask(id, 0);
+            // codex-acp withdraws a non-blocking question at its turn's end, maybe after this.
+            if self.core.agents[&id].asks[0].blocks() {
+                self.cancel_ask(id, 0);
+            } else {
+                let (response, _) = self.core.agents[&id].asks[0].cancelled();
+                self.close_ask(id, 0, "○ withdrawn", Some(response));
+            }
         }
         let core = &mut *self.core;
         let line = match result {
@@ -8141,6 +8166,80 @@ mod tests {
         assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":"a"}"#)]);
         h.keys("C-c C-q");
         assert_eq!(h.core.message(), Some("No question is pending"));
+    }
+
+    /// codex-acp's async question, `request`, which doesn't stop the turn.
+    fn async_question(h: &mut Harness, request: i64) {
+        let ask = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "mode": "form", "message": "Which env?",
+            "requestedSchema": {"type": "object", "properties": {
+                "env": {"type": "string", "oneOf": [{"const": "s", "title": "staging"}]}}},
+            "_meta": {"codex": {"delivery": "async"}},
+        }))
+        .unwrap();
+        h.send(Msg::AgentRequest {
+            id: AgentId(0),
+            request: RequestId::Number(request),
+            body: Request(Box::new(AgentRequest::CreateElicitationRequest(ask))),
+        });
+    }
+
+    #[test]
+    fn a_nonblocking_question_lets_the_turn_go_on() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        async_question(&mut h, 1);
+        let end = h.core.text().chars().count();
+        assert_eq!(h.point(), end, "point stays in the prompt");
+        assert_eq!(
+            h.core.message(),
+            Some("Question waiting: C-c C-q goes to it")
+        );
+        let right = |h: &mut Harness| h.display(5).mode_line.right;
+        assert_eq!(
+            right(&mut h)[..2],
+            [
+                vec![("● working".into(), FaceName::StatusRunning)],
+                vec![("1 question".into(), FaceName::StatusWaiting)]
+            ]
+        );
+        assert_eq!(
+            h.core.session_state("claude", &"s".into()),
+            Some("[working]")
+        );
+        for t in ["t1", "t2", "t3"] {
+            tool(&mut h, ToolCall::new(t, "Read"));
+        }
+        let lines = shown(&mut h, 20);
+        let at = |t: &str| lines.iter().position(|l| l.contains(t)).unwrap();
+        assert!(
+            at("go to it") < at("Using tools"),
+            "calls group below: {lines:?}"
+        );
+        chunk(&mut h, "Later");
+        let text = h.core.text();
+        let (block, later) = (
+            text.find("C-c C-q go to it").unwrap(),
+            text.find("Later").unwrap(),
+        );
+        assert!(block < later, "output goes in below the block: {text}");
+        async_question(&mut h, 2);
+        assert_eq!(
+            right(&mut h)[1],
+            vec![("2 questions".into(), FaceName::StatusWaiting)]
+        );
+        h.keys("C-c C-q 1");
+        assert_eq!(ops(&mut h), [accepted(1, r#"{"env":"s"}"#)]);
+        async_question(&mut h, 3);
+        h.send(Msg::AgentWithdrawn {
+            id: AgentId(0),
+            request: RequestId::Number(3),
+        });
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert_eq!(ops(&mut h), [r#"reply 0 2 {"action":"cancel"}"#]);
+        assert_eq!(h.core.text().matches("○ withdrawn").count(), 2);
+        assert_eq!(right(&mut h).len(), 0, "{:?}", right(&mut h));
     }
 
     #[test]
