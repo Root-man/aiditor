@@ -278,3 +278,69 @@ async fn permission_requests_are_answered_from_the_session_buffer() {
         "> go\n\n✓ allowed once\n\n✗ rejected\n\n✓ allowed always\n\nWorked 0s\n\n> "
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn questions_are_answered_from_the_session_buffer() {
+    let request = r#"{"mode": "form", "message": "Which?", "requestedSchema":
+        {"type": "object", "properties": {
+            "question_0": {"type": "string", "oneOf": [{"const": "a", "title": "A"},
+                                                         {"const": "b", "title": "B"}]},
+            "question_0_custom": {"type": "string"}}}}"#;
+    let ask = format!(r#"{{"question": {{"request": {request}}}}}"#);
+    let withdrawn = format!(r#"{{"question": {{"request": {request}, "withdrawAfter": 100}}}}"#);
+    let mut app = App::new(&format!(
+        r#"{{"prompts": [[{ask}, {ask}, {ask}], [{withdrawn}]]}}"#
+    ));
+    app.keys("M-x agent-start RET fake RET");
+    app.until("the session", |app| app.started).await;
+    app.keys("go RET");
+    let answered = |n: usize| {
+        move |app: &App| {
+            (app.stderr.iter())
+                .filter(|l| l.starts_with("question "))
+                .count()
+                == n
+        }
+    };
+    for (n, keys, answer) in [
+        (
+            1,
+            "2",
+            r#"{"action":"accept","content":{"question_0":"b"}}"#,
+        ),
+        (
+            2,
+            "o mine RET",
+            r#"{"action":"accept","content":{"question_0_custom":"mine"}}"#,
+        ),
+        (3, "C-c C-k", r#"{"action":"decline"}"#),
+    ] {
+        let n1 = n;
+        app.until("a question", move |app: &App| {
+            app.core.text().matches("Question: Which?").count() == 1 && answered(n1 - 1)(app)
+        })
+        .await;
+        app.keys(keys);
+        app.until("the answer", answered(n)).await;
+        let line = app
+            .stderr
+            .iter()
+            .rfind(|l| l.starts_with("question "))
+            .unwrap();
+        assert_eq!(line, &format!("question answered: {answer}"));
+    }
+    app.until("the turn", |app| app.prompted).await;
+    app.keys("again RET");
+    app.until("the withdrawal", answered(4)).await;
+    let line = app
+        .stderr
+        .iter()
+        .rfind(|l| l.starts_with("question "))
+        .unwrap();
+    assert_eq!(line, "question error: Request cancelled");
+    app.until("the closed block", |app| {
+        app.core.text().contains("○ withdrawn")
+    })
+    .await;
+    assert!(!app.core.text().contains("Question: Which?"));
+}

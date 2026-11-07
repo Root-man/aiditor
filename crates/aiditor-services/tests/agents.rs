@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
-    PromptRequest, SessionConfigKind, SetSessionConfigOptionRequest, StopReason,
+    ClientResponse, PromptRequest, SessionConfigKind, SetSessionConfigOptionRequest, StopReason,
 };
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
@@ -108,6 +108,12 @@ async fn a_session_opens_in_cwd_without_fs_or_terminal() {
     stderr_until(&mut rx, &mut lines, &cwd).await;
     let caps = "fs.readTextFile=false fs.writeTextFile=false terminal=false terminal_output=true";
     stderr_until(&mut rx, &mut lines, caps).await;
+    stderr_until(
+        &mut rx,
+        &mut lines,
+        "elicitation.form=true elicitation.url=false",
+    )
+    .await;
     agents.kill_all();
 }
 
@@ -263,6 +269,44 @@ async fn the_core_cancels_permission_requests_without_a_session() {
             }
         }
     }
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withdrawn_request_is_answered_and_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let ask = r#"{"request": {"mode": "form", "message": "Which?", "requestedSchema":
+        {"type": "object", "properties": {"c": {"type": "string", "enum": ["a"]}}}},
+        "withdrawAfter": 50}"#;
+    let (key, path) = script(
+        dir.path(),
+        &format!(r#"{{"session": [{{"question": {ask}}}]}}"#),
+    );
+    let mut agents = Agents::default();
+    let mut rx = spawn(&mut agents, AGENT, Path::new("/"), &[(key, &path)]);
+    let (mut withdrawn, mut error) = (None, None);
+    while withdrawn.is_none() || error.is_none() {
+        match next(&mut rx).await.expect("the agent is running") {
+            Msg::AgentWithdrawn { id, request } => withdrawn = Some((id, request)),
+            Msg::AgentStderr { line, .. } if line.starts_with("question ") => error = Some(line),
+            _ => {}
+        }
+    }
+    let (id, request) = withdrawn.unwrap();
+    assert_eq!(id, ID);
+    assert_eq!(error.unwrap(), "question error: Request cancelled");
+    // A late reply from the core goes nowhere.
+    let decline = serde_json::from_value(serde_json::json!({"action": "decline"})).unwrap();
+    let result = Ok(ClientResponse::CreateElicitationResponse(decline));
+    assert!(
+        agents
+            .run(AgentOp::Reply {
+                id,
+                request,
+                result
+            })
+            .is_none()
+    );
     agents.kill_all();
 }
 

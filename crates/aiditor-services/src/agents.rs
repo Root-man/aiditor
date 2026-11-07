@@ -13,20 +13,23 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, Implementation,
-    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-    NewSessionResponse, PromptRequest, RequestId, SessionId, SessionInfo, SessionNotification,
+    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, ElicitationCapabilities,
+    ElicitationFormCapabilities, Implementation, InitializeRequest, ListSessionsRequest,
+    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest, RequestId, SessionId,
+    SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Request};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::oneshot;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-/// The agent's requests the core hasn't answered yet; ACP's request enum takes its answer as
-/// JSON, so replies are serialized.
-type Pending = Arc<Mutex<HashMap<RequestId, Responder>>>;
+/// The agent's requests the core hasn't answered yet, each with a sender whose drop ends the
+/// wait for its withdrawal; ACP's request enum takes its answer as JSON, so replies are
+/// serialized.
+type Pending = Arc<Mutex<HashMap<RequestId, (Responder, oneshot::Sender<()>)>>>;
 
 /// The spawned agents by id, and the processes still listing sessions by request.
 #[derive(Default)]
@@ -153,7 +156,8 @@ impl Agents {
                 result,
             } => {
                 let responder = (self.handles.get(&id))
-                    .and_then(|agent| agent.pending.lock().unwrap().remove(&request));
+                    .and_then(|agent| agent.pending.lock().unwrap().remove(&request))
+                    .map(|(responder, _)| responder);
                 let result = result.map(|response| {
                     serde_json::to_value(response).expect("a ClientResponse serializes")
                 });
@@ -465,7 +469,25 @@ async fn connect(
         .on_receive_request(
             async move |body: AgentRequest, responder: Responder, _| {
                 let request = responder.id().clone();
-                pending.lock().unwrap().insert(request.clone(), responder);
+                let cancellation = responder.cancellation();
+                let (settled, answered) = oneshot::channel();
+                (pending.lock().unwrap()).insert(request.clone(), (responder, settled));
+                // `$/cancel_request` withdraws it: answered here, its block closed by the core.
+                let (pending, withdrawn, at) = (pending.clone(), requests.clone(), request.clone());
+                tokio::spawn(async move {
+                    tokio::select! {
+                        () = cancellation.cancelled() => {}
+                        _ = answered => return,
+                    }
+                    let responder = pending.lock().unwrap().remove(&at);
+                    if let Some((responder, _)) = responder {
+                        let cancelled = agent_client_protocol::Error::request_cancelled();
+                        _ = responder.respond_with_error(cancelled);
+                        _ = withdrawn
+                            .send(Msg::AgentWithdrawn { id, request: at })
+                            .await;
+                    }
+                });
                 _ = (requests.send(Msg::AgentRequest {
                     id,
                     request,
@@ -488,8 +510,12 @@ async fn connect(
             // The default capabilities offer neither fs nor terminals: agents use the disk. The
             // `_meta` extension asks for command output in tool calls (#100).
             let meta = serde_json::json!({"terminal_output": true});
+            let elicitation =
+                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new());
+            let capabilities = (ClientCapabilities::new().meta(meta.as_object().cloned()))
+                .elicitation(elicitation);
             let initialize = InitializeRequest::new(ProtocolVersion::V1)
-                .client_capabilities(ClientCapabilities::new().meta(meta.as_object().cloned()))
+                .client_capabilities(capabilities)
                 .client_info(Implementation::new("aiditor", env!("CARGO_PKG_VERSION")));
             let initialized = agent.send_request(initialize).block_task().await?;
             let capabilities = &initialized.agent_capabilities;

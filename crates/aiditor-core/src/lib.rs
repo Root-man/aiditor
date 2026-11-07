@@ -219,6 +219,12 @@ pub enum Msg {
         request: RequestId,
         body: Request,
     },
+    /// The agent withdrew pending request `request` with `$/cancel_request`; the service
+    /// answered it.
+    AgentWithdrawn {
+        id: AgentId,
+        request: RequestId,
+    },
     /// A `session/update` notification from the agent.
     AgentUpdate {
         id: AgentId,
@@ -721,6 +727,7 @@ impl Ctx<'_> {
             Msg::TerminalSpawned { .. } => {}
             Msg::TerminalExited { id, .. } => self.end_terminal(id, None),
             Msg::AgentRequest { id, request, body } => self.agent_request(id, request, body),
+            Msg::AgentWithdrawn { id, request } => self.agent_withdrawn(id, request),
             Msg::AgentStarted { id, result } => self.agent_started(id, result),
             Msg::AgentUnscoped { id } => self.agent_unscoped(id),
             Msg::AgentStderr { id, line } => self.agent_stderr(id, line),
