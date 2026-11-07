@@ -14,14 +14,14 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, CancelNotification, ConfigOptionUpdate, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest,
-    PromptResponse, RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities,
-    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionInfo, SessionListCapabilities, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    ToolCallUpdate,
+    AgentCapabilities, CancelNotification, ConfigOptionUpdate, CreateElicitationRequest,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PromptRequest, PromptResponse, RequestPermissionRequest,
+    SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo, SessionListCapabilities,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, ToolCallUpdate,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
@@ -78,6 +78,7 @@ struct Script {
 enum Step {
     Update(SessionUpdate),
     Permission(Permission),
+    Question(Question),
     Write { path: PathBuf, text: String },
     Sleep(u64),
     Stderr(String),
@@ -93,6 +94,15 @@ enum Step {
 struct Permission {
     tool_call: ToolCallUpdate,
     options: Vec<PermissionOption>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Question {
+    /// A `CreateElicitationRequest` without its `sessionId`.
+    request: serde_json::Map<String, Value>,
+    /// Withdraws it with `$/cancel_request` after this many ms unless answered.
+    withdraw_after: Option<u64>,
 }
 
 /// What the handlers share: the session's `cwd`, the prompts run so far and the running turn.
@@ -147,6 +157,37 @@ async fn run(
                         serde_json::to_string(&response.outcome).unwrap()
                     ),
                     Err(err) => eprintln!("permission error: {}", err.message),
+                }
+            }
+            Step::Question(ask) => {
+                let mut request = ask.request.clone();
+                request.insert("sessionId".into(), SESSION.into());
+                let request: CreateElicitationRequest = serde_json::from_value(request.into())
+                    .map_err(|err| {
+                        agent_client_protocol::Error::invalid_params().data(err.to_string())
+                    })?;
+                let sent = client.send_request(request);
+                let withdraw = sent.cancellation_handle();
+                let wait = ask.withdraw_after.map(Duration::from_millis);
+                let withdrawn = async move {
+                    match wait {
+                        Some(wait) => tokio::time::sleep(wait).await,
+                        None => std::future::pending().await,
+                    }
+                    _ = withdraw.cancel();
+                    std::future::pending::<()>().await
+                };
+                let answer = tokio::select! {
+                    answer = sent.block_task() => answer,
+                    () = withdrawn => unreachable!("pends after withdrawing"),
+                    _ = cancel.cancelled() => return Ok(StopReason::Cancelled),
+                };
+                match answer {
+                    Ok(response) => eprintln!(
+                        "question answered: {}",
+                        serde_json::to_string(&response).unwrap()
+                    ),
+                    Err(err) => eprintln!("question error: {}", err.message),
                 }
             }
             Step::Write { path, text } => {
@@ -299,6 +340,12 @@ async fn main() -> agent_client_protocol::Result<()> {
                     caps.terminal,
                     (caps.meta.as_ref()).and_then(|m| m.get("terminal_output"))
                         == Some(&true.into())
+                );
+                let elicitation = caps.elicitation.as_ref();
+                eprintln!(
+                    "elicitation.form={} elicitation.url={}",
+                    elicitation.is_some_and(|e| e.supports_form()),
+                    elicitation.is_some_and(|e| e.supports_url())
                 );
                 let mut sessions = SessionCapabilities::new();
                 if init_script.sessions.is_some() {

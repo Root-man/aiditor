@@ -2,9 +2,10 @@
 //! comint-style, and a read-only buffer for its stderr.
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, AvailableCommand, AvailableCommandInput, ClientResponse, ContentBlock, Error,
-    MessageId, NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
-    PlanEntryStatus, PromptRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
+    AgentRequest, AvailableCommand, AvailableCommandInput, ClientResponse, ContentBlock,
+    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, Error, MessageId,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryStatus,
+    PromptRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelect,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
@@ -30,6 +31,7 @@ use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
 mod chips;
 mod groups;
 mod pastes;
+mod questions;
 mod render;
 pub(crate) use chips::{Chips, is_chip};
 use groups::*;
@@ -49,6 +51,7 @@ const TICK: Duration = Duration::from_secs(1);
 pub(crate) enum Activity {
     Working,
     Failed,
+    Asking,
     Waiting,
 }
 
@@ -57,6 +60,7 @@ impl Activity {
         match self {
             Self::Working => "● working",
             Self::Failed => "● exited",
+            Self::Asking => "● awaiting answer",
             Self::Waiting => "● awaiting permission",
         }
     }
@@ -65,7 +69,7 @@ impl Activity {
         match self {
             Self::Working => FaceName::StatusRunning,
             Self::Failed => FaceName::StatusFailed,
-            Self::Waiting => FaceName::StatusWaiting,
+            Self::Asking | Self::Waiting => FaceName::StatusWaiting,
         }
     }
 }
@@ -107,7 +111,7 @@ pub(crate) struct Session {
     /// The plan's block: where it starts and its length in chars, the blank line after it not
     /// counted.
     plan: Option<(MarkerId, usize)>,
-    /// Permission requests waiting for an answer, oldest first.
+    /// Permission requests and questions waiting for an answer, oldest first.
     asks: Vec<Ask>,
     /// The tool calls and what sits among them since the last message, plan or prompt, until
     /// they form a group.
@@ -207,11 +211,25 @@ impl Session {
         Some(buffer.text().char_to_line(first)..=buffer.text().char_to_line(last))
     }
 
+    /// The buffer line of the question row `point` is on, which frame 6d highlights.
+    pub(crate) fn question_row(&self, buffer: &Buffer, point: usize) -> Option<usize> {
+        self.asks.iter().find_map(|ask| {
+            let start = buffer.marker(ask.start)?;
+            let range = start..=start + ask.len;
+            let first = buffer.text().char_to_line(start);
+            let line = buffer.text().char_to_line(point);
+            (range.contains(&point) && ask.question()?.answer_at(line - first).is_some())
+                .then_some(line)
+        })
+    }
+
     pub(crate) fn activity(&self) -> Option<Activity> {
         if self.ended {
             Some(Activity::Failed)
-        } else if !self.asks.is_empty() {
+        } else if self.asks.iter().any(|a| a.question().is_none()) {
             Some(Activity::Waiting)
+        } else if !self.asks.is_empty() {
+            Some(Activity::Asking)
         } else if self.turn.is_some() {
             Some(Activity::Working)
         } else {
@@ -406,20 +424,77 @@ fn terminal_tool<'a>(
     (tools.values_mut()).find(|t| t.term.as_ref().is_some_and(|t| t.id == id))
 }
 
-/// A permission request's block, waiting for its answer.
+/// A permission request's or question's block, waiting for its answer.
 struct Ask {
     request: RequestId,
     /// The tool call it asks about, which shows the wait.
-    tool: ToolCallId,
+    tool: Option<ToolCallId>,
     since: Instant,
-    /// The tool call's title, for the block.
+    /// The tool call's title, or the question's message, for the block.
     title: String,
-    options: Vec<PermissionOption>,
+    body: Body,
     /// Where the block starts and its length in chars, the blank line after it not counted.
     start: MarkerId,
     len: usize,
     /// Its row's marker.
     row: MarkerId,
+}
+
+/// What an `Ask` asks.
+enum Body {
+    Permission(Vec<PermissionOption>),
+    Question(questions::Question),
+}
+
+impl Body {
+    /// Its block's rows, under `title`.
+    fn rows(&self, title: &str) -> Vec<(String, usize)> {
+        match self {
+            Body::Permission(options) => ask_rows(title, options),
+            Body::Question(question) => question.lines().into_iter().map(|(t, _)| (t, 0)).collect(),
+        }
+    }
+
+    /// Draws its block, under `title`, at `start`.
+    fn render(&self, buffer: &mut Buffer, start: usize, title: &str) {
+        match self {
+            Body::Permission(_) => render_rows(buffer, start, &self.rows(title)),
+            Body::Question(question) => question.render(buffer, start),
+        }
+    }
+}
+
+impl Ask {
+    fn question(&self) -> Option<&questions::Question> {
+        match &self.body {
+            Body::Question(q) => Some(q),
+            Body::Permission(_) => None,
+        }
+    }
+
+    /// Whether it is a permission request about `tool`, whose row then shows under its folded
+    /// group; a question's block shows there in place of the row.
+    fn holds(&self, tool: &ToolCallId) -> bool {
+        self.question().is_none() && self.tool.as_ref() == Some(tool)
+    }
+
+    /// The answer that cancels it, and the line its block becomes.
+    fn cancelled(&self) -> (ClientResponse, String) {
+        match &self.body {
+            Body::Permission(_) => (
+                ClientResponse::RequestPermissionResponse(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                )),
+                CANCELLED.into(),
+            ),
+            Body::Question(q) => (
+                ClientResponse::CreateElicitationResponse(CreateElicitationResponse::new(
+                    ElicitationAction::Cancel,
+                )),
+                format!("✗ {}  Cancelled", q.message),
+            ),
+        }
+    }
 }
 
 /// What a block above the prompt line holds. A chunk joins a streamed block of its own kind, so
@@ -630,7 +705,7 @@ impl Core {
         let known = session.tools.get(&call.tool_call_id);
         let arrived = known.map_or(session.live().then_some(now), |t| t.arrived);
         let waited = known.map_or(Duration::ZERO, |t| t.waited);
-        let asked = (session.asks.iter()).find(|a| a.tool == call.tool_call_id);
+        let asked = (session.asks.iter()).find(|a| a.tool.as_ref() == Some(&call.tool_call_id));
         let waiting = asked.map(|a| now - a.since);
         let done = finished(call.status);
         let ended = known.and_then(|t| t.ended).or(done.then_some(now));
@@ -800,7 +875,66 @@ impl Core {
 
     /// Puts permission request `ask` above session `id`'s prompt line as a block of its own,
     /// pending until answered.
-    fn show_ask(&mut self, id: AgentId, request: RequestId, ask: RequestPermissionRequest) {
+    fn show_permission(&mut self, id: AgentId, request: RequestId, ask: RequestPermissionRequest) {
+        let Some(session) = self.agents.get(&id) else {
+            return;
+        };
+        let call = &ask.tool_call;
+        let shown = session.tools.get(&call.tool_call_id).map(|t| &t.call.title);
+        let title = (call.fields.title.as_ref().or(shown))
+            .map_or_else(|| call.tool_call_id.to_string(), |t| first_line(t));
+        let tool = Some(ask.tool_call.tool_call_id);
+        self.show_ask(id, request, tool, title, Body::Permission(ask.options));
+    }
+
+    /// Puts question `question` above session `id`'s prompt line, pending until answered. Point
+    /// moves to it when the prompt area is empty; otherwise the echo line says it waits.
+    fn show_question(
+        &mut self,
+        id: AgentId,
+        request: RequestId,
+        (question, tool): (questions::Question, Option<ToolCallId>),
+    ) {
+        let (title, first) = (question.message.clone(), question.first());
+        self.show_ask(id, request, tool, title, Body::Question(question));
+        let Some(session) = self.agents.get(&id) else {
+            return;
+        };
+        let (buffer, ask) = (session.buffer, session.asks.last().expect("just shown"));
+        let b = self.buffers.get(buffer).expect("shown in it");
+        if b.prompt_start() < b.len_chars() {
+            if self.windows.window.buffer() == buffer {
+                self.echo("Question waiting: C-c C-q goes to it".into());
+            }
+            return;
+        }
+        let start = b.marker(ask.start).expect("live while pending");
+        let at = b.text().line_to_char(b.text().char_to_line(start) + first) + 1;
+        let b = self.buffers.get_mut(buffer).expect("shown in it");
+        let end = b.len_chars();
+        (b.set_marker(b.point, at)).expect("in the text");
+        for window in self.windows.windows_mut() {
+            if window.buffer() == buffer {
+                // Scrolled to the prompt, then to the header, so the block below point shows.
+                for p in [end, start] {
+                    (window.set_point(&mut self.buffers, p)).expect("in the text");
+                    window.scroll(&self.buffers, window.rows());
+                }
+                (window.set_point(&mut self.buffers, at)).expect("in the text");
+            }
+        }
+    }
+
+    /// Puts `body` above session `id`'s prompt line as a block of its own, pending until
+    /// answered.
+    fn show_ask(
+        &mut self,
+        id: AgentId,
+        request: RequestId,
+        tool: Option<ToolCallId>,
+        title: String,
+        body: Body,
+    ) {
         self.end_stream(id);
         let now = self.now();
         let Some(session) = self.agents.get_mut(&id) else {
@@ -809,17 +943,12 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        let call = &ask.tool_call;
-        let shown = session.tools.get(&call.tool_call_id).map(|t| &t.call.title);
-        let title = (call.fields.title.as_ref().or(shown))
-            .map_or_else(|| call.tool_call_id.to_string(), |t| first_line(t));
-        let rows = ask_rows(&title, &ask.options);
+        let rows = body.rows(&title);
         let text = rows_text(&rows);
         let end = session.end(buffer);
         buffer.insert_output(end, &format!("{text}\n\n"));
-        render_rows(buffer, end, &rows);
-        let tool = ask.tool_call.tool_call_id;
-        let shown = session.tools.get(&tool).map(|t| t.call.clone());
+        body.render(buffer, end, &title);
+        let shown = (tool.as_ref()).and_then(|t| session.tools.get(t).map(|t| t.call.clone()));
         let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
         let (start, row) = (marker(), marker());
         let len = text.chars().count();
@@ -828,7 +957,7 @@ impl Core {
             since: now,
             request,
             title,
-            options: ask.options,
+            body,
             start,
             len,
             row,
@@ -854,7 +983,7 @@ impl Core {
         if let Some(buffer) = self.buffers.get_mut(session.buffer) {
             session.settle_row(buffer, ask.row, line.chars().count());
         }
-        if let Some(tool) = session.tools.get_mut(&ask.tool) {
+        if let Some(tool) = ask.tool.as_ref().and_then(|t| session.tools.get_mut(t)) {
             tool.waited += now - ask.since;
             let call = tool.call.clone();
             self.show_tool(id, call);
@@ -1029,9 +1158,8 @@ impl Core {
         for (at, ask) in session.asks.iter().enumerate() {
             // Its tool's oldest ask counts.
             let oldest = session.asks.iter().position(|a| a.tool == ask.tool);
-            let Some(tool) = session
-                .tools
-                .get_mut(&ask.tool)
+            let Some(tool) = (ask.tool.as_ref())
+                .and_then(|t| session.tools.get_mut(t))
                 .filter(|_| oldest == Some(at))
             else {
                 continue;
@@ -1312,12 +1440,21 @@ impl Core {
         self.agents.values().any(|s| s.buffer == id && !s.ended)
     }
 
-    /// Stops the agents of sessions whose session buffer was killed and forgets them.
+    /// Stops the agents of sessions whose session buffer was killed and forgets them, cancelling
+    /// their pending requests first.
     pub(crate) fn sync_agents(&mut self, effects: &mut Effects) {
         let buffers = &self.buffers;
         self.agents.retain(|&id, session| {
             let live = buffers.get(session.buffer).is_some();
             if !live {
+                for ask in &session.asks {
+                    let (response, _) = ask.cancelled();
+                    effects.push(Effect::Agent(AgentOp::Reply {
+                        id,
+                        request: ask.request.clone(),
+                        result: Ok(response),
+                    }));
+                }
                 effects.push(Effect::Agent(AgentOp::Kill { id }));
             }
             live
@@ -1579,22 +1716,39 @@ impl Ctx<'_> {
         }
     }
 
-    /// Shows a permission request from a ready session and cancels one from an ended or killed
-    /// session; refuses it before the session is ready, and every other request.
+    /// Shows a permission request or a question from a ready session, declining a form it can't
+    /// draw, and cancels one from an ended or killed session; refuses either before the session
+    /// is ready, and every other request.
     pub(crate) fn agent_request(&mut self, id: AgentId, request: RequestId, body: Request) {
         let core = &mut *self.core;
         let session = core.agents.get(&id);
         let ready = session.is_some_and(|s| !s.ended && s.session.is_some());
         // An unknown id is a session forgotten when its buffer was killed.
         let gone = session.is_none_or(|s| s.ended);
+        let elicited = |action| {
+            Ok(ClientResponse::CreateElicitationResponse(
+                CreateElicitationResponse::new(action),
+            ))
+        };
         let result = match *body.0 {
             AgentRequest::RequestPermissionRequest(ask) if ready => {
-                return core.show_ask(id, request, ask);
+                return core.show_permission(id, request, ask);
             }
             AgentRequest::RequestPermissionRequest(_) if gone => {
                 Ok(ClientResponse::RequestPermissionResponse(
                     RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
                 ))
+            }
+            AgentRequest::CreateElicitationRequest(ask) if ready => match questions::parse(&ask) {
+                Some(question) => return core.show_question(id, request, question),
+                None => {
+                    let agent = &core.agents[&id].agent;
+                    core.echo(format!("Can't show {agent}'s question yet; declined"));
+                    elicited(ElicitationAction::Decline)
+                }
+            },
+            AgentRequest::CreateElicitationRequest(_) if gone => {
+                elicited(ElicitationAction::Cancel)
             }
             _ => Err(Error::method_not_found()),
         };
@@ -1605,63 +1759,193 @@ impl Ctx<'_> {
         }));
     }
 
-    /// Answers session `id`'s pending request `at` with its option `option`, or `cancelled`,
-    /// leaving its answer line in place of its block.
-    fn answer_ask(&mut self, id: AgentId, at: usize, option: Option<usize>) {
+    /// Closes session `id`'s pending request `at`, leaving the dim `line` in place of its block,
+    /// and sends `response` unless the agent withdrew it. Point in a question's block moves to
+    /// the prompt's end.
+    fn close_ask(&mut self, id: AgentId, at: usize, line: &str, response: Option<ClientResponse>) {
+        let inside = self.ask_at_point().is_some_and(|(_, a, _)| a == at)
+            && self.core.agents[&id].asks[at].question().is_some();
+        if inside {
+            let end = self.core.current().len_chars();
+            _ = self.goto(end);
+        }
         let core = &mut *self.core;
         let session = core
             .agents
             .get_mut(&id)
             .expect("a pending request's session");
         let ask = session.asks.remove(at);
-        let (outcome, line) = match option.map(|i| &ask.options[i]) {
-            Some(o) => (
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                    o.option_id.clone(),
-                )),
-                answered(o.kind),
-            ),
-            None => (RequestPermissionOutcome::Cancelled, CANCELLED),
-        };
         if let Some(b) = core.buffers.get_mut(session.buffer) {
             settle(b, &ask, line);
         }
         core.close_wait(id, &ask, line);
-        let response = RequestPermissionResponse::new(outcome);
-        self.effects.push(Effect::Agent(AgentOp::Reply {
-            id,
-            request: ask.request,
-            result: Ok(ClientResponse::RequestPermissionResponse(response)),
-        }));
+        if let Some(response) = response {
+            self.effects.push(Effect::Agent(AgentOp::Reply {
+                id,
+                request: ask.request,
+                result: Ok(response),
+            }));
+        }
     }
 
-    /// Answers the current session's oldest pending request with its first option of `kind`.
-    fn answer_oldest(&mut self, kind: PermissionOptionKind) -> Result<(), String> {
+    /// Answers session `id`'s pending permission request `at` with its option `option`, or
+    /// `cancelled`, leaving its answer line in place of its block.
+    fn answer_ask(&mut self, id: AgentId, at: usize, option: Option<usize>) {
+        let ask = &self.core.agents[&id].asks[at];
+        let Body::Permission(options) = &ask.body else {
+            unreachable!("answered as a permission request");
+        };
+        let (response, line) = match option.map(|i| &options[i]) {
+            Some(o) => (
+                ClientResponse::RequestPermissionResponse(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                        o.option_id.clone(),
+                    )),
+                )),
+                answered(o.kind).to_owned(),
+            ),
+            None => ask.cancelled(),
+        };
+        self.close_ask(id, at, &line, Some(response));
+    }
+
+    /// Answers session `id`'s pending question `at` with `answer`.
+    fn answer_question(&mut self, id: AgentId, at: usize, answer: questions::Answer) {
+        let ask = &self.core.agents[&id].asks[at];
+        let question = ask.question().expect("answered as a question");
+        let (content, shown) = question.content(&answer);
+        let line = format!("✓ {}  {shown}", question.message);
+        let accept = ElicitationAcceptAction::new().content(content);
+        let response = ClientResponse::CreateElicitationResponse(CreateElicitationResponse::new(
+            ElicitationAction::Accept(accept),
+        ));
+        self.close_ask(id, at, &line, Some(response));
+    }
+
+    /// Answers session `id`'s pending request `at` with `cancelled` or `cancel`.
+    fn cancel_ask(&mut self, id: AgentId, at: usize) {
+        let (response, line) = self.core.agents[&id].asks[at].cancelled();
+        self.close_ask(id, at, &line, Some(response));
+    }
+
+    /// Closes the block of the request `request` that session `id`'s agent withdrew.
+    pub(crate) fn agent_withdrawn(&mut self, id: AgentId, request: RequestId) {
+        let at = (self.core.agents.get(&id))
+            .and_then(|s| s.asks.iter().position(|a| a.request == request));
+        if let Some(at) = at {
+            self.close_ask(id, at, "○ withdrawn", None);
+        }
+    }
+
+    /// `agent-allow-once`: answers the oldest pending permission request with its first
+    /// `allow_once` option, passing questions by.
+    pub(crate) fn agent_allow_once(&mut self) -> Result<(), String> {
+        let kind = PermissionOptionKind::AllowOnce;
+        let (id, session) = self.core.current_session()?;
+        let (at, ask, options) = (session.asks.iter().enumerate())
+            .find_map(|(at, a)| match &a.body {
+                Body::Permission(options) => Some((at, a, options)),
+                Body::Question(_) => None,
+            })
+            .ok_or("No permission request is pending")?;
+        let option = (options.iter().position(|o| o.kind == kind))
+            .ok_or_else(|| format!("No {} option for {}", acp_name(kind), ask.title))?;
+        self.answer_ask(id, at, Some(option));
+        Ok(())
+    }
+
+    /// `agent-reject-once`: answers the oldest pending request: a permission request with its
+    /// first `reject_once` option, a question with `decline`.
+    pub(crate) fn agent_reject_once(&mut self) -> Result<(), String> {
+        let kind = PermissionOptionKind::RejectOnce;
         let (id, session) = self.core.current_session()?;
         let ask = session
             .asks
             .first()
             .ok_or("No permission request is pending")?;
-        let option = (ask.options.iter().position(|o| o.kind == kind))
+        let options = match &ask.body {
+            Body::Permission(options) => options,
+            Body::Question(q) => {
+                let line = format!("– {}  Skipped", q.message);
+                let response = ClientResponse::CreateElicitationResponse(
+                    CreateElicitationResponse::new(ElicitationAction::Decline),
+                );
+                self.close_ask(id, 0, &line, Some(response));
+                return Ok(());
+            }
+        };
+        let option = (options.iter().position(|o| o.kind == kind))
             .ok_or_else(|| format!("No {} option for {}", acp_name(kind), ask.title))?;
         self.answer_ask(id, 0, Some(option));
         Ok(())
     }
 
-    /// `agent-allow-once`: answers the oldest pending permission request with its first
-    /// `allow_once` option.
-    pub(crate) fn agent_allow_once(&mut self) -> Result<(), String> {
-        self.answer_oldest(PermissionOptionKind::AllowOnce)
+    /// `agent-goto-question`: moves point to the oldest pending question's first option.
+    pub(crate) fn agent_goto_question(&mut self) -> Result<(), String> {
+        let (_, session) = self.core.current_session()?;
+        let (start, first) = (session.asks.iter())
+            .find_map(|a| Some((a.start, a.question()?.first())))
+            .ok_or("No question is pending")?;
+        let text = self.core.current().text();
+        let start = self
+            .core
+            .current()
+            .marker(start)
+            .expect("live while pending");
+        let at = text.line_to_char(text.char_to_line(start) + first) + 1;
+        // Scrolled to the header first, so coming from below shows it.
+        let (window, buffers) = (&mut self.core.windows.window, &mut self.core.buffers);
+        (window.set_point(buffers, start)).expect("in the text");
+        window.scroll(buffers, window.rows());
+        self.goto(at)
     }
 
-    /// `agent-reject-once`: answers the oldest pending permission request with its first
-    /// `reject_once` option.
-    pub(crate) fn agent_reject_once(&mut self) -> Result<(), String> {
-        self.answer_oldest(PermissionOptionKind::RejectOnce)
+    /// `1` to `9` and `o` in a session: on a pending question's lines a digit answers it with
+    /// that option and `o` reads an own answer; elsewhere they insert themselves.
+    pub(crate) fn agent_question_key(&mut self, args: Args) -> Result<(), String> {
+        let key = match self.core.this_keys.last().map(|key| key.code) {
+            Some(crate::key::KeyCode::Char(c)) => c,
+            _ => return Err("agent-question-key must be run by a character key".into()),
+        };
+        let asked = self.ask_at_point().and_then(|(id, at, _)| {
+            let question = self.core.agents[&id].asks[at].question()?;
+            Some((id, at, question.options.len(), question.own.is_some()))
+        });
+        match (asked, key) {
+            (Some((_, _, _, own)), 'o') => {
+                if own {
+                    self.call("agent-answer-own", args);
+                }
+            }
+            (Some((id, at, options, _)), digit) => {
+                let n = digit.to_digit(10).map_or(0, |d| d as usize);
+                if (1..=options).contains(&n) {
+                    self.answer_question(id, at, questions::Answer::Option(n - 1));
+                }
+            }
+            (None, _) => self.call("self-insert-command", args),
+        }
+        Ok(())
     }
 
-    /// The session, pending request and option whose option line point is on.
-    fn option_at_point(&self) -> Option<(AgentId, usize, usize)> {
+    /// `agent-answer-own`: answers the question at point with `text`, in its adapter's shape.
+    pub(crate) fn agent_answer_own(&mut self, text: &str) -> Result<(), String> {
+        let (id, at) = self
+            .ask_at_point()
+            .filter(|&(id, at, _)| {
+                (self.core.agents[&id].asks[at].question()).is_some_and(|q| q.own.is_some())
+            })
+            .map(|(id, at, _)| (id, at))
+            .ok_or("No question here")?;
+        if text.trim().is_empty() {
+            return Err("Answer is empty".into());
+        }
+        self.answer_question(id, at, questions::Answer::Own(text.trim().into()));
+        Ok(())
+    }
+
+    /// The session, pending request and line of its block point is on.
+    fn ask_at_point(&self) -> Option<(AgentId, usize, usize)> {
         let core = &*self.core;
         let (point, buffer) = (core.point(), core.windows.window.buffer());
         let b = core.buffers.get(buffer)?;
@@ -1672,7 +1956,7 @@ impl Ctx<'_> {
                 return None;
             }
             let line = b.text().slice(start..point).chars().filter(|&c| c == '\n');
-            line.count().checked_sub(1).map(|option| (id, at, option))
+            Some((id, at, line.count()))
         })
     }
 
@@ -1786,9 +2070,23 @@ impl Ctx<'_> {
     /// its full output; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
     /// new prompt line.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
-        if let Some((id, at, option)) = self.option_at_point() {
-            self.answer_ask(id, at, Some(option));
-            return Ok(());
+        if let Some((id, at, line)) = self.ask_at_point() {
+            let ask = &self.core.agents[&id].asks[at];
+            match ask.question().map(|q| q.answer_at(line)) {
+                None if line > 0 => {
+                    self.answer_ask(id, at, Some(line - 1));
+                    return Ok(());
+                }
+                Some(Some(answer @ questions::Answer::Option(_))) => {
+                    self.answer_question(id, at, answer);
+                    return Ok(());
+                }
+                Some(Some(questions::Answer::Own(_))) => {
+                    self.call("agent-answer-own", Args::default());
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         if let Some(chip) = self.core.chip_at_point() {
             let (path, kind) = (chip.path.clone().ok_or("No file")?, chip.kind);
@@ -1968,7 +2266,7 @@ impl Ctx<'_> {
         let session = ready.ok_or("No turn is running")?.session_id.clone();
         (self.effects).push(Effect::Agent(AgentOp::Cancel { id, session }));
         for _ in 0..asks {
-            self.answer_ask(id, 0, None);
+            self.cancel_ask(id, 0);
         }
         Ok(())
     }
@@ -2124,7 +2422,7 @@ impl Ctx<'_> {
             return;
         };
         for _ in 0..session.asks.len() {
-            self.answer_ask(id, 0, None);
+            self.cancel_ask(id, 0);
         }
         let core = &mut *self.core;
         let line = match result {
@@ -2176,10 +2474,11 @@ impl Ctx<'_> {
         };
         // The agent is gone with its requests, so only the blocks change.
         let asks = std::mem::take(&mut session.asks);
+        let lines: Vec<_> = asks.iter().map(|ask| ask.cancelled().1).collect();
         if let Some(b) = core.buffers.get_mut(session.buffer) {
-            asks.iter().for_each(|ask| settle(b, ask, CANCELLED));
+            (asks.iter().zip(&lines)).for_each(|(ask, line)| settle(b, ask, line));
         }
-        (asks.iter()).for_each(|ask| core.close_wait(id, ask, CANCELLED));
+        (asks.iter().zip(&lines)).for_each(|(ask, line)| core.close_wait(id, ask, line));
         let session = core.agents.get_mut(&id).expect("found above");
         if !std::mem::replace(&mut session.ended, true) {
             let agent = &session.agent;
@@ -2254,6 +2553,9 @@ mod tests {
                             RequestPermissionOutcome::Selected(s) => s.option_id.to_string(),
                             _ => "cancelled".into(),
                         },
+                        Ok(ClientResponse::CreateElicitationResponse(r)) => {
+                            serde_json::to_string(&r).unwrap()
+                        }
                         Ok(other) => format!("{other:?}"),
                         Err(err) => err.message,
                     };
@@ -7449,5 +7751,321 @@ mod tests {
         ask(&mut h, 3, "c", Some("Late"));
         assert_eq!(ops(&mut h), ["reply 0 3 cancelled"]);
         assert_eq!(h.core.text(), "> ");
+    }
+
+    /// Sends session 0 question `request`, a Claude-shaped one with options A (`First`) and B
+    /// and an own-answer field, on tool call `t` with `fields` replacing its properties.
+    fn question(h: &mut Harness, request: i64, fields: Option<Value>) {
+        let fields = fields.unwrap_or_else(|| {
+            serde_json::json!({
+                "question_0": {"type": "string", "oneOf": [
+                    {"const": "a", "title": "A", "description": "First"},
+                    {"const": "b", "title": "B"}]},
+                "question_0_custom": {"type": "string", "title": "Other"},
+            })
+        });
+        let ask = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "toolCallId": "t", "mode": "form", "message": "Which?",
+            "requestedSchema": {"type": "object", "properties": fields},
+        }))
+        .unwrap();
+        h.send(Msg::AgentRequest {
+            id: AgentId(0),
+            request: RequestId::Number(request),
+            body: Request(Box::new(AgentRequest::CreateElicitationRequest(ask))),
+        });
+    }
+
+    const QUESTION: &str = " Question  Which?\n   1   A  First\n   2   B\n   o   Own answer\n  \
+        1-2 answer   RET answer with the row at point   C-c C-k skip";
+
+    /// Point's offset at the column before the chip of the line holding `text`.
+    fn on_chip(h: &Harness, text: &str) -> usize {
+        let at = h.core.text().find(text).unwrap();
+        h.core.text()[..at].chars().count() + 1
+    }
+
+    #[test]
+    fn a_question_arriving_at_the_bottom_shows_whole() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, &"line\n\n".repeat(20));
+        shown(&mut h, 10);
+        question(&mut h, 1, None);
+        let lines = shown(&mut h, 10);
+        assert!(
+            lines.iter().any(|l| l.contains("Question  Which?")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("C-c C-k skip")),
+            "{lines:?}"
+        );
+        // From the prompt, C-c C-q shows the header too.
+        h.keys("C-c C-k x");
+        question(&mut h, 2, None);
+        let before = shown(&mut h, 6);
+        assert!(
+            !before.iter().any(|l| l.contains("Question  Which?")),
+            "{before:?}"
+        );
+        h.keys("C-c C-q");
+        let lines = shown(&mut h, 6);
+        assert!(
+            lines.iter().any(|l| l.contains("Question  Which?")),
+            "{lines:?}"
+        );
+    }
+
+    fn accepted(request: i64, content: &str) -> String {
+        format!(r#"reply 0 {request} {{"action":"accept","content":{content}}}"#)
+    }
+
+    #[test]
+    fn a_question_shows_and_a_digit_answers_it() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        assert!(ops(&mut h).is_empty(), "nothing answered yet");
+        assert_eq!(
+            h.core.text(),
+            format!("> a\n\n{QUESTION}\n\nWorking for 0s\n\n> ")
+        );
+        assert_eq!(h.point(), on_chip(&h, "   1   A"), "on its first option");
+        // Frame 6d: a box one column in, and the row at point highlighted.
+        assert_eq!(
+            drawn_line(&mut h, "1   A").decorations,
+            [
+                Decoration::Indent(1),
+                Decoration::Background(FaceName::Permission),
+                Decoration::Background(FaceName::Region)
+            ]
+        );
+        assert_eq!(
+            drawn_line(&mut h, "Question").decorations,
+            [
+                Decoration::Indent(1),
+                Decoration::Background(FaceName::Permission)
+            ]
+        );
+        assert_eq!(
+            h.display(5).mode_line.right[0],
+            vec![("● awaiting answer".into(), FaceName::StatusWaiting)]
+        );
+        h.keys("3");
+        assert!(ops(&mut h).is_empty(), "past the options");
+        h.keys("2");
+        assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":"b"}"#)]);
+        assert_eq!(h.core.text(), "> a\n\n✓ Which?  B\n\nWorking for 0s\n\n> ");
+        assert_eq!(
+            h.point(),
+            h.core.text().chars().count(),
+            "back in the prompt"
+        );
+        h.keys("2");
+        assert!(h.core.text().ends_with("> 2"), "digits type again");
+    }
+
+    #[test]
+    fn ret_and_an_own_answer_answer_a_question() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        h.keys("RET");
+        assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":"a"}"#)]);
+        question(&mut h, 2, None);
+        h.keys("o");
+        assert_eq!(h.core.minibuffer().unwrap().prompt, "Own answer: ");
+        h.keys("RET");
+        assert_eq!(h.core.message(), Some("Answer is empty"));
+        h.keys("o Redis RET");
+        assert_eq!(
+            ops(&mut h),
+            [accepted(2, r#"{"question_0_custom":"Redis"}"#)]
+        );
+        assert!(
+            h.core.text().contains("✓ Which?  Redis\n"),
+            "{}",
+            h.core.text()
+        );
+        // RET on the own-answer row asks too.
+        let codex = serde_json::json!({
+            "env": {"type": "string", "title": "Where?", "oneOf": [
+                {"const": "staging", "title": "staging"},
+                {"const": "None of the above", "title": "None of the above"}]},
+            "env_note": {"type": "string", "_meta": {"codex": {"role": "user_note"}}},
+        });
+        question(&mut h, 3, Some(codex));
+        assert!(
+            h.core
+                .text()
+                .contains(" Question  Which?\n Where?\n   1   staging\n   o   Own answer\n")
+        );
+        h.keys("C-n RET qa RET");
+        assert_eq!(
+            ops(&mut h),
+            [accepted(
+                3,
+                r#"{"env":"None of the above","env_note":"qa"}"#
+            )]
+        );
+    }
+
+    #[test]
+    fn a_question_while_typing_waits_and_c_c_c_q_goes_to_it() {
+        let mut h = session();
+        h.keys("draft");
+        question(&mut h, 1, None);
+        assert_eq!(
+            h.core.message(),
+            Some("Question waiting: C-c C-q goes to it")
+        );
+        h.keys("1 o");
+        assert!(ops(&mut h).is_empty());
+        assert!(h.core.text().ends_with("> draft1o"));
+        h.keys("C-c C-q");
+        assert_eq!(h.point(), on_chip(&h, "   1   A"));
+        h.keys("1");
+        assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":"a"}"#)]);
+        h.keys("C-c C-q");
+        assert_eq!(h.core.message(), Some("No question is pending"));
+    }
+
+    #[test]
+    fn skipping_cancelling_and_withdrawing_questions() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        h.keys("C-c C-k");
+        assert_eq!(ops(&mut h), [r#"reply 0 1 {"action":"decline"}"#]);
+        question(&mut h, 2, None);
+        ask(&mut h, 3, "c", Some("Edit"));
+        h.keys("C-c C-y");
+        assert_eq!(
+            ops(&mut h),
+            ["reply 0 3 allow"],
+            "C-c C-y passes the question by"
+        );
+        question(&mut h, 4, None);
+        h.send(Msg::AgentWithdrawn {
+            id: AgentId(0),
+            request: RequestId::Number(4),
+        });
+        assert!(ops(&mut h).is_empty(), "the service answered it");
+        h.keys("C-c C-c");
+        assert_eq!(
+            ops(&mut h),
+            ["cancel 0 s", r#"reply 0 2 {"action":"cancel"}"#]
+        );
+        assert_eq!(
+            h.core.text(),
+            "> a\n\n– Which?  Skipped\n\n✗ Which?  Cancelled\n\n✓ allowed once\n\n○ withdrawn\n\n\
+             Working for 0s\n\n> "
+        );
+        prompted(&mut h, Ok(StopReason::Cancelled));
+        h.keys("b RET");
+        ops(&mut h);
+        question(&mut h, 5, None);
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert_eq!(ops(&mut h), [r#"reply 0 5 {"action":"cancel"}"#]);
+    }
+
+    #[test]
+    fn killing_the_buffer_cancels_pending_requests_before_the_agent_stops() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        ask(&mut h, 2, "c", Some("Edit"));
+        let strings = vec!["*claude*<work>".into()];
+        h.call(
+            "kill-buffer",
+            Args {
+                strings,
+                ..Args::default()
+            },
+        );
+        h.keys("yes RET");
+        assert_eq!(
+            ops(&mut h),
+            [
+                r#"reply 0 1 {"action":"cancel"}"#,
+                "reply 0 2 cancelled",
+                "kill 0"
+            ]
+        );
+    }
+
+    #[test]
+    fn forms_it_cant_draw_are_declined_and_ended_sessions_cancel() {
+        let mut h = session();
+        let form = serde_json::json!({"ok": {"type": "boolean"}});
+        question(&mut h, 1, Some(form));
+        assert_eq!(ops(&mut h), [r#"reply 0 1 {"action":"decline"}"#]);
+        assert_eq!(
+            h.core.message(),
+            Some("Can't show claude's question yet; declined")
+        );
+        assert_eq!(h.core.text(), "> ");
+        exited(&mut h, 0, 0);
+        ops(&mut h);
+        question(&mut h, 2, None);
+        assert_eq!(ops(&mut h), [r#"reply 0 2 {"action":"cancel"}"#]);
+    }
+
+    #[test]
+    fn a_question_stands_in_for_its_calls_row_under_the_fold() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        tool(&mut h, read("a", "a.rs"));
+        tool(&mut h, call("t", ToolKind::Other));
+        visible(&mut h);
+        question(&mut h, 1, None);
+        let lines = visible(&mut h);
+        assert_eq!(
+            lines[1..4],
+            [
+                "▸    Read files, using tools",
+                " Question  Which?",
+                "   1   A  First"
+            ],
+            "{lines:?}"
+        );
+        h.keys("1");
+        assert_eq!(visible(&mut h).len(), 4, "{:?}", visible(&mut h));
+    }
+
+    #[test]
+    fn permissions_outrank_questions_and_exits_and_withdrawals_close_both() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        ask(&mut h, 2, "c", Some("Edit"));
+        assert_eq!(
+            h.display(5).mode_line.right[0],
+            vec![("● awaiting permission".into(), FaceName::StatusWaiting)]
+        );
+        h.send(Msg::AgentWithdrawn {
+            id: AgentId(0),
+            request: RequestId::Number(2),
+        });
+        assert_eq!(
+            h.display(5).mode_line.right[0],
+            vec![("● awaiting answer".into(), FaceName::StatusWaiting)]
+        );
+        exited(&mut h, 0, 1);
+        assert!(!ops(&mut h).iter().any(|o| o.starts_with("reply")));
+        assert!(
+            h.core
+                .text()
+                .starts_with("> a\n\n✗ Which?  Cancelled\n\n○ withdrawn\n\n"),
+            "{}",
+            h.core.text()
+        );
     }
 }

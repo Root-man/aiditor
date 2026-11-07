@@ -1,6 +1,6 @@
 //! Windows and the frame's display model.
 
-use crate::buffer::{BufferId, Buffers};
+use crate::buffer::{BufferId, Buffers, Decoration};
 use crate::display::{SESSION_INSET, TEXT_INSET};
 use crate::settings::{FaceName, LineNumbers, Settings};
 use crate::window::{Tree, Window, WindowId};
@@ -199,6 +199,12 @@ impl Core {
                     let point = window.point(buffers);
                     if let Some(lines) = session.message_lines(buffer, point) {
                         display::mark_message(&mut display, lines);
+                    }
+                    if let Some(row) = session.question_row(buffer, point) {
+                        let region = Decoration::Background(FaceName::Region);
+                        for line in display.lines.iter_mut().filter(|l| l.number == row) {
+                            line.decorations.push(region.clone());
+                        }
                     }
                 }
                 if highlighted {

@@ -845,6 +845,24 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_reject_once(),
         },
         Command {
+            name: "agent-goto-question",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_goto_question(),
+        },
+        Command {
+            name: "agent-question-key",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.agent_question_key(args),
+        },
+        Command {
+            name: "agent-answer-own",
+            spec: ArgSpec {
+                prompts: &["Own answer: "],
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.agent_answer_own(&args.strings[0]),
+        },
+        Command {
             name: "vterm",
             spec: ArgSpec {
                 workspace: true,
