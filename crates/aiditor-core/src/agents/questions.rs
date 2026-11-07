@@ -31,6 +31,9 @@ const NESTED: &str = "   ";
 /// whether it is the dim count of the lines left out.
 pub(crate) type Preview = (usize, Vec<(String, bool)>);
 
+/// What an answer sent: each field's name and answer.
+pub(super) type Sent = Vec<(String, String)>;
+
 /// An option's value, title, description and preview.
 pub(super) type Choice = (String, String, Option<String>, Option<String>);
 
@@ -43,6 +46,8 @@ pub(super) struct Question {
     pub(super) open: Option<usize>,
     /// codex-acp's `_meta.codex.delivery: "async"`: the turn goes on without waiting for it.
     pub(super) nonblocking: bool,
+    /// What its answer sent, once answered.
+    pub(super) sent: Sent,
 }
 
 /// A single-choice or multi-select field.
@@ -223,6 +228,7 @@ pub(super) fn parse(request: &CreateElicitationRequest) -> Option<(Question, Opt
         fields,
         open: Some(0),
         nonblocking: meta.is_some_and(|c| c["delivery"] == "async"),
+        sent: Vec::new(),
     };
     Some((question, tool))
 }
@@ -324,7 +330,7 @@ impl Field {
         }
     }
 
-    /// Its name in a block of several: its title, else its key.
+    /// Its name in a block of several and an answer's rows: its title, else its key.
     fn name(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.key)
     }
@@ -598,32 +604,38 @@ impl Question {
         Some((column, lines))
     }
 
-    /// `answer`'s content and the text its answered line shows; a block of several sends each
-    /// field's answer, whatever `answer` is.
+    /// Its answered line's label: the message, or `<n> questions` for a block of several.
+    pub(super) fn label(&self) -> String {
+        match self.several() {
+            true => format!("{} questions", self.fields.len()),
+            false => self.message.clone(),
+        }
+    }
+
+    /// `answer`'s content, the text its answered line shows and each sent field's name and
+    /// answer; a block of several sends each field's answer, whatever `answer` is.
     pub(super) fn content(
         &self,
         answer: &Answer,
-    ) -> (BTreeMap<String, ElicitationContentValue>, String) {
+    ) -> (BTreeMap<String, ElicitationContentValue>, String, Sent) {
         let mut content = BTreeMap::new();
         if !self.several() {
-            let shown = self.fields[0].content(answer, &mut content);
-            return (content, shown);
+            let field = &self.fields[0];
+            let shown = field.content(answer, &mut content);
+            let sent = vec![(field.name().to_owned(), shown.clone())];
+            return (content, shown, sent);
         }
-        let shown: Vec<_> = (self.fields.iter())
+        let sent: Sent = (self.fields.iter())
             .filter_map(|f| {
                 let answer = f.answered()?;
-                Some(format!(
-                    "{}: {}",
-                    f.name(),
-                    f.content(&answer, &mut content)
-                ))
+                Some((f.name().to_owned(), f.content(&answer, &mut content)))
             })
             .collect();
-        let shown = match shown.is_empty() {
+        let shown = match sent.is_empty() {
             true => "Nothing answered".into(),
-            false => shown.join("; "),
+            false => (sent.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>()).join(" · "),
         };
-        (content, shown)
+        (content, shown, sent)
     }
 }
 
@@ -683,7 +695,7 @@ mod tests {
         assert!(matches!(q.answer_at(2), Some(Answer::Option(0))));
         assert!(matches!(q.answer_at(4), Some(Answer::Own(_))));
         assert!(q.answer_at(1).is_none() && q.answer_at(5).is_none());
-        let (content, shown) = q.content(&Answer::Own("mine".into()));
+        let (content, shown, _) = q.content(&Answer::Own("mine".into()));
         assert_eq!(
             serde_json::to_value(content).unwrap(),
             json!({"question_0_custom": "mine"})
@@ -705,12 +717,12 @@ mod tests {
         let (q, _) = parse(&r).unwrap();
         assert_eq!(q.fields[0].options.len(), 2);
         assert_eq!(q.first(), 1, "a title equal to the message isn't repeated");
-        let (content, _) = q.content(&Answer::Own("qa".into()));
+        let (content, ..) = q.content(&Answer::Own("qa".into()));
         assert_eq!(
             serde_json::to_value(content).unwrap(),
             json!({"env": NONE_OF_THE_ABOVE, "env_note": "qa"})
         );
-        let (content, shown) = q.content(&Answer::Option(1));
+        let (content, shown, _) = q.content(&Answer::Option(1));
         assert_eq!(serde_json::to_value(content).unwrap(), json!({"env": "b"}));
         assert_eq!(shown, "B");
     }
@@ -760,7 +772,7 @@ mod tests {
         let (e, _) = parse(&request(json!({"c": {"type": "string", "oneOf": empty}}))).unwrap();
         assert!(e.preview(0).is_none() && e.lines().last().unwrap().0.contains("RET answer"));
         assert_eq!(q.refusal().as_deref(), Some("Pick at least 1"));
-        let (content, shown) = q.content(&Answer::Ticked);
+        let (content, shown, _) = q.content(&Answer::Ticked);
         assert_eq!(
             serde_json::to_value(content).unwrap(),
             json!({"question_0": []})
@@ -770,7 +782,7 @@ mod tests {
         (multi.ticked[1], multi.own) = (true, Some("mine".into()));
         assert_eq!(q.refusal(), None);
         assert_eq!(q.lines()[2].0, "   2   [x] B");
-        let (content, shown) = q.content(&Answer::Ticked);
+        let (content, shown, _) = q.content(&Answer::Ticked);
         assert_eq!(
             serde_json::to_value(content).unwrap(),
             json!({"question_0": ["b"], "question_0_custom": "mine"})
@@ -784,7 +796,7 @@ mod tests {
         let (mut q, _) = parse(&r).unwrap();
         assert_eq!(q.fields[0].options.len(), 1);
         q.field_mut().unwrap().multi.as_mut().unwrap().own = Some("qa".into());
-        let (content, _) = q.content(&Answer::Ticked);
+        let (content, ..) = q.content(&Answer::Ticked);
         assert_eq!(
             serde_json::to_value(content).unwrap(),
             json!({"env": [NONE_OF_THE_ABOVE], "env_note": "qa"})
@@ -831,7 +843,7 @@ mod tests {
         );
         assert_eq!(q.first(), 2);
         assert!(matches!(q.answer_at(4), Some(Answer::Own(_))));
-        let (content, shown) = q.content(&Answer::Ticked);
+        let (content, shown, _) = q.content(&Answer::Ticked);
         assert!(content.is_empty());
         assert_eq!(shown, "Nothing answered");
         (q.fields[0].chosen, q.open) = (Some(Answer::Option(1)), Some(1));
@@ -857,12 +869,15 @@ mod tests {
         assert_eq!(q.refusal().as_deref(), Some("Tests: Pick at least 2"));
         q.field_mut().unwrap().multi.as_mut().unwrap().ticked[1] = true;
         assert_eq!(q.refusal(), None);
-        let (content, shown) = q.content(&Answer::Ticked);
+        let (content, shown, sent) = q.content(&Answer::Ticked);
         assert_eq!(
             serde_json::to_value(content).unwrap(),
             json!({"question_2": "b", "question_3": ["a", "b"]})
         );
-        assert_eq!(shown, "Status: Both; Tests: A, B");
+        assert_eq!(shown, "Both · A, B");
+        let sent: Vec<_> = sent.iter().map(|(n, a)| format!("{n}: {a}")).collect();
+        assert_eq!(sent, ["Status: Both", "Tests: A, B"]);
+        assert_eq!(q.label(), "3 questions");
     }
 
     #[test]

@@ -111,6 +111,8 @@ pub(crate) struct Session {
     plan: Option<(MarkerId, usize)>,
     /// Permission requests and questions waiting for an answer, oldest first.
     asks: Vec<Ask>,
+    /// The closed questions' lines.
+    answers: Vec<Answered>,
     /// The tool calls and what sits among them since the last message, plan or prompt, until
     /// they form a group.
     run: Vec<Row>,
@@ -394,6 +396,8 @@ struct Tool {
     output_buffer: Option<BufferId>,
     /// The indexed file its header links to, and the line, from 1.
     link: Option<(PathBuf, Option<usize>)>,
+    /// A closed question's line stands for it, so it shows no row.
+    replaced: bool,
 }
 
 /// Faces on char ranges.
@@ -504,14 +508,31 @@ impl Ask {
                 )),
                 CANCELLED.into(),
             ),
-            Body::Question(q) => (
+            Body::Question(_) => (
                 ClientResponse::CreateElicitationResponse(CreateElicitationResponse::new(
                     ElicitationAction::Cancel,
                 )),
-                format!("✗ {}  Cancelled", q.message),
+                "✗ Cancelled".into(),
             ),
         }
     }
+}
+
+/// A closed question's line, `▸ <mark> <label>  <outcome>` and its time, with the rows of what
+/// it sent under it.
+struct Answered {
+    /// The question's own marker, at its group row's.
+    start: MarkerId,
+    /// Where the label and the outcome end, and the line's length, its time counted.
+    label: usize,
+    outcome: usize,
+    line: usize,
+    /// The whole text's length, the rows counted.
+    len: usize,
+    /// The rows' name width.
+    name: usize,
+    mark: FaceName,
+    open: bool,
 }
 
 /// What a block above the prompt line holds. A chunk joins a streamed block of its own kind, so
@@ -799,6 +820,7 @@ impl Core {
                     output,
                     output_buffer: None,
                     link,
+                    replaced: false,
                 };
                 session.tools.insert(call_id.clone(), tool);
                 session.add_row(buffer, Row::Tool(call_id.clone()));
@@ -997,20 +1019,21 @@ impl Core {
         }
     }
 
-    /// Adds `ask`'s wait, just closed, to its tool call and shows the call without it, its block
-    /// now the answer's `line`.
+    /// Adds `ask`'s wait, just closed, to its tool call and shows the call without it, or not at
+    /// all for a question, its block now an answer of `len` chars.
     // shortcut: overlapping asks on one call each add their wait, so the run time can read low;
     // both adapters ask once per call.
-    fn close_wait(&mut self, id: AgentId, ask: &Ask, line: &str) {
+    fn close_wait(&mut self, id: AgentId, ask: &Ask, len: Option<usize>) {
         let now = self.now();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
-        if let Some(buffer) = self.buffers.get_mut(session.buffer) {
-            session.settle_row(buffer, ask.row, line.chars().count());
+        if let (Some(buffer), Some(len)) = (self.buffers.get_mut(session.buffer), len) {
+            session.settle_row(buffer, ask.row, len);
         }
         if let Some(tool) = ask.tool.as_ref().and_then(|t| session.tools.get_mut(t)) {
             tool.waited += now - ask.since;
+            tool.replaced |= ask.question().is_some();
             let call = tool.call.clone();
             self.show_tool(id, call);
         }
@@ -1569,6 +1592,7 @@ impl Ctx<'_> {
             tools: HashMap::new(),
             plan: None,
             asks: Vec::new(),
+            answers: Vec::new(),
             run: Vec::new(),
             group: None,
             groups: Vec::new(),
@@ -1794,15 +1818,15 @@ impl Ctx<'_> {
             _ = self.goto(end);
         }
         let core = &mut *self.core;
+        let clock = core.clock();
         let session = core
             .agents
             .get_mut(&id)
             .expect("a pending request's session");
         let ask = session.asks.remove(at);
-        if let Some(b) = core.buffers.get_mut(session.buffer) {
-            settle(b, &ask, line);
-        }
-        core.close_wait(id, &ask, line);
+        let len = (core.buffers.get_mut(session.buffer))
+            .map(|b| session.settle(b, &ask, line, clock.as_deref()));
+        core.close_wait(id, &ask, len);
         if let Some(response) = response {
             self.effects.push(Effect::Agent(AgentOp::Reply {
                 id,
@@ -1837,9 +1861,13 @@ impl Ctx<'_> {
     fn answer_question(&mut self, id: AgentId, at: usize, answer: questions::Answer) {
         let ask = &self.core.agents[&id].asks[at];
         let question = ask.question().expect("answered as a question");
-        let (content, shown) = question.content(&answer);
-        let line = format!("✓ {}  {shown}", question.message);
+        let (content, shown, sent) = question.content(&answer);
+        let line = format!("✓ {shown}");
         let accept = ElicitationAcceptAction::new().content(content);
+        let ask = &mut self.core.agents.get_mut(&id).expect("found above").asks[at];
+        if let Body::Question(question) = &mut ask.body {
+            question.sent = sent;
+        }
         let response = ClientResponse::CreateElicitationResponse(CreateElicitationResponse::new(
             ElicitationAction::Accept(accept),
         ));
@@ -1969,7 +1997,13 @@ impl Ctx<'_> {
         let at = (self.core.agents.get(&id))
             .and_then(|s| s.asks.iter().position(|a| a.request == request));
         if let Some(at) = at {
-            self.close_ask(id, at, "○ withdrawn", None);
+            let question = self.core.agents[&id].asks[at].question().is_some();
+            let line = if question {
+                "○ Closed"
+            } else {
+                "○ withdrawn"
+            };
+            self.close_ask(id, at, line, None);
         }
     }
 
@@ -2012,12 +2046,11 @@ impl Ctx<'_> {
             .ok_or("No permission request is pending")?;
         let options = match &ask.body {
             Body::Permission(options) => options,
-            Body::Question(q) => {
-                let line = format!("– {}  Skipped", q.message);
+            Body::Question(_) => {
                 let response = ClientResponse::CreateElicitationResponse(
                     CreateElicitationResponse::new(ElicitationAction::Decline),
                 );
-                self.close_ask(id, 0, &line, Some(response));
+                self.close_ask(id, 0, "– Skipped", Some(response));
                 return Ok(());
             }
         };
@@ -2442,6 +2475,13 @@ impl Ctx<'_> {
         if let Some(start) = session.toggle_paste(b, point) {
             return self.goto(start);
         }
+        if let Some((start, line)) = session.toggle_answer(b, point) {
+            return if point > line {
+                self.goto(start)
+            } else {
+                Ok(())
+            };
+        }
         let call = (session.tools.iter())
             .find(|(_, t)| {
                 let end = if t.open { t.len } else { t.header };
@@ -2651,7 +2691,7 @@ impl Ctx<'_> {
                 self.cancel_ask(id, 0);
             } else {
                 let (response, _) = self.core.agents[&id].asks[0].cancelled();
-                self.close_ask(id, 0, "○ withdrawn", Some(response));
+                self.close_ask(id, 0, "○ Closed, the turn ended first", Some(response));
             }
         }
         let core = &mut *self.core;
@@ -2699,16 +2739,19 @@ impl Ctx<'_> {
     pub(crate) fn agent_exited(&mut self, id: AgentId, code: u32, signal: Option<String>) {
         let core = &mut *self.core;
         core.settle_turn(id);
+        let clock = core.clock();
         let Some(session) = core.agents.get_mut(&id) else {
             return;
         };
         // The agent is gone with its requests, so only the blocks change.
         let asks = std::mem::take(&mut session.asks);
-        let lines: Vec<_> = asks.iter().map(|ask| ask.cancelled().1).collect();
-        if let Some(b) = core.buffers.get_mut(session.buffer) {
-            (asks.iter().zip(&lines)).for_each(|(ask, line)| settle(b, ask, line));
-        }
-        (asks.iter().zip(&lines)).for_each(|(ask, line)| core.close_wait(id, ask, line));
+        let lens: Vec<_> = (asks.iter())
+            .map(|ask| {
+                let b = core.buffers.get_mut(session.buffer)?;
+                Some(session.settle(b, ask, &ask.cancelled().1, clock.as_deref()))
+            })
+            .collect();
+        (asks.iter().zip(lens)).for_each(|(ask, len)| core.close_wait(id, ask, len));
         let session = core.agents.get_mut(&id).expect("found above");
         if !std::mem::replace(&mut session.ended, true) {
             let agent = &session.agent;
@@ -7839,7 +7882,7 @@ mod tests {
     }
 
     #[test]
-    fn an_answered_line_is_dim_and_has_no_rule() {
+    fn an_answered_permission_line_is_dim_and_has_no_rule() {
         use PermissionOptionKind::*;
         for (kind, line) in [
             (AllowOnce, "✓ allowed once"),
@@ -8086,7 +8129,14 @@ mod tests {
         assert!(ops(&mut h).is_empty(), "past the options");
         h.keys("2");
         assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":"b"}"#)]);
-        assert_eq!(h.core.text(), "> a\n\n✓ Which?  B\n\nWorking for 0s\n\n> ");
+        assert_eq!(
+            h.core.text(),
+            "> a\n\n▸ ✓ Which?  B\n question_0  B\n\nWorking for 0s\n\n> "
+        );
+        assert!(
+            !visible(&mut h).contains(&" question_0  B".into()),
+            "folded"
+        );
         assert_eq!(
             h.point(),
             h.core.text().chars().count(),
@@ -8115,7 +8165,7 @@ mod tests {
             [accepted(2, r#"{"question_0_custom":"Redis"}"#)]
         );
         assert!(
-            h.core.text().contains("✓ Which?  Redis\n"),
+            h.core.text().contains("▸ ✓ Which?  Redis\n"),
             "{}",
             h.core.text()
         );
@@ -8232,7 +8282,12 @@ mod tests {
         });
         prompted(&mut h, Ok(StopReason::EndTurn));
         assert_eq!(ops(&mut h), [r#"reply 0 2 {"action":"cancel"}"#]);
-        assert_eq!(h.core.text().matches("○ withdrawn").count(), 2);
+        let text = h.core.text();
+        assert!(
+            text.contains("▸ ○ Which env?  Closed, the turn ended first\n"),
+            "{text}"
+        );
+        assert!(text.contains("▸ ○ Which env?  Closed\n"), "{text}");
         assert_eq!(right(&mut h).len(), 0, "{:?}", right(&mut h));
     }
 
@@ -8265,7 +8320,7 @@ mod tests {
         );
         assert_eq!(
             h.core.text(),
-            "> a\n\n– Which?  Skipped\n\n✗ Which?  Cancelled\n\n✓ allowed once\n\n○ withdrawn\n\n\
+            "> a\n\n▸ – Which?  Skipped\n\n▸ ✗ Which?  Cancelled\n\n✓ allowed once\n\n▸ ○ Which?  Closed\n\n\
              Working for 0s\n\n> "
         );
         prompted(&mut h, Ok(StopReason::Cancelled));
@@ -8340,6 +8395,154 @@ mod tests {
         );
         h.keys("1");
         assert_eq!(visible(&mut h).len(), 4, "{:?}", visible(&mut h));
+    }
+
+    /// The faces on the text `part` of the line starting `line`.
+    fn faces_on(h: &Harness, line: &str, part: &str) -> Vec<FaceName> {
+        let text = h.core.text();
+        let at = text.find(line).unwrap() + line.find(part).unwrap();
+        let start = text[..at].chars().count();
+        let range = start..start + part.chars().count();
+        (h.core.current().properties())
+            .filter(|(r, _)| *r == range)
+            .filter_map(|(_, p)| match p {
+                Prop::Named(faces) => match faces[..] {
+                    [FaceRef::Face(f)] => Some(f),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_outcome_shrinks_to_its_line_and_tab_opens_what_was_sent() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        h.clock("14:03:00");
+        let choice = |title: &str, option: &str| serde_json::json!({"type": "string", "title": title, "oneOf": [{"const": option, "title": option}, {"const": "x", "title": "X"}]});
+        let fields =
+            serde_json::json!({"q_0": choice("Status", "Both"), "q_1": choice("Commit", "One")});
+        question(&mut h, 1, Some(fields));
+        h.keys("1 1 C-c C-y");
+        ops(&mut h);
+        let line = "▸ ✓ 2 questions  Both · One 14:03:00";
+        assert!(
+            h.core
+                .text()
+                .contains(&format!("{line}\n Status  Both\n Commit  One\n\n"))
+        );
+        assert_eq!(faces_on(&h, line, "✓"), [FaceName::StatusRunning]);
+        assert_eq!(faces_on(&h, line, "Both · One"), [FaceName::SessionThought]);
+        assert_eq!(faces_on(&h, line, "14:03:00"), [FaceName::Annotation]);
+        assert_eq!(faces_on(&h, line, "▸"), [FaceName::SessionThought]);
+        assert!(
+            faces_on(&h, line, "2 questions").is_empty(),
+            "the label is plain"
+        );
+        assert_eq!(visible(&mut h)[1], line);
+        on_line(&mut h, "▸ ✓ 2 questions");
+        h.keys("TAB");
+        assert_eq!(
+            visible(&mut h)[1..4],
+            [
+                "▾ ✓ 2 questions  Both · One 14:03:00",
+                " Status  Both",
+                " Commit  One"
+            ]
+        );
+        assert_eq!(
+            drawn_line(&mut h, "Commit  One").decorations,
+            [
+                Decoration::Indent(3),
+                Decoration::Background(FaceName::SessionBlock)
+            ]
+        );
+        assert_eq!(
+            faces_on(&h, " Status  Both", "Status"),
+            [FaceName::SessionThought]
+        );
+        h.keys("C-n C-e TAB");
+        assert_eq!(visible(&mut h)[1], line);
+        assert_eq!(visible(&mut h)[2], "Working for 0s");
+        assert_eq!(h.point(), on_chip(&h, line) - 1, "back on the line");
+        question(&mut h, 2, None);
+        h.keys("C-c C-k");
+        question(&mut h, 3, None);
+        h.keys("C-c C-c");
+        let skipped = "▸ – Which?  Skipped 14:03:00";
+        assert_eq!(faces_on(&h, skipped, "–"), [FaceName::SessionThought]);
+        assert_eq!(
+            faces_on(&h, "▸ ✗ Which?  Cancelled", "✗"),
+            [FaceName::StatusFailed]
+        );
+        on_line(&mut h, "▸ – Which?");
+        h.keys("TAB");
+        assert_eq!(
+            h.core.message(),
+            Some("No tool call here"),
+            "nothing was sent"
+        );
+    }
+
+    #[test]
+    fn an_answered_question_takes_its_calls_row() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        tool(&mut h, call("t", ToolKind::Other));
+        question(&mut h, 1, None);
+        h.keys("1");
+        tool_update(
+            &mut h,
+            "t",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+        );
+        assert_eq!(
+            shown(&mut h, 30)[..5],
+            ["❯ a", "", "▸ ✓ Which?  A", "", "Working for 0s"]
+        );
+        tool(&mut h, read("a", "a.rs"));
+        on_line(&mut h, "▸    ");
+        h.keys("TAB");
+        let lines = visible(&mut h);
+        assert_eq!(
+            lines[2..4],
+            ["▸ ✓ Which?  A", "  ▸ ✓   Read a.rs 0.0s"],
+            "{lines:?}"
+        );
+        assert_eq!(
+            drawn_line(&mut h, "Which?  A").decorations,
+            [Decoration::Indent(2)]
+        );
+        on_line(&mut h, "▸ ✓ Which?");
+        h.keys("TAB");
+        assert_eq!(visible(&mut h)[2..4], ["▾ ✓ Which?  A", " question_0  A"]);
+        on_line(&mut h, "▾    ");
+        h.keys("TAB");
+        let lines = visible(&mut h);
+        assert!(
+            !lines.iter().any(|l| l.contains("Which?")),
+            "folds away: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_replayed_question_call_shows_no_question() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
+        loading.load = Some(("old".into(), loading.buffer));
+        tool(
+            &mut h,
+            call("t", ToolKind::Other).status(ToolCallStatus::Completed),
+        );
+        assert_eq!(visible(&mut h)[0], "▸ ✓   Used t");
+        assert!(!h.core.text().contains("Question"));
+        let status = h.display(5).mode_line.right;
+        assert!(!format!("{status:?}").contains("awaiting answer"));
     }
 
     /// Three Claude-shaped questions: `Status` (Prompt, Both, an own answer), `Tests` (a
@@ -8456,7 +8659,7 @@ mod tests {
         );
         let text = h.core.text();
         assert!(
-            text.contains("✓ Which?  Status: Redis; Tests: A; Commit: One\n"),
+            text.contains("▸ ✓ 3 questions  Redis · A · One\n"),
             "{text}"
         );
         assert_eq!(visible(&mut h).len(), 4, "the answer folds with its group");
@@ -8474,7 +8677,7 @@ mod tests {
         h.keys("1 C-c C-k");
         assert_eq!(ops(&mut h), [r#"reply 0 1 {"action":"decline"}"#]);
         assert!(
-            h.core.text().contains("– Which?  Skipped\n"),
+            h.core.text().contains("▸ – 3 questions  Skipped\n"),
             "{}",
             h.core.text()
         );
@@ -8504,7 +8707,7 @@ mod tests {
         assert!(
             h.core
                 .text()
-                .starts_with("> a\n\n✗ Which?  Cancelled\n\n○ withdrawn\n\n"),
+                .starts_with("> a\n\n▸ ✗ Which?  Cancelled\n\n○ withdrawn\n\n"),
             "{}",
             h.core.text()
         );
@@ -8572,7 +8775,7 @@ mod tests {
             )]
         );
         assert!(
-            h.core.text().contains("✓ Which?  A, C, Redis\n"),
+            h.core.text().contains("▸ ✓ Which?  A, C, Redis\n"),
             "{}",
             h.core.text()
         );
