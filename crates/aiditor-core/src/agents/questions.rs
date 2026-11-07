@@ -41,6 +41,8 @@ pub(super) struct Question {
     pub(super) fields: Vec<Field>,
     /// The field whose options show; none once the last of several is answered.
     pub(super) open: Option<usize>,
+    /// codex-acp's `_meta.codex.delivery: "async"`: the turn goes on without waiting for it.
+    pub(super) nonblocking: bool,
 }
 
 /// A single-choice or multi-select field.
@@ -215,10 +217,12 @@ pub(super) fn parse(request: &CreateElicitationRequest) -> Option<(Question, Opt
         ElicitationScope::Session(scope) => scope.tool_call_id.clone(),
         _ => None,
     };
+    let meta = request.meta.as_ref().and_then(|m| m.get("codex"));
     let question = Question {
         message,
         fields,
         open: Some(0),
+        nonblocking: meta.is_some_and(|c| c["delivery"] == "async"),
     };
     Some((question, tool))
 }
@@ -434,6 +438,10 @@ impl Question {
             let previews = field.options.iter().any(|(.., p)| p.is_some());
             let keys = field.keys();
             let hints: &[_] = match (&field.multi, previews) {
+                (None, _) if self.nonblocking => &[
+                    ("C-c C-q", " go to it   "),
+                    ("C-c C-k", " skip   an answer joins this turn"),
+                ],
                 (Some(_), _) => &[
                     (&*keys, " tick   "),
                     ("RET", " tick at point   "),
@@ -705,6 +713,25 @@ mod tests {
         let (content, shown) = q.content(&Answer::Option(1));
         assert_eq!(serde_json::to_value(content).unwrap(), json!({"env": "b"}));
         assert_eq!(shown, "B");
+    }
+
+    #[test]
+    fn codex_async_questions_are_nonblocking() {
+        let mut r = request(json!({"env": {"type": "string", "oneOf": one_of()}}));
+        assert!(!parse(&r).unwrap().0.nonblocking);
+        r.meta = serde_json::from_value(json!({"codex": {"delivery": "async"}})).unwrap();
+        let (q, _) = parse(&r).unwrap();
+        assert!(q.nonblocking);
+        assert_eq!(
+            q.lines().last().unwrap().0,
+            "  C-c C-q go to it   C-c C-k skip   an answer joins this turn"
+        );
+        let (text, props) = q.lines().pop().unwrap();
+        let chars: Vec<_> = text.chars().collect();
+        let keys: Vec<String> = (props[1..].iter())
+            .map(|(r, p)| (assert_eq!(*p, label()), chars[r.clone()].iter().collect()).1)
+            .collect();
+        assert_eq!(keys, ["C-c C-q", "C-c C-k"]);
     }
 
     #[test]

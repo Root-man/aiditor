@@ -1938,6 +1938,16 @@ milestones:
               - "TAB opens and folds the fields that were sent"
               - "A session/load replay shows no open question"
             blocked_by: [m6-question-choice, m6-permission-collapse]
+          - key: m6-question-async-check
+            title: "Check non-blocking questions against codex-acp"
+            labels: [macos]
+            body: |
+              #412 built non-blocking questions from codex-acp's `docs/async-questions.md`, but the codex-acp in use sends no `request_user_input_async` questions yet. Once a release does, check frame 6f against it on macOS and fix what differs: the request's `_meta.codex.delivery`, its fields, the steered answer, and the withdrawal at the turn's end.
+            acceptance:
+              - "A real async question shows without stopping the turn, with `● working` and `1 question`"
+              - "An answer joins the running turn"
+              - "The turn's end closes an open one"
+            blocked_by: [m6-question-async]
       - key: m6-fork
         title: "Fork and roll back sessions"
         labels: [acp]
