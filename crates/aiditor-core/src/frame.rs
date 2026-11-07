@@ -1,5 +1,6 @@
 //! Windows and the frame's display model.
 
+use crate::agents::Preview;
 use crate::buffer::{BufferId, Buffers, Decoration};
 use crate::display::{SESSION_INSET, TEXT_INSET};
 use crate::settings::{FaceName, LineNumbers, Settings};
@@ -179,8 +180,20 @@ impl Core {
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
                 let matches = search.filter(|(from, _)| *from == id).map(|(_, s)| s);
+                let question = (self.agents.values())
+                    .find(|s| s.buffer == window.buffer())
+                    .and_then(|s| {
+                        s.question_row(buffers.get(window.buffer())?, window.point(buffers))
+                    });
                 let mut display = match session {
-                    true => session_display(window, buffers, settings, rect.height, cols, &roots),
+                    true => session_display(
+                        window,
+                        buffers,
+                        settings,
+                        (rect.height, cols),
+                        &roots,
+                        question,
+                    ),
                     false => window_display(
                         window,
                         buffers,
@@ -199,12 +212,6 @@ impl Core {
                     let point = window.point(buffers);
                     if let Some(lines) = session.message_lines(buffer, point) {
                         display::mark_message(&mut display, lines);
-                    }
-                    if let Some(row) = session.question_row(buffer, point) {
-                        let region = Decoration::Background(FaceName::Region);
-                        for line in display.lines.iter_mut().filter(|l| l.number == row) {
-                            line.decorations.push(region.clone());
-                        }
                     }
                 }
                 if highlighted {
@@ -385,6 +392,49 @@ pub(crate) fn window_display(
     display
 }
 
+/// Draws an option's `preview` under its row, display line `at`, in the question's box from the
+/// option's title, keeping to the window's `rows`.
+// shortcut: the window scrolls without the preview's rows, so a row near the bottom shows it cut and a
+// click below it lands a row off; count them in the window's scrolling if that bites.
+fn show_preview(
+    display: &mut display::WindowDisplay,
+    at: usize,
+    (column, preview): Preview,
+    settings: &Settings,
+    rows: usize,
+) {
+    use crate::buffer::FaceRef;
+    let number = display.lines[at].number;
+    let block = FaceRef::Face(FaceName::SessionBlock);
+    let lines = preview.into_iter().map(|(text, dim)| {
+        let refs = match dim {
+            true => vec![block, FaceRef::Face(FaceName::SessionThought)],
+            false => vec![block],
+        };
+        let span = |text: String, face| display::Span {
+            text,
+            face,
+            fold: false,
+        };
+        display::Line {
+            number,
+            height: settings.line_height(),
+            spans: vec![
+                span(" ".repeat(column), Default::default()),
+                span(text, settings.theme.resolve(&refs)),
+            ],
+            decorations: vec![
+                Decoration::Indent(1),
+                Decoration::Background(FaceName::Permission),
+            ],
+            aligned: false,
+            icons: Vec::new(),
+        }
+    });
+    display.lines.splice(at + 1..at + 1, lines);
+    display.lines.truncate(rows);
+}
+
 /// A session window's display `cols` wide in a window `height` px high: the transcript in the
 /// rows above a pane docked at the bottom, which holds the prompt area, from the prompt line on.
 /// The transcript shows its last lines while point is in the prompt area and scrolls to keep
@@ -393,9 +443,9 @@ fn session_display(
     window: &mut Window,
     buffers: &mut Buffers,
     settings: &Settings,
-    height: f32,
-    cols: usize,
+    (height, cols): (f32, usize),
     roots: &[PathBuf],
+    question: Option<(usize, Option<Preview>)>,
 ) -> display::WindowDisplay {
     window.set_cols(cols);
     let id = window.buffer();
@@ -441,6 +491,17 @@ fn session_display(
     display
         .lines
         .truncate(transcript.unwrap_or(display.lines.len()));
+    // Frame 6d: the question row at point highlighted, its option's preview under it.
+    if let Some((row, preview)) = question {
+        let region = Decoration::Background(FaceName::Region);
+        for line in display.lines.iter_mut().filter(|l| l.number == row) {
+            line.decorations.push(region.clone());
+        }
+        let at = display.lines.iter().rposition(|l| l.number == row);
+        if let (Some(at), Some(preview)) = (at, preview) {
+            show_preview(&mut display, at, preview, settings, rows);
+        }
+    }
     let shown = display.lines.len();
     display.cursor = display.cursor.filter(|&(l, _)| l < shown);
     // shortcut: the pane's top follows point each frame instead of being kept, so it can jump while editing a long prompt; keep a pane top on the window if it does.

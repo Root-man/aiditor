@@ -321,7 +321,7 @@ A `session/request_permission` from a session whose `session/new` was answered a
 - **THEN** the header line is `Permission: ` followed by the tool call id
 
 ### Requirement: Answering a permission request
-`C-c C-y` in a session buffer (`agent-allow-once`) SHALL answer the oldest pending permission request with its first `allow_once` option, passing pending questions by, and `C-c C-k` (`agent-reject-once`) SHALL answer the oldest pending request: a permission request with its first `reject_once` option, a question by skipping it, wherever point is. `RET` on an option line of any pending request SHALL answer it with that option; on any other line `RET` sends the prompt as before. The answer SHALL be the `selected` outcome with the option's id, and the request's block SHALL become a single line in `session-thought`, with no rule, that stays in the transcript: `✓ allowed once` for an `allow_once` option, `✓ allowed always` for `allow_always`, `✗ rejected` for `reject_once` and `✗ rejected always` for `reject_always`. With no pending permission request `C-c C-y`, and with no pending request `C-c C-k`, SHALL echo `No permission request is pending`; when the oldest has no option of the kind they SHALL echo `No allow_once option for <title>` (or `reject_once`) and answer nothing.
+`C-c C-y` in a session buffer (`agent-allow-once`) SHALL send the multi-select question whose block point is on, as agent-questions describes; elsewhere it SHALL answer the oldest pending permission request with its first `allow_once` option, passing pending questions by. `C-c C-k` (`agent-reject-once`) SHALL answer the oldest pending request: a permission request with its first `reject_once` option, a question by skipping it, wherever point is. `RET` on an option line of any pending request SHALL answer it with that option; on any other line `RET` sends the prompt as before. The answer SHALL be the `selected` outcome with the option's id, and the request's block SHALL become a single line in `session-thought`, with no rule, that stays in the transcript: `✓ allowed once` for an `allow_once` option, `✓ allowed always` for `allow_always`, `✗ rejected` for `reject_once` and `✗ rejected always` for `reject_always`. With no pending permission request `C-c C-y`, and with no pending request `C-c C-k`, SHALL echo `No permission request is pending`; when the oldest has no option of the kind they SHALL echo `No allow_once option for <title>` (or `reject_once`) and answer nothing.
 
 #### Scenario: Allowing
 - **WHEN** a request for `Edit a.txt` is pending and `C-c C-y` is typed in the prompt area
@@ -354,6 +354,10 @@ A `session/request_permission` from a session whose `session/new` was answered a
 #### Scenario: Allowing passes a question by
 - **WHEN** a question and then a permission request for `A` are pending and `C-c C-y` is typed
 - **THEN** `A` is answered and the question stays pending
+
+#### Scenario: Sending the multi-select question at point
+- **WHEN** a permission request for `A` and then a multi-select question are pending, point is on the question's lines and `C-c C-y` is typed
+- **THEN** the question is sent and `A` stays pending
 
 ### Requirement: Cancelling ends pending permission requests
 When `C-c C-c` sends `session/cancel`, the agent's answer to the prompt ends a turn, or the session buffer is killed, every pending permission request of the session SHALL be answered with the `cancelled` outcome. When the agent exits, pending requests are dropped unanswered. Each way, each block SHALL become the line `✗ cancelled` in `session-thought`, with no rule. A permission request that arrives after the session ended, or after its session buffer was killed, SHALL be answered `cancelled` and SHALL NOT be shown.
