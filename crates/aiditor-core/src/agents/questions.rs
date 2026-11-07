@@ -290,11 +290,26 @@ impl Field {
         }
         if self.own.is_some() {
             let on = self.multi.as_ref().is_some_and(|m| m.own.is_some());
-            let (mut text, props) = chip("o", on);
+            let (mut text, mut props) = chip("o", on);
             text.push_str("Own answer");
+            if let Some(own) = self.own_text() {
+                text.push_str("  ");
+                let start = text.chars().count();
+                text.push_str(&first_line(own));
+                props.push((start..text.chars().count(), dim()));
+            }
             lines.push((text, props));
         }
         lines
+    }
+
+    /// Its own answer's text so far: a multi-select's ticked one, or a recorded one.
+    pub(super) fn own_text(&self) -> Option<&str> {
+        match (&self.multi, &self.chosen) {
+            (Some(m), _) => m.own.as_deref(),
+            (None, Some(Answer::Own(text))) => Some(text),
+            _ => None,
+        }
     }
 
     /// The keys that pick its options: `1`, or `1-<n>` up to nine.

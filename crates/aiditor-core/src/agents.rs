@@ -1895,6 +1895,8 @@ impl Ctx<'_> {
     /// Draws session `id`'s pending question `at` again after a change, returning where its
     /// block starts. A block of the same length changes char for char, so point stays.
     fn redraw_question(&mut self, id: AgentId, at: usize) -> Option<usize> {
+        let point = self.core.point();
+        let selected = self.core.windows.window.buffer();
         let session = self
             .core
             .agents
@@ -1905,6 +1907,7 @@ impl Ctx<'_> {
         let start = buffer.marker(ask.start).expect("live while pending");
         let new = rows_text(&ask.body.rows(&ask.title));
         let len = new.chars().count();
+        let mut kept = None;
         if len == ask.len {
             let old: Vec<_> = buffer.text().slice(start..start + len).chars().collect();
             for (i, (o, n)) in old.into_iter().zip(new.chars()).enumerate() {
@@ -1914,12 +1917,27 @@ impl Ctx<'_> {
             }
             buffer.remove_properties(start..start + len);
         } else {
+            // Point's line and column in the block, kept as its lines change length.
+            let text = buffer.text();
+            if selected == session.buffer && (start..=start + ask.len).contains(&point) {
+                let line = text.char_to_line(point);
+                kept = Some((
+                    line - text.char_to_line(start),
+                    point - text.line_to_char(line),
+                ));
+            }
             rewrite(buffer, start..start + ask.len, &new);
             ask.len = len;
         }
         ask.body.render(buffer, start, &ask.title);
         let row = ask.row;
         session.settle_row(buffer, row, len);
+        if let Some((line, column)) = kept {
+            let text = self.core.current().text();
+            let first = text.char_to_line(start) + line;
+            let end = text.line_to_char(first + 1).saturating_sub(1);
+            _ = self.goto((text.line_to_char(first) + column).min(end));
+        }
         Some(start)
     }
 
@@ -2067,12 +2085,13 @@ impl Ctx<'_> {
         }
     }
 
-    /// Reads an own answer to session `id`'s pending question `at`, or unticks a multi-select's.
+    /// Reads an own answer to session `id`'s pending question `at`, starting from the one it has.
     fn own_answer(&mut self, id: AgentId, at: usize) {
         let question = self.core.agents[&id].asks[at].question();
-        match question.and_then(|q| q.field().multi.as_ref()) {
-            Some(m) if m.own.is_some() => self.tick_question(id, at, None, None),
-            _ => self.call("agent-answer-own", Args::default()),
+        let own = question.and_then(|q| q.field().own_text().map(str::to_owned));
+        self.call("agent-answer-own", Args::default());
+        if let Some(own) = own {
+            _ = self.set_text(&own);
         }
     }
 
@@ -2093,7 +2112,24 @@ impl Ctx<'_> {
             .map(|(id, at, _)| (id, at))
             .ok_or("No question here")?;
         if text.trim().is_empty() {
-            return Err("Answer is empty".into());
+            // An empty answer clears one kept while the block waits; a lone question has none.
+            let question = self.core.agents[&id].asks[at]
+                .question()
+                .expect("a question");
+            if question.field().multi.is_some() {
+                self.tick_question(id, at, None, None);
+            } else if question.several() {
+                let Body::Question(q) =
+                    &mut self.core.agents.get_mut(&id).expect("live").asks[at].body
+                else {
+                    unreachable!("a question");
+                };
+                q.field_mut().chosen = None;
+                self.redraw_question(id, at);
+            } else {
+                return Err("Answer is empty".into());
+            }
+            return Ok(());
         }
         self.choose(id, at, None, questions::Answer::Own(text.trim().into()));
         Ok(())
@@ -8278,6 +8314,15 @@ mod tests {
         );
         h.keys("o Redis RET");
         assert!(h.core.text().contains(" ▸ ✓ Status  Redis\n ▾ ● Tests"));
+        h.keys("TAB TAB");
+        assert!(
+            h.core.text().contains("      o   Own answer  Redis\n"),
+            "{}",
+            h.core.text()
+        );
+        h.keys("o");
+        assert_eq!(h.core.text(), "Redis");
+        h.keys("RET");
         h.keys("2 C-c C-y");
         assert_eq!(h.core.message(), Some("Tests: Pick at most 1"));
         assert!(ops(&mut h).is_empty(), "nothing sent out of range");
@@ -8383,8 +8428,21 @@ mod tests {
         assert_eq!(h.point(), at, "point stays");
         h.keys("RET");
         assert!(h.core.text().contains("   1   [ ] A\n"), "RET unticks");
+        let at = h.point();
         h.keys("RET o Redis RET");
-        assert!(h.core.text().contains("   o   [x] Own answer\n"));
+        assert!(
+            h.core.text().contains("   o   [x] Own answer  Redis\n"),
+            "the row shows it"
+        );
+        assert_eq!(h.point(), at, "point keeps its place as the row grows");
+        h.keys("o");
+        assert_eq!(h.core.text(), "Redis", "o starts from the answer it has");
+        h.keys("C-a C-k RET");
+        assert!(
+            h.core.text().contains("   o   [ ] Own answer\n"),
+            "an empty one clears it"
+        );
+        h.keys("o Redis RET");
         h.keys("C-c C-y");
         assert_eq!(
             ops(&mut h),
@@ -8415,7 +8473,7 @@ mod tests {
         h.keys("2 o x RET C-c C-y");
         assert_eq!(h.core.message(), Some("Pick at most 2"));
         assert!(ops(&mut h).is_empty(), "nothing sent");
-        h.keys("o C-c C-y");
+        h.keys("o C-a C-k RET C-c C-y");
         assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":["a","b"]}"#)]);
     }
 

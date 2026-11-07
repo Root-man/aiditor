@@ -23,6 +23,29 @@ A form-mode `elicitation/create` from a ready session SHALL be a question when i
 - **WHEN** the agent asks with a boolean field, or a string field without choices that is no choice's companion, or in URL mode
 - **THEN** it is answered `decline`, the echo line says `Can't show fake's question yet; declined` and the session buffer is unchanged
 
+### Requirement: Multi-select questions
+A multi-select question's option and own-answer rows SHALL read `[ ] ` before the title (`[x] ` once ticked), and its hint SHALL be `  <keys> tick   RET tick at point   C-c C-y send   C-c C-k skip`. On its lines a digit `1` to `9`, or `RET` on an option line, SHALL tick that option, or untick it when ticked, without answering. `o`, or `RET` on the own-answer line, SHALL read `Own answer: ` in the minibuffer, starting from the own answer's text when one is ticked, and tick the own answer with the trimmed text; an empty one SHALL untick it. A ticked own answer's row SHALL read `[x] Own answer  <text>`, the text's first line in `session-thought`. `C-c C-y` with point on the block's lines SHALL send it: `accept` with the choice field set to the ticked options' values, in option order, as a string array, and the own answer in the adapter's shape, the companion set to its text for a `_custom` companion, or `None of the above` added to the values and the companion set to its text for a `user_note` companion. The schema's `minItems` and `maxItems` SHALL NOT be drawn; when the count of ticked options plus a ticked own answer is below `minItems` or above `maxItems`, `C-c C-y` SHALL send nothing, keep the question open and echo `Pick at least <minItems>` or `Pick at most <maxItems>`. The block SHALL become `✓ <message>  <titles and own answer, joined by ", ">`, or `✓ <message>  Nothing picked`.
+
+#### Scenario: Ticking and sending
+- **WHEN** point is on a multi-select question with options A, B and C, `1` and `3` are typed, then `C-c C-y`
+- **THEN** after `1` the first row reads `[x] A` and nothing is sent, and the agent then gets `accept` with the choice set to `["a", "c"]`, and the block reads `✓ <message>  A, C`
+
+#### Scenario: Unticking with RET
+- **WHEN** the first option is ticked and `RET` is typed on its line
+- **THEN** it reads `[ ] A` again and nothing is sent
+
+#### Scenario: An own answer joins the picks
+- **WHEN** `2` is typed, then `o` and `Redis`, then `C-c C-y` on a Claude multi-select question
+- **THEN** the agent gets `accept` with `question_0` set to `["b"]` and `question_0_custom` set to `Redis`
+
+#### Scenario: Out of range
+- **WHEN** the field has `minItems` 2 and `maxItems` 2, one option is ticked and `C-c C-y` is typed, then three are ticked and `C-c C-y` is typed
+- **THEN** the echo line says `Pick at least 2`, then `Pick at most 2`, nothing is sent and no count is drawn
+
+#### Scenario: Editing the own answer
+- **WHEN** `o` and `Redis` tick the own answer, then `o` is typed again
+- **THEN** the row reads `[x] Own answer  Redis`, the minibuffer starts with `Redis`, and entering it empty unticks the own answer
+
 ## ADDED Requirements
 
 ### Requirement: Several questions in one block
@@ -33,7 +56,7 @@ A question with more than one choice field SHALL show as one block, drawn as fra
 - **THEN** the block reads ` Questions  1 of 3`, ` ▾ ● Status`, its option rows, ` ▸ ○ Tests   Which cases?`, ` ▸ ○ Commit  One or many?` and ` 1-2 answer  TAB next  C-c C-y send all  C-c C-k skip all`, and point is before its first chip
 
 ### Requirement: Answering several questions
-`TAB` with point on the block's lines SHALL open the next field, after the last the first, and move point to the column before its first option's chip. On the open field's lines, digits, `RET` and `o` SHALL act as on a single question's, except that answering a single-choice field SHALL record its answer, without sending, and open the next field, the last staying open. A multi-select field SHALL count as answered once an option or own answer is ticked, its answer the ticked titles joined by `, `. `C-c C-y` with point on the block's lines SHALL send `accept` with each answered field's content in its adapter's shape and no content for an unanswered one; when a ticked multi-select field is below its `minItems` or above its `maxItems`, it SHALL send nothing and echo `<title>: Pick at least <n>` or `<title>: Pick at most <n>`. The block SHALL become `✓ <message>  <title>: <answer>` for each answered field, joined by `; `, or `✓ <message>  Nothing answered`. `C-c C-k` SHALL skip the whole block as it skips a question.
+`TAB` with point on the block's lines SHALL open the next field, after the last the first, and move point to the column before its first option's chip. On the open field's lines, digits, `RET` and `o` SHALL act as on a single question's, except that answering a single-choice field SHALL record its answer, without sending, and open the next field, the last staying open. A recorded own answer SHALL show on its row as `Own answer  <text>`, `o` SHALL start from it, and an empty one SHALL clear it. A multi-select field SHALL count as answered once an option or own answer is ticked, its answer the ticked titles joined by `, `. `C-c C-y` with point on the block's lines SHALL send `accept` with each answered field's content in its adapter's shape and no content for an unanswered one; when a ticked multi-select field is below its `minItems` or above its `maxItems`, it SHALL send nothing and echo `<title>: Pick at least <n>` or `<title>: Pick at most <n>`. The block SHALL become `✓ <message>  <title>: <answer>` for each answered field, joined by `; `, or `✓ <message>  Nothing answered`. `C-c C-k` SHALL skip the whole block as it skips a question.
 
 #### Scenario: A single choice moves on
 - **WHEN** `2` is typed in the open `Status` field
