@@ -911,9 +911,15 @@ impl Core {
         let start = b.marker(ask.start).expect("live while pending");
         let at = b.text().line_to_char(b.text().char_to_line(start) + first) + 1;
         let b = self.buffers.get_mut(buffer).expect("shown in it");
+        let end = b.len_chars();
         (b.set_marker(b.point, at)).expect("in the text");
         for window in self.windows.windows_mut() {
             if window.buffer() == buffer {
+                // Scrolled to the prompt, then to the header, so the block below point shows.
+                for p in [end, start] {
+                    (window.set_point(&mut self.buffers, p)).expect("in the text");
+                    window.scroll(&self.buffers, window.rows());
+                }
                 (window.set_point(&mut self.buffers, at)).expect("in the text");
             }
         }
@@ -1887,6 +1893,10 @@ impl Ctx<'_> {
             .marker(start)
             .expect("live while pending");
         let at = text.line_to_char(text.char_to_line(start) + first) + 1;
+        // Scrolled to the header first, so coming from below shows it.
+        let (window, buffers) = (&mut self.core.windows.window, &mut self.core.buffers);
+        (window.set_point(buffers, start)).expect("in the text");
+        window.scroll(buffers, window.rows());
         self.goto(at)
     }
 
@@ -7775,6 +7785,38 @@ mod tests {
         h.core.text()[..at].chars().count() + 1
     }
 
+    #[test]
+    fn a_question_arriving_at_the_bottom_shows_whole() {
+        let mut h = session();
+        h.keys("a RET");
+        chunk(&mut h, &"line\n\n".repeat(20));
+        shown(&mut h, 10);
+        question(&mut h, 1, None);
+        let lines = shown(&mut h, 10);
+        assert!(
+            lines.iter().any(|l| l.contains("Question  Which?")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("C-c C-k skip")),
+            "{lines:?}"
+        );
+        // From the prompt, C-c C-q shows the header too.
+        h.keys("C-c C-k x");
+        question(&mut h, 2, None);
+        let before = shown(&mut h, 6);
+        assert!(
+            !before.iter().any(|l| l.contains("Question  Which?")),
+            "{before:?}"
+        );
+        h.keys("C-c C-q");
+        let lines = shown(&mut h, 6);
+        assert!(
+            lines.iter().any(|l| l.contains("Question  Which?")),
+            "{lines:?}"
+        );
+    }
+
     fn accepted(request: i64, content: &str) -> String {
         format!(r#"reply 0 {request} {{"action":"accept","content":{content}}}"#)
     }
@@ -7981,6 +8023,7 @@ mod tests {
         ops(&mut h);
         tool(&mut h, read("a", "a.rs"));
         tool(&mut h, call("t", ToolKind::Other));
+        visible(&mut h);
         question(&mut h, 1, None);
         let lines = visible(&mut h);
         assert_eq!(

@@ -32,11 +32,15 @@ A question SHALL add a block above the prompt line, drawn as frame 6d, and stay 
 - **THEN** that line is drawn on the `region` background and the others are not
 
 ### Requirement: Point and a waiting question
-When a question shows and the session's prompt area is empty, point SHALL move to the column before its first option's chip in every window of the current workspace showing the session, and the buffer's own point. When the prompt area holds text, point SHALL stay, keys SHALL keep typing into the prompt, and, when the selected window shows the session, the echo line SHALL say `Question waiting: C-c C-q goes to it`. `C-c C-q` (`agent-goto-question`) SHALL move point to the column before the oldest pending question's first chip, or echo `No question is pending`.
+When a question shows and the session's prompt area is empty, point SHALL move to the column before its first option's chip in every window of the current workspace showing the session, and the buffer's own point, each such window scrolling so the block shows from its first line, the prompt line too when it fits. When the prompt area holds text, point SHALL stay, keys SHALL keep typing into the prompt, and, when the selected window shows the session, the echo line SHALL say `Question waiting: C-c C-q goes to it`. `C-c C-q` (`agent-goto-question`) SHALL move point to the column before the oldest pending question's first chip, scrolling so the block shows from its first line, or echo `No question is pending`.
 
 #### Scenario: An empty prompt
 - **WHEN** a question arrives while the prompt area is empty
 - **THEN** point is just before its ` 1 ` chip
+
+#### Scenario: A question at the bottom of a long transcript
+- **WHEN** a question arrives while the window shows the end of a transcript longer than it
+- **THEN** the window shows the block from ` Question` to its hint row
 
 #### Scenario: A prompt with text
 - **WHEN** a question arrives while `draft` is typed in the prompt area, then `1` is typed and `C-c C-q`
