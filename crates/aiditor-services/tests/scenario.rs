@@ -317,7 +317,7 @@ async fn questions_are_answered_from_the_session_buffer() {
     ] {
         let n1 = n;
         app.until("a question", move |app: &App| {
-            app.core.text().matches("Question: Which?").count() == 1 && answered(n1 - 1)(app)
+            app.core.text().matches("Question  Which?").count() == 1 && answered(n1 - 1)(app)
         })
         .await;
         app.keys(keys);
@@ -342,5 +342,5 @@ async fn questions_are_answered_from_the_session_buffer() {
         app.core.text().contains("○ withdrawn")
     })
     .await;
-    assert!(!app.core.text().contains("Question: Which?"));
+    assert!(!app.core.text().contains("Question  Which?"));
 }

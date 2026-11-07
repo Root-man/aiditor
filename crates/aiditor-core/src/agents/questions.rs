@@ -2,6 +2,7 @@
 //! rows of a question's block and the content of its answers.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use agent_client_protocol_schema::v1::{
     CreateElicitationRequest, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
@@ -9,7 +10,12 @@ use agent_client_protocol_schema::v1::{
 };
 
 use super::ToolCallId;
-use super::render::first_line;
+use super::render::{dim, first_line};
+use crate::buffer::{Buffer, Decoration, FaceRef, Prop};
+use crate::settings::FaceName;
+
+/// A line's faces, by char range.
+pub(super) type Faces = Vec<(Range<usize>, Prop)>;
 
 /// codex-acp's own-answer option, which `o` stands in for.
 const NONE_OF_THE_ABOVE: &str = "None of the above";
@@ -118,33 +124,75 @@ pub(super) fn parse(request: &CreateElicitationRequest) -> Option<(Question, Opt
 }
 
 impl Question {
-    /// The block's rows, each with the length of its text before a dim suffix.
-    pub(super) fn rows(&self) -> Vec<(String, usize)> {
-        let full = |text: String| {
-            let len = text.chars().count();
-            (text, len)
-        };
-        let mut rows = vec![full(format!("Question: {}", self.message))];
-        rows.extend(self.title.clone().map(full));
-        for (i, (_, title, description)) in self.options.iter().enumerate() {
-            let (text, len) = full(format!("{}. {}", i + 1, first_line(title)));
-            match description {
-                Some(d) => rows.push((format!("{text}  {}", first_line(d)), len)),
-                None => rows.push((text, len)),
+    /// The block's lines, frame 6d's: each with its char ranges' faces, the box drawn behind
+    /// them by `render`.
+    pub(super) fn lines(&self) -> Vec<(String, Faces)> {
+        let named = |faces: &[FaceRef]| Prop::Named(faces.to_vec());
+        let label = named(&[FaceRef::Face(FaceName::StatusWaiting), FaceRef::Bold]);
+        let (key, dim) = (named(&[FaceRef::Face(FaceName::KeyHint)]), dim());
+        let header = format!(" Question  {}", self.message);
+        let mut lines = vec![(header, vec![(1..9, label.clone())])];
+        lines.extend(self.title.as_ref().map(|t| (format!(" {t}"), Vec::new())));
+        let titles: Vec<_> = self.options.iter().map(|(_, t, _)| first_line(t)).collect();
+        let width = titles.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+        // `  [ 1 ]  <title>` with the chip 3 columns wide from column 2.
+        let chip = |n: &str| (format!("  {n:^3}  "), vec![(2..5, key.clone())]);
+        for (i, (title, (_, _, description))) in titles.iter().zip(&self.options).enumerate() {
+            let (mut text, mut props) = chip(&(i + 1).to_string());
+            text.push_str(title);
+            if let Some(d) = description {
+                let pad = width - title.chars().count();
+                text.push_str(&" ".repeat(pad + 2));
+                let start = text.chars().count();
+                text.push_str(&first_line(d));
+                props.push((start..text.chars().count(), dim.clone()));
             }
+            lines.push((text, props));
         }
         if self.own.is_some() {
-            rows.push(full("o. Own answer".into()));
+            let (mut text, props) = chip("o");
+            text.push_str("Own answer");
+            lines.push((text, props));
         }
         let keys = match self.options.len() {
             1 => "1".into(),
             n => format!("1-{n}"),
         };
-        rows.push((
-            format!("{keys} answer   RET answer with the row at point   C-c C-k skip"),
-            0,
-        ));
-        rows
+        let mut text = String::from("  ");
+        let mut props = Vec::new();
+        for (key, what) in [
+            (&*keys, " answer   "),
+            ("RET", " answer with the row at point   "),
+            ("C-c C-k", " skip"),
+        ] {
+            let start = text.chars().count();
+            text.push_str(key);
+            props.push((start..start + key.chars().count(), label.clone()));
+            text.push_str(what);
+        }
+        props.insert(0, (0..text.chars().count(), dim));
+        lines.push((text, props));
+        lines
+    }
+
+    /// Draws the block of `lines()` at `start`, whose properties were removed: each line in the
+    /// `permission` box, one column in, with its faces.
+    pub(super) fn render(&self, buffer: &mut Buffer, start: usize) {
+        let mut at = start;
+        for (text, props) in self.lines() {
+            let decorations = [
+                Decoration::Indent(1),
+                Decoration::Background(FaceName::Permission),
+            ];
+            for decoration in decorations {
+                (buffer.add_property(at..at + 1, Prop::Line(decoration)))
+                    .expect("inside the block");
+            }
+            for (r, prop) in props {
+                (buffer.add_property(at + r.start..at + r.end, prop)).expect("inside the block");
+            }
+            at += text.chars().count() + 1;
+        }
     }
 
     /// The line of the block its first option is on.
@@ -215,18 +263,30 @@ mod tests {
         let (q, tool) = parse(&r).unwrap();
         assert_eq!(tool, Some("t".into()));
         assert_eq!(q.own, Some(Own::Custom("question_0_custom".into())));
-        let rows: Vec<_> = q.rows().into_iter().map(|r| r.0).collect();
+        let lines = q.lines();
+        let texts: Vec<_> = lines.iter().map(|l| l.0.as_str()).collect();
         assert_eq!(
-            rows,
+            texts,
             [
-                "Question: Pick one?",
-                "Pick",
-                "1. A  First",
-                "2. B",
-                "o. Own answer",
-                "1-2 answer   RET answer with the row at point   C-c C-k skip"
+                " Question  Pick one?",
+                " Pick",
+                "   1   A  First",
+                "   2   B",
+                "   o   Own answer",
+                "  1-2 answer   RET answer with the row at point   C-c C-k skip"
             ]
         );
+        // The label, each chip and each hint key in their faces, descriptions and the hint dim.
+        let faced = |(text, props): &(String, Faces)| -> Vec<String> {
+            let chars: Vec<_> = text.chars().collect();
+            (props.iter())
+                .map(|(r, _)| chars[r.clone()].iter().collect())
+                .collect()
+        };
+        assert_eq!(faced(&lines[0]), ["Question"]);
+        assert_eq!(faced(&lines[2]), [" 1 ", "First"]);
+        assert_eq!(faced(&lines[4]), [" o "]);
+        assert_eq!(faced(&lines[5])[1..], ["1-2", "RET", "C-c C-k"]);
         assert!(matches!(q.answer_at(2), Some(Answer::Option(0))));
         assert!(matches!(q.answer_at(4), Some(Answer::Own(_))));
         assert!(q.answer_at(1).is_none() && q.answer_at(5).is_none());
@@ -267,8 +327,8 @@ mod tests {
         let (q, _) = parse(&request(json!({"c": {"type": "string", "enum": ["x"]}}))).unwrap();
         assert_eq!(q.own, None);
         assert_eq!(
-            q.rows().last().unwrap().0,
-            "1 answer   RET answer with the row at point   C-c C-k skip"
+            q.lines().last().unwrap().0,
+            "  1 answer   RET answer with the row at point   C-c C-k skip"
         );
     }
 

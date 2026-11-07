@@ -2,7 +2,7 @@
 //! apart in the rope, and a folded group's hidden rows carry no properties, only the `Invisible`
 //! runs over them, so properties never nest.
 
-use super::render::{dim, group_line, render, render_rows, render_tool};
+use super::render::{dim, group_line, render, render_tool};
 use super::*;
 
 /// A row of a run: a tool call, or a thought or permission block among its calls.
@@ -114,7 +114,7 @@ impl Session {
             Row::Ask { start, len } => {
                 let at = buffer.marker(*start).expect("live with its run");
                 match self.asks.iter().find(|a| a.row == *start) {
-                    Some(ask) => render_rows(buffer, at, &ask.rows()),
+                    Some(ask) => ask.body.render(buffer, at, &ask.title),
                     None => {
                         (buffer.add_property(at..at + len, dim())).expect("inside the block");
                     }

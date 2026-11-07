@@ -211,6 +211,18 @@ impl Session {
         Some(buffer.text().char_to_line(first)..=buffer.text().char_to_line(last))
     }
 
+    /// The buffer line of the question row `point` is on, which frame 6d highlights.
+    pub(crate) fn question_row(&self, buffer: &Buffer, point: usize) -> Option<usize> {
+        self.asks.iter().find_map(|ask| {
+            let start = buffer.marker(ask.start)?;
+            let range = start..=start + ask.len;
+            let first = buffer.text().char_to_line(start);
+            let line = buffer.text().char_to_line(point);
+            (range.contains(&point) && ask.question()?.answer_at(line - first).is_some())
+                .then_some(line)
+        })
+    }
+
     pub(crate) fn activity(&self) -> Option<Activity> {
         if self.ended {
             Some(Activity::Failed)
@@ -439,16 +451,20 @@ impl Body {
     fn rows(&self, title: &str) -> Vec<(String, usize)> {
         match self {
             Body::Permission(options) => ask_rows(title, options),
-            Body::Question(question) => question.rows(),
+            Body::Question(question) => question.lines().into_iter().map(|(t, _)| (t, 0)).collect(),
+        }
+    }
+
+    /// Draws its block, under `title`, at `start`.
+    fn render(&self, buffer: &mut Buffer, start: usize, title: &str) {
+        match self {
+            Body::Permission(_) => render_rows(buffer, start, &self.rows(title)),
+            Body::Question(question) => question.render(buffer, start),
         }
     }
 }
 
 impl Ask {
-    fn rows(&self) -> Vec<(String, usize)> {
-        self.body.rows(&self.title)
-    }
-
     fn question(&self) -> Option<&questions::Question> {
         match &self.body {
             Body::Question(q) => Some(q),
@@ -893,7 +909,7 @@ impl Core {
             return;
         }
         let start = b.marker(ask.start).expect("live while pending");
-        let at = b.text().line_to_char(b.text().char_to_line(start) + first);
+        let at = b.text().line_to_char(b.text().char_to_line(start) + first) + 1;
         let b = self.buffers.get_mut(buffer).expect("shown in it");
         (b.set_marker(b.point, at)).expect("in the text");
         for window in self.windows.windows_mut() {
@@ -925,7 +941,7 @@ impl Core {
         let text = rows_text(&rows);
         let end = session.end(buffer);
         buffer.insert_output(end, &format!("{text}\n\n"));
-        render_rows(buffer, end, &rows);
+        body.render(buffer, end, &title);
         let shown = (tool.as_ref()).and_then(|t| session.tools.get(t).map(|t| t.call.clone()));
         let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
         let (start, row) = (marker(), marker());
@@ -1870,7 +1886,7 @@ impl Ctx<'_> {
             .current()
             .marker(start)
             .expect("live while pending");
-        let at = text.line_to_char(text.char_to_line(start) + first);
+        let at = text.line_to_char(text.char_to_line(start) + first) + 1;
         self.goto(at)
     }
 
@@ -7750,8 +7766,14 @@ mod tests {
         });
     }
 
-    const QUESTION: &str = "Question: Which?\n1. A  First\n2. B\no. Own answer\n\
+    const QUESTION: &str = " Question  Which?\n   1   A  First\n   2   B\n   o   Own answer\n  \
         1-2 answer   RET answer with the row at point   C-c C-k skip";
+
+    /// Point's offset at the column before the chip of the line holding `text`.
+    fn on_chip(h: &Harness, text: &str) -> usize {
+        let at = h.core.text().find(text).unwrap();
+        h.core.text()[..at].chars().count() + 1
+    }
 
     fn accepted(request: i64, content: &str) -> String {
         format!(r#"reply 0 {request} {{"action":"accept","content":{content}}}"#)
@@ -7768,11 +7790,22 @@ mod tests {
             h.core.text(),
             format!("> a\n\n{QUESTION}\n\nWorking for 0s\n\n> ")
         );
-        let point = h.core.text().find("1. A").unwrap();
+        assert_eq!(h.point(), on_chip(&h, "   1   A"), "on its first option");
+        // Frame 6d: a box one column in, and the row at point highlighted.
         assert_eq!(
-            h.point(),
-            h.core.text()[..point].chars().count(),
-            "on its first option"
+            drawn_line(&mut h, "1   A").decorations,
+            [
+                Decoration::Indent(1),
+                Decoration::Background(FaceName::Permission),
+                Decoration::Background(FaceName::Region)
+            ]
+        );
+        assert_eq!(
+            drawn_line(&mut h, "Question").decorations,
+            [
+                Decoration::Indent(1),
+                Decoration::Background(FaceName::Permission)
+            ]
         );
         assert_eq!(
             h.display(5).mode_line.right[0],
@@ -7826,7 +7859,7 @@ mod tests {
         assert!(
             h.core
                 .text()
-                .contains("Question: Which?\nWhere?\n1. staging\no. Own answer\n")
+                .contains(" Question  Which?\n Where?\n   1   staging\n   o   Own answer\n")
         );
         h.keys("C-n RET qa RET");
         assert_eq!(
@@ -7851,8 +7884,7 @@ mod tests {
         assert!(ops(&mut h).is_empty());
         assert!(h.core.text().ends_with("> draft1o"));
         h.keys("C-c C-q");
-        let point = h.core.text().find("1. A").unwrap();
-        assert_eq!(h.point(), h.core.text()[..point].chars().count());
+        assert_eq!(h.point(), on_chip(&h, "   1   A"));
         h.keys("1");
         assert_eq!(ops(&mut h), [accepted(1, r#"{"question_0":"a"}"#)]);
         h.keys("C-c C-q");
@@ -7955,8 +7987,8 @@ mod tests {
             lines[1..4],
             [
                 "▸    Read files, using tools",
-                "Question: Which?",
-                "1. A  First"
+                " Question  Which?",
+                "   1   A  First"
             ],
             "{lines:?}"
         );

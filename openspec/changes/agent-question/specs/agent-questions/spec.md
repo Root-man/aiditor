@@ -21,22 +21,26 @@ A form-mode `elicitation/create` from a ready session SHALL be a single-choice q
 - **THEN** it is answered `decline`, the echo line says `Can't show fake's question yet; declined` and the session buffer is unchanged
 
 ### Requirement: A question shows above the prompt line
-A question SHALL add a block above the prompt line, in the faces of a permission request's block, and stay pending: `Question: <message>` (its first line), then the choice field's `title` on its own line when it has one that differs from the message, then a line per option `<n>. <title>`, numbered from 1, followed by two spaces and its `description` in `session-thought` when it has one, then `o. Own answer` when the question has a companion, then `<keys> answer   RET answer with the row at point   C-c C-k skip` in `session-thought`, `<keys>` being `1` for one option and `1-<n>` for more, with a `session-thought` rule beside every line. While the request names a `toolCallId` of a call in a tool group, the block SHALL stand in for that call's row under the group's folded line, as a permission request's block does. The session's status SHALL show `● awaiting answer` in `status-waiting` while a question is pending and no permission request is.
+A question SHALL add a block above the prompt line, drawn as frame 6d, and stay pending. Every line of the block SHALL be indented one column and drawn on the `permission` background, with no rule. The lines are: ` Question  <message>` (its first line), with `Question` in `status-waiting` bold; then ` <title>` for the choice field's `title` when it has one that differs from the message; then a line per option, numbered from 1, of two spaces, the number centred in a three-column `key-hint` chip, two spaces and its title, padded to the longest title and followed by two spaces and its `description` in `session-thought` when it has one; then the same line with the chip ` o ` and `Own answer` when the question has a companion; then `  <keys> answer   RET answer with the row at point   C-c C-k skip` in `session-thought` with `<keys>`, `RET` and `C-c C-k` in `status-waiting` bold, `<keys>` being `1` for one option and `1-<n>` for more. While point is on an option or own-answer line, that line SHALL also be drawn on the `region` background. While the request names a `toolCallId` of a call in a tool group, the block SHALL stand in for that call's row under the group's folded line, as a permission request's block does. The session's status SHALL show `● awaiting answer` in `status-waiting` while a question is pending and no permission request is.
 
 #### Scenario: A question shows
 - **WHEN** the agent asks `Where should the status go?` with options `Prompt` (`Replace the count`) and `Mode line`
-- **THEN** `Question: Where should the status go?\n1. Prompt  Replace the count\n2. Mode line\n1-2 answer   RET answer with the row at point   C-c C-k skip` appears above the prompt line and the status reads `● awaiting answer`
+- **THEN** ` Question  Where should the status go?\n   1   Prompt     Replace the count\n   2   Mode line\n  1-2 answer   RET answer with the row at point   C-c C-k skip` appears above the prompt line in the `permission` box and the status reads `● awaiting answer`
+
+#### Scenario: The row at point
+- **WHEN** point is on the `1` option's line
+- **THEN** that line is drawn on the `region` background and the others are not
 
 ### Requirement: Point and a waiting question
-When a question shows and the session's prompt area is empty, point SHALL move to the start of its first option line in every window of the current workspace showing the session, and the buffer's own point. When the prompt area holds text, point SHALL stay, keys SHALL keep typing into the prompt, and, when the selected window shows the session, the echo line SHALL say `Question waiting: C-c C-q goes to it`. `C-c C-q` (`agent-goto-question`) SHALL move point to the oldest pending question's first option line, or echo `No question is pending`.
+When a question shows and the session's prompt area is empty, point SHALL move to the column before its first option's chip in every window of the current workspace showing the session, and the buffer's own point. When the prompt area holds text, point SHALL stay, keys SHALL keep typing into the prompt, and, when the selected window shows the session, the echo line SHALL say `Question waiting: C-c C-q goes to it`. `C-c C-q` (`agent-goto-question`) SHALL move point to the column before the oldest pending question's first chip, or echo `No question is pending`.
 
 #### Scenario: An empty prompt
 - **WHEN** a question arrives while the prompt area is empty
-- **THEN** point is on its `1.` line
+- **THEN** point is just before its ` 1 ` chip
 
 #### Scenario: A prompt with text
 - **WHEN** a question arrives while `draft` is typed in the prompt area, then `1` is typed and `C-c C-q`
-- **THEN** the echo line said `Question waiting: C-c C-q goes to it`, the prompt reads `draft1`, and point is then on the question's `1.` line
+- **THEN** the echo line said `Question waiting: C-c C-q goes to it`, the prompt reads `draft1`, and point is then just before the question's ` 1 ` chip
 
 ### Requirement: Answering a question
 On a pending question's lines, a digit `1` to `9` SHALL answer it with that option at once, and `RET` on an option line SHALL answer it with that option; the answer SHALL be `accept` with the choice field set to the option's value. `o` on a question's lines SHALL read `Own answer: ` in the minibuffer when the question has a companion, and answer `accept` in the adapter's shape: the companion alone for a `_custom` companion, the choice field set to `None of the above` and the companion to the text for a `user_note` companion. An own answer SHALL be sent trimmed, and an empty one refused with `Answer is empty`. A digit past the options, or `o` without a companion, SHALL answer nothing. Elsewhere, digits and `o` SHALL insert themselves. The block SHALL become one line in `session-thought` with no rule: `✓ <message>  <option title or own answer>`. When point was in the block, it SHALL move to the end of the prompt area.
@@ -46,7 +50,7 @@ On a pending question's lines, a digit `1` to `9` SHALL answer it with that opti
 - **THEN** the agent gets `accept` with the choice set to the second option's value, and the block reads `✓ <message>  <second title>`
 
 #### Scenario: RET answers
-- **WHEN** point is on the `1.` line and `RET` is typed
+- **WHEN** point is on the `1` option's line and `RET` is typed
 - **THEN** the agent gets `accept` with the first option's value and no prompt is sent
 
 #### Scenario: Own answer to Claude
