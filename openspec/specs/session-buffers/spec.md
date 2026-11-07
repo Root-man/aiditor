@@ -321,7 +321,7 @@ A `session/request_permission` from a session whose `session/new` was answered a
 - **THEN** the header line is `Permission: ` followed by the tool call id
 
 ### Requirement: Answering a permission request
-`C-c C-y` in a session buffer (`agent-allow-once`) SHALL answer the oldest pending request with its first `allow_once` option, and `C-c C-k` (`agent-reject-once`) with its first `reject_once` option, wherever point is. `RET` on an option line of any pending request SHALL answer it with that option; on any other line `RET` sends the prompt as before. The answer SHALL be the `selected` outcome with the option's id, and the request's block SHALL become a single line in `session-thought`, with no rule, that stays in the transcript: `✓ allowed once` for an `allow_once` option, `✓ allowed always` for `allow_always`, `✗ rejected` for `reject_once` and `✗ rejected always` for `reject_always`. With no pending request `C-c C-y` and `C-c C-k` SHALL echo `No permission request is pending`; when the oldest has no option of the kind they SHALL echo `No allow_once option for <title>` (or `reject_once`) and answer nothing.
+`C-c C-y` in a session buffer (`agent-allow-once`) SHALL answer the oldest pending permission request with its first `allow_once` option, passing pending questions by, and `C-c C-k` (`agent-reject-once`) SHALL answer the oldest pending request: a permission request with its first `reject_once` option, a question by skipping it, wherever point is. `RET` on an option line of any pending request SHALL answer it with that option; on any other line `RET` sends the prompt as before. The answer SHALL be the `selected` outcome with the option's id, and the request's block SHALL become a single line in `session-thought`, with no rule, that stays in the transcript: `✓ allowed once` for an `allow_once` option, `✓ allowed always` for `allow_always`, `✗ rejected` for `reject_once` and `✗ rejected always` for `reject_always`. With no pending permission request `C-c C-y`, and with no pending request `C-c C-k`, SHALL echo `No permission request is pending`; when the oldest has no option of the kind they SHALL echo `No allow_once option for <title>` (or `reject_once`) and answer nothing.
 
 #### Scenario: Allowing
 - **WHEN** a request for `Edit a.txt` is pending and `C-c C-y` is typed in the prompt area
@@ -351,8 +351,12 @@ A `session/request_permission` from a session whose `session/new` was answered a
 - **WHEN** no request is pending, or the oldest has no `allow_once` option, and `C-c C-y` is typed
 - **THEN** `No permission request is pending`, or `No allow_once option for <title>`, is echoed and nothing is answered
 
+#### Scenario: Allowing passes a question by
+- **WHEN** a question and then a permission request for `A` are pending and `C-c C-y` is typed
+- **THEN** `A` is answered and the question stays pending
+
 ### Requirement: Cancelling ends pending permission requests
-When `C-c C-c` sends `session/cancel`, or the agent's answer to the prompt ends a turn, every pending permission request of the session SHALL be answered with the `cancelled` outcome. When the agent exits, pending requests are dropped unanswered. Each way, each block SHALL become the line `✗ cancelled` in `session-thought`, with no rule. A permission request that arrives after the session ended, or after its session buffer was killed, SHALL be answered `cancelled` and SHALL NOT be shown.
+When `C-c C-c` sends `session/cancel`, the agent's answer to the prompt ends a turn, or the session buffer is killed, every pending permission request of the session SHALL be answered with the `cancelled` outcome. When the agent exits, pending requests are dropped unanswered. Each way, each block SHALL become the line `✗ cancelled` in `session-thought`, with no rule. A permission request that arrives after the session ended, or after its session buffer was killed, SHALL be answered `cancelled` and SHALL NOT be shown.
 
 #### Scenario: Cancelling with a pending request
 - **WHEN** a request for `Edit a.txt` is pending and `C-c C-c` is typed
@@ -369,6 +373,10 @@ When `C-c C-c` sends `session/cancel`, or the agent's answer to the prompt ends 
 #### Scenario: A request after the session buffer was killed
 - **WHEN** the session buffer was killed and a permission request from its agent arrives before the agent exits
 - **THEN** it is answered `cancelled`
+
+#### Scenario: Killing the buffer with a pending request
+- **WHEN** a request for `Edit a.txt` is pending and the session buffer is killed
+- **THEN** it is answered `cancelled` before the agent is stopped
 
 ### Requirement: Command output shows in its tool call
 A `tool_call`, or a call started from an update, SHALL open a terminal for the call when its `_meta.terminal_info` names a `terminal_id` or a content item is a terminal, the first of these naming the terminal's id; a call keeps the terminal it opened when later updates replace its content. Every `tool_call` and `tool_call_update` SHALL append the `data` string of `_meta.terminal_output` and of `_meta.terminal_output_delta`, in that order, to the output of the terminal their `terminal_id` names, whichever call announced it. `_meta.terminal_exit` SHALL record that terminal's exit: `signal <signal>` when `signal` is a string, else `exit <code>` when `exit_code` is a non-zero number, else none. Data or an exit for a terminal no shown call opened SHALL be dropped.
@@ -544,7 +552,7 @@ In the selected window the model and effort SHALL be coloured by item quality, t
 - **THEN** the model and effort are in `mode-line-inactive`
 
 ### Requirement: Session mode lines show lifecycle status
-The right group SHALL show `● working` in `status-running` while a prompt awaits its answer, `● awaiting permission` in `status-waiting` while any permission request is pending, or `● exited` in `status-failed` after exit or failed startup, with exited taking precedence over awaiting permission, which takes precedence over working. A live session without a running prompt or pending permission SHALL omit status. Answering one of several requests SHALL keep awaiting-permission status until all are answered.
+The right group SHALL show `● working` in `status-running` while a prompt awaits its answer, `● awaiting permission` in `status-waiting` while any permission request is pending, `● awaiting answer` in `status-waiting` while a question is pending and no permission request is, or `● exited` in `status-failed` after exit or failed startup, with exited taking precedence over awaiting permission, which takes precedence over awaiting answer, which takes precedence over working. A live session without a running prompt or pending request SHALL omit status. Answering one of several requests SHALL keep awaiting-permission status until all are answered.
 
 #### Scenario: Turn and permission lifecycle
 - **GIVEN** a live idle session
