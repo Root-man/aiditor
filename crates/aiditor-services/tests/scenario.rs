@@ -339,7 +339,7 @@ async fn questions_are_answered_from_the_session_buffer() {
         .unwrap();
     assert_eq!(line, "question error: Request cancelled");
     app.until("the closed block", |app| {
-        app.core.text().contains("○ withdrawn")
+        app.core.text().contains("○ Which?  Closed")
     })
     .await;
     assert!(!app.core.text().contains("Question  Which?"));

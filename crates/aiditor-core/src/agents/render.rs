@@ -500,12 +500,94 @@ pub(super) fn answered(kind: PermissionOptionKind) -> &'static str {
     }
 }
 
-/// Replaces `ask`'s block with the dim `line`.
+/// Replaces permission request `ask`'s block with the dim `line`.
 pub(super) fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
     let start = buffer.marker(ask.start).expect("live while pending");
     rewrite(buffer, start..start + ask.len, line);
     (buffer.add_property(start..start + line.chars().count(), dim())).expect("inside the block");
     buffer.remove_marker(ask.start);
+}
+
+/// Replaces question `ask`'s block with its answered line, from `line`'s `<mark> <outcome>`,
+/// `clock` at its right, and the rows of what it sent, folded.
+pub(super) fn settle_question(
+    buffer: &mut Buffer,
+    ask: &Ask,
+    line: &str,
+    clock: Option<&str>,
+) -> Answered {
+    let question = ask.question().expect("settled as a question");
+    let start = buffer.marker(ask.start).expect("live while pending");
+    let mut chars = line.chars();
+    let mark = chars.next().expect("a mark");
+    let label = question.label();
+    let head = format!("▸ {mark} {label}  {}", chars.as_str().trim_start());
+    let name = (question.sent.iter()).map(|(n, _)| n.chars().count()).max();
+    let name = name.unwrap_or_default();
+    let rows: String = (question.sent.iter())
+        .map(|(n, a)| format!("\n {n:<name$}  {a}"))
+        .collect();
+    rewrite(buffer, start..start + ask.len, &format!("{head}{rows}"));
+    let outcome = head.chars().count();
+    let time = clock.map_or(String::new(), |c| format!(" {c}"));
+    buffer.insert_output(start + outcome, &time);
+    let line = outcome + time.chars().count();
+    Answered {
+        start: ask.start,
+        label: 4 + label.chars().count(),
+        outcome,
+        line,
+        len: line + rows.chars().count(),
+        name,
+        mark: match mark {
+            '✓' => FaceName::StatusRunning,
+            '✗' => FaceName::StatusFailed,
+            _ => FaceName::SessionThought,
+        },
+        open: false,
+    }
+}
+
+/// Renders answered line `a`, two columns in when `grouped`: its marks, its dim outcome and
+/// time, and its rows on `session-block` when open, else hidden.
+pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) {
+    let start = buffer.marker(a.start).expect("live with its session");
+    let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
+    let indent = if grouped { 2 } else { 0 };
+    let mut props = vec![
+        (0..1, dim()),
+        (2..3, face(a.mark)),
+        (a.label + 2..a.outcome, dim()),
+    ];
+    if grouped {
+        props.push((0..1, Prop::Line(Decoration::Indent(indent))));
+    }
+    if a.line > a.outcome {
+        props.push((a.outcome..a.outcome + 1, Prop::AlignRight));
+        props.push((a.outcome + 1..a.line, face(FaceName::Annotation)));
+    }
+    if a.open {
+        let rows = buffer
+            .text()
+            .slice(start + a.line..start + a.len)
+            .to_string();
+        let mut at = a.line + 1;
+        for row in rows.split('\n').skip(1) {
+            // Under the label, the row's leading space its padding.
+            props.push((at..at + 1, Prop::Line(Decoration::Indent(indent + 3))));
+            props.push((
+                at..at + 1,
+                Prop::Line(Decoration::Background(FaceName::SessionBlock)),
+            ));
+            props.push((at + 1..at + 1 + a.name, dim()));
+            at += row.chars().count() + 1;
+        }
+    } else if a.len > a.line {
+        props.push((a.line..a.len, Prop::Invisible(String::new())));
+    }
+    for (r, prop) in props {
+        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
+    }
 }
 
 /// A tool call's raw output as text.
@@ -780,6 +862,16 @@ fn hidden_output(content: &str, at: usize) -> Option<(Range<usize>, usize)> {
 /// and ends ascend.
 pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     let start = buffer.marker(tool.start).expect("live while shown");
+    if tool.replaced {
+        // With what parts it from the row before in a group, else from the next block.
+        let span = match tool.group {
+            Some(_) => start - 1..start + tool.len,
+            None => start..start + tool.len + "\n\n".len(),
+        };
+        buffer.remove_properties(span.clone());
+        let hide = Prop::Invisible(String::new());
+        return (buffer.add_property(span, hide)).expect("inside the text");
+    }
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
     let status = match tool.call.status {
         ToolCallStatus::Failed => FaceName::StatusFailed,

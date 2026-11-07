@@ -92,10 +92,62 @@ impl Session {
         start..self.row_span(buffer, last).end
     }
 
-    /// Whether `tool` is out of sight in a folded group.
+    /// Whether `tool` is out of sight: in a folded group, or replaced by its question's line.
     pub(super) fn hidden(&self, tool: &Tool) -> bool {
         let waiting = (self.asks.iter()).any(|a| a.holds(&tool.call.tool_call_id));
-        !waiting && tool.group.is_some_and(|g| !self.groups[g].open)
+        tool.replaced || !waiting && tool.group.is_some_and(|g| !self.groups[g].open)
+    }
+
+    /// The group with a row starting at `at`, an answered line's.
+    fn group_at(&self, buffer: &Buffer, at: usize) -> Option<usize> {
+        let starts =
+            |r: &Row| matches!(r, Row::Ask { start, .. } if buffer.marker(*start) == Some(at));
+        self.groups.iter().position(|g| g.rows.iter().any(starts))
+    }
+
+    /// Replaces `ask`'s block with `line`, returning its length: a question's answered line, `clock`
+    /// at its right, or a permission request's dim line.
+    pub(super) fn settle(
+        &mut self,
+        buffer: &mut Buffer,
+        ask: &Ask,
+        line: &str,
+        clock: Option<&str>,
+    ) -> usize {
+        if ask.question().is_none() {
+            settle(buffer, ask, line);
+            return line.chars().count();
+        }
+        let answered = settle_question(buffer, ask, line, clock);
+        let start = buffer.marker(answered.start).expect("just settled");
+        render_answered(buffer, &answered, self.group_at(buffer, start).is_some());
+        let len = answered.len;
+        self.answers.push(answered);
+        len
+    }
+
+    /// Opens or folds the answered line `point` is on or in, if it sent anything, returning
+    /// where it starts and ends.
+    pub(super) fn toggle_answer(
+        &mut self,
+        buffer: &mut Buffer,
+        point: usize,
+    ) -> Option<(usize, usize)> {
+        let (i, start) = self.answers.iter().enumerate().find_map(|(i, a)| {
+            let start = buffer.marker(a.start).expect("live with its session");
+            let end = start + if a.open { a.len } else { a.line };
+            (a.len > a.line && (start..=end).contains(&point)).then_some((i, start))
+        })?;
+        let group = self.group_at(buffer, start);
+        if group.is_some_and(|g| !self.groups[g].open) {
+            return None;
+        }
+        let a = &mut self.answers[i];
+        a.open = !a.open;
+        buffer.remove_properties(start..start + a.len);
+        buffer.replace_output(start..start + 1, if a.open { "▾" } else { "▸" });
+        render_answered(buffer, a, group.is_some());
+        Some((start, start + a.line))
     }
 
     /// Whether `row` shows under its folded group.
@@ -113,9 +165,11 @@ impl Session {
             Row::Thought(thought) => render_thought(buffer, thought),
             Row::Ask { start, len } => {
                 let at = buffer.marker(*start).expect("live with its run");
-                match self.asks.iter().find(|a| a.row == *start) {
-                    Some(ask) => ask.body.render(buffer, at, &ask.title),
-                    None => {
+                let answered = (self.answers.iter()).find(|a| buffer.marker(a.start) == Some(at));
+                match (self.asks.iter().find(|a| a.row == *start), answered) {
+                    (Some(ask), _) => ask.body.render(buffer, at, &ask.title),
+                    (None, Some(a)) => render_answered(buffer, a, true),
+                    (None, None) => {
                         (buffer.add_property(at..at + len, dim())).expect("inside the block");
                     }
                 }
@@ -229,7 +283,8 @@ impl Session {
             Row::Ask { start, .. } => *start,
         };
         let asks = self.asks.iter().map(|a| a.start);
-        for marker in asks.chain([first]) {
+        let answers = self.answers.iter().map(|a| a.start);
+        for marker in asks.chain(answers).chain([first]) {
             if buffer.marker(marker) == Some(at) {
                 buffer.set_marker(marker, at + 1).expect("in the text");
             }
