@@ -397,7 +397,7 @@ pub enum FaceRef {
 }
 
 /// Something drawn across a whole line, in a face's `bg` or, for a rule, its `fg`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decoration {
     Background(FaceName),
     /// A rule beside the line, like the one beside tool calls.
@@ -413,6 +413,12 @@ pub enum Decoration {
     },
     /// A 1 px line through the middle of the line, where it has no text.
     HRule(FaceName),
+    /// A drawn table's row: `separator` rules at the char columns `edges` and along its bottom,
+    /// and its top when it is the `first`. The line is cut at the window's edge, never wrapped.
+    Table {
+        edges: Vec<isize>,
+        first: bool,
+    },
 }
 
 /// An icon from the set bundled with the frontend.
@@ -443,6 +449,8 @@ pub enum Prop {
     Icon(Icon),
     /// Text drawn in place of the range, a piece per face, as Emacs's `display` string.
     Display(Vec<(String, Vec<FaceRef>)>),
+    /// The destination of the link shown in the range, whose markup isn't in the text.
+    Url(String),
 }
 
 impl Buffer {
@@ -839,6 +847,13 @@ impl Buffer {
     }
 
     /// The columns an `Indent` decoration puts `line` in.
+    /// Whether `line` is a drawn table's, which is cut at the window's edge, never wrapped.
+    pub(crate) fn table_line(&self, line: usize) -> bool {
+        let start = self.text().line_to_char(line);
+        (self.properties_near(start..start).into_iter())
+            .any(|(r, p)| r.start == start && matches!(p, Prop::Line(Decoration::Table { .. })))
+    }
+
     pub(crate) fn line_indent(&self, line: usize) -> usize {
         let start = self.text().line_to_char(line);
         let end = self

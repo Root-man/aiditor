@@ -18,10 +18,28 @@ pub(super) fn render(
     buffer.remove_properties(range.clone());
     let text = buffer.text().slice(range.clone()).to_string();
     let is_file = |word: &str| file_link(index, word).is_some();
-    for (r, prop) in markdown::render(&text, thought, false, is_file) {
+    for (r, prop) in markdown::render(&text, thought, false, false, is_file).1 {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
+}
+
+/// Replaces `range` of `buffer`, a streamed message, with `source` rendered as markdown with its
+/// tables drawn, linking the files of `index`; returns the rendered length in chars.
+pub(super) fn render_message(
+    buffer: &mut Buffer,
+    range: Range<usize>,
+    source: &str,
+    index: Option<&FileIndex>,
+) -> usize {
+    let is_file = |word: &str| file_link(index, word).is_some();
+    let (text, props) = markdown::render(source, false, false, true, is_file);
+    rewrite(buffer, range.clone(), &text);
+    for (r, prop) in props {
+        (buffer.add_property(range.start + r.start..range.start + r.end, prop))
+            .expect("inside the rendered range");
+    }
+    text.chars().count()
 }
 
 /// Replaces `range` of `buffer`'s output with `text`, removing its properties, line by line so
@@ -832,7 +850,9 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             Some(h) if r.start >= h.start => r.start + h.len()..r.end + h.len(),
             _ => r,
         };
-        let markdown = markdown::render(&visible, false, true, |_| false).into_iter();
+        let markdown = markdown::render(&visible, false, true, false, |_| false)
+            .1
+            .into_iter();
         props.extend(markdown.map(|(r, p)| (past(r), p)).map(shifted));
         // Sorted with the markdown faces by range; where both apply, the later sorted one wins.
         let faces = tool.faces.iter().filter_map(|(r, f)| {

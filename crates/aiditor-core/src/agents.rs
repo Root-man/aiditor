@@ -449,6 +449,8 @@ struct Stream {
     /// Where the block starts.
     start: MarkerId,
     block: Block,
+    /// Its markdown, which a message's drawn tables replace in the text.
+    source: String,
     /// Chunks arrived since it was last rendered.
     dirty: bool,
     /// When its first chunk arrived and the clock then; `None` when replayed.
@@ -480,6 +482,7 @@ impl Core {
             && stream.block == block
         {
             buffer.insert_output(end - "\n\n".len(), text);
+            stream.source.push_str(text);
             stream.dirty = true;
             if let Block::Thought(_) = block {
                 session.thought_grew(text.chars().count());
@@ -508,6 +511,7 @@ impl Core {
             session.stream = Some(Stream {
                 start: marker(),
                 block,
+                source: text.into(),
                 dirty: true,
                 began: session.live().then_some((now, clock)),
             });
@@ -880,13 +884,16 @@ impl Core {
         if std::mem::take(&mut stream.dirty) {
             let start = buffer.marker(stream.start).expect("live while streaming");
             let thought = matches!(stream.block, Block::Thought(_));
-            if !thought || !session.fold_stream(buffer) {
+            if !thought {
                 // shortcut: links are found as the block renders; a file indexed later isn't
                 // linked until it renders again, and RET on one since dropped sends the prompt.
-                let index = (!thought)
-                    .then(|| self.index.get(&session.project))
-                    .flatten();
-                render(buffer, start..end, thought, index);
+                let index = self.index.get(&session.project);
+                let len = render_message(buffer, start..end, &stream.source, index);
+                if let Some(message) = session.messages.last_mut() {
+                    message.len = len;
+                }
+            } else if !session.fold_stream(buffer) {
+                render(buffer, start..end, thought, None);
             }
         }
     }
@@ -919,7 +926,18 @@ impl Core {
                     header = Some(end - start);
                 }
                 (Block::Message(_), Some(clock), Some(message)) => {
-                    message.len += put_time(buffer, line_end(buffer, start), &clock);
+                    // A drawn table's row is cut at the window's edge, so the time goes on the
+                    // first line of text, and a message of tables alone has none.
+                    let text = buffer.text();
+                    let end = text.char_to_line(start + message.len.saturating_sub(1));
+                    let line = (text.char_to_line(start)..=end).find(|&l| {
+                        let at = text.line_to_char(l);
+                        !buffer.table_line(l) && line_end(buffer, at) > at
+                    });
+                    if let Some(line) = line {
+                        let at = line_end(buffer, buffer.text().line_to_char(line));
+                        message.len += put_time(buffer, at, &clock);
+                    }
                 }
                 _ => {}
             }
@@ -941,11 +959,13 @@ impl Core {
         let Some(Stream {
             start,
             block: Block::Message(_),
+            source,
             ..
-        }) = &session.stream
+        }) = &mut session.stream
         else {
             return;
         };
+        source.truncate(source.trim_end_matches('\n').len());
         let start = buffer.marker(*start).expect("live while streaming");
         let end = session.end(buffer) - "\n\n".len();
         let text = buffer.text().slice(start..end);
@@ -1684,7 +1704,14 @@ impl Ctx<'_> {
             return None;
         }
         let (line, at) = self.linked_line()?;
-        let url = markdown::url_at(&line, at)?;
+        // A drawn table keeps a link's destination on its label, as the text has none.
+        let (core, point) = (&*self.core, self.core.point());
+        let b = core.buffers.get(core.windows.window.buffer())?;
+        let kept = (b.properties_near(point..point).into_iter()).find_map(|(r, p)| match p {
+            Prop::Url(url) if r.contains(&point) => Some(url.clone()),
+            _ => None,
+        });
+        let url = kept.or_else(|| markdown::url_at(&line, at))?;
         // A scheme is a letter, then letters, digits, `+`, `-` or `.`, before a `:` that isn't
         // a `path:line`'s.
         let (scheme, rest) = url.split_once(':')?;
@@ -4733,6 +4760,157 @@ mod tests {
     }
 
     #[test]
+    fn tables_are_drawn_into_the_text() {
+        let mut h = session();
+        chunk(&mut h, "| a | b |\n|---|--:|\n");
+        let frame = h.joined_frame(800., 600.);
+        let line = &frame.windows[0].display.lines[0];
+        let row = Decoration::Table {
+            edges: vec![0, 3, 6],
+            first: true,
+        };
+        assert!(line.decorations.contains(&row), "{:?}", line.decorations);
+        assert!(h.core.text().starts_with(" a  b \n"), "the header alone");
+        chunk(&mut h, "| x | 10 |\n");
+        h.joined_frame(800., 600.);
+        assert!(h.core.text().starts_with(" a   b \n x  10 \n"), "widened");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert!(
+            h.core.text().starts_with(" a   b \n x  10 \n"),
+            "{:?}",
+            h.core.text()
+        );
+        let message = &h.core.agents[&AgentId(0)].messages[0];
+        let b = h.core.current();
+        let start = b.marker(message.start).unwrap();
+        let text = b.text().slice(start..start + message.len).to_string();
+        assert!(
+            text.starts_with(" a   b \n x  10"),
+            "its length follows: {text:?}"
+        );
+        h.keys("M-< C-SPC C-n C-n M-w");
+        assert_eq!(h.clipboard.as_deref(), Some(" a   b \n x  10 \n"));
+        h.keys("C-g C-s - - -");
+        let found = listed(&mut h).0;
+        assert!(
+            found.is_empty(),
+            "no markdown to find: {found:?} in {:?}",
+            h.core.text()
+        );
+        h.keys("C-g C-s x SPC SPC 1 0");
+        assert_eq!(listed(&mut h).0, ["2  x  10 "]);
+    }
+
+    #[test]
+    fn a_message_time_skips_its_table_rows() {
+        let mut h = session();
+        h.clock("14:01:00");
+        h.keys("a RET");
+        chunk(&mut h, "| a |\n|---|\n| b |\n\nAfter.");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert!(
+            h.core.text().contains(" a \n b \n\nAfter. 14:01:00\n"),
+            "{:?}",
+            h.core.text()
+        );
+        h.keys("a RET");
+        chunk(&mut h, "| c |\n|---|\n| d |\n");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        let text = h.core.text();
+        assert!(
+            text.contains("\n c \n d \n\nWorked"),
+            "a table alone has no time: {text:?}"
+        );
+    }
+
+    #[test]
+    fn wide_tables_are_cut_and_scroll_as_one() {
+        let mut h = session();
+        let wide = "w".repeat(150);
+        let prose = "word ".repeat(40);
+        chunk(
+            &mut h,
+            &format!("| a | {wide} |\n|---|---|\n| b | x |\n| c | y |\n\n{prose}"),
+        );
+        h.joined_frame(800., 600.);
+        let cols = h.core.windows.window.cols();
+        let text = |l: &crate::display::Line| -> String {
+            l.spans.iter().map(|s| s.text.as_str()).collect()
+        };
+        let edges = |l: &crate::display::Line| {
+            (l.decorations.iter()).find_map(|d| match d {
+                Decoration::Table { edges, .. } => Some(edges.clone()),
+                _ => None,
+            })
+        };
+        let frame = h.joined_frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        assert_eq!(
+            text(&lines[0]).chars().count(),
+            cols + 1,
+            "cut, one more for a part column"
+        );
+        assert!(
+            text(&lines[1]).starts_with(" b "),
+            "no wrapped rows: {:?}",
+            text(&lines[1])
+        );
+        assert!(text(&lines[2]).starts_with(" c "));
+        assert!(text(&lines[4]).starts_with("word") && text(&lines[5]).starts_with("word"));
+        assert_eq!(edges(&lines[0]), Some(vec![0, 3, 155]));
+        h.keys("M-< C-e");
+        let frame = h.joined_frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        let left = 156 - cols as isize;
+        assert_eq!(frame.windows[0].display.cursor, Some((0, cols - 1)));
+        for line in &lines[..3] {
+            assert_eq!(
+                edges(line),
+                Some(vec![-left, 3 - left, 155 - left]),
+                "scrolled as one"
+            );
+        }
+        assert!(
+            text(&lines[4]).starts_with("word"),
+            "prose stays at column 0"
+        );
+        h.keys("C-n C-n C-n");
+        let frame = h.joined_frame(800., 600.);
+        let lines = &frame.windows[0].display.lines;
+        assert_eq!(frame.windows[0].display.cursor.map(|(l, _)| l), Some(3));
+        assert_eq!(edges(&lines[0]), Some(vec![0, 3, 155]), "back to column 0");
+    }
+
+    #[test]
+    fn ret_on_a_link_in_a_table_opens_its_destination() {
+        let mut h = indexed_session();
+        h.keys("a RET");
+        chunk(
+            &mut h,
+            "| l |\n|---|\n| [docs](https://x.dev) |\n| [sh](file:///bin/sh) |\n",
+        );
+        h.joined_frame(800., 600.);
+        ops(&mut h);
+        point_in(&mut h, " docs ", 2);
+        h.keys("RET");
+        let opened: Vec<_> = (h.effects.drain(..))
+            .filter_map(|e| match e {
+                Effect::OpenUrl(url) => Some(url),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, ["https://x.dev"]);
+        point_in(&mut h, " sh ", 1);
+        h.keys("RET");
+        assert!(!h.effects.iter().any(|e| matches!(e, Effect::OpenUrl(_))));
+        assert_eq!(
+            h.core.message.as_deref(),
+            Some("Not a web link: file:///bin/sh")
+        );
+        assert!(ops(&mut h).is_empty(), "nothing is sent");
+    }
+
+    #[test]
     fn ret_on_a_url_in_the_prompt_sends_it() {
         let mut h = session();
         h.keys("https://x.dev RET");
@@ -6784,6 +6962,22 @@ mod tests {
         assert_eq!(
             visible(&mut h)[2..5],
             ["  ▸ hmm", "  ▸ ✓   Read a.rs", "  ▸ ✓   Read b.rs"]
+        );
+    }
+
+    #[test]
+    fn replayed_tables_are_drawn_and_thoughts_keep_theirs() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        ops(&mut h);
+        let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
+        loading.load = Some(("old".into(), loading.buffer));
+        thought(&mut h, "| t |\n|---|");
+        chunk(&mut h, "| a |\n|---|\n| b |\n");
+        tool(&mut h, ls().status(ToolCallStatus::Completed));
+        assert_eq!(
+            h.core.text(),
+            format!("| t |\n|---|\n\n a \n b \n\n▸ ✓    Ran ls\n{LS_INPUT}\n\n> ")
         );
     }
 

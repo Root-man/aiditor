@@ -328,17 +328,22 @@ pub(crate) fn window_display(
     let mark = window.mark(buffers).filter(|_| window.active());
     // shortcut: point's column is its char column in the buffer line, so a fold before point on its line shifts the scroll; use the display column when folds get common.
     // shortcut: a tab or wide char counts as one column, so the cursor can sit past the edge on such lines; measure widths when the display does.
-    let wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
+    let mut wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
         width,
         word,
         from: window.row_starts(buffer, top)[window.top_row()],
+        left: 0,
     });
-    // A wrapped line never scrolls sideways.
+    // A wrapped line never scrolls sideways, but a drawn table's lines aren't wrapped.
+    let table = buffer.table_line(buffer.text().char_to_line(point));
     let col = match wrap {
-        Some(_) => 0,
-        None => buffer.line_col(point).map_or(0, |(_, c)| c),
+        Some(_) if !table => 0,
+        _ => buffer.line_col(point).map_or(0, |(_, c)| c),
     };
     let left = window.hscroll(col, cols);
+    if let Some(wrap) = &mut wrap {
+        wrap.left = left;
+    }
     // One more than fits, for the partly visible last column; no width cuts nothing.
     let width = match cols {
         0 => usize::MAX,
@@ -399,6 +404,9 @@ fn session_display(
     let prompt = buffer.text().char_to_line(buffer.prompt_start());
     let in_prompt = point >= buffer.text().line_to_char(prompt);
     let most = (settings.text_rows(height) / 3).max(1);
+    // Only a drawn table's lines scroll sideways, as the rest wrap.
+    let (line, col) = buffer.line_col(point).unwrap_or_default();
+    window.hscroll(if buffer.table_line(line) { col } else { 0 }, cols);
     // Laid out, as a folded paste's preview takes more rows than its lines.
     let area = window_rows(
         window,
@@ -472,6 +480,7 @@ fn window_rows(
         width,
         word,
         from: window.row_starts(buffer, top)[top_row],
+        left: window.left(),
     });
     let shown = match wrap {
         Some(_) => 0..(rows + 1).saturating_mul(cols),

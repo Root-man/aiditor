@@ -347,12 +347,14 @@ pub struct Span {
 }
 
 /// How a window wraps long lines: `width` chars to a row, breaking at words or at the width, and
-/// shown from char column `from` of its first line, where its first row starts.
+/// shown from char column `from` of its first line, where its first row starts. Table lines
+/// aren't wrapped but cut, the run of them holding point shown from column `left`.
 #[derive(Clone, Copy, Debug)]
 pub struct Wrap {
     pub width: usize,
     pub word: bool,
     pub from: usize,
+    pub left: usize,
 }
 
 /// The px between a gutter's left edge and its digits, and between them and the text.
@@ -488,6 +490,23 @@ pub fn build(
     }
     // shortcut: point's line is the display line starting on point's buffer line, so one joined by a fold from an earlier line is not scrolled; compare display lines when folds get common.
     let point_line = buffer.line_col(point).ok().map(|(l, _)| l);
+    // A drawn table's lines are cut, not wrapped, and the run of them holding point scrolls as one.
+    let table_lines: std::collections::HashSet<usize> = (props.iter())
+        .filter(|(_, p)| matches!(p, Prop::Line(Decoration::Table { .. })))
+        .map(|(r, _)| text.char_to_line(r.start))
+        .collect();
+    let in_run = |n: usize| {
+        point_line.is_some_and(|p| (n.min(p)..=n.max(p)).all(|l| table_lines.contains(&l)))
+    };
+    // The char columns line `n` shows.
+    let columns = |n: usize| match wrap {
+        Some(w) if table_lines.contains(&n) => {
+            let left = if in_run(n) { w.left } else { 0 };
+            left..left + w.width + 2
+        }
+        _ if Some(n) == point_line || (wrap.is_none() && in_run(n)) => shown.clone(),
+        _ => 0..shown.len(),
+    };
     // Without folds a column is a char, so only each line's drawn chars are highlighted.
     // shortcut: only the window's buffer lines are highlighted, so lines a fold joins in are drawn uncoloured; highlight display lines when folds get common.
     let mut drawn: Vec<Range<usize>> = Vec::new();
@@ -572,13 +591,24 @@ pub fn build(
     let finish = |lines: &mut Vec<Line>, line: &mut Line, start: usize, end: usize, next| {
         let end = end.max(start + 1);
         for (range, prop) in &props {
+            let Prop::Line(d) = prop else {
+                continue;
+            };
+            // A table's rules move with the columns scrolled off its line.
+            let d = match d {
+                Decoration::Table { edges, first } => {
+                    let left = columns(line.number).start as isize;
+                    let edges = edges.iter().map(|e| e - left).collect();
+                    Decoration::Table {
+                        edges,
+                        first: *first,
+                    }
+                }
+                d => d.clone(),
+            };
             // A fold joining lines can bring in a decoration the line has already.
-            if let Prop::Line(d) = prop
-                && range.start < end
-                && range.end > start
-                && !line.decorations.contains(d)
-            {
-                line.decorations.push(*d);
+            if range.start < end && range.end > start && !line.decorations.contains(&d) {
+                line.decorations.push(d);
             }
         }
         lines.push(std::mem::replace(line, new_line(next)));
@@ -633,10 +663,7 @@ pub fn build(
     let mut positions = search.map(|_| Vec::new());
     let mut source_positions = Vec::new();
     while lines.len() < rows {
-        let range = match Some(line.number) == point_line {
-            true => shown.clone(),
-            false => 0..shown.len(),
-        };
+        let range = columns(line.number);
         let fold = props.iter().find_map(|(range, prop)| match prop {
             // Placeholders stand for hidden text (line counts, a folded call's ` …`), which frame 6 draws dim.
             Prop::Invisible(placeholder) if range.contains(&pos) => Some((
@@ -1122,7 +1149,8 @@ fn wrap_lines(
     for (i, line) in lines.into_iter().enumerate() {
         let chars: Vec<char> = line.spans.iter().flat_map(|s| s.text.chars()).collect();
         let width = wrap.width.saturating_sub(line.indent()).max(1);
-        let starts = match line.aligned {
+        let table = (line.decorations.iter()).any(|d| matches!(d, Decoration::Table { .. }));
+        let starts = match line.aligned || table {
             true => vec![0],
             false => row_starts(chars.len(), width, wrap.word, |i| chars[i].is_whitespace()),
         };
@@ -1184,7 +1212,7 @@ fn wrap_lines(
                     Decoration::Border { top: false, .. } => row == last,
                     _ => true,
                 })
-                .copied()
+                .cloned()
                 .collect();
             out.push(Line {
                 number: line.number,
@@ -1312,6 +1340,7 @@ mod tests {
             width: 3,
             word: false,
             from: 0,
+            left: 0,
         };
         let d = super::build(
             h.core.current(),
@@ -1503,6 +1532,7 @@ mod tests {
             width: cols - 1,
             word: true,
             from,
+            left: 0,
         });
         let shown = match wrap {
             Some(_) => 0..10 * cols,
@@ -1748,6 +1778,44 @@ mod tests {
     }
 
     #[test]
+    fn a_table_row_is_cut_with_its_edges_shifted_by_the_offset() {
+        let mut h = Harness::new(&[("a.txt", "abcdefghij\nx\n")]);
+        h.open("a.txt");
+        let row = |edges| Decoration::Table { edges, first: true };
+        prop(&mut h, 0..1, Prop::Line(row(vec![0, 3, 10])));
+        let wrap = super::Wrap {
+            width: 4,
+            word: true,
+            from: 0,
+            left: 2,
+        };
+        let settings = h.core.settings();
+        let d = super::build(
+            h.core.current(),
+            0,
+            3,
+            5,
+            None,
+            settings,
+            0..50,
+            Some(wrap),
+            &[],
+            None,
+        );
+        let text = |l: &super::Line| l.spans.iter().map(|s| s.text.clone()).collect::<String>();
+        assert_eq!(
+            text(&d.lines[0]),
+            "cdefgh",
+            "one row, from the offset, a column more"
+        );
+        assert_eq!(d.lines[0].decorations, [row(vec![-2, 1, 8])]);
+        assert_eq!(
+            (text(&d.lines[1]), d.lines[1].decorations.len()),
+            ("x".into(), 0)
+        );
+    }
+
+    #[test]
     fn a_wrapped_line_keeps_its_borders_on_its_first_and_last_rows() {
         let mut h = Harness::new(&[("a.rs", &format!("{}\n", "x".repeat(100)))]);
         h.open("a.rs");
@@ -1761,6 +1829,7 @@ mod tests {
             width: 40,
             word: false,
             from: 0,
+            left: 0,
         };
         let (b, s) = (h.core.current(), h.core.settings());
         let d = super::build(b, 0, 5, 0, None, s, 0..400, Some(wrap), &[], None);
@@ -1779,6 +1848,7 @@ mod tests {
             width: 40,
             word: false,
             from: 0,
+            left: 0,
         };
         let build = |h: &Harness, point| {
             let b = h.core.current();
@@ -1967,7 +2037,7 @@ mod tests {
             top: true,
             face: FaceName::SessionUserRule,
         };
-        prop(&mut h, 0..1, Prop::Line(top));
+        prop(&mut h, 0..1, Prop::Line(top.clone()));
         prop(
             &mut h,
             4..5,

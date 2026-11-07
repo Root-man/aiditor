@@ -264,10 +264,11 @@ impl Window {
     }
 
     /// Where each visual row of `buffer`'s `line` starts at the last redisplay's width, `[0]`
-    /// when it truncates.
+    /// when it truncates or is a table's.
     // shortcut: rows are counted in buffer chars, so a fold on a wrapped line makes it count more rows than it shows; count display chars when folds get common.
     pub(crate) fn row_starts(&self, buffer: &Buffer, line: usize) -> Vec<usize> {
-        let Some((width, word)) = buffer.wrap(self.cols) else {
+        let Some((width, word)) = buffer.wrap(self.cols).filter(|_| !buffer.table_line(line))
+        else {
             return vec![0];
         };
         let text = buffer.text().line(line);
