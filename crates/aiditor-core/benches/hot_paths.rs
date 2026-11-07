@@ -107,7 +107,7 @@ fn session() -> (Core, AgentId) {
             result: Ok(NewSessionResponse::new("s")),
         },
     );
-    let group = "# Heading été\n\nSome **bold** and *italic* text with `code` and a [link](https://x.dev).\n\n```rust\nfn item() -> usize { 1 }\n```\n- a *list* item with `x`\n\nA closing **line**.\n";
+    let group = "# Heading été\n\nSome **bold** and *italic* text with `code` and a [link](https://x.dev).\n\n```rust\nfn item() -> usize { 1 }\n```\n- a *list* item with `x`\n\nA closing **line**.\n| key | **value** |\n|---|--:|\n| a | 1 |\n| b | 22 |\n| `c` | 333 |\n| d | 4 |\n| e | 55 |\n| f | 666 |\n| [g](https://x.dev) | 7 |\n\n";
     let text = group.repeat(5_000 / group.matches('\n').count());
     assert_eq!(text.matches('\n').count(), 5_000);
     chunk(&mut core, id, &text);

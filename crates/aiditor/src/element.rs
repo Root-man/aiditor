@@ -25,6 +25,8 @@ pub(crate) struct Painted {
     pub(crate) text_x: Pixels,
     /// Where its text stops, from the window's right.
     text_right: Pixels,
+    /// A char cell's width, where a table's rules stand.
+    cell: Pixels,
     pub(crate) rows: Vec<Row>,
     /// The rule above a docked prompt pane.
     pub(crate) rule: Option<Bounds<Pixels>>,
@@ -357,6 +359,7 @@ impl Element for FrameElement {
                     selected: w.selected,
                     text_x,
                     text_right: px(w.inset.1),
+                    cell,
                     rows,
                     rule: pane_rule,
                     mode_line_fill: bar_fill.into_iter().chain(rule_fill).collect(),
@@ -434,6 +437,11 @@ impl Element for FrameElement {
                             Decoration::Border { top, face } => {
                                 let y = if top { px(0.) } else { h - one };
                                 (theme.face(face).fg, vec![(px(0.), y, width, one)])
+                            }
+                            Decoration::Table { ref edges, first } => {
+                                let text = p.text_x..width - p.text_right;
+                                let rules = table_rules(edges, first, text, p.cell, h);
+                                (theme.face(FaceName::Separator).fg, rules)
                             }
                             Decoration::HRule(face) => {
                                 let y = (h / 2.).floor();
@@ -854,9 +862,60 @@ fn rule_gaps(
     gaps
 }
 
+/// A table row's 1 px rules as x, y, width and height from the row's left top: one down the row
+/// at each char column of `edges` within the `text` area's x range, one along its bottom from
+/// its first edge to its last and, on its `first` row, one along its top, cut to the area.
+fn table_rules(
+    edges: &[isize],
+    first: bool,
+    text: Range<Pixels>,
+    cell: Pixels,
+    h: Pixels,
+) -> Vec<(Pixels, Pixels, Pixels, Pixels)> {
+    let one = px(1.);
+    let x = |e: isize| text.start + cell * e as f32;
+    let (Some(&left), Some(&right)) = (edges.first(), edges.last()) else {
+        return Vec::new();
+    };
+    let (from, to) = (x(left).max(text.start), x(right).min(text.end));
+    let mut rules: Vec<_> = (edges.iter().map(|&e| x(e)))
+        // A table ending at the area's edge keeps its right rule, in the inset beside the text.
+        .filter(|x| text.contains(x) || *x == text.end)
+        .map(|x| (x, px(0.), one, h))
+        .collect();
+    if from < to {
+        rules.push((from, h - one, to - from, one));
+        if first {
+            rules.push((from, px(0.), to - from, one));
+        }
+    }
+    rules
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_rules_stand_at_cell_edges_cut_to_the_text() {
+        let (one, h) = (px(1.), px(20.));
+        let text = px(12.)..px(400.);
+        assert_eq!(
+            table_rules(&[0, 3, 7], true, text.clone(), px(10.), h),
+            [
+                (px(12.), px(0.), one, h),
+                (px(42.), px(0.), one, h),
+                (px(82.), px(0.), one, h),
+                (px(12.), h - one, px(70.), one),
+                (px(12.), px(0.), px(70.), one),
+            ]
+        );
+        // Scrolled sideways and wider than the window: only the edges inside are drawn.
+        assert_eq!(
+            table_rules(&[-5, 3, 50], false, text, px(10.), h),
+            [(px(42.), px(0.), one, h), (px(12.), h - one, px(388.), one),]
+        );
+    }
 
     #[test]
     fn a_rule_fills_the_gaps_a_cell_clear_of_the_text() {

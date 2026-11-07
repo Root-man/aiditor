@@ -1791,13 +1791,13 @@ milestones:
           - key: m6-md-tables
             title: "Render markdown tables in session buffers"
             body: |
-              GFM pipe tables in agent messages, thoughts and tool-call bodies show as raw text today. `markdown::render` handles `tree-sitter-md`'s `pipe_table` as it does other markup: the text stays markdown, so search and copy yield it, and only the display changes. Columns are as wide as their widest cell's visible text, inline markup hidden; each `|` with its padding becomes a `Display` of padding and `│`; the delimiter row draws as `├──┼──┤`; `:--`, `:-:` and `--:` align their column; the header row is bold. A table wider than the window wraps as other text does; record in docs/editor.md whether that stays. Cells are measured in chars, so wide characters misalign.
+              GFM pipe tables in agent messages show as raw text today. A streamed message keeps its markdown source, and each frame that renders it rewrites the block's text from that source, so a top-level pipe table becomes drawn text: one line per header and body row, each cell padded to its column's width as the delimiter row aligns it, cell markup rendered and left out, the header bold on `session-block`. A `Table` line decoration carries the cell edges; the frontend draws 1 px `separator` rules down each edge and along each row. Search, copy and kill see the drawn text, as Zed's plain copy does; a markdown link in a cell keeps its destination in a `Url` property so `RET` still opens it. Table lines are cut at the window's edge, never wrapped, and the run holding point scrolls sideways as one. Thoughts, tool bodies and the echo keep tables as text. Cells are measured in chars, so wide characters misalign. Planned as the OpenSpec change `session-markdown-tables`.
             acceptance:
-              - "A table in an agent message draws aligned columns with box-drawn separators and a bold header"
+              - "A table in an agent message draws aligned columns with painted rules and a bold header"
               - "Column alignment follows the delimiter row"
-              - "Inline markup in cells is hidden and not counted in column widths"
-              - "Search and copy see the table's markdown"
-              - "C-n, C-p and C-f move sensibly across a drawn table"
+              - "Inline markup in cells is rendered and not counted in column widths, and links in cells open with RET"
+              - "Search and copy see the drawn table"
+              - "Table lines are cut, not wrapped, count as one row for C-n and C-p, and scroll sideways together"
               - "A table still streaming redraws as rows arrive"
               - "Tests cover widths, alignment, markup in cells and a ragged table"
       - key: m6-prompt
