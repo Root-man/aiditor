@@ -850,10 +850,10 @@ impl Buffer {
             return line;
         }
         let (text, pos) = (self.text(), self.text().line_to_char(line));
+        // The kind first: the prompt's continuation indent ends past the text.
         let fold = (self.properties_near(pos..pos).into_iter()).find(|(r, p)| {
-            let joins = r.start == pos && text.char_to_line(r.end) > line;
             matches!(p, Prop::Invisible(_) | Prop::Display(_))
-                && (r.start < pos || joins)
+                && (r.start < pos || text.char_to_line(r.end) > line)
                 && pos < r.end
         });
         match fold {
@@ -1520,6 +1520,15 @@ mod tests {
         // A long overlapping one makes the list unsorted by end; the full scan still finds it.
         b.add_property(0..90, face(1)).unwrap();
         assert_eq!(near(b, 68..70), [0..90]);
+    }
+
+    #[test]
+    fn unfolded_line_skips_the_prompt_continuation_past_the_end() {
+        let (mut buffers, id) = with_text("hi\n> a\nb");
+        let b = buffers.get_mut(id).unwrap();
+        b.prompt = Some(b.add_marker(5, InsertionType::Stay).unwrap());
+        b.add_property(0..1, Prop::Invisible(String::new())).unwrap();
+        assert_eq!(b.unfolded_line(2, true), 2);
     }
 
     #[test]
