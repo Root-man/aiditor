@@ -26,7 +26,7 @@ use crate::display::ModeLine;
 use crate::markdown;
 use crate::project::ProjectId;
 use crate::settings::FaceName;
-use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Request};
+use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Open, Request};
 
 mod chips;
 mod groups;
@@ -90,9 +90,9 @@ pub(crate) struct Session {
     held: Option<AgentOp>,
     /// The `session/new` answer, once the agent is ready, its config options the latest reported.
     pub(crate) session: Option<NewSessionResponse>,
-    /// The session it loads instead of opening one, and the buffer it was loaded from, which
-    /// shows it once loaded if still selected.
-    load: Option<(SessionId, BufferId)>,
+    /// The session it loads instead of opening one, none for a fork until it answers, and the
+    /// buffer it was loaded from, which shows it once loaded if still selected.
+    load: Option<(Option<SessionId>, BufferId)>,
     /// What was last sent with `session/set_config_option`, as `mode <value>`, `model
     /// <value>` or `effort <value>`, for a refusal's note.
     sent: Option<String>,
@@ -551,9 +551,9 @@ enum Block {
 /// An agent or user message's block. Prompts sent live have no `id`.
 #[derive(Debug)]
 struct Message {
-    // Nothing reads it yet; timings and forking will.
-    #[allow(dead_code)]
     id: Option<MessageId>,
+    /// Whether it is the user's, which can't be a fork point.
+    user: bool,
     start: MarkerId,
     /// Its length in chars, the blank line after it not counted.
     len: usize,
@@ -617,6 +617,7 @@ impl Core {
         if let Block::Message(message) | Block::User(message) = &block {
             session.messages.push(Message {
                 id: message.clone(),
+                user: matches!(block, Block::User(_)),
                 start: marker(),
                 len: text.chars().count(),
             });
@@ -1452,7 +1453,7 @@ impl Core {
         (self.agents.values())
             .find(|s| {
                 let answered = s.session.as_ref().map(|r| &r.session_id);
-                let loading = s.load.as_ref().map(|(id, _)| id);
+                let loading = s.load.as_ref().and_then(|(id, _)| id.as_ref());
                 s.agent == agent && answered.or(loading) == Some(id)
             })
             .map(|s| s.buffer)
@@ -1514,19 +1515,19 @@ impl Ctx<'_> {
     /// `agent-start`: starts the named agent in the current workspace's project, showing a new
     /// session buffer, with a new log buffer for its stderr.
     pub(crate) fn agent_start(&mut self, args: Args) -> Result<(), String> {
-        self.start_session(&args.strings[0], None)
+        self.start_session(&args.strings[0], Open::New, None)
     }
 
-    /// Starts agent `name` as `agent-start` does; with `load`, loads that session, titled,
-    /// instead of opening one, showing its buffer only once loaded.
+    /// Starts agent `name` as `agent-start` does; one that loads or forks a session is titled
+    /// `title` and shows its buffer only once loaded.
     pub(crate) fn start_session(
         &mut self,
         name: &str,
-        load: Option<(SessionId, Option<&str>)>,
+        open: Open,
+        title: Option<&str>,
     ) -> Result<(), String> {
         let core = &mut *self.core;
-        let (load, title) = load.unzip();
-        let session_title = session_title(title.flatten());
+        let session_title = session_title(title);
         let agent = (core.settings.agents.get(name))
             .ok_or_else(|| format!("{name:?} is not a registered agent"))?
             .clone();
@@ -1534,7 +1535,7 @@ impl Ctx<'_> {
         let (project, log, title, workspace) = (
             workspace.project,
             format!("*{name} stderr*<{}>", workspace.name),
-            session_name(name, &workspace.name, title.flatten()),
+            session_name(name, &workspace.name, title),
             workspace.name.clone(),
         );
         let loaded = &core.projects[core.project_at(project)?].project;
@@ -1555,6 +1556,12 @@ impl Ctx<'_> {
         b.set_marker(b.point, start).expect("after the prompt");
         b.major_mode = MODE;
         let from = core.windows.window.buffer();
+        let (echo, load) = match &open {
+            Open::New => (format!("Starting {name}..."), None),
+            Open::Load(session) => (format!("Loading {name} session..."), Some(session.clone())),
+            Open::Fork(..) => (format!("Forking {name} session..."), None),
+        };
+        let load = (open != Open::New).then_some((load, from));
         if load.is_none() {
             core.switch_to(buffer);
         }
@@ -1565,11 +1572,7 @@ impl Ctx<'_> {
             cwd: cwd.clone(),
             roots,
             env,
-            session: load.clone(),
-        };
-        let echo = match load {
-            Some(_) => format!("Loading {name} session..."),
-            None => format!("Starting {name}..."),
+            session: open,
         };
         let session = Session {
             root: cwd,
@@ -1582,7 +1585,7 @@ impl Ctx<'_> {
             project,
             held: Some(spawn),
             session: None,
-            load: load.map(|id| (id, from)),
+            load,
             sent: None,
             ended: false,
             turn: None,
@@ -1680,6 +1683,13 @@ impl Ctx<'_> {
                     core.log(&note);
                 }
                 self.effects.extend(set.map(Effect::Agent));
+            }
+            // A failed fork leaves nothing: killing its buffers forgets it and stops its agent.
+            Err(err) if matches!(session.load, Some((None, _))) => {
+                let (buffer, log) = (session.buffer, session.log);
+                core.kill_buffer(buffer);
+                core.kill_buffer(log);
+                core.echo(format!("{agent} fork failed: {err}"));
             }
             Err(err) => {
                 session.ended = true;
@@ -2410,6 +2420,7 @@ impl Ctx<'_> {
         let echo = start - PROMPT.len();
         let message = Message {
             id: None,
+            user: true,
             start: b.add_marker(echo, InsertionType::Stay)?,
             len: PROMPT.len() + input.chars().count(),
         };
@@ -2450,6 +2461,38 @@ impl Ctx<'_> {
             .collect();
         let at = crate::motion::nth_mark(&starts, point, n).ok_or("No message found")?;
         self.goto(at)
+    }
+
+    /// `agent-fork-session`: forks the session into a new session buffer, whole with point on the
+    /// prompt line, else at the message the bar marks.
+    pub(crate) fn agent_fork_session(&mut self) -> Result<(), String> {
+        let core = &*self.core;
+        let (point, buffer) = (core.point(), core.current());
+        let shown = core.windows.window.buffer();
+        let session = (core.agents.values())
+            .find(|s| s.buffer == shown)
+            .ok_or("Not in an agent session buffer")?;
+        let source = (session.session.as_ref())
+            .map(|r| r.session_id.clone())
+            .ok_or_else(|| format!("{} is not ready", session.agent))?;
+        let at = match point >= buffer.prompt_start() - PROMPT.len() {
+            true => None,
+            false => {
+                let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
+                let after = session.messages.partition_point(|m| start(m) <= point);
+                let message = after.checked_sub(1).map(|i| &session.messages[i]);
+                if message.is_some_and(|m| m.user) {
+                    return Err("Fork at an agent message".into());
+                }
+                Some(
+                    message
+                        .and_then(|m| m.id.clone())
+                        .ok_or("No message id to fork at")?,
+                )
+            }
+        };
+        let (agent, title) = (session.agent.clone(), session.title.clone());
+        self.start_session(&agent, Open::Fork(source, at), Some(&title))
     }
 
     /// `agent-toggle-tool-call`: shows or hides the content of the tool call or thought row whose
@@ -4003,6 +4046,103 @@ mod tests {
             message_list(&h),
             [(Some("m1".into()), "yo".into()), (None, "> hi".into())]
         );
+    }
+
+    /// The forks spawned since the last call: the source session and the message id.
+    fn forks(h: &mut Harness) -> Vec<(String, Option<String>)> {
+        (h.agent_ops.drain(..))
+            .filter_map(|op| match op {
+                AgentOp::Spawn {
+                    session: Open::Fork(source, at),
+                    ..
+                } => Some((source.to_string(), at.map(|m| m.0.to_string()))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fork_from_the_prompt_takes_the_whole_session_and_shows_once_loaded() {
+        let mut h = session();
+        info(&mut h, 0, serde_json::json!({"title": "Fix it"}));
+        agent_chunk(&mut h, "m1", "yo");
+        let source = h.core.windows.window.buffer();
+        // Point on the prompt line's `> ` marker counts as the prompt.
+        let marker = h.core.current().prompt_start() - PROMPT.len();
+        h.ctx().goto(marker).unwrap();
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(forks(&mut h), [("s".into(), None)]);
+        assert_eq!(h.core.message(), Some("Forking claude session..."));
+        let fork = h.core.buffers.find("*claude: Fix it*<work><2>").unwrap();
+        assert_eq!(h.core.windows.window.buffer(), source);
+        let replayed = ContentChunk::new("yo".into()).message_id("m1");
+        update(&mut h, 1, SessionUpdate::AgentMessageChunk(replayed));
+        let response = NewSessionResponse::new("f").config_options(options("plan"));
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Ok(response),
+        });
+        assert_eq!(h.core.windows.window.buffer(), fork);
+        assert_eq!(h.core.text(), "yo\n\n> ");
+        // The fork keeps its mode, and the source is untouched and still sends.
+        assert_eq!(ops(&mut h), Vec::<String>::new());
+        h.core.switch_to(source);
+        assert_eq!(h.core.text(), "yo\n\n> ");
+        h.keys("M-> h i RET");
+        assert_eq!(ops(&mut h), ["prompt 0 s \"hi\""]);
+    }
+
+    #[test]
+    fn a_fork_in_the_transcript_is_at_the_marked_message() {
+        let mut h = session();
+        agent_chunk(&mut h, "m1", "yo");
+        tool(&mut h, ls());
+        point_in(&mut h, "ls", 0);
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(forks(&mut h), [("s".into(), Some("m1".into()))]);
+    }
+
+    #[test]
+    fn a_fork_needs_a_ready_session_and_a_message_with_an_id() {
+        let mut h = work();
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(h.core.message(), Some("Not in an agent session buffer"));
+        h.keys("M-x agent-start RET claude RET");
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(h.core.message(), Some("claude is not ready"));
+        ready(&mut h, 0);
+        h.keys("h i RET");
+        point_in(&mut h, "> hi", 2);
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(h.core.message(), Some("Fork at an agent message"));
+        // A replayed prompt has an id but is the user's all the same.
+        let user = ContentChunk::new("yo".into()).message_id("u1");
+        update(&mut h, 0, SessionUpdate::UserMessageChunk(user));
+        point_in(&mut h, "> yo", 2);
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(h.core.message(), Some("Fork at an agent message"));
+        assert_eq!(forks(&mut h), []);
+    }
+
+    #[test]
+    fn a_failed_fork_opens_nothing() {
+        let mut h = session();
+        let source = h.core.windows.window.buffer();
+        let names = h.core.buffer_names(true);
+        h.keys("M-x agent-fork-session RET");
+        ops(&mut h);
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Err("agent can't fork sessions".into()),
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("claude fork failed: agent can't fork sessions")
+        );
+        assert_eq!(h.core.buffer_names(true), names);
+        assert_eq!(h.core.windows.window.buffer(), source);
+        assert_eq!(ops(&mut h), ["kill 1"]);
+        assert!(!h.core.agents.contains_key(&AgentId(1)));
     }
 
     /// The text of each transcript row and each prompt pane row of a frame `rows` text rows high,
@@ -7563,7 +7703,7 @@ mod tests {
         h.keys("M-x agent-start RET claude RET");
         ops(&mut h);
         let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
-        loading.load = Some(("old".into(), loading.buffer));
+        loading.load = Some((Some("old".into()), loading.buffer));
         update(
             &mut h,
             0,
@@ -7587,7 +7727,7 @@ mod tests {
         h.keys("M-x agent-start RET claude RET");
         ops(&mut h);
         let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
-        loading.load = Some(("old".into(), loading.buffer));
+        loading.load = Some((Some("old".into()), loading.buffer));
         thought(&mut h, "| t |\n|---|");
         chunk(&mut h, "| a |\n|---|\n| b |\n");
         tool(&mut h, ls().status(ToolCallStatus::Completed));
@@ -7604,7 +7744,7 @@ mod tests {
         ops(&mut h);
         h.clock("14:01:00");
         let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
-        loading.load = Some(("old".into(), loading.buffer));
+        loading.load = Some((Some("old".into()), loading.buffer));
         let user = ContentChunk::new("old".into());
         update(&mut h, 0, SessionUpdate::UserMessageChunk(user));
         thought(&mut h, "hmm");
@@ -8601,7 +8741,7 @@ mod tests {
         h.keys("M-x agent-start RET claude RET");
         ops(&mut h);
         let loading = h.core.agents.get_mut(&AgentId(0)).unwrap();
-        loading.load = Some(("old".into(), loading.buffer));
+        loading.load = Some((Some("old".into()), loading.buffer));
         tool(
             &mut h,
             call("t", ToolKind::Other).status(ToolCallStatus::Completed),

@@ -5,7 +5,7 @@ use agent_client_protocol::schema::v1::{
     ClientResponse, PromptRequest, SessionConfigKind, SetSessionConfigOptionRequest, StopReason,
 };
 use aiditor_core::key::{Key, KeyCode, parse_keys};
-use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
+use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg, Open};
 use aiditor_services::agents::Agents;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
@@ -29,7 +29,7 @@ fn spawn(agents: &mut Agents, command: &str, cwd: &Path, env: &[(&str, &str)]) -
         cwd: cwd.into(),
         roots: Vec::new(),
         env,
-        session: None,
+        session: Open::New,
     }))
     .expect("spawn returns a receiver")
 }
@@ -341,6 +341,11 @@ async fn session_updates_reach_the_core() {
 
 /// Spawns the fake agent with `script` in `dir` to load session `old`.
 fn load(agents: &mut Agents, dir: &Path, script_text: &str) -> Receiver<Msg> {
+    open(agents, dir, script_text, Open::Load("old".into()))
+}
+
+/// Spawns the fake agent with `script` in `dir` to open its session as `session`.
+fn open(agents: &mut Agents, dir: &Path, script_text: &str, session: Open) -> Receiver<Msg> {
     let (key, path) = script(dir, script_text);
     (agents.run(AgentOp::Spawn {
         id: ID,
@@ -349,7 +354,7 @@ fn load(agents: &mut Agents, dir: &Path, script_text: &str) -> Receiver<Msg> {
         cwd: dir.into(),
         roots: Vec::new(),
         env: vec![(key.into(), path)],
-        session: Some("old".into()),
+        session,
     }))
     .expect("spawn returns a receiver")
 }
@@ -409,7 +414,7 @@ async fn with_roots(
         cwd: dir.into(),
         roots: roots.iter().map(Into::into).collect(),
         env: vec![(key.into(), path)],
-        session: session.map(|s| s.to_owned().into()),
+        session: session.map_or(Open::New, |s| Open::Load(s.to_owned().into())),
     }))
     .expect("spawn returns a receiver");
     let (mut lines, mut unscoped) = (Vec::new(), false);
@@ -463,6 +468,83 @@ async fn an_agent_that_cant_load_fails_to_start() {
     agents.kill_all();
 }
 
+/// The fork's updates as text and its started message's session, once it reported its request.
+async fn fork(at: Option<&'static str>) -> (Vec<String>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let chunk = |id: &str, text: &str| {
+        format!(
+            r#"{{"sessionUpdate": "agent_message_chunk", "messageId": "{id}",
+                 "content": {{"type": "text", "text": "{text}"}}}}"#
+        )
+    };
+    let history = [chunk("m1", "a"), chunk("m1", "b"), chunk("m2", "c")].join(",");
+    let script = format!(r#"{{"fork": true, "directories": true, "history": [{history}]}}"#);
+    let (key, path) = self::script(dir.path(), &script);
+    let mut agents = Agents::default();
+    let mut rx = (agents.run(AgentOp::Spawn {
+        id: ID,
+        command: AGENT.into(),
+        args: Vec::new(),
+        cwd: dir.path().into(),
+        roots: vec!["/a".into()],
+        env: vec![(key.into(), path)],
+        session: Open::Fork("old".into(), at.map(Into::into)),
+    }))
+    .expect("spawn returns a receiver");
+    let (mut lines, mut updates) = (Vec::new(), Vec::new());
+    let session = loop {
+        match next(&mut rx).await {
+            Some(Msg::AgentStderr { line, .. }) => lines.push(line),
+            Some(Msg::AgentUpdate { update, .. }) => updates.push(format!("{update:?}")),
+            Some(Msg::AgentStarted { result, .. }) => break format!("{:?}", result.unwrap()),
+            msg => panic!("expected stderr, updates or started, got {msg:?}"),
+        }
+    };
+    for wanted in [
+        "fork=old",
+        &format!("at={}", at.unwrap_or_default()),
+        "dirs=/a",
+    ] {
+        stderr_until(&mut rx, &mut lines, wanted).await;
+    }
+    stderr_until(&mut rx, &mut lines, "load=fake-fork").await;
+    agents.kill_all();
+    (updates, session)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whole_fork_loads_the_fork_with_its_whole_history() {
+    let (updates, session) = fork(None).await;
+    assert!(session.contains("\"fake-fork\""), "{session}");
+    assert_eq!(updates.len(), 3, "{updates:?}");
+    assert!(
+        updates.iter().all(|u| u.contains("\"fake-fork\"")),
+        "{updates:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_at_a_message_names_it_and_the_load_ends_there() {
+    let (updates, _) = fork(Some("m1")).await;
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    assert!(updates[1].contains("\"b\""), "{updates:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_cant_fork_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agents = Agents::default();
+    let mut rx = open(
+        &mut agents,
+        dir.path(),
+        r#"{"history": []}"#,
+        Open::Fork("old".into(), None),
+    );
+    let (_, result) = started(&mut rx).await;
+    assert_eq!(result, Err("agent can't fork sessions".into()));
+    agents.kill_all();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_killed_agent_exits_and_is_gone() {
     let mut agents = Agents::default();
@@ -508,7 +590,7 @@ async fn quitting_kills_every_agent() {
             cwd: "/".into(),
             roots: Vec::new(),
             env: script.map(|s| (key.into(), s.into())).into_iter().collect(),
-            session: None,
+            session: Open::New,
         }))
         .unwrap();
         // The trapping agent is killed only once SIGTERM is ignored.

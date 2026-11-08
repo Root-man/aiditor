@@ -14,12 +14,12 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, ElicitationCapabilities,
-    ElicitationFormCapabilities, Implementation, InitializeRequest, ListSessionsRequest,
-    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest, RequestId, SessionId,
-    SessionInfo, SessionNotification,
+    ElicitationFormCapabilities, ForkSessionRequest, Implementation, InitializeRequest,
+    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest,
+    RequestId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
-use aiditor_core::{AgentId, AgentOp, Msg, Request};
+use aiditor_core::{AgentId, AgentOp, Msg, Open, Request};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -263,7 +263,7 @@ impl Agents {
         id: AgentId,
         command: String,
         args: Vec<String>,
-        (cwd, roots, session): (PathBuf, Vec<PathBuf>, Option<SessionId>),
+        (cwd, roots, session): (PathBuf, Vec<PathBuf>, Open),
         env: Vec<(String, String)>,
     ) -> Receiver<Msg> {
         let (tx, rx) = channel(4);
@@ -454,7 +454,7 @@ fn command_in(
 /// session that stops speaking still exits.
 async fn connect(
     id: AgentId,
-    (cwd, mut roots, load): (PathBuf, Vec<PathBuf>, Option<SessionId>),
+    (cwd, mut roots, open_as): (PathBuf, Vec<PathBuf>, Open),
     (stdin, stdout): (ChildStdin, ChildStdout),
     (pid, exited): (libc::pid_t, Arc<AtomicBool>),
     pending: Pending,
@@ -528,16 +528,40 @@ async fn connect(
                 roots.clear();
                 _ = tx.send(Msg::AgentUnscoped { id }).await;
             }
+            let refusal = match &open_as {
+                Open::Fork(..) if capabilities.session_capabilities.fork.is_none() => {
+                    Some("agent can't fork sessions")
+                }
+                Open::Load(_) | Open::Fork(..) if !capabilities.load_session => {
+                    Some("agent can't load sessions")
+                }
+                _ => None,
+            };
+            // The core kills an agent whose start failed, as after an error answer.
+            if let Some(refusal) = refusal {
+                let result = Err(refusal.into());
+                _ = tx.send(Msg::AgentStarted { id, result }).await;
+                return Ok(());
+            }
+            let load = match open_as {
+                Open::New => None,
+                Open::Load(session) => Some(session),
+                // The fork replays nothing, so loading it shows the history it kept.
+                Open::Fork(source, at) => {
+                    let meta = at.map(|at| {
+                        let fork = serde_json::json!({"version": 1, "messageId": at.0});
+                        serde_json::json!({"jetbrains": {"air": {"fork": fork}}})
+                    });
+                    let fork = ForkSessionRequest::new(source, cwd.clone())
+                        .additional_directories(roots.clone())
+                        .meta(meta.and_then(|m| m.as_object().cloned()));
+                    Some(agent.send_request(fork).block_task().await?.session_id)
+                }
+            };
             let session = match load {
                 None => {
                     let new = NewSessionRequest::new(cwd).additional_directories(roots);
                     agent.send_request(new).block_task().await?
-                }
-                // The core kills an agent whose start failed, as after an error answer.
-                Some(_) if !initialized.agent_capabilities.load_session => {
-                    let result = Err("agent can't load sessions".into());
-                    _ = tx.send(Msg::AgentStarted { id, result }).await;
-                    return Ok(());
                 }
                 // The replayed history arrives as notifications before this answer.
                 Some(session) => {
