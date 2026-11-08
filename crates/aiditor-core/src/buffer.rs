@@ -804,9 +804,28 @@ impl Buffer {
     }
 
     /// The non-empty property ranges touching `range`, from at its start to at its end, in
-    /// stored order.
+    /// stored order, then the prompt area's continuation indent.
     pub fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
         let touches = |r: &Range<usize>| r.end >= range.start && r.start <= range.end;
+        let mut near = self.stored_properties_near(&range, touches);
+        // The prompt's lines after its first start under its text, past `> `, as Claude Code's do.
+        static CONTINUATION: Prop = Prop::Line(Decoration::Indent(2));
+        let line = self.text().char_to_line(self.prompt_start()) + 1;
+        if self.prompt.is_some() && line < self.text().len_lines() {
+            // Past the end, so an empty last line is inside it too.
+            let continuation = self.text().line_to_char(line)..self.len_chars() + 1;
+            if touches(&continuation) {
+                near.push((continuation, &CONTINUATION));
+            }
+        }
+        near
+    }
+
+    fn stored_properties_near(
+        &self,
+        range: &Range<usize>,
+        touches: impl Fn(&Range<usize>) -> bool,
+    ) -> Vec<(Range<usize>, &Prop)> {
         if !self.props_sorted {
             return self.properties().filter(|(r, _)| touches(r)).collect();
         }

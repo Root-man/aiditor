@@ -7656,6 +7656,31 @@ mod tests {
     }
 
     #[test]
+    fn prompt_lines_after_the_first_start_under_its_text() {
+        let mut h = session();
+        h.keys("s e n t C-j e c h o RET");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        let echo = [drawn_line(&mut h, "sent"), drawn_line(&mut h, "echo")];
+        assert_eq!(echo.map(|l| l.indent()), [0, 2], "the sent prompt too");
+        h.keys("o n e C-j t w o C-j");
+        let mut frame = h.joined_frame(800., 600.);
+        let last = frame.windows[0]
+            .display
+            .lines
+            .pop()
+            .expect("the prompt's last line");
+        let indents = [
+            drawn_line(&mut h, "one").indent(),
+            drawn_line(&mut h, "two").indent(),
+        ];
+        assert_eq!(
+            (indents, last.indent()),
+            ([0, 2], 2),
+            "an empty last line too"
+        );
+    }
+
+    #[test]
     fn a_turn_that_ends_otherwise_says_so() {
         let mut h = session();
         h.keys("a RET");

@@ -81,7 +81,7 @@ pub(super) fn prompt_glyph(buffer: &mut Buffer, at: usize) {
 }
 
 /// Puts the `session-user` background on each line of the echo at `range`, a top border on its
-/// first and a bottom one on its last. A one-char range per line keeps the properties sorted.
+/// first and a bottom one on its last, and indents its later lines. A one-char range per line keeps the properties sorted.
 pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
     let text = buffer.text().slice(range.clone()).to_string();
     let after_newlines = text.chars().enumerate().filter(|(_, c)| *c == '\n');
@@ -94,8 +94,13 @@ pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
         Prop::Line(Decoration::Border { top, face })
     };
     let background = Prop::Line(Decoration::Background(FaceName::SessionUser));
-    for &at in &starts {
+    let indent = Prop::Line(Decoration::Indent(super::PROMPT.len()));
+    for (i, &at) in starts.iter().enumerate() {
         (buffer.add_property(at..at + 1, background.clone())).expect("inside the echo");
+        // Its later lines start under its text, as the prompt area's do.
+        if i > 0 {
+            (buffer.add_property(at..at + 1, indent.clone())).expect("inside the echo");
+        }
     }
     let (Some(&first), Some(&last)) = (starts.first(), starts.last()) else {
         return;

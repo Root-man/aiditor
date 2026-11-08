@@ -439,7 +439,10 @@ impl Element for FrameElement {
                         let (h, one) = (row.height, px(1.));
                         // Each quad is x, y, width and height from the row's left top.
                         let (color, quads) = match *decoration {
-                            Decoration::Background(name) if left > px(0.) => {
+                            // The echo's band spans the window on its indented lines too.
+                            Decoration::Background(name)
+                                if left > px(0.) && name != FaceName::SessionUser =>
+                            {
                                 let w = width - left - p.text_right;
                                 (theme.face(name).bg, vec![(left, px(0.), w, h)])
                             }
