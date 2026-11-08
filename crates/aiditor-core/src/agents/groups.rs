@@ -2,7 +2,9 @@
 //! apart in the rope, and a folded group's hidden rows carry no properties, only the `Invisible`
 //! runs over them, so properties never nest.
 
-use super::render::{dim, group_line, render, render_tool};
+use super::render::{
+    META_INDENT, dim, group_line, group_meta, put_meta, render, render_tool, take_tool_meta,
+};
 use super::*;
 
 /// A row of a run: a tool call, or a thought or permission block among its calls.
@@ -55,6 +57,8 @@ pub(super) struct Group {
     line: usize,
     open: bool,
     rows: Vec<Row>,
+    /// The length of its failed count and time on the line under its last row, 0 for none.
+    meta: usize,
 }
 
 fn render_thought(buffer: &mut Buffer, thought: &Thought) {
@@ -214,10 +218,28 @@ impl Session {
             })
             .collect();
         let start = buffer.marker(group.start).expect("live with its session");
+        let meta = group_meta(&calls);
         let line = group_line(buffer, start..start + group.line, &calls, group.open);
         self.groups[g].line = line;
+        self.take_meta(buffer, g);
+        // A thought streaming as its last row grows into the line under it.
+        if !(self.group == Some(g) && self.stream.is_some()) {
+            let end = self.group_span(buffer, g).end;
+            let parts: Vec<_> = meta.iter().map(|(t, f)| (t.as_str(), *f)).collect();
+            self.groups[g].meta = put_meta(buffer, end, META_INDENT, &parts);
+        }
         if !self.groups[g].open {
             self.fold_rows(buffer, g);
+        }
+    }
+
+    /// Takes group `g`'s failed count and time off the line under it.
+    fn take_meta(&mut self, buffer: &mut Buffer, g: usize) {
+        let at = self.group_span(buffer, g).end + 1;
+        let meta = std::mem::take(&mut self.groups[g].meta);
+        if meta > 0 {
+            buffer.remove_properties(at..at + meta);
+            buffer.replace_output(at..at + meta, "");
         }
     }
 
@@ -238,6 +260,7 @@ impl Session {
         let Some(g) = self.group else {
             return self.run.push(row);
         };
+        self.take_meta(buffer, g);
         let start = self.row_span(buffer, &row).start;
         buffer.replace_output(start - 1..start, "");
         self.groups[g].rows.push(row);
@@ -269,6 +292,12 @@ impl Session {
     /// as rows. Its calls still need showing indented.
     pub(super) fn form_group(&mut self, buffer: &mut Buffer) {
         let mut rows = std::mem::take(&mut self.run);
+        // Its calls' times go back into their headers when they are shown as rows.
+        for row in &rows {
+            if let Row::Tool(call) = row {
+                take_tool_meta(buffer, self.tools.get_mut(call).expect("shown"));
+            }
+        }
         for row in &rows[1..] {
             let start = self.row_span(buffer, row).start;
             buffer.replace_output(start - 1..start, "");
@@ -305,6 +334,7 @@ impl Session {
             line: 0,
             open,
             rows,
+            meta: 0,
         });
         self.group = Some(g);
     }

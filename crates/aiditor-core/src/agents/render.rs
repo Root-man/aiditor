@@ -144,6 +144,40 @@ pub(super) fn put_time(buffer: &mut Buffer, at: usize, time: &str) -> usize {
     end - at
 }
 
+/// How far in the line under a block puts its timings, the same under every block.
+pub(super) const META_INDENT: usize = 2;
+
+/// Puts `parts`, each in its face, on the blank line after the block ending at `end`, small and
+/// `indent` columns in, as frame 6's timings, returning the chars added.
+pub(super) fn put_meta(
+    buffer: &mut Buffer,
+    end: usize,
+    indent: usize,
+    parts: &[(&str, FaceName)],
+) -> usize {
+    let at = end + 1;
+    let text = parts.iter().map(|(t, _)| *t).collect::<Vec<_>>().join("  ");
+    if text.is_empty() {
+        return 0;
+    }
+    buffer.insert_output(at, &text);
+    let mut props = vec![
+        (at..at + 1, Prop::Line(Decoration::Indent(indent))),
+        (at..at + 1, Prop::Line(Decoration::Small)),
+    ];
+    let mut from = at;
+    for (part, face) in parts {
+        let len = part.chars().count();
+        props.push((from..from + len, Prop::Named(vec![FaceRef::Face(*face)])));
+        from += len + "  ".len();
+    }
+    props.sort_by_key(|(r, _)| r.start);
+    for (range, prop) in props {
+        (buffer.add_property(range, prop)).expect("just inserted");
+    }
+    text.chars().count()
+}
+
 /// Replaces the time at `range` with `text`, in `face`, returning its length in chars. Only the
 /// chars that differ change, so point on the line stays.
 pub(super) fn retime(
@@ -194,6 +228,8 @@ const MARKS: Range<usize> = 0..2;
 const STATUS: Range<usize> = 2..3;
 const ICON: Range<usize> = 4..6;
 const VERB: usize = 7;
+/// Where a group line's verbs start.
+const GROUP_VERBS: usize = 5;
 
 /// Whether a call with `status` has finished.
 pub(super) fn finished(status: ToolCallStatus) -> bool {
@@ -257,6 +293,17 @@ fn group_duration(calls: &[&Tool]) -> Option<Duration> {
     Some(*ended.iter().max()? - *arrived.iter().min()?)
 }
 
+/// A group's failed count and, once all its calls finished live, how long they took, for the line
+/// under it.
+pub(super) fn group_meta(calls: &[&Tool]) -> Vec<(String, FaceName)> {
+    let failed = (calls.iter())
+        .filter(|t| t.call.status == ToolCallStatus::Failed)
+        .count();
+    let failed = (failed > 0).then(|| (format!("{failed} failed"), FaceName::StatusFailed));
+    let duration = group_duration(calls).map(|d| (short_duration(d), FaceName::Annotation));
+    failed.into_iter().chain(duration).collect()
+}
+
 /// Writes a group's line over `range`, with its properties, returning its length in chars.
 pub(super) fn group_line(
     buffer: &mut Buffer,
@@ -265,45 +312,21 @@ pub(super) fn group_line(
     open: bool,
 ) -> usize {
     const ICON: Range<usize> = 2..4;
-    const VERBS: usize = 5;
     let fold = if open { '▾' } else { '▸' };
     let verbs = group_verbs(calls);
-    let verbs_end = VERBS + verbs.chars().count();
-    let failed = (calls.iter())
-        .filter(|t| t.call.status == ToolCallStatus::Failed)
-        .count();
-    let failed = (failed > 0).then(|| format!("{failed} failed"));
-    let duration = group_duration(calls).map(short_duration);
-    let right: Vec<_> = failed.iter().chain(&duration).map(String::as_str).collect();
-    let mut text = format!("{fold}    {verbs}");
-    if !right.is_empty() {
-        text += &format!(" {}", right.join("  "));
-    }
+    let verbs_end = GROUP_VERBS + verbs.chars().count();
+    let text = format!("{fold}    {verbs}");
     let start = range.start;
     rewrite(buffer, range, &text);
-    let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
     let icon = calls
         .first()
         .map_or(Icon::Wrench, |t| kind_parts(t.call.kind).0);
-    let mut props = vec![
+    let props = [
         (MARKS, dim()),
         (ICON, Prop::Icon(icon)),
         (ICON, dim()),
-        (VERBS..verbs_end, dim()),
+        (GROUP_VERBS..verbs_end, dim()),
     ];
-    if !right.is_empty() {
-        props.push((verbs_end..verbs_end + 1, Prop::AlignRight));
-    }
-    let mut at = verbs_end + 1;
-    if let Some(failed) = &failed {
-        let end = at + failed.chars().count();
-        props.push((at..end, face(FaceName::StatusFailed)));
-        at = end + "  ".len();
-    }
-    if let Some(duration) = &duration {
-        let end = at + duration.chars().count();
-        props.push((at..end, face(FaceName::Annotation)));
-    }
     for (r, prop) in props {
         (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
     }
@@ -856,6 +879,34 @@ fn hidden_output(content: &str, at: usize) -> Option<(Range<usize>, usize)> {
     Some((ends[SHOWN_LINES - 1] + 1..ends[ends.len() - 1], lines))
 }
 
+/// The face of a call's time: `status-failed` for an exit code.
+pub(super) fn time_face(tool: &Tool) -> FaceName {
+    let exit = tool.term.as_ref().and_then(|t| t.exit.as_ref());
+    match exit == Some(&tool.time) {
+        true => FaceName::StatusFailed,
+        false => FaceName::Annotation,
+    }
+}
+
+/// Takes the line under a call that is not in a group off, returning where the block ends.
+pub(super) fn take_tool_meta(buffer: &mut Buffer, tool: &mut Tool) -> usize {
+    let end = buffer.marker(tool.start).expect("live while shown") + tool.len;
+    let meta = std::mem::take(&mut tool.meta);
+    if meta > 0 {
+        buffer.remove_properties(end + 1..end + 1 + meta);
+        buffer.replace_output(end + 1..end + 1 + meta, "");
+    }
+    end
+}
+
+/// Puts the time of a call that is not in a group on the line under its block.
+pub(super) fn put_tool_meta(buffer: &mut Buffer, tool: &mut Tool) {
+    let end = take_tool_meta(buffer, tool);
+    if tool.group.is_none() {
+        tool.meta = put_meta(buffer, end, META_INDENT, &[(&tool.time, time_face(tool))]);
+    }
+}
+
 /// Renders a tool call's block, whose properties were removed: its header with a rule beside it,
 /// then its content as markdown with a rule beside each line, or folded. An open command's
 /// hidden output gets no properties of its own, so no property contains another's end and starts
@@ -866,7 +917,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         // With what parts it from the row before in a group, else from the next block.
         let span = match tool.group {
             Some(_) => start - 1..start + tool.len,
-            None => start..start + tool.len + "\n\n".len(),
+            None => start..start + tool.len + "\n\n".len() + tool.meta,
         };
         buffer.remove_properties(span.clone());
         let hide = Prop::Invisible(String::new());
@@ -894,9 +945,10 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     ];
     // Where the target ends, before the counts and the time.
     let (counts, removed) = counts_text(&tool.call);
-    let mut end = match tool.time.is_empty() {
-        true => tool.header,
-        false => tool.header - tool.time.chars().count() - 1,
+    let inline = !tool.time.is_empty() && tool.group.is_some();
+    let mut end = match inline {
+        false => tool.header,
+        true => tool.header - tool.time.chars().count() - 1,
     };
     if !counts.is_empty() {
         end -= counts.chars().count();
@@ -914,15 +966,10 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     if tool_command(&tool.call, tool.term.as_ref()).is_some() {
         props.push((verb_end + indent + 1..end, face(FaceName::SessionCode)));
     }
-    if !tool.time.is_empty() {
+    if inline {
         let suffix = tool.header - tool.time.chars().count() - 1;
-        let exit = tool.term.as_ref().and_then(|t| t.exit.as_ref());
-        let name = match exit == Some(&tool.time) {
-            true => FaceName::StatusFailed,
-            false => FaceName::Annotation,
-        };
         props.push((suffix..suffix + 1, Prop::AlignRight));
-        props.push((suffix + 1..tool.header, face(name)));
+        props.push((suffix + 1..tool.header, face(time_face(tool))));
     }
     let body = tool.header + 1..tool.len;
     if tool.open && !body.is_empty() {

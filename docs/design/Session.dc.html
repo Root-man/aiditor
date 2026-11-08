@@ -17,6 +17,7 @@ body{margin:0}
 .at{border-left-color:#fabd2f}
 .dim{color:#928374}
 .ts{color:#7c6f64;flex:none;padding-left:24px}
+.mr{display:flex;min-height:21px;padding:0 24px 0 42px;border-left:3px solid transparent;color:#7c6f64;font-size:11px;line-height:11px;white-space:pre}
 .th{color:#928374;font-style:italic}
 .code{color:#8ec07c}
 .ln{color:#83a598;text-decoration:underline;text-decoration-color:#4f6a6a;text-underline-offset:3px}
@@ -50,11 +51,12 @@ body{margin:0}
     <div class="lr"><i class="s"></i>Worked 2m 05s<i></i>13:58:12<i class="e"></i></div>
     <div class="gap"></div>
     <div class="ruled">
-    <div class="r user"><span><span style="color: #83a598; font-weight: 700">❯ </span><span class="pr">Show that a project grep is running, as #338 says. Start from</span> <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span class="ts">14:01:05</span></div>
+    <div class="r user"><span><span style="color: #83a598; font-weight: 700">❯ </span><span class="pr">Show that a project grep is running, as #338 says. Start from</span> <span class="tok"><span class="ic">▤</span>grep.rs</span></span><span></span></div>
     <div class="r user"><span>  <span class="tok"><span class="ic">▣</span>grep-stall.png</span> <span class="tok"><span class="ic">≡</span>Pasted 214 lines</span></span><span></span></div>
     </div>
-    <div class="gap"></div>
-    <div class="r"><span class="dim">▸ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path></svg> Read files, searched code</span><span class="ts">0.6s  14:01:09</span></div>
+    <div class="mr"><span class="i">14:01:05</span></div>
+    <div class="r"><span class="dim">▸ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path></svg> Read files, searched code</span><span></span></div>
+    <div class="mr"><span class="i">0.6s  14:01:09</span></div>
     <div class="r"><span>Grep's core already tracks <span class="code">running</span> and <span class="code">answered</span>; the prompt never shows them. The change belongs in <span class="ln">crates/aiditor-core/src/grep.rs:112</span>.</span><span></span></div>
     <div class="gap"></div>
     <div class="r"><span class="dim">Plan</span><span></span></div>
@@ -62,7 +64,7 @@ body{margin:0}
     <div class="r"><span><span class="run">  ● </span>Show the running and no-match states in the prompt</span><span></span></div>
     <div class="r"><span class="dim">  ○ Core tests for running, done and superseded</span><span></span></div>
     <div class="gap"></div>
-    <div class="r"><span class="dim">▾ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edited files, ran commands</span><span class="ts"><span class="bad">1 failed</span>  43.1s</span></div>
+    <div class="r"><span class="dim">▾ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edited files, ran commands</span><span></span></div>
     <div class="r"><span class="th">  ▸ Thought for 4s</span><span></span></div>
     <div class="r"><span>  <span class="dim">▾ </span><span class="ok">✓ </span><svg class="gi dim" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edit  <span class="ln">crates/aiditor-core/src/grep.rs</span>  <span class="ok">+6</span> <span class="bad">−1</span></span><span class="ts">0.3s</span></div>
     <div class="blk in"><span class="hunk">@@ -112,7 +112,12 @@ impl Core {</span></div>
@@ -76,9 +78,9 @@ body{margin:0}
     <div class="blk in"><span class="dim">test grep::tests::</span>running_then_done <span class="bad">... FAILED</span></div>
     <div class="blk in">  assertion failed: left == "", right == "searching"  <span class="ln">src/grep.rs:418</span></div>
     <div class="blk in dim">… 142 more lines</div>
-    <div class="gap"></div>
-    <div class="r at"><span>The status is set before the last batch lands, so <span class="code">running_then_done</span> still sees <span class="code">searching</span>. Moving it after the batch and running the tests again.</span><span class="ts">14:03:22</span></div>
-    <div class="gap"></div>
+    <div class="mr"><span class="i"><span class="bad">1 failed</span>  43.1s</span></div>
+    <div class="r at"><span>The status is set before the last batch lands, so <span class="code">running_then_done</span> still sees <span class="code">searching</span>. Moving it after the batch and running the tests again.</span><span></span></div>
+    <div class="mr"><span>14:03:22</span></div>
     <div class="r"><span class="dim">▸ <svg class="gi" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg> Edited files, running commands</span><span></span></div>
     <div class="r"><span>  <span class="dim">▸ </span><span class="run">● </span><svg class="gi dim" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 11 2-2-2-2"></path><path d="M11 13h4"></path><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg> Run  <span class="code">cargo test -p aiditor-core grep</span></span><span class="ts">waiting 0:12</span></div>
     <div class="perm"><span style="color: #fabd2f; font-weight: 700">Permission</span>  Run cargo test -p aiditor-core grep</div>
