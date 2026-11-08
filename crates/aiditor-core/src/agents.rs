@@ -95,8 +95,8 @@ pub(crate) struct Session {
     load: Option<(Option<SessionId>, BufferId)>,
     /// Whether it is a rollback of `load`'s buffer, taking that buffer's place once loaded.
     rollback: bool,
-    /// Whether stopping it deletes its session first, as a rolled back source's.
-    delete: bool,
+    /// The agent that deletes its session once it stopped, a rolled back source's fork.
+    delete: Option<AgentId>,
     /// What was last sent with `session/set_config_option`, as `mode <value>`, `model
     /// <value>` or `effort <value>`, for a refusal's note.
     sent: Option<String>,
@@ -1514,13 +1514,14 @@ impl Core {
     }
 
     /// Puts rolled back session buffer `source`'s fork, `buffer` with its `log`, in its place:
-    /// in every window showing it and under its and its log's names. Killing the source deletes
-    /// its session and stops its agent. Nothing happens once the source is gone.
-    fn take_place(&mut self, source: BufferId, buffer: BufferId, log: BufferId) {
+    /// in every window showing it and under its and its log's names. Killing the source stops
+    /// its agent, then the fork's agent `id` deletes its session. Nothing happens once the
+    /// source is gone.
+    fn take_place(&mut self, id: AgentId, source: BufferId, buffer: BufferId, log: BufferId) {
         let Some(old) = self.agents.values_mut().find(|s| s.buffer == source) else {
             return;
         };
-        old.delete = true;
+        old.delete = Some(id);
         let listed = (
             old.agent.clone(),
             old.session.as_ref().map(|r| r.session_id.clone()),
@@ -1562,11 +1563,12 @@ impl Core {
                         result: Ok(response),
                     }));
                 }
-                let delete = (session.session.as_ref()).filter(|_| session.delete);
-                effects.push(Effect::Agent(match delete {
-                    Some(r) => AgentOp::Delete {
-                        id,
-                        session: r.session_id.clone(),
+                let opened = session.session.as_ref().map(|r| r.session_id.clone());
+                effects.push(Effect::Agent(match session.delete.zip(opened) {
+                    Some((fork, session)) => AgentOp::Delete {
+                        id: fork,
+                        source: id,
+                        session,
                     },
                     None => AgentOp::Kill { id },
                 }));
@@ -1654,7 +1656,7 @@ impl Ctx<'_> {
             session: None,
             load,
             rollback,
-            delete: false,
+            delete: None,
             sent: None,
             ended: false,
             turn: None,
@@ -1743,7 +1745,9 @@ impl Ctx<'_> {
                 let selected = core.windows.window.buffer();
                 let (buffer, log) = (session.buffer, session.log);
                 match session.load {
-                    Some((_, source)) if session.rollback => core.take_place(source, buffer, log),
+                    Some((_, source)) if session.rollback => {
+                        core.take_place(id, source, buffer, log)
+                    }
                     Some((_, from)) if from == selected => core.switch_to(buffer),
                     _ => {}
                 }
@@ -2984,7 +2988,11 @@ mod tests {
                 }
                 AgentOp::Cancel { id, session } => format!("cancel {} {session}", id.0),
                 AgentOp::Kill { id } => format!("kill {}", id.0),
-                AgentOp::Delete { id, session } => format!("delete {} {session}", id.0),
+                AgentOp::Delete {
+                    id,
+                    source,
+                    session,
+                } => format!("delete {} {} {session}", id.0, source.0),
                 AgentOp::List { request, .. } => format!("list {request}"),
             })
             .collect()
@@ -4283,7 +4291,7 @@ mod tests {
             "*claude stderr*<work>",
         ];
         assert_eq!(h.core.buffer_names(true), names);
-        assert_eq!(ops(&mut h), ["delete 0 s"]);
+        assert_eq!(ops(&mut h), ["delete 1 0 s"]);
         assert!(!h.core.agents.contains_key(&AgentId(0)));
         h.keys("h i RET");
         assert_eq!(ops(&mut h), ["prompt 1 f \"hi\""]);

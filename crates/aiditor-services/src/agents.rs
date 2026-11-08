@@ -59,7 +59,7 @@ struct Handle {
 /// How long a terminated agent has to exit before SIGKILL.
 const GRACE: Duration = Duration::from_millis(100);
 
-/// How long an agent has to answer `session/delete` before it is stopped all the same.
+/// How long an agent has to answer `session/delete`.
 const DELETE_WAIT: Duration = Duration::from_secs(5);
 
 /// shortcut: sessions past this many `session/list` pages are left out; page on demand if a
@@ -228,25 +228,37 @@ impl Agents {
                 }
                 None
             }
-            AgentOp::Delete { id, session } => {
-                let handle = self.handles.get(&id)?;
-                let connection = (handle.connection.lock().unwrap().clone())
-                    .filter(|_| handle.deletable.load(Ordering::SeqCst));
-                let Some((connection, _)) = connection else {
-                    return self.run(AgentOp::Kill { id });
-                };
-                // The handle stays until quitting, so quitting while the agent deletes still
-                // kills it.
-                let (pid, exited) = (handle.pid, handle.exited.clone());
+            AgentOp::Delete {
+                id,
+                source,
+                session,
+            } => {
+                let group = self.handles.remove(&source).and_then(Handle::terminate);
+                let connection = self.handles.get(&id).and_then(|handle| {
+                    (handle.connection.lock().unwrap().clone())
+                        .filter(|_| handle.deletable.load(Ordering::SeqCst))
+                });
+                // Claude Code writes its transcript as it exits, so the delete waits until the
+                // source's whole group is gone.
                 tokio::spawn(async move {
+                    if let Some(group) = group {
+                        tokio::time::sleep(GRACE).await;
+                        unsafe { libc::killpg(group, libc::SIGKILL) };
+                        for _ in 0..100 {
+                            if unsafe { libc::killpg(group, 0) } != 0 {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                    let Some((connection, _)) = connection else {
+                        return;
+                    };
                     let delete = connection.send_request(DeleteSessionRequest::new(session));
                     match timeout(DELETE_WAIT, delete.block_task()).await {
                         Ok(Ok(_)) => {}
                         Ok(Err(err)) => tracing::warn!("deleting the session: {err}"),
                         Err(_) => tracing::warn!("deleting the session: no answer"),
-                    }
-                    if let Some(group) = terminate(pid, &exited) {
-                        kill_after_grace(group);
                     }
                 });
                 None

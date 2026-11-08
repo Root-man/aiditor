@@ -578,27 +578,62 @@ async fn a_rollback_is_a_fork_at_its_message() {
     assert!(!lines.iter().any(|l| l.starts_with("delete=")), "{lines:?}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn delete_deletes_the_session_then_stops_the_agent() {
-    let delete = AgentOp::Delete {
-        id: ID,
+/// A source agent and a deleter run with `script`, the deleter sent a delete of the source's
+/// session once both started, after the source has exited.
+async fn delete_through(
+    agents: &mut Agents,
+    script_text: &str,
+) -> (Receiver<Msg>, tempfile::TempDir, tempfile::TempDir) {
+    let (dir, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut source = open(agents, dir.path(), "{}", Open::New);
+    started(&mut source).await.1.expect("the source starts");
+    let (key, path) = script(other.path(), script_text);
+    let deleter = AgentId(ID.0 + 1);
+    let mut rx = (agents.run(AgentOp::Spawn {
+        id: deleter,
+        command: AGENT.into(),
+        args: Vec::new(),
+        cwd: other.path().into(),
+        roots: Vec::new(),
+        env: vec![(key.into(), path)],
+        session: Open::New,
+    }))
+    .expect("spawn returns a receiver");
+    while !matches!(next(&mut rx).await, Some(Msg::AgentStarted { .. })) {}
+    agents.run(AgentOp::Delete {
+        id: deleter,
+        source: ID,
         session: "fake-session".into(),
-    };
-    let (lines, _) = run_then(r#"{"delete": true}"#, Open::New, Some(delete)).await;
-    assert!(
-        lines.iter().any(|l| l == "delete=fake-session"),
-        "{lines:?}"
-    );
+    });
+    loop {
+        match next(&mut source).await {
+            Some(Msg::AgentExited { .. }) => break,
+            None => panic!("the source exits"),
+            _ => {}
+        }
+    }
+    (rx, dir, other)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn delete_only_stops_an_agent_that_cant_delete() {
-    let delete = AgentOp::Delete {
-        id: ID,
-        session: "fake-session".into(),
-    };
-    let (lines, _) = run_then("{}", Open::New, Some(delete)).await;
-    assert!(!lines.iter().any(|l| l.starts_with("delete=")), "{lines:?}");
+async fn delete_stops_the_source_then_deletes_through_the_other_agent() {
+    let mut agents = Agents::default();
+    let (mut rx, _dirs, _) = delete_through(&mut agents, r#"{"delete": true}"#).await;
+    stderr_until(&mut rx, &mut Vec::new(), "delete=fake-session").await;
+    agents.kill_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_only_stops_the_source_when_the_other_agent_cant_delete() {
+    let mut agents = Agents::default();
+    let (mut rx, _dirs, _) = delete_through(&mut agents, "{}").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    agents.kill_all();
+    while let Some(msg) = next(&mut rx).await {
+        if let Msg::AgentStderr { line, .. } = msg {
+            assert!(!line.starts_with("delete="), "{line}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

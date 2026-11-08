@@ -570,9 +570,13 @@ pub enum AgentOp {
     /// SIGTERM the agent's process group, SIGKILL after 100 ms; ignored for an unknown agent.
     /// The exit message still follows.
     Kill { id: AgentId },
-    /// Send `session/delete` for `session` if the agent advertises it, then stop the agent as
-    /// `Kill` does once it answers, or at once; ignored for an unknown agent.
-    Delete { id: AgentId, session: SessionId },
+    /// Stop agent `source` as `Kill` does and, once its process group is gone, send
+    /// `session/delete` for `session` through agent `id` if that agent advertises it.
+    Delete {
+        id: AgentId,
+        source: AgentId,
+        session: SessionId,
+    },
     /// Start `command` as `Spawn` does in a throwaway process, then `initialize` and
     /// `session/list` in `cwd` through every page, then terminate it; answered with
     /// `Msg::AgentListed` carrying `request`.
