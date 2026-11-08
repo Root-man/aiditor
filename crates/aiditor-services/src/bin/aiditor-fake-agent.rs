@@ -2,8 +2,8 @@
 //! with a two-value mode option, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its
 //! `session` steps after `session/new` and the n-th list of `prompts` on the n-th
 //! `session/prompt`, answers `session/list` from its `sessions` pages and replays its
-//! `history` on `session/load`, taking additional directories with `directories` and forking
-//! with `fork`. With
+//! `history` on `session/load`, taking additional directories with `directories`, forking
+//! with `fork` and deleting with `delete`. With
 //! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
 //! Both are in docs/editor.md under Testing.
 
@@ -16,11 +16,12 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ConfigOptionUpdate, CreateElicitationRequest,
-    ForkSessionRequest, ForkSessionResponse, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest, PromptResponse,
-    RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PromptRequest, PromptResponse, RequestPermissionRequest,
+    SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionDeleteCapabilities,
     SessionForkCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     ToolCallUpdate,
@@ -76,6 +77,9 @@ struct Script {
     /// Whether it advertises `session/fork`, which needs a `history` to load the fork.
     #[serde(default)]
     fork: bool,
+    /// Whether it advertises `session/delete`.
+    #[serde(default)]
+    delete: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -365,6 +369,9 @@ async fn main() -> agent_client_protocol::Result<()> {
                 if init_script.fork && init_script.history.is_some() {
                     sessions = sessions.fork(SessionForkCapabilities::new());
                 }
+                if init_script.delete {
+                    sessions = sessions.delete(SessionDeleteCapabilities::new());
+                }
                 let capabilities = (AgentCapabilities::new().session_capabilities(sessions))
                     .load_session(init_script.history.is_some());
                 responder.respond(
@@ -439,6 +446,13 @@ async fn main() -> agent_client_protocol::Result<()> {
                 eprintln!("dirs={}", dirs(&request.additional_directories));
                 fork_state.lock().unwrap().fork_at = at;
                 responder.respond(ForkSessionResponse::new("fake-fork").config_options(options()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |request: DeleteSessionRequest, responder, _| {
+                eprintln!("delete={}", request.session_id);
+                responder.respond(DeleteSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )

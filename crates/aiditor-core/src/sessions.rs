@@ -89,6 +89,25 @@ impl Core {
         }
     }
 
+    /// Drops `agent`'s session `id`, being deleted, from the sessions buffers' answers.
+    // shortcut: assumes the agent can delete it; `g` lists it again if it can't.
+    pub(crate) fn forget_listed(&mut self, agent: &str, id: &SessionId) {
+        let changed: Vec<_> = (self.session_lists.iter_mut())
+            .filter_map(|(&buffer, list)| {
+                let listing = list.agents.iter_mut().find(|a| a.name == agent)?;
+                let Some(Ok(sessions)) = &mut listing.answer else {
+                    return None;
+                };
+                let listed = sessions.len();
+                sessions.retain(|s| s.session_id != *id);
+                (sessions.len() != listed).then_some(buffer)
+            })
+            .collect();
+        for buffer in changed {
+            self.render_sessions(buffer);
+        }
+    }
+
     /// Rebuilds sessions buffer `id`'s text from its answers, keeping point on its session.
     fn render_sessions(&mut self, id: BufferId) {
         let (Some(list), Some(buffer)) = (self.session_lists.get(&id), self.buffers.get(id)) else {
@@ -679,6 +698,38 @@ mod tests {
         );
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
+    }
+
+    #[test]
+    fn a_rolled_back_session_leaves_the_list() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        let started = Ok(NewSessionResponse::new("c1"));
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: started,
+        });
+        let chunk = ContentChunk::new("yo".into()).message_id("m1");
+        let update = SessionNotification::new("c1", SessionUpdate::AgentMessageChunk(chunk));
+        h.send(Msg::AgentUpdate {
+            id: AgentId(0),
+            update: Box::new(update),
+        });
+        let session = h.core.windows.window.buffer();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let mine = vec![info("c1", Some("Mine"), Some("2026-10-28T10:00:00Z"))];
+        answer(&mut h, requests[0].0, Ok(mine.clone()));
+        answer(&mut h, requests[1].0, Ok(mine));
+        h.core.switch_to(session);
+        h.ctx().goto(0).unwrap();
+        h.keys("M-x agent-rollback-session RET yes RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Ok(NewSessionResponse::new("f")),
+        });
+        // Codex's session of the same id is another session.
+        assert_eq!(body(&h), "codex  2026-10-28 10:00  Mine");
     }
 
     #[test]

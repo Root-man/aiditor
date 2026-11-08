@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, ElicitationCapabilities,
-    ElicitationFormCapabilities, ForkSessionRequest, Implementation, InitializeRequest,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest,
-    RequestId, SessionInfo, SessionNotification,
+    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, DeleteSessionRequest,
+    ElicitationCapabilities, ElicitationFormCapabilities, ForkSessionRequest, Implementation,
+    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PromptRequest, RequestId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Open, Request};
@@ -24,6 +24,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// The agent's requests the core hasn't answered yet, each with a sender whose drop ends the
@@ -49,12 +50,17 @@ struct Handle {
     /// The agent leads its own process group, so this is the group's id too.
     pid: libc::pid_t,
     exited: Arc<AtomicBool>,
+    /// Whether it advertised `session/delete`, once initialized.
+    deletable: Arc<AtomicBool>,
     pending: Pending,
     connection: Connection,
 }
 
 /// How long a terminated agent has to exit before SIGKILL.
 const GRACE: Duration = Duration::from_millis(100);
+
+/// How long an agent has to answer `session/delete`.
+const DELETE_WAIT: Duration = Duration::from_secs(5);
 
 /// shortcut: sessions past this many `session/list` pages are left out; page on demand if a
 /// real history ever gets that long.
@@ -222,6 +228,41 @@ impl Agents {
                 }
                 None
             }
+            AgentOp::Delete {
+                id,
+                source,
+                session,
+            } => {
+                let group = self.handles.remove(&source).and_then(Handle::terminate);
+                let connection = self.handles.get(&id).and_then(|handle| {
+                    (handle.connection.lock().unwrap().clone())
+                        .filter(|_| handle.deletable.load(Ordering::SeqCst))
+                });
+                // Claude Code writes its transcript as it exits, so the delete waits until the
+                // source's whole group is gone.
+                tokio::spawn(async move {
+                    if let Some(group) = group {
+                        tokio::time::sleep(GRACE).await;
+                        unsafe { libc::killpg(group, libc::SIGKILL) };
+                        for _ in 0..100 {
+                            if unsafe { libc::killpg(group, 0) } != 0 {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                    let Some((connection, _)) = connection else {
+                        return;
+                    };
+                    let delete = connection.send_request(DeleteSessionRequest::new(session));
+                    match timeout(DELETE_WAIT, delete.block_task()).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err)) => tracing::warn!("deleting the session: {err}"),
+                        Err(_) => tracing::warn!("deleting the session: no answer"),
+                    }
+                });
+                None
+            }
             AgentOp::List {
                 request,
                 command,
@@ -288,7 +329,7 @@ impl Agents {
         let (stdin, stdout, stderr) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (stdin, stdout, stderr) = (stdin.unwrap(), stdout.unwrap(), stderr.unwrap());
-        let exited = Arc::new(AtomicBool::new(false));
+        let (exited, deletable) = (Arc::new(AtomicBool::new(false)), Arc::default());
         let pending = Pending::default();
         let open = Connection::default();
         self.handles.insert(
@@ -296,12 +337,13 @@ impl Agents {
             Handle {
                 pid,
                 exited: exited.clone(),
+                deletable: Arc::clone(&deletable),
                 pending: pending.clone(),
                 connection: open.clone(),
             },
         );
         let streams = (stdin, stdout);
-        let process = (pid, exited.clone());
+        let process = (pid, exited.clone(), deletable);
         let connection = tokio::spawn(connect(
             id,
             (cwd, roots, session),
@@ -456,7 +498,7 @@ async fn connect(
     id: AgentId,
     (cwd, mut roots, open_as): (PathBuf, Vec<PathBuf>, Open),
     (stdin, stdout): (ChildStdin, ChildStdout),
-    (pid, exited): (libc::pid_t, Arc<AtomicBool>),
+    (pid, exited, deletable): (libc::pid_t, Arc<AtomicBool>, Arc<AtomicBool>),
     pending: Pending,
     open: Connection,
     tx: Sender<Msg>,
@@ -528,6 +570,13 @@ async fn connect(
                 roots.clear();
                 _ = tx.send(Msg::AgentUnscoped { id }).await;
             }
+            let delete = capabilities.session_capabilities.delete.is_some();
+            deletable.store(delete, Ordering::SeqCst);
+            // A rollback is a fork at its message; the core deletes the source.
+            let open_as = match open_as {
+                Open::Rollback(source, at) => Open::Fork(source, Some(at)),
+                open_as => open_as,
+            };
             let refusal = match &open_as {
                 Open::Fork(..) if capabilities.session_capabilities.fork.is_none() => {
                     Some("agent can't fork sessions")
@@ -546,6 +595,7 @@ async fn connect(
             let load = match open_as {
                 Open::New => None,
                 Open::Load(session) => Some(session),
+                Open::Rollback(..) => unreachable!("made a fork above"),
                 // The fork replays nothing, so loading it shows the history it kept.
                 Open::Fork(source, at) => {
                     let meta = at.map(|at| {
