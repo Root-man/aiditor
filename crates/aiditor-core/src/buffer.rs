@@ -1527,7 +1527,8 @@ mod tests {
         let (mut buffers, id) = with_text("hi\n> a\nb");
         let b = buffers.get_mut(id).unwrap();
         b.prompt = Some(b.add_marker(5, InsertionType::Stay).unwrap());
-        b.add_property(0..1, Prop::Invisible(String::new())).unwrap();
+        b.add_property(0..1, Prop::Invisible(String::new()))
+            .unwrap();
         assert_eq!(b.unfolded_line(2, true), 2);
     }
 
