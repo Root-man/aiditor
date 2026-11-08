@@ -545,43 +545,59 @@ async fn an_agent_that_cant_fork_fails_to_start() {
     agents.kill_all();
 }
 
-/// Every stderr line of a rollback of `old` to `m1` by the fake with `script`, and its started
-/// message's session.
-async fn rollback(script: &str) -> (Vec<String>, String) {
+/// Every stderr line of the fake with `script`, opened as `session`, then sent `then`, and
+/// its started message's session.
+async fn run_then(script: &str, session: Open, then: Option<AgentOp>) -> (Vec<String>, String) {
     let dir = tempfile::tempdir().unwrap();
     let mut agents = Agents::default();
-    let mut rx = open(
-        &mut agents,
-        dir.path(),
-        script,
-        Open::Rollback("old".into(), "m1".into()),
-    );
+    let mut rx = open(&mut agents, dir.path(), script, session);
     let (mut lines, result) = started(&mut rx).await;
-    agents.kill_all();
-    // Every line is in once the agent's stderr closes with it.
+    if let Some(op) = then {
+        agents.run(op);
+    }
+    // Every line is in once the agent's stderr closes with its exit.
     while let Some(msg) = next(&mut rx).await {
         if let Msg::AgentStderr { line, .. } = msg {
             lines.push(line);
         }
     }
+    agents.kill_all();
     (lines, result.unwrap())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rollback_forks_loads_then_deletes_the_source() {
-    let (lines, session) = rollback(r#"{"fork": true, "delete": true, "history": []}"#).await;
+async fn a_rollback_is_a_fork_at_its_message() {
+    let script = r#"{"fork": true, "delete": true, "history": []}"#;
+    let rollback = Open::Rollback("old".into(), "m1".into());
+    let kill = AgentOp::Kill { id: ID };
+    let (lines, session) = run_then(script, rollback, Some(kill)).await;
     assert!(session.contains("\"fake-fork\""), "{session}");
-    let at = |wanted: &str| lines.iter().position(|l| l == wanted);
-    let (fork, load, delete) = (at("fork=old"), at("load=fake-fork"), at("delete=old"));
-    assert!(fork.is_some() && at("at=m1").is_some(), "{lines:?}");
-    assert!(fork < load && load < delete, "{lines:?}");
+    for wanted in ["fork=old", "at=m1", "load=fake-fork"] {
+        assert!(lines.iter().any(|l| l == wanted), "{wanted} in {lines:?}");
+    }
+    assert!(!lines.iter().any(|l| l.starts_with("delete=")), "{lines:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rollback_keeps_the_source_when_the_agent_cant_delete() {
-    let (lines, session) = rollback(r#"{"fork": true, "history": []}"#).await;
-    assert!(session.contains("\"fake-fork\""), "{session}");
-    assert!(lines.iter().any(|l| l == "load=fake-fork"), "{lines:?}");
+async fn delete_deletes_the_session_then_stops_the_agent() {
+    let delete = AgentOp::Delete {
+        id: ID,
+        session: "fake-session".into(),
+    };
+    let (lines, _) = run_then(r#"{"delete": true}"#, Open::New, Some(delete)).await;
+    assert!(
+        lines.iter().any(|l| l == "delete=fake-session"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_only_stops_an_agent_that_cant_delete() {
+    let delete = AgentOp::Delete {
+        id: ID,
+        session: "fake-session".into(),
+    };
+    let (lines, _) = run_then("{}", Open::New, Some(delete)).await;
     assert!(!lines.iter().any(|l| l.starts_with("delete=")), "{lines:?}");
 }
 

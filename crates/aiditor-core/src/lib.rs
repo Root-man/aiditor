@@ -570,6 +570,9 @@ pub enum AgentOp {
     /// SIGTERM the agent's process group, SIGKILL after 100 ms; ignored for an unknown agent.
     /// The exit message still follows.
     Kill { id: AgentId },
+    /// Send `session/delete` for `session` if the agent advertises it, then stop the agent as
+    /// `Kill` does once it answers, or at once; ignored for an unknown agent.
+    Delete { id: AgentId, session: SessionId },
     /// Start `command` as `Spawn` does in a throwaway process, then `initialize` and
     /// `session/list` in `cwd` through every page, then terminate it; answered with
     /// `Msg::AgentListed` carrying `request`.
@@ -592,7 +595,7 @@ pub enum Open {
     /// `session/fork` of the session, cut at the message if one is named, then `session/load`
     /// of the fork.
     Fork(SessionId, Option<MessageId>),
-    /// A fork at the message, then `session/delete` of the source if the agent can.
+    /// A fork at the message, for a rollback.
     Rollback(SessionId, MessageId),
 }
 

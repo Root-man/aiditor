@@ -95,6 +95,8 @@ pub(crate) struct Session {
     load: Option<(Option<SessionId>, BufferId)>,
     /// Whether it is a rollback of `load`'s buffer, taking that buffer's place once loaded.
     rollback: bool,
+    /// Whether stopping it deletes its session first, as a rolled back source's.
+    delete: bool,
     /// What was last sent with `session/set_config_option`, as `mode <value>`, `model
     /// <value>` or `effort <value>`, for a refusal's note.
     sent: Option<String>,
@@ -1512,17 +1514,21 @@ impl Core {
     }
 
     /// Puts rolled back session buffer `source`'s fork, `buffer` with its `log`, in its place:
-    /// in every window showing it and under its and its log's names. Killing the source stops
-    /// its agent. Nothing happens once the source is gone.
+    /// in every window showing it and under its and its log's names. Killing the source deletes
+    /// its session and stops its agent. Nothing happens once the source is gone.
     fn take_place(&mut self, source: BufferId, buffer: BufferId, log: BufferId) {
-        let Some(old) = self
-            .agents
-            .values()
-            .find(|s| s.buffer == source)
-            .map(|s| s.log)
-        else {
+        let Some(old) = self.agents.values_mut().find(|s| s.buffer == source) else {
             return;
         };
+        old.delete = true;
+        let listed = (
+            old.agent.clone(),
+            old.session.as_ref().map(|r| r.session_id.clone()),
+        );
+        let old = old.log;
+        if let (agent, Some(id)) = listed {
+            self.forget_listed(&agent, &id);
+        }
         let name = |id| self.buffers.get(id).map(|b| b.name.clone());
         let names = (name(source), name(old));
         let inactive = (self.workspaces.iter_mut()).filter_map(|w| w.windows.as_mut());
@@ -1556,7 +1562,14 @@ impl Core {
                         result: Ok(response),
                     }));
                 }
-                effects.push(Effect::Agent(AgentOp::Kill { id }));
+                let delete = (session.session.as_ref()).filter(|_| session.delete);
+                effects.push(Effect::Agent(match delete {
+                    Some(r) => AgentOp::Delete {
+                        id,
+                        session: r.session_id.clone(),
+                    },
+                    None => AgentOp::Kill { id },
+                }));
             }
             live
         });
@@ -1641,6 +1654,7 @@ impl Ctx<'_> {
             session: None,
             load,
             rollback,
+            delete: false,
             sent: None,
             ended: false,
             turn: None,
@@ -2960,6 +2974,7 @@ mod tests {
                 }
                 AgentOp::Cancel { id, session } => format!("cancel {} {session}", id.0),
                 AgentOp::Kill { id } => format!("kill {}", id.0),
+                AgentOp::Delete { id, session } => format!("delete {} {session}", id.0),
                 AgentOp::List { request, .. } => format!("list {request}"),
             })
             .collect()
@@ -4258,7 +4273,7 @@ mod tests {
             "*claude stderr*<work>",
         ];
         assert_eq!(h.core.buffer_names(true), names);
-        assert_eq!(ops(&mut h), ["kill 0"]);
+        assert_eq!(ops(&mut h), ["delete 0 s"]);
         assert!(!h.core.agents.contains_key(&AgentId(0)));
         h.keys("h i RET");
         assert_eq!(ops(&mut h), ["prompt 1 f \"hi\""]);

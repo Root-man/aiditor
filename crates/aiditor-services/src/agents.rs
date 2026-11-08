@@ -24,6 +24,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 /// The agent's requests the core hasn't answered yet, each with a sender whose drop ends the
@@ -49,12 +50,17 @@ struct Handle {
     /// The agent leads its own process group, so this is the group's id too.
     pid: libc::pid_t,
     exited: Arc<AtomicBool>,
+    /// Whether it advertised `session/delete`, once initialized.
+    deletable: Arc<AtomicBool>,
     pending: Pending,
     connection: Connection,
 }
 
 /// How long a terminated agent has to exit before SIGKILL.
 const GRACE: Duration = Duration::from_millis(100);
+
+/// How long an agent has to answer `session/delete` before it is stopped all the same.
+const DELETE_WAIT: Duration = Duration::from_secs(5);
 
 /// shortcut: sessions past this many `session/list` pages are left out; page on demand if a
 /// real history ever gets that long.
@@ -222,6 +228,29 @@ impl Agents {
                 }
                 None
             }
+            AgentOp::Delete { id, session } => {
+                let handle = self.handles.get(&id)?;
+                let connection = (handle.connection.lock().unwrap().clone())
+                    .filter(|_| handle.deletable.load(Ordering::SeqCst));
+                let Some((connection, _)) = connection else {
+                    return self.run(AgentOp::Kill { id });
+                };
+                // The handle stays until quitting, so quitting while the agent deletes still
+                // kills it.
+                let (pid, exited) = (handle.pid, handle.exited.clone());
+                tokio::spawn(async move {
+                    let delete = connection.send_request(DeleteSessionRequest::new(session));
+                    match timeout(DELETE_WAIT, delete.block_task()).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err)) => tracing::warn!("deleting the session: {err}"),
+                        Err(_) => tracing::warn!("deleting the session: no answer"),
+                    }
+                    if let Some(group) = terminate(pid, &exited) {
+                        kill_after_grace(group);
+                    }
+                });
+                None
+            }
             AgentOp::List {
                 request,
                 command,
@@ -288,7 +317,7 @@ impl Agents {
         let (stdin, stdout, stderr) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (stdin, stdout, stderr) = (stdin.unwrap(), stdout.unwrap(), stderr.unwrap());
-        let exited = Arc::new(AtomicBool::new(false));
+        let (exited, deletable) = (Arc::new(AtomicBool::new(false)), Arc::default());
         let pending = Pending::default();
         let open = Connection::default();
         self.handles.insert(
@@ -296,12 +325,13 @@ impl Agents {
             Handle {
                 pid,
                 exited: exited.clone(),
+                deletable: Arc::clone(&deletable),
                 pending: pending.clone(),
                 connection: open.clone(),
             },
         );
         let streams = (stdin, stdout);
-        let process = (pid, exited.clone());
+        let process = (pid, exited.clone(), deletable);
         let connection = tokio::spawn(connect(
             id,
             (cwd, roots, session),
@@ -456,7 +486,7 @@ async fn connect(
     id: AgentId,
     (cwd, mut roots, open_as): (PathBuf, Vec<PathBuf>, Open),
     (stdin, stdout): (ChildStdin, ChildStdout),
-    (pid, exited): (libc::pid_t, Arc<AtomicBool>),
+    (pid, exited, deletable): (libc::pid_t, Arc<AtomicBool>, Arc<AtomicBool>),
     pending: Pending,
     open: Connection,
     tx: Sender<Msg>,
@@ -528,14 +558,12 @@ async fn connect(
                 roots.clear();
                 _ = tx.send(Msg::AgentUnscoped { id }).await;
             }
-            // A rollback is a fork at its message whose source is deleted once the fork loaded.
-            let (open_as, delete) = match open_as {
-                Open::Rollback(source, at) => {
-                    let delete = capabilities.session_capabilities.delete.is_some();
-                    let fork = Open::Fork(source.clone(), Some(at));
-                    (fork, delete.then_some(source))
-                }
-                open_as => (open_as, None),
+            let delete = capabilities.session_capabilities.delete.is_some();
+            deletable.store(delete, Ordering::SeqCst);
+            // A rollback is a fork at its message; the core deletes the source.
+            let open_as = match open_as {
+                Open::Rollback(source, at) => Open::Fork(source, Some(at)),
+                open_as => open_as,
             };
             let refusal = match &open_as {
                 Open::Fork(..) if capabilities.session_capabilities.fork.is_none() => {
@@ -582,13 +610,6 @@ async fn connect(
                         .config_options(loaded.config_options)
                 }
             };
-            if let Some(source) = delete
-                && let Err(err) = (agent.send_request(DeleteSessionRequest::new(source)))
-                    .block_task()
-                    .await
-            {
-                tracing::warn!("deleting the rolled back session: {err}");
-            }
             started = true;
             // Before the core hears of it, so its first prompt finds the connection.
             *open.lock().unwrap() = Some((agent.clone(), tx.clone()));
