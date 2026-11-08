@@ -2038,7 +2038,7 @@ milestones:
 
   # ───────────────────────────────────────────── M8 ─────────────────────────────────────────────
   - key: m8
-    title: "M8 · Editing polish"
+    title: "M8 · Polish"
     description: "TAB indentation, formatters, registers and macros, navigation, editable grep, other encodings, the $EDITOR client, the remaining editing commands and the workspace list redesign."
     gate: "Daily driver for real work, without LSP (knowingly deferred)."
     epics:
@@ -2273,3 +2273,19 @@ milestones:
               - "Core tests cover the cuts at several widths"
               - "Spec updated in docs/editor.md"
             blocked_by: [m8-workspace-list-fold]
+      - key: m8-session-rework
+        title: "Agent session buffer rework"
+        labels: [frontend, acp]
+        design: "#subsystems"
+        body: |
+          Rework the agent session buffer, functionally and visually. The scope is decided when the epic starts. Break down after the decision below. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m8-decide-session-rework
+            title: "Decide: agent session buffer rework"
+            labels: [decision]
+            design: "#open-questions"
+            body: |
+              What to change in the session buffer, functionally and visually, after using the monospace session. Record the answer in `docs/editor.md` and break the epic into tasks.
+            acceptance:
+              - "Decision recorded in docs/editor.md"
+              - "The epic is broken down into tasks"

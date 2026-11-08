@@ -573,7 +573,7 @@ Build the editor core first and add the agent at M3, so agent features land on a
 | M5 · Look and feel | Tree-sitter for 5 languages; the approved visual design: named faces, frame chrome, line numbers, mode lines per buffer type, the workspace modeline; minibuffer and grep polish | File, terminal, session and grep buffers in split windows match the approved design in Gruvbox dark and light |
 | M6 · Interactive session | Messages as units, timings, tool-call blocks and file links in the session buffer; file chips, `@` references, attachments, folded pastes, slash commands; questions from agents; fork and rollback | In one session, reference and attach files, run a slash command, open a tool call and a link with `RET`, answer a question and a form, then fork and roll back |
 | M7 · Rich session buffer | Block rows and proportional faces; the welcome dashboard | A session reads like Zed's agent panel, and search, mark and kill still work across it |
-| M8 · Editing polish | TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results; other encodings; the workspace list redesign; `$EDITOR` client for terminals | Daily driver for real work, without LSP (knowingly deferred) |
+| M8 · Polish | TAB indentation, formatter commands; registers, macros; grep-based jump to definition, `file:line` jumps, editable grep results; other encodings; the workspace list redesign; `$EDITOR` client for terminals | Daily driver for real work, without LSP (knowingly deferred) |
 
 Phases are in order of dependency, not to scale; no dates are set. LSP, multiple cursors, notifications, diff review, dired and worktree workflows come after M8.
 
