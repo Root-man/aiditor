@@ -6,7 +6,7 @@ M6 needs a way to branch a conversation: try another direction from some point w
 
 ## What Changes
 
-- New command `agent-fork-session` (M-x) in a session buffer. With point in the prompt area it forks the whole session; with point in the transcript it forks up to the message at point (the one the `message-at-point` bar marks), passing `_meta.jetbrains.air.fork = { version: 1, messageId }`. A message without an id (a prompt sent live) echoes `No message id to fork at`.
+- New command `agent-fork-session` (M-x) in a session buffer. With point in the prompt area it forks the whole session; with point in the transcript it forks up to the message at point (the one the `message-at-point` bar marks), passing `_meta.jetbrains.air.fork = { version: 1, messageId }`. Only agent messages are fork points: on a prompt it echoes `Fork at an agent message`, and on an agent message without an id `No message id to fork at`.
 - The fork spawns its own agent process (one process per session) with the source's agent, in the current workspace's project, sends `initialize`, `session/fork` of the source's session id, then `session/load` of the new session, so the agent replays the forked history into the new buffer through the existing load path.
 - The new buffer is created hidden and named like a loaded session (`*<agent>: <source title>*<<workspace>>`), and is shown once the load answers if the selected window still shows the source buffer, as loading a listed session does. The source session is untouched.
 - An agent that doesn't advertise `sessionCapabilities.fork` fails with `agent can't fork sessions`; that or any other failure echoes the error and kills the hidden buffers, so nothing opens.

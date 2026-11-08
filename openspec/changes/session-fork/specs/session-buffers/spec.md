@@ -16,11 +16,11 @@
 - **THEN** the selected window shows the fork's buffer with the replayed transcript, and the source buffer still sends prompts
 
 ### Requirement: What can't be forked
-`agent-fork-session` SHALL echo and spawn nothing when it can't fork: `Not in an agent session buffer` outside one, `<agent> is not ready` before the source's session id is known, and `No message id to fork at` when point is in the transcript but no message is marked or the marked one has no id, as a prompt sent live has none.
+`agent-fork-session` SHALL echo and spawn nothing when it can't fork: `Not in an agent session buffer` outside one, `<agent> is not ready` before the source's session id is known, `Fork at an agent message` when the marked message is a prompt, sent live or replayed, since only agent messages are fork points, and `No message id to fork at` when point is in the transcript but no message is marked or the marked agent message has no id.
 
-#### Scenario: A prompt sent live
-- **WHEN** point is on a prompt sent live and `agent-fork-session` runs
-- **THEN** `No message id to fork at` is echoed and nothing is spawned
+#### Scenario: A prompt
+- **WHEN** point is on a prompt, sent live or replayed with an id, and `agent-fork-session` runs
+- **THEN** `Fork at an agent message` is echoed and nothing is spawned
 
 #### Scenario: A source not ready
 - **WHEN** `agent-fork-session` runs before the session's `session/new` answers

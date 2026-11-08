@@ -552,6 +552,8 @@ enum Block {
 #[derive(Debug)]
 struct Message {
     id: Option<MessageId>,
+    /// Whether it is the user's, which can't be a fork point.
+    user: bool,
     start: MarkerId,
     /// Its length in chars, the blank line after it not counted.
     len: usize,
@@ -615,6 +617,7 @@ impl Core {
         if let Block::Message(message) | Block::User(message) = &block {
             session.messages.push(Message {
                 id: message.clone(),
+                user: matches!(block, Block::User(_)),
                 start: marker(),
                 len: text.chars().count(),
             });
@@ -2417,6 +2420,7 @@ impl Ctx<'_> {
         let echo = start - PROMPT.len();
         let message = Message {
             id: None,
+            user: true,
             start: b.add_marker(echo, InsertionType::Stay)?,
             len: PROMPT.len() + input.chars().count(),
         };
@@ -2477,6 +2481,9 @@ impl Ctx<'_> {
                 let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
                 let after = session.messages.partition_point(|m| start(m) <= point);
                 let message = after.checked_sub(1).map(|i| &session.messages[i]);
+                if message.is_some_and(|m| m.user) {
+                    return Err("Fork at an agent message".into());
+                }
                 Some(
                     message
                         .and_then(|m| m.id.clone())
@@ -4107,7 +4114,13 @@ mod tests {
         h.keys("h i RET");
         point_in(&mut h, "> hi", 2);
         h.keys("M-x agent-fork-session RET");
-        assert_eq!(h.core.message(), Some("No message id to fork at"));
+        assert_eq!(h.core.message(), Some("Fork at an agent message"));
+        // A replayed prompt has an id but is the user's all the same.
+        let user = ContentChunk::new("yo".into()).message_id("u1");
+        update(&mut h, 0, SessionUpdate::UserMessageChunk(user));
+        point_in(&mut h, "> yo", 2);
+        h.keys("M-x agent-fork-session RET");
+        assert_eq!(h.core.message(), Some("Fork at an agent message"));
         assert_eq!(forks(&mut h), []);
     }
 

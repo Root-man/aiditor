@@ -23,5 +23,5 @@ Loading a listed session (#103) already does most of this: `start_session` creat
 ## Risks / Trade-offs
 
 - [codex-acp's load of a just-forked thread isn't checked here, and it isn't installed on this machine] → the issue's last criterion is a manual check on macOS against both adapters.
-- [Live-sent prompts have no id, so they can't be fork points] → echo `No message id to fork at`; forking at the reply before works.
+- [Prompts aren't fork points: claude-agent-acp would cut right after one, leaving an unanswered prompt, while codex-acp keeps its whole turn, and live-sent prompts have no id at all] → messages remember whether they are the user's, and a prompt echoes `Fork at an agent message`; forking at the reply before works.
 - [A failed fork's stderr log is killed with it] → the error is echoed and kept in `*Messages*`.
