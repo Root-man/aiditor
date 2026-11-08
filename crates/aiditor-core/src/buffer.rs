@@ -413,6 +413,9 @@ pub enum Decoration {
     },
     /// A 1 px line through the middle of the line, where it has no text.
     HRule(FaceName),
+    /// The line's text in a smaller font at the top of its row, as a session's timings under
+    /// their block. The row keeps its height and its cells their width.
+    Small,
     /// A drawn table's row: `separator` rules at the char columns `edges` and along its bottom,
     /// and its top when it is the `first`. The line is cut at the window's edge, never wrapped.
     Table {

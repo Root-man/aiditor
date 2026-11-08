@@ -683,16 +683,13 @@ impl Core {
         let end = session.end(buffer) - "\n\n".len();
         render(buffer, end - text.chars().count()..end, false, None);
         self.chips.paint(buffer, end - text.chars().count()..end);
-        if let (true, Some(clock), Some(message)) =
-            (session.live(), clock, session.messages.last_mut())
-        {
-            let at = line_end(buffer, end - text.chars().count());
-            message.len += put_time(buffer, at, &clock);
-        }
         let echo = end - text.chars().count() - PROMPT.len();
         prompt_glyph(buffer, echo);
         let end = session.end(buffer) - "\n\n".len();
         user_lines(buffer, echo..end);
+        if let (true, Some(clock)) = (session.live(), clock) {
+            put_meta(buffer, end, META_INDENT, &[(&clock, FaceName::Annotation)]);
+        }
     }
 
     /// Merges a `tool_call_update` into its call, or starts a call from one with a title.
@@ -1104,18 +1101,9 @@ impl Core {
                     header = Some(end - start);
                 }
                 (Block::Message(_), Some(clock), Some(message)) => {
-                    // A drawn table's row is cut at the window's edge, so the time goes on the
-                    // first line of text, and a message of tables alone has none.
-                    let text = buffer.text();
-                    let end = text.char_to_line(start + message.len.saturating_sub(1));
-                    let line = (text.char_to_line(start)..=end).find(|&l| {
-                        let at = text.line_to_char(l);
-                        !buffer.table_line(l) && line_end(buffer, at) > at
-                    });
-                    if let Some(line) = line {
-                        let at = line_end(buffer, buffer.text().line_to_char(line));
-                        message.len += put_time(buffer, at, &clock);
-                    }
+                    let end = start + message.len;
+                    let time = [(clock.as_str(), FaceName::Annotation)];
+                    put_meta(buffer, end, MESSAGE_META_INDENT, &time);
                 }
                 _ => {}
             }
@@ -2409,18 +2397,22 @@ impl Ctx<'_> {
         let line = start + input.chars().count() + "\n\n".len();
         (b.add_property(line..line + working.chars().count(), dim())).expect("just appended");
         let echo = start - PROMPT.len();
-        let mut message = Message {
+        let message = Message {
             id: None,
             start: b.add_marker(echo, InsertionType::Stay)?,
             len: PROMPT.len() + input.chars().count(),
         };
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
-        if let Some(clock) = clock {
-            let at = session.paste_line_end(b, start);
-            message.len += put_time(b, at, &clock);
-        }
         user_lines(b, echo..echo + message.len);
+        if let Some(clock) = clock {
+            put_meta(
+                b,
+                echo + message.len,
+                META_INDENT,
+                &[(&clock, FaceName::Annotation)],
+            );
+        }
         let end = b.len_chars();
         let session = core.agents.get_mut(&id).expect("found above");
         session.fold_pastes(b, start);
@@ -3192,7 +3184,7 @@ mod tests {
         );
         let rows = session_rows(&mut h);
         assert!(rows[0].contains("≡ Pasted 21 lines"));
-        assert!(rows[0].ends_with("12:34:00"));
+        assert!(rows.contains(&"12:34:00".to_string()), "{rows:?}");
         h.keys("M-< C-u 9 C-f TAB");
         let rows = session_rows(&mut h);
         assert_eq!(
@@ -4614,7 +4606,11 @@ mod tests {
         assert_eq!(h.core.text(), "▸ ●    Using Think\n\n> ");
         // With a title it starts a block.
         tool_update(&mut h, "u", fields.title("Grep".to_string()));
-        assert!(h.core.text().ends_with("▸ ✗    Used Grep 0.0s\n\n> "));
+        assert!(
+            h.core
+                .text()
+                .ends_with("▸ ✗    Used Grep 0.0s\n1 failed\n> ")
+        );
     }
 
     #[test]
@@ -5376,14 +5372,14 @@ mod tests {
     }
 
     #[test]
-    fn a_message_time_skips_its_table_rows() {
+    fn a_message_time_goes_under_its_table_rows() {
         let mut h = session();
         h.clock("14:01:00");
         h.keys("a RET");
         chunk(&mut h, "| a |\n|---|\n| b |\n\nAfter.");
         prompted(&mut h, Ok(StopReason::EndTurn));
         assert!(
-            h.core.text().contains(" a \n b \n\nAfter. 14:01:00\n"),
+            h.core.text().contains(" a \n b \n\nAfter.\n14:01:00\n"),
             "{:?}",
             h.core.text()
         );
@@ -5392,8 +5388,8 @@ mod tests {
         prompted(&mut h, Ok(StopReason::EndTurn));
         let text = h.core.text();
         assert!(
-            text.contains("\n c \n d \n\nWorked"),
-            "a table alone has no time: {text:?}"
+            text.contains("\n c \n d \n14:01:00\nWorked"),
+            "a table alone has its time too: {text:?}"
         );
     }
 
@@ -6896,19 +6892,24 @@ mod tests {
         prompted(&mut h, Ok(StopReason::EndTurn));
         assert_eq!(
             h.core.text(),
-            "> hi 14:01:05\n\nHi 14:03:22\nthere!\n\nWorked 2m 22s 14:06:00\n\n> "
+            "> hi\n14:01:05\nHi\nthere!\n14:03:22\nWorked 2m 22s 14:06:00\n\n> "
         );
+        // Only the summary rule's time stays at the right; the others are small, under their block.
         assert_eq!(
             props(&h)
                 .iter()
                 .filter(|(_, p)| *p == Prop::AlignRight)
                 .count(),
-            3
+            1
         );
+        let small = (props(&h).into_iter())
+            .filter(|(_, p)| *p == Prop::Line(Decoration::Small))
+            .count();
+        assert_eq!(small, 2);
         let annotation = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
         assert!(props(&h).contains(&("14:03:22".into(), annotation)));
-        // The message's lines still cover its whole block.
-        assert_eq!(message_list(&h)[1].1, "Hi 14:03:22\nthere!");
+        // The message's lines cover its block, not the time under it.
+        assert_eq!(message_list(&h)[1].1, "Hi\nthere!");
     }
 
     #[test]
@@ -7116,12 +7117,12 @@ mod tests {
         let mut h = grouped();
         assert_eq!(
             h.core.text(),
-            "> a\n\n▸    Read files 0.0s\n  ▸ ✓    Read a.rs 0.0s\nOutput:\n```\ntext\n```\n  \
-             ▸ ✓    Read b.rs 0.0s\nOutput:\n```\ntext\n```\n\nWorking for 0s\n\n> "
+            "> a\n\n▸    Read files\n  ▸ ✓    Read a.rs 0.0s\nOutput:\n```\ntext\n```\n  \
+             ▸ ✓    Read b.rs 0.0s\nOutput:\n```\ntext\n```\n0.0s\nWorking for 0s\n\n> "
         );
         assert_eq!(
             visible(&mut h),
-            ["❯ a", "▸    Read files 0.0s", "Working for 0s", "❯ "]
+            ["❯ a", "▸    Read files", "0.0s", "Working for 0s", "❯ "]
         );
         let rule = |(_, p): &(String, Prop)| matches!(p, Prop::Line(Decoration::Rule(_)));
         assert!(!props(&h).iter().any(rule), "the group line has no rule");
@@ -7132,8 +7133,8 @@ mod tests {
             "a",
             ToolCallUpdateFields::new().title("x".to_string()),
         );
-        assert_eq!(visible(&mut h)[1], "▸    Read files 0.0s");
-        assert_eq!(visible(&mut h).len(), 4);
+        assert_eq!(visible(&mut h)[1..3], ["▸    Read files", "0.0s"]);
+        assert_eq!(visible(&mut h).len(), 5);
     }
 
     #[test]
@@ -7231,7 +7232,7 @@ mod tests {
         );
         assert_eq!(
             line(&mut h),
-            "▸    Edited files, searched code, fetched pages, used tools 0.0s"
+            "▸    Edited files, searched code, fetched pages, used tools"
         );
         let icons: Vec<_> = (props(&h).into_iter())
             .filter_map(|(_, p)| match p {
@@ -7255,10 +7256,10 @@ mod tests {
         assert_eq!(visible(&mut h)[1], "▸    Read files, running commands");
         tool_update(&mut h, "b", finish(ToolCallStatus::Failed));
         assert_eq!(
-            visible(&mut h)[1],
-            "▸    Read files, ran commands 1 failed 3.0s"
+            visible(&mut h)[1..3],
+            ["▸    Read files, ran commands", "1 failed 3.0s"]
         );
-        assert!(h.core.text().contains("ran commands 1 failed  3.0s\n"));
+        assert!(h.core.text().contains("\n1 failed  3.0s\n"));
         let failed = (props(&h).into_iter()).find(|(t, _)| t == "1 failed");
         let want = Prop::Named(vec![FaceRef::Face(FaceName::StatusFailed)]);
         assert_eq!(failed.map(|(_, p)| p), Some(want));
@@ -7294,7 +7295,7 @@ mod tests {
         assert_eq!(
             visible(&mut h)[1..4],
             [
-                "▾    Read files 0.0s",
+                "▾    Read files",
                 "  ▸ ✓   Read a.rs 0.0s",
                 "  ▸ ✓   Read b.rs 0.0s"
             ]
@@ -7306,10 +7307,10 @@ mod tests {
         // Inside the call, back to its row, the group staying open.
         h.keys("C-n C-n TAB");
         assert_eq!(visible(&mut h)[2], "  ▸ ✓   Read a.rs 0.0s");
-        assert_eq!(visible(&mut h).len(), 6);
+        assert_eq!(visible(&mut h).len(), 7);
         on_line(&mut h, "▾    Read");
         h.keys("TAB");
-        assert_eq!(visible(&mut h).len(), 4);
+        assert_eq!(visible(&mut h).len(), 5);
         // What was open stays open across a fold.
         h.keys("TAB");
         on_line(&mut h, "▸ ✓    Read b.rs");
@@ -7344,7 +7345,7 @@ mod tests {
         h.keys("TAB");
         tool(&mut h, read("b", "b.rs"));
         let lines = visible(&mut h);
-        assert_eq!(lines[1], "▾    Read files 0.0s");
+        assert_eq!(lines[1], "▾    Read files");
         assert_eq!(lines[2], "  ▾ ✓   Read a.rs 0.0s");
     }
 
@@ -7358,13 +7359,13 @@ mod tests {
         tool(&mut h, read("b", "b.rs"));
         thought(&mut h, "last");
         tool(&mut h, read("c", "c.rs"));
-        assert_eq!(visible(&mut h).len(), 4);
+        assert_eq!(visible(&mut h).len(), 5);
         on_line(&mut h, "▸    Read");
         h.keys("TAB");
         assert_eq!(
             visible(&mut h)[1..8],
             [
-                "▾    Read files 0.0s",
+                "▾    Read files",
                 "  ▸ Thought for 0s",
                 "  ▸ ✓   Read a.rs 0.0s",
                 "  ▸ Thought for 0s",
@@ -7390,11 +7391,11 @@ mod tests {
         thought(&mut h, " more");
         assert_eq!(visible(&mut h).len(), 4);
         chunk(&mut h, "done");
-        assert_eq!(visible(&mut h).len(), 5);
+        assert_eq!(visible(&mut h).len(), 6);
         assert!(
             h.core
                 .text()
-                .contains("  ▸ Thought for 0s\nhmm more\n\ndone")
+                .contains("  ▸ Thought for 0s\nhmm more\n0.0s\ndone")
         );
     }
 
@@ -7442,10 +7443,10 @@ mod tests {
         tool(&mut h, read("a", "a.rs"));
         tool(&mut h, read("b", "b.rs"));
         let lines = visible(&mut h);
-        assert_eq!(lines[1], "▸    Read files 0.0s", "{lines:?}");
+        assert_eq!(lines[1], "▸    Read files", "{lines:?}");
         assert_eq!(lines[2], "Permission: U");
         h.keys("C-c C-y");
-        assert_eq!(visible(&mut h).len(), 4);
+        assert_eq!(visible(&mut h).len(), 5);
     }
 
     #[test]
@@ -7475,7 +7476,7 @@ mod tests {
         let text = h.core.text();
         assert!(text.lines().nth(line).unwrap().contains("Read b.rs"));
         h.keys("TAB");
-        assert!(h.core.text().contains("▾    Read files 0.0s"));
+        assert!(h.core.text().contains("▾    Read files"));
         h.keys("M-<");
         assert_eq!(visible(&mut h)[3], "  ▸ ✓   Read b.rs 0.0s");
     }
@@ -7580,7 +7581,7 @@ mod tests {
         assert!(h.core.text().contains("Ran ls\n"), "no arrival, no time");
         chunk(&mut h, "live");
         h.keys("a RET");
-        assert!(h.core.text().contains("live 14:01:06\n"));
+        assert!(h.core.text().contains("live\n14:01:06\n"));
     }
 
     #[test]

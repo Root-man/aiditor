@@ -144,6 +144,42 @@ pub(super) fn put_time(buffer: &mut Buffer, at: usize, time: &str) -> usize {
     end - at
 }
 
+/// How far in the line under a block puts its timings: two columns past where the text after a
+/// user's `> ` or a group's icon starts, and past a message's start.
+pub(super) const META_INDENT: usize = 4;
+pub(super) const MESSAGE_META_INDENT: usize = 2;
+
+/// Puts `parts`, each in its face, on the blank line after the block ending at `end`, small and
+/// `indent` columns in, as frame 6's timings, returning the chars added.
+pub(super) fn put_meta(
+    buffer: &mut Buffer,
+    end: usize,
+    indent: usize,
+    parts: &[(&str, FaceName)],
+) -> usize {
+    let at = end + 1;
+    let text = parts.iter().map(|(t, _)| *t).collect::<Vec<_>>().join("  ");
+    if text.is_empty() {
+        return 0;
+    }
+    buffer.insert_output(at, &text);
+    let mut props = vec![
+        (at..at + 1, Prop::Line(Decoration::Indent(indent))),
+        (at..at + 1, Prop::Line(Decoration::Small)),
+    ];
+    let mut from = at;
+    for (part, face) in parts {
+        let len = part.chars().count();
+        props.push((from..from + len, Prop::Named(vec![FaceRef::Face(*face)])));
+        from += len + "  ".len();
+    }
+    props.sort_by_key(|(r, _)| r.start);
+    for (range, prop) in props {
+        (buffer.add_property(range, prop)).expect("just inserted");
+    }
+    text.chars().count()
+}
+
 /// Replaces the time at `range` with `text`, in `face`, returning its length in chars. Only the
 /// chars that differ change, so point on the line stays.
 pub(super) fn retime(
@@ -257,6 +293,17 @@ fn group_duration(calls: &[&Tool]) -> Option<Duration> {
     Some(*ended.iter().max()? - *arrived.iter().min()?)
 }
 
+/// A group's failed count and, once all its calls finished live, how long they took, for the line
+/// under it.
+pub(super) fn group_meta(calls: &[&Tool]) -> Vec<(String, FaceName)> {
+    let failed = (calls.iter())
+        .filter(|t| t.call.status == ToolCallStatus::Failed)
+        .count();
+    let failed = (failed > 0).then(|| (format!("{failed} failed"), FaceName::StatusFailed));
+    let duration = group_duration(calls).map(|d| (short_duration(d), FaceName::Annotation));
+    failed.into_iter().chain(duration).collect()
+}
+
 /// Writes a group's line over `range`, with its properties, returning its length in chars.
 pub(super) fn group_line(
     buffer: &mut Buffer,
@@ -269,41 +316,18 @@ pub(super) fn group_line(
     let fold = if open { '▾' } else { '▸' };
     let verbs = group_verbs(calls);
     let verbs_end = VERBS + verbs.chars().count();
-    let failed = (calls.iter())
-        .filter(|t| t.call.status == ToolCallStatus::Failed)
-        .count();
-    let failed = (failed > 0).then(|| format!("{failed} failed"));
-    let duration = group_duration(calls).map(short_duration);
-    let right: Vec<_> = failed.iter().chain(&duration).map(String::as_str).collect();
-    let mut text = format!("{fold}    {verbs}");
-    if !right.is_empty() {
-        text += &format!(" {}", right.join("  "));
-    }
+    let text = format!("{fold}    {verbs}");
     let start = range.start;
     rewrite(buffer, range, &text);
-    let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
     let icon = calls
         .first()
         .map_or(Icon::Wrench, |t| kind_parts(t.call.kind).0);
-    let mut props = vec![
+    let props = [
         (MARKS, dim()),
         (ICON, Prop::Icon(icon)),
         (ICON, dim()),
         (VERBS..verbs_end, dim()),
     ];
-    if !right.is_empty() {
-        props.push((verbs_end..verbs_end + 1, Prop::AlignRight));
-    }
-    let mut at = verbs_end + 1;
-    if let Some(failed) = &failed {
-        let end = at + failed.chars().count();
-        props.push((at..end, face(FaceName::StatusFailed)));
-        at = end + "  ".len();
-    }
-    if let Some(duration) = &duration {
-        let end = at + duration.chars().count();
-        props.push((at..end, face(FaceName::Annotation)));
-    }
     for (r, prop) in props {
         (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
     }

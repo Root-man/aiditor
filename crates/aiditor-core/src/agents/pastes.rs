@@ -95,14 +95,6 @@ impl Session {
         self.paint_pastes(buffer, from);
     }
 
-    pub(super) fn paste_line_end(&self, buffer: &Buffer, from: usize) -> usize {
-        let mut end = line_end(buffer, from);
-        while let Some(paste) = self.pastes.iter().find(|p| p.range(buffer).contains(&end)) {
-            end = line_end(buffer, paste.range(buffer).end);
-        }
-        end
-    }
-
     pub(super) fn toggle_paste(&mut self, buffer: &mut Buffer, point: usize) -> Option<usize> {
         let paste = self
             .pastes

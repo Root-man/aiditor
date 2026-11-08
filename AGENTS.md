@@ -37,7 +37,7 @@ The approved designs are in [docs/design](docs/design), exported from the [aidit
 - **13c · Workspace list in a split** ([WorkspaceListNarrow.dc.html](docs/design/WorkspaceListNarrow.dc.html)): the list in a narrow window, beside a file.
 - **13d · Workspace list, Gruvbox light** ([WorkspaceListLight.dc.html](docs/design/WorkspaceListLight.dc.html)): the folded list in the light theme, with point away from the current workspace.
 
-Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those.
+Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those. Frames 6d, 6e, 6f and 6g still draw a prompt's and a message's time at the right of its first line; frame 6 is the reference: small, on the blank line under the block.
 
 Frames 7 and 8 stay open until the monospace session has been used. Don't build from them before "Decide: rich session and dashboard direction" settles them. Frame 12 lists 30 faces; `docs/editor.md` adds the rest and the changed `annotation`.
 

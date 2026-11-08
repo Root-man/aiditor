@@ -61,6 +61,8 @@ pub(crate) struct Row {
     /// Its top, from the window's.
     pub(crate) top: Pixels,
     pub(crate) height: Pixels,
+    /// The height its text is set in: less than `height` on a `Small` line, so it sits at the top.
+    text_height: Pixels,
     decorations: Vec<Decoration>,
     /// Where an `HRule` decoration shows, as x from the window's left.
     gaps: Vec<Range<Pixels>>,
@@ -91,6 +93,9 @@ pub(crate) struct RowIcon {
     pub(crate) x: Range<Pixels>,
     pub(crate) color: Hsla,
 }
+
+/// A `Small` line's font size against the frame's, frame 6's 11px timings beside 15px text.
+const SMALL: f32 = 11. / 15.;
 
 /// A boxed run's corners, per the design's chip.
 const BOX_RADIUS: f32 = 5.;
@@ -213,7 +218,20 @@ impl Element for FrameElement {
                     let marked = at.and(editor.marked.as_deref()).unwrap_or_default();
                     let (text, runs, byte, boxes) =
                         line_runs(line, at.map(|(_, col)| col), marked, &font, &settings.theme);
-                    let text = shape(text, &runs);
+                    let small = line.decorations.contains(&Decoration::Small);
+                    let text = match small {
+                        true => (window.text_system()).shape_line(
+                            text.into(),
+                            font_size * SMALL,
+                            &runs,
+                            None,
+                        ),
+                        false => shape(text, &runs),
+                    };
+                    let text_height = match small {
+                        true => line_height * SMALL,
+                        false => height,
+                    };
                     let boxes = boxed(&text, boxes);
                     let icons = icons(line, at.map(|(_, col)| col), marked, &text, &runs);
                     if at.is_some() {
@@ -250,6 +268,7 @@ impl Element for FrameElement {
                     let row = Row {
                         top,
                         height,
+                        text_height,
                         gaps,
                         decorations: line.decorations.clone(),
                         indent,
@@ -433,7 +452,7 @@ impl Element for FrameElement {
                             Decoration::Bar(name) => {
                                 (theme.face(name).fg, vec![(px(0.), px(0.), px(3.), h)])
                             }
-                            Decoration::Indent(_) => (None, Vec::new()),
+                            Decoration::Indent(_) | Decoration::Small => (None, Vec::new()),
                             Decoration::Border { top, face } => {
                                 let y = if top { px(0.) } else { h - one };
                                 (theme.face(face).fg, vec![(px(0.), y, width, one)])
@@ -469,7 +488,7 @@ impl Element for FrameElement {
                     for b in &row.boxes {
                         window.paint_quad(box_quad(b, origin, row.height));
                     }
-                    row.text.paint(origin, row.height, window, cx).ok();
+                    row.text.paint(origin, row.text_height, window, cx).ok();
                     for i in &row.icons {
                         let bounds = icon_bounds(i, origin, row.height, font_size);
                         let path = crate::icons::path(i.icon).into();
