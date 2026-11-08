@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agent-client-protocol = "3.5.0"
+agent-client-protocol = { version = "3.5.0", features = ["unstable_session_fork"] }
 aiditor-core = { path = "../aiditor-core" }
 grep-matcher = "0.1.9"
 grep-regex = "0.1.14"

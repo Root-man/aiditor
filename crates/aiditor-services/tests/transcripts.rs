@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::v1::{AgentRequest, Error, PromptRequest, SessionUpdate};
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::settings::FaceName;
-use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg};
+use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg, Open};
 use aiditor_services::agents::Agents;
 use serde_json::Value;
 use tokio::sync::mpsc::Receiver;
@@ -37,7 +37,7 @@ fn spawn(
         cwd: cwd.into(),
         roots: Vec::new(),
         env: (env.iter()).map(|&(k, v)| (k.into(), v.into())).collect(),
-        session: None,
+        session: Open::New,
     }))
     .expect("spawn returns a receiver")
 }

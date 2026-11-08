@@ -2,7 +2,8 @@
 //! with a two-value mode option, then runs the JSON script `AIDITOR_FAKE_AGENT` names: its
 //! `session` steps after `session/new` and the n-th list of `prompts` on the n-th
 //! `session/prompt`, answers `session/list` from its `sessions` pages and replays its
-//! `history` on `session/load`, taking additional directories with `directories`. With
+//! `history` on `session/load`, taking additional directories with `directories` and forking
+//! with `fork`. With
 //! `AIDITOR_FAKE_AGENT_REPLAY` it replays a recorded transcript instead.
 //! Both are in docs/editor.md under Testing.
 
@@ -15,13 +16,14 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ConfigOptionUpdate, CreateElicitationRequest,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PromptRequest, PromptResponse, RequestPermissionRequest,
-    SessionAdditionalDirectoriesCapabilities, SessionCapabilities, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo, SessionListCapabilities,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, ToolCallUpdate,
+    ForkSessionRequest, ForkSessionResponse, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PromptRequest, PromptResponse,
+    RequestPermissionRequest, SessionAdditionalDirectoriesCapabilities, SessionCapabilities,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    SessionForkCapabilities, SessionInfo, SessionListCapabilities, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    ToolCallUpdate,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 use serde::Deserialize;
@@ -71,6 +73,9 @@ struct Script {
     /// Whether it advertises `additionalDirectories`.
     #[serde(default)]
     directories: bool,
+    /// Whether it advertises `session/fork`, which needs a `history` to load the fork.
+    #[serde(default)]
+    fork: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -105,12 +110,14 @@ struct Question {
     withdraw_after: Option<u64>,
 }
 
-/// What the handlers share: the session's `cwd`, the prompts run so far and the running turn.
+/// What the handlers share: the session's `cwd`, the prompts run so far, the running turn and
+/// the last fork's message id, which cuts the next load's history.
 #[derive(Default)]
 struct State {
     cwd: PathBuf,
     turns: usize,
     turn: CancellationToken,
+    fork_at: Option<String>,
 }
 
 fn dirs(paths: &[PathBuf]) -> String {
@@ -322,7 +329,7 @@ async fn main() -> agent_client_protocol::Result<()> {
         script.clone(),
         script.clone(),
     );
-    let load_state = session_state.clone();
+    let (load_state, fork_state) = (session_state.clone(), session_state.clone());
     let transport = ByteStreams::new(
         tokio::io::stdout().compat_write(),
         tokio::io::stdin().compat(),
@@ -354,6 +361,9 @@ async fn main() -> agent_client_protocol::Result<()> {
                 if init_script.directories {
                     sessions = sessions
                         .additional_directories(SessionAdditionalDirectoriesCapabilities::new());
+                }
+                if init_script.fork && init_script.history.is_some() {
+                    sessions = sessions.fork(SessionForkCapabilities::new());
                 }
                 let capabilities = (AgentCapabilities::new().session_capabilities(sessions))
                     .load_session(init_script.history.is_some());
@@ -393,13 +403,42 @@ async fn main() -> agent_client_protocol::Result<()> {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::method_not_found());
                 };
-                for update in history {
+                let at = load_state.lock().unwrap().fork_at.take();
+                let at_fork = |u: &SessionUpdate, at: &str| match u {
+                    SessionUpdate::UserMessageChunk(c)
+                    | SessionUpdate::AgentMessageChunk(c)
+                    | SessionUpdate::AgentThoughtChunk(c) => {
+                        c.message_id.as_ref().is_some_and(|m| *m.0 == *at)
+                    }
+                    _ => false,
+                };
+                let cut = (at.as_deref())
+                    .and_then(|at| history.iter().rposition(|u| at_fork(u, at)))
+                    .map_or(history.len(), |i| i + 1);
+                for update in &history[..cut] {
                     let update =
                         SessionNotification::new(request.session_id.clone(), update.clone());
                     client.send_notification(update)?;
                 }
                 load_state.lock().unwrap().cwd = request.cwd;
                 responder.respond(LoadSessionResponse::new().config_options(options()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ForkSessionRequest, responder, _| {
+                let meta = request
+                    .meta
+                    .as_ref()
+                    .map(|m| &m["jetbrains"]["air"]["fork"]);
+                let at = meta
+                    .and_then(|f| f["messageId"].as_str())
+                    .map(str::to_owned);
+                eprintln!("fork={}", request.session_id);
+                eprintln!("at={}", at.as_deref().unwrap_or_default());
+                eprintln!("dirs={}", dirs(&request.additional_directories));
+                fork_state.lock().unwrap().fork_at = at;
+                responder.respond(ForkSessionResponse::new("fake-fork").config_options(options()))
             },
             agent_client_protocol::on_receive_request!(),
         )

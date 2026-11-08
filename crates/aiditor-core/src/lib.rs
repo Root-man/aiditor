@@ -57,7 +57,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::{
-    AgentRequest, ClientResponse, Error, NewSessionResponse, PromptRequest, RequestId,
+    AgentRequest, ClientResponse, Error, MessageId, NewSessionResponse, PromptRequest, RequestId,
     SessionConfigOption, SessionId, SessionInfo, SessionNotification,
     SetSessionConfigOptionRequest, StopReason,
 };
@@ -539,9 +539,8 @@ pub struct AgentId(pub u64);
 /// Work for the agent service.
 pub enum AgentOp {
     /// Start `command` in `cwd` with `env` on top of the editor's environment, later pairs
-    /// winning, then `initialize` and `session/new` in `cwd`, or `session/load` of `session`,
-    /// with `roots` as `additionalDirectories` if the agent takes them; answered with
-    /// `Msg::AgentStarted`.
+    /// winning, then `initialize` and open `session` in `cwd`, with `roots` as
+    /// `additionalDirectories` if the agent takes them; answered with `Msg::AgentStarted`.
     Spawn {
         id: AgentId,
         command: String,
@@ -549,7 +548,7 @@ pub enum AgentOp {
         cwd: PathBuf,
         roots: Vec<PathBuf>,
         env: Vec<(String, String)>,
-        session: Option<SessionId>,
+        session: Open,
     },
     /// Answer the agent's pending `request`; ignored for an unknown agent or request.
     Reply {
@@ -581,6 +580,18 @@ pub enum AgentOp {
         cwd: PathBuf,
         env: Vec<(String, String)>,
     },
+}
+
+/// How a spawned agent opens its session.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Open {
+    /// `session/new`.
+    New,
+    /// `session/load` of the session, replaying its history.
+    Load(SessionId),
+    /// `session/fork` of the session, cut at the message if one is named, then `session/load`
+    /// of the fork.
+    Fork(SessionId, Option<MessageId>),
 }
 
 /// Work for the grep service.

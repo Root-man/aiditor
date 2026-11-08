@@ -7,7 +7,7 @@ use jiff::tz::TimeZone;
 
 use crate::buffer::BufferId;
 use crate::project::ProjectId;
-use crate::{AgentOp, Core, Ctx};
+use crate::{AgentOp, Core, Ctx, Open};
 
 const MODE: &str = "agent-sessions-mode";
 const HEADER: &str = "Sessions — RET switch, g refresh, n/p move, q quit";
@@ -312,7 +312,7 @@ impl Ctx<'_> {
                 _ => None,
             };
             let (name, session) = (listing.name.clone(), session.clone());
-            return self.start_session(&name, Some((session, title.as_deref())));
+            return self.start_session(&name, Open::Load(session), title.as_deref());
         };
         if self.core.session_state(&listing.name, session) == Some("[loading]") {
             let echo = format!("Loading {} session...", listing.name);
@@ -704,7 +704,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let c1 = Some(SessionId::from("c1"));
+        let c1 = Open::Load("c1".into());
         let roots = vec![h.path("lib")];
         assert_eq!(
             spawns,
