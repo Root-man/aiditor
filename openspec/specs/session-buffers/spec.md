@@ -1302,3 +1302,36 @@ A live agent message's clock time SHALL go at the end of its first line that is 
 #### Scenario: A reply of a table alone
 - **WHEN** a live reply `| c |\n|---|\n| d |` ends
 - **THEN** its lines read ` c ` and ` d ` with no time
+
+### Requirement: Forking a session into a new session buffer
+`agent-fork-session` (M-x) in a session buffer SHALL fork it as loading a listed session loads one: a hidden session buffer named after the source's title and a log, in the current workspace, spawning the source's agent to fork the source's session id. With point in the prompt area it SHALL fork without a message id; elsewhere at the id of the message the `message-at-point` bar marks. The source session SHALL be left as it was.
+
+#### Scenario: Forking from the prompt area
+- **WHEN** point is in the prompt area of a ready `claude` session titled `Fix it` in workspace `work` and `agent-fork-session` runs
+- **THEN** the agent is spawned to fork the session without a message id, `*claude: Fix it*<work><2>` exists unshown, and `Forking claude session...` is echoed
+
+#### Scenario: Forking at a message
+- **WHEN** point is on a tool call under an agent message with id `m1` and `agent-fork-session` runs
+- **THEN** the agent is spawned to fork the session at `m1`
+
+#### Scenario: The fork shows once loaded
+- **WHEN** the fork's load answers while the selected window still shows the source buffer
+- **THEN** the selected window shows the fork's buffer with the replayed transcript, and the source buffer still sends prompts
+
+### Requirement: What can't be forked
+`agent-fork-session` SHALL echo and spawn nothing when it can't fork: `Not in an agent session buffer` outside one, `<agent> is not ready` before the source's session id is known, `Fork at an agent message` when the marked message is a prompt, sent live or replayed, since only agent messages are fork points, and `No message id to fork at` when point is in the transcript but no message is marked or the marked agent message has no id.
+
+#### Scenario: A prompt
+- **WHEN** point is on a prompt, sent live or replayed with an id, and `agent-fork-session` runs
+- **THEN** `Fork at an agent message` is echoed and nothing is spawned
+
+#### Scenario: A source not ready
+- **WHEN** `agent-fork-session` runs before the session's `session/new` answers
+- **THEN** `claude is not ready` is echoed and nothing is spawned
+
+### Requirement: A failed fork opens nothing
+When a fork's start fails, as with an agent that can't fork or an error answer, the echo area SHALL show `<agent> fork failed: <error>`, and the fork's session buffer and log SHALL be killed, so no buffer is left from it.
+
+#### Scenario: An agent that can't fork
+- **WHEN** the fork's started message fails with `agent can't fork sessions`
+- **THEN** `claude fork failed: agent can't fork sessions` is echoed, neither of the fork's buffers exists and the selected window still shows the source
