@@ -830,6 +830,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.agent_fork_session(),
         },
         Command {
+            name: "agent-rollback-session",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.agent_rollback_session(args),
+        },
+        Command {
             name: "agent-previous-message",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.agent_next_message(args.count().saturating_neg()),

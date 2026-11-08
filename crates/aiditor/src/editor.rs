@@ -2255,7 +2255,8 @@ mod tests {
         let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_keystrokes("alt-x");
-        cx.simulate_input("abc");
+        // Input that no command name matches, so the count stays 0/0.
+        cx.simulate_input("xqz");
         cx.simulate_keystrokes("ctrl-b ctrl-b alt-z");
         let line = editor.update(cx, |e, _| {
             let frame = e.core.frame();
@@ -2264,8 +2265,8 @@ mod tests {
                 &frame.message.unwrap_or_default(),
             )
         });
-        let text = "   0/0 M-x abc [M-z is undefined]".to_string();
-        assert_eq!(line, (text, "   0/0 M-x a".len()));
+        let text = "   0/0 M-x xqz [M-z is undefined]".to_string();
+        assert_eq!(line, (text, "   0/0 M-x x".len()));
     }
 
     #[gpui::test]

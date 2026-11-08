@@ -592,6 +592,8 @@ pub enum Open {
     /// `session/fork` of the session, cut at the message if one is named, then `session/load`
     /// of the fork.
     Fork(SessionId, Option<MessageId>),
+    /// A fork at the message, then `session/delete` of the source if the agent can.
+    Rollback(SessionId, MessageId),
 }
 
 /// Work for the grep service.

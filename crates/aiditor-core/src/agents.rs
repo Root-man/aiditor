@@ -93,6 +93,8 @@ pub(crate) struct Session {
     /// The session it loads instead of opening one, none for a fork until it answers, and the
     /// buffer it was loaded from, which shows it once loaded if still selected.
     load: Option<(Option<SessionId>, BufferId)>,
+    /// Whether it is a rollback of `load`'s buffer, taking that buffer's place once loaded.
+    rollback: bool,
     /// What was last sent with `session/set_config_option`, as `mode <value>`, `model
     /// <value>` or `effort <value>`, for a refusal's note.
     sent: Option<String>,
@@ -1479,6 +1481,26 @@ impl Core {
         })
     }
 
+    /// The selected window's session, ready, its session id and, unless point is on the prompt
+    /// line, the message the bar marks, if any.
+    fn session_at_point(&self) -> Result<(&Session, SessionId, Option<Option<&Message>>), String> {
+        let (point, buffer) = (self.point(), self.current());
+        let shown = self.windows.window.buffer();
+        let session = (self.agents.values())
+            .find(|s| s.buffer == shown)
+            .ok_or("Not in an agent session buffer")?;
+        let source = (session.session.as_ref())
+            .map(|r| r.session_id.clone())
+            .ok_or_else(|| format!("{} is not ready", session.agent))?;
+        if point >= buffer.prompt_start() - PROMPT.len() {
+            return Ok((session, source, None));
+        }
+        let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
+        let after = session.messages.partition_point(|m| start(m) <= point);
+        let message = after.checked_sub(1).map(|i| &session.messages[i]);
+        Ok((session, source, Some(message)))
+    }
+
     /// Whether any agent session hasn't ended: waiting, starting or ready.
     pub(crate) fn live_agents(&self) -> bool {
         self.agents.values().any(|s| !s.ended)
@@ -1487,6 +1509,36 @@ impl Core {
     /// Whether buffer `id` is the session buffer of a session that hasn't ended.
     pub(crate) fn live_agent(&self, id: BufferId) -> bool {
         self.agents.values().any(|s| s.buffer == id && !s.ended)
+    }
+
+    /// Puts rolled back session buffer `source`'s fork, `buffer` with its `log`, in its place:
+    /// in every window showing it and under its and its log's names. Killing the source stops
+    /// its agent. Nothing happens once the source is gone.
+    fn take_place(&mut self, source: BufferId, buffer: BufferId, log: BufferId) {
+        let Some(old) = self
+            .agents
+            .values()
+            .find(|s| s.buffer == source)
+            .map(|s| s.log)
+        else {
+            return;
+        };
+        let name = |id| self.buffers.get(id).map(|b| b.name.clone());
+        let names = (name(source), name(old));
+        let inactive = (self.workspaces.iter_mut()).filter_map(|w| w.windows.as_mut());
+        for windows in std::iter::once(&mut self.windows).chain(inactive) {
+            for window in windows.windows_mut().filter(|w| w.buffer() == source) {
+                window.show(&mut self.buffers, buffer);
+            }
+        }
+        self.buffers.raise(buffer);
+        self.kill_buffer(source);
+        self.kill_buffer(old);
+        for (id, name) in [(buffer, names.0), (log, names.1)] {
+            if let Some(name) = name {
+                self.buffers.rename(id, &name);
+            }
+        }
     }
 
     /// Stops the agents of sessions whose session buffer was killed and forgets them, cancelling
@@ -1560,7 +1612,9 @@ impl Ctx<'_> {
             Open::New => (format!("Starting {name}..."), None),
             Open::Load(session) => (format!("Loading {name} session..."), Some(session.clone())),
             Open::Fork(..) => (format!("Forking {name} session..."), None),
+            Open::Rollback(..) => (format!("Rolling back {name} session..."), None),
         };
+        let rollback = matches!(open, Open::Rollback(..));
         let load = (open != Open::New).then_some((load, from));
         if load.is_none() {
             core.switch_to(buffer);
@@ -1586,6 +1640,7 @@ impl Ctx<'_> {
             held: Some(spawn),
             session: None,
             load,
+            rollback,
             sent: None,
             ended: false,
             turn: None,
@@ -1672,11 +1727,11 @@ impl Ctx<'_> {
                 }
                 session.session = Some(response);
                 let selected = core.windows.window.buffer();
-                let show = (session.load.as_ref())
-                    .filter(|(_, from)| *from == selected)
-                    .map(|_| session.buffer);
-                if let Some(buffer) = show {
-                    core.switch_to(buffer);
+                let (buffer, log) = (session.buffer, session.log);
+                match session.load {
+                    Some((_, source)) if session.rollback => core.take_place(source, buffer, log),
+                    Some((_, from)) if from == selected => core.switch_to(buffer),
+                    _ => {}
                 }
                 core.echo(format!("{agent} session ready (modes: {modes})"));
                 if let Some(note) = note {
@@ -1687,9 +1742,10 @@ impl Ctx<'_> {
             // A failed fork leaves nothing: killing its buffers forgets it and stops its agent.
             Err(err) if matches!(session.load, Some((None, _))) => {
                 let (buffer, log) = (session.buffer, session.log);
+                let what = if session.rollback { "rollback" } else { "fork" };
                 core.kill_buffer(buffer);
                 core.kill_buffer(log);
-                core.echo(format!("{agent} fork failed: {err}"));
+                core.echo(format!("{agent} {what} failed: {err}"));
             }
             Err(err) => {
                 session.ended = true;
@@ -2466,33 +2522,37 @@ impl Ctx<'_> {
     /// `agent-fork-session`: forks the session into a new session buffer, whole with point on the
     /// prompt line, else at the message the bar marks.
     pub(crate) fn agent_fork_session(&mut self) -> Result<(), String> {
-        let core = &*self.core;
-        let (point, buffer) = (core.point(), core.current());
-        let shown = core.windows.window.buffer();
-        let session = (core.agents.values())
-            .find(|s| s.buffer == shown)
-            .ok_or("Not in an agent session buffer")?;
-        let source = (session.session.as_ref())
-            .map(|r| r.session_id.clone())
-            .ok_or_else(|| format!("{} is not ready", session.agent))?;
-        let at = match point >= buffer.prompt_start() - PROMPT.len() {
-            true => None,
-            false => {
-                let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
-                let after = session.messages.partition_point(|m| start(m) <= point);
-                let message = after.checked_sub(1).map(|i| &session.messages[i]);
-                if message.is_some_and(|m| m.user) {
-                    return Err("Fork at an agent message".into());
-                }
-                Some(
-                    message
-                        .and_then(|m| m.id.clone())
-                        .ok_or("No message id to fork at")?,
-                )
+        let (session, source, message) = self.core.session_at_point()?;
+        let at = match message {
+            None => None,
+            Some(Some(message)) if message.user => return Err("Fork at an agent message".into()),
+            Some(message) => {
+                Some((message.and_then(|m| m.id.clone())).ok_or("No message id to fork at")?)
             }
         };
         let (agent, title) = (session.agent.clone(), session.title.clone());
         self.start_session(&agent, Open::Fork(source, at), Some(&title))
+    }
+
+    /// `agent-rollback-session`: after asking, forks the session at the message the bar marks
+    /// into a session that takes its buffer's place once loaded.
+    pub(crate) fn agent_rollback_session(&mut self, args: Args) -> Result<(), String> {
+        let (session, source, message) = self.core.session_at_point()?;
+        let message = message.flatten().ok_or("No message at point")?;
+        if message.user {
+            return Err("Roll back to an agent message".into());
+        }
+        let at = message.id.clone().ok_or("No message id to roll back to")?;
+        let (agent, title) = (session.agent.clone(), session.title.clone());
+        match args.strings.first().map(String::as_str) {
+            None => {
+                let command = self.core.commands["agent-rollback-session"];
+                let prompt = "Roll back to this message? Files stay as they are ".into();
+                self.read_string(command, args, prompt, Some(&["no", "yes"]))
+            }
+            Some("yes") => self.start_session(&agent, Open::Rollback(source, at), Some(&title)),
+            Some(_) => Ok(()),
+        }
     }
 
     /// `agent-toggle-tool-call`: shows or hides the content of the tool call or thought row whose
@@ -4143,6 +4203,108 @@ mod tests {
         assert_eq!(h.core.windows.window.buffer(), source);
         assert_eq!(ops(&mut h), ["kill 1"]);
         assert!(!h.core.agents.contains_key(&AgentId(1)));
+    }
+
+    /// The rollbacks spawned since the last call: the source session and the message id.
+    fn rollbacks(h: &mut Harness) -> Vec<(String, String)> {
+        (h.agent_ops.drain(..))
+            .filter_map(|op| match op {
+                AgentOp::Spawn {
+                    session: Open::Rollback(source, at),
+                    ..
+                } => Some((source.to_string(), at.0.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A session with agent messages `m1` and `m2`, point on `m1`, rolled back after `answer`.
+    fn rolled_back(answer: &str) -> Harness {
+        let mut h = session();
+        agent_chunk(&mut h, "m1", "yo");
+        agent_chunk(&mut h, "m2", "later");
+        point_in(&mut h, "yo", 1);
+        h.keys("M-x agent-rollback-session RET");
+        assert_eq!(
+            h.core.minibuffer().unwrap().prompt,
+            "Roll back to this message? Files stay as they are "
+        );
+        h.keys(&format!("{answer} RET"));
+        h
+    }
+
+    #[test]
+    fn a_rollback_takes_the_source_buffers_place() {
+        let mut h = rolled_back("yes");
+        assert_eq!(rollbacks(&mut h), [("s".into(), "m1".into())]);
+        assert_eq!(h.core.message(), Some("Rolling back claude session..."));
+        let source = h.core.windows.window.buffer();
+        h.keys("C-x 2");
+        let replayed = ContentChunk::new("yo".into()).message_id("m1");
+        update(&mut h, 1, SessionUpdate::AgentMessageChunk(replayed));
+        let response = NewSessionResponse::new("f").config_options(options("auto"));
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Ok(response),
+        });
+        let fork = h.core.agents[&AgentId(1)].buffer;
+        assert_ne!(fork, source);
+        assert!(h.core.windows.windows_mut().all(|w| w.buffer() == fork));
+        assert_eq!(h.core.text(), "yo\n\n> ");
+        let names = [
+            "*claude*<work>",
+            "*scratch*<work>",
+            "*Messages*",
+            "*claude stderr*<work>",
+        ];
+        assert_eq!(h.core.buffer_names(true), names);
+        assert_eq!(ops(&mut h), ["kill 0"]);
+        assert!(!h.core.agents.contains_key(&AgentId(0)));
+        h.keys("h i RET");
+        assert_eq!(ops(&mut h), ["prompt 1 f \"hi\""]);
+    }
+
+    #[test]
+    fn a_declined_rollback_does_nothing() {
+        let mut h = rolled_back("no");
+        assert_eq!(rollbacks(&mut h), []);
+        assert_eq!(h.core.agents.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_rollback_leaves_the_source() {
+        let mut h = rolled_back("yes");
+        let source = h.core.windows.window.buffer();
+        ops(&mut h);
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Err("agent can't fork sessions".into()),
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("claude rollback failed: agent can't fork sessions")
+        );
+        assert_eq!(h.core.windows.window.buffer(), source);
+        assert_eq!(ops(&mut h), ["kill 1"]);
+        h.keys("M-> h i RET");
+        assert_eq!(ops(&mut h), ["prompt 0 s \"hi\""]);
+    }
+
+    #[test]
+    fn a_rollback_needs_an_agent_message_at_point() {
+        let mut h = session();
+        h.keys("M-x agent-rollback-session RET");
+        assert_eq!(h.core.message(), Some("No message at point"));
+        h.keys("h i RET");
+        point_in(&mut h, "> hi", 2);
+        h.keys("M-x agent-rollback-session RET");
+        assert_eq!(h.core.message(), Some("Roll back to an agent message"));
+        assert!(h.core.minibuffer().is_none());
+        chunk(&mut h, "no id");
+        point_in(&mut h, "no id", 0);
+        h.keys("M-x agent-rollback-session RET");
+        assert_eq!(h.core.message(), Some("No message id to roll back to"));
+        assert_eq!(rollbacks(&mut h), []);
     }
 
     /// The text of each transcript row and each prompt pane row of a frame `rows` text rows high,

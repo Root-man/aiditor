@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, ElicitationCapabilities,
-    ElicitationFormCapabilities, ForkSessionRequest, Implementation, InitializeRequest,
-    ListSessionsRequest, LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest,
-    RequestId, SessionInfo, SessionNotification,
+    AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, DeleteSessionRequest,
+    ElicitationCapabilities, ElicitationFormCapabilities, ForkSessionRequest, Implementation,
+    InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PromptRequest, RequestId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use aiditor_core::{AgentId, AgentOp, Msg, Open, Request};
@@ -528,6 +528,15 @@ async fn connect(
                 roots.clear();
                 _ = tx.send(Msg::AgentUnscoped { id }).await;
             }
+            // A rollback is a fork at its message whose source is deleted once the fork loaded.
+            let (open_as, delete) = match open_as {
+                Open::Rollback(source, at) => {
+                    let delete = capabilities.session_capabilities.delete.is_some();
+                    let fork = Open::Fork(source.clone(), Some(at));
+                    (fork, delete.then_some(source))
+                }
+                open_as => (open_as, None),
+            };
             let refusal = match &open_as {
                 Open::Fork(..) if capabilities.session_capabilities.fork.is_none() => {
                     Some("agent can't fork sessions")
@@ -546,6 +555,7 @@ async fn connect(
             let load = match open_as {
                 Open::New => None,
                 Open::Load(session) => Some(session),
+                Open::Rollback(..) => unreachable!("made a fork above"),
                 // The fork replays nothing, so loading it shows the history it kept.
                 Open::Fork(source, at) => {
                     let meta = at.map(|at| {
@@ -572,6 +582,13 @@ async fn connect(
                         .config_options(loaded.config_options)
                 }
             };
+            if let Some(source) = delete
+                && let Err(err) = (agent.send_request(DeleteSessionRequest::new(source)))
+                    .block_task()
+                    .await
+            {
+                tracing::warn!("deleting the rolled back session: {err}");
+            }
             started = true;
             // Before the core hears of it, so its first prompt finds the connection.
             *open.lock().unwrap() = Some((agent.clone(), tx.clone()));
