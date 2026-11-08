@@ -22,6 +22,6 @@ Fork (#349) spawns a hidden session buffer, sends `session/fork` (cut at a messa
 
 ## Risks / Trade-offs
 
-- [Local-command replies (claude's `/rename` output) arrive as agent messages whose id isn't an assistant message in the transcript, so claude-agent-acp can't fork or roll back at them] → it answers `Fork point message … was not found`, echoed as a failed rollback; the source is untouched.
+- [Local-command replies (claude's `/rename` output) arrive as agent messages whose id isn't an assistant message in the transcript, so claude-agent-acp can't fork or roll back at them] → that answer, `Fork point message … was not found`, echoes `Can't roll back to this message` (or `Can't fork at this message`), the answer itself logged; the source is untouched.
 - [codex-acp's delete and its load of a just-forked thread are unchecked here] → manual check on macOS.
 - [A failed delete is only in the tracing log; the source then still lists] → visible in `agent-sessions`; no data lost.

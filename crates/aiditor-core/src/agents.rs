@@ -1756,10 +1756,20 @@ impl Ctx<'_> {
             // A failed fork leaves nothing: killing its buffers forgets it and stops its agent.
             Err(err) if matches!(session.load, Some((None, _))) => {
                 let (buffer, log) = (session.buffer, session.log);
-                let what = if session.rollback { "rollback" } else { "fork" };
+                let (what, at) = match session.rollback {
+                    true => ("rollback", "roll back to"),
+                    false => ("fork", "fork at"),
+                };
                 core.kill_buffer(buffer);
                 core.kill_buffer(log);
-                core.echo(format!("{agent} {what} failed: {err}"));
+                // claude-agent-acp's answer for a message not in the transcript, like a local
+                // command's reply.
+                if err.contains("Fork point message") {
+                    core.log(&format!("{agent} {what} failed: {err}"));
+                    core.echo(format!("Can't {at} this message"));
+                } else {
+                    core.echo(format!("{agent} {what} failed: {err}"));
+                }
             }
             Err(err) => {
                 session.ended = true;
@@ -4277,6 +4287,31 @@ mod tests {
         assert!(!h.core.agents.contains_key(&AgentId(0)));
         h.keys("h i RET");
         assert_eq!(ops(&mut h), ["prompt 1 f \"hi\""]);
+    }
+
+    #[test]
+    fn a_message_the_agent_cant_cut_at_says_so() {
+        let not_found = "Invalid params: Fork point message m1 was not found in session s";
+        for (command, echo) in [
+            (
+                "agent-rollback-session RET yes",
+                "Can't roll back to this message",
+            ),
+            ("agent-fork-session", "Can't fork at this message"),
+        ] {
+            let mut h = session();
+            agent_chunk(&mut h, "m1", "yo");
+            point_in(&mut h, "yo", 1);
+            h.keys(&format!("M-x {command} RET"));
+            h.send(Msg::AgentStarted {
+                id: AgentId(1),
+                result: Err(not_found.into()),
+            });
+            assert_eq!(h.core.message(), Some(echo));
+            let messages = h.core.buffers.find("*Messages*").unwrap();
+            let logged = h.core.buffers.get(messages).unwrap().text().to_string();
+            assert!(logged.contains(not_found), "{logged}");
+        }
     }
 
     #[test]

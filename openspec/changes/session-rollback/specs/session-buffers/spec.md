@@ -19,6 +19,13 @@
 - **WHEN** the rollback's fork fails with `agent can't fork sessions`
 - **THEN** `claude rollback failed: agent can't fork sessions` is echoed, the fork's buffers are gone and the source buffer is shown and still sends prompts
 
+### Requirement: A message the agent can't cut at
+When the agent answers a fork or rollback with claude-agent-acp's `Fork point message <id> was not found` error, the core SHALL echo `Can't fork at this message` or `Can't roll back to this message` and log the answer to `*Messages*`, killing the fork's buffers as for any failure.
+
+#### Scenario: Rolling back to a local command's reply
+- **WHEN** a rollback's fork fails with `Invalid params: Fork point message m1 was not found in session s`
+- **THEN** `Can't roll back to this message` is echoed and the answer is in `*Messages*`
+
 ### Requirement: What can't be rolled back
 `agent-rollback-session` SHALL echo, ask nothing and spawn nothing when it can't roll back: `Not in an agent session buffer` outside one, `<agent> is not ready` before the source's session id is known, `No message at point` with point on the prompt line or before the first message, `Roll back to an agent message` when the marked message is a prompt, and `No message id to roll back to` when the marked agent message has no id.
 
