@@ -690,7 +690,7 @@ impl Core {
         let end = session.end(buffer) - "\n\n".len();
         user_lines(buffer, echo..end);
         if let (true, Some(clock)) = (session.live(), clock) {
-            put_meta(buffer, end, PROMPT_META, &[(&clock, FaceName::Annotation)]);
+            put_meta(buffer, end, META_INDENT, &[(&clock, FaceName::Annotation)]);
         }
     }
 
@@ -1107,7 +1107,7 @@ impl Core {
                 (Block::Message(_), Some(clock), Some(message)) => {
                     let end = start + message.len;
                     let time = [(clock.as_str(), FaceName::Annotation)];
-                    put_meta(buffer, end, MESSAGE_META, &time);
+                    put_meta(buffer, end, META_INDENT, &time);
                 }
                 _ => {}
             }
@@ -2420,7 +2420,7 @@ impl Ctx<'_> {
             put_meta(
                 b,
                 echo + message.len,
-                PROMPT_META,
+                META_INDENT,
                 &[(&clock, FaceName::Annotation)],
             );
         }
@@ -7158,7 +7158,7 @@ mod tests {
     }
 
     #[test]
-    fn times_under_a_block_start_two_columns_past_its_text() {
+    fn times_under_every_block_start_in_one_column() {
         let mut h = session();
         h.clock("14:01:00");
         h.keys("a RET");
@@ -7173,9 +7173,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // The prompt's after `> `, the call's after its verb, the message's at its start and the
-        // group's after its icon; the summary rule keeps its own.
-        let want = [("1", 4), ("0", 9), ("1", 2), ("0", 7), ("W", 2)];
+        // One column under every block; the summary rule has its own indent.
+        let want = [("1", 2), ("0", 2), ("1", 2), ("0", 2), ("W", 2)];
         assert_eq!(indents, want.map(|(t, n)| (t.to_string(), n)));
     }
 

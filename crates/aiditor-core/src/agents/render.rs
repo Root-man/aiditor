@@ -144,12 +144,8 @@ pub(super) fn put_time(buffer: &mut Buffer, at: usize, time: &str) -> usize {
     end - at
 }
 
-/// How far in the line under a block puts its timings: two columns past where its text starts,
-/// after a prompt's `> `, at a message's start, after a group's icon and after a call's verb.
-pub(super) const PROMPT_META: usize = 2 + 2;
-pub(super) const MESSAGE_META: usize = 2;
-pub(super) const GROUP_META: usize = GROUP_VERBS + 2;
-pub(super) const TOOL_META: usize = VERB + 2;
+/// How far in the line under a block puts its timings, the same under every block.
+pub(super) const META_INDENT: usize = 2;
 
 /// Puts `parts`, each in its face, on the blank line after the block ending at `end`, small and
 /// `indent` columns in, as frame 6's timings, returning the chars added.
@@ -907,7 +903,7 @@ pub(super) fn take_tool_meta(buffer: &mut Buffer, tool: &mut Tool) -> usize {
 pub(super) fn put_tool_meta(buffer: &mut Buffer, tool: &mut Tool) {
     let end = take_tool_meta(buffer, tool);
     if tool.group.is_none() {
-        tool.meta = put_meta(buffer, end, TOOL_META, &[(&tool.time, time_face(tool))]);
+        tool.meta = put_meta(buffer, end, META_INDENT, &[(&tool.time, time_face(tool))]);
     }
 }
 

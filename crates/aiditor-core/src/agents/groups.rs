@@ -3,7 +3,7 @@
 //! runs over them, so properties never nest.
 
 use super::render::{
-    GROUP_META, dim, group_line, group_meta, put_meta, render, render_tool, take_tool_meta,
+    META_INDENT, dim, group_line, group_meta, put_meta, render, render_tool, take_tool_meta,
 };
 use super::*;
 
@@ -226,7 +226,7 @@ impl Session {
         if !(self.group == Some(g) && self.stream.is_some()) {
             let end = self.group_span(buffer, g).end;
             let parts: Vec<_> = meta.iter().map(|(t, f)| (t.as_str(), *f)).collect();
-            self.groups[g].meta = put_meta(buffer, end, GROUP_META, &parts);
+            self.groups[g].meta = put_meta(buffer, end, META_INDENT, &parts);
         }
         if !self.groups[g].open {
             self.fold_rows(buffer, g);
