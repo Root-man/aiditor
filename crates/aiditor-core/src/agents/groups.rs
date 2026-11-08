@@ -2,7 +2,9 @@
 //! apart in the rope, and a folded group's hidden rows carry no properties, only the `Invisible`
 //! runs over them, so properties never nest.
 
-use super::render::{META_INDENT, dim, group_line, group_meta, put_meta, render, render_tool};
+use super::render::{
+    GROUP_META, dim, group_line, group_meta, put_meta, render, render_tool, take_tool_meta,
+};
 use super::*;
 
 /// A row of a run: a tool call, or a thought or permission block among its calls.
@@ -224,7 +226,7 @@ impl Session {
         if !(self.group == Some(g) && self.stream.is_some()) {
             let end = self.group_span(buffer, g).end;
             let parts: Vec<_> = meta.iter().map(|(t, f)| (t.as_str(), *f)).collect();
-            self.groups[g].meta = put_meta(buffer, end, META_INDENT, &parts);
+            self.groups[g].meta = put_meta(buffer, end, GROUP_META, &parts);
         }
         if !self.groups[g].open {
             self.fold_rows(buffer, g);
@@ -290,6 +292,12 @@ impl Session {
     /// as rows. Its calls still need showing indented.
     pub(super) fn form_group(&mut self, buffer: &mut Buffer) {
         let mut rows = std::mem::take(&mut self.run);
+        // Its calls' times go back into their headers when they are shown as rows.
+        for row in &rows {
+            if let Row::Tool(call) = row {
+                take_tool_meta(buffer, self.tools.get_mut(call).expect("shown"));
+            }
+        }
         for row in &rows[1..] {
             let start = self.row_span(buffer, row).start;
             buffer.replace_output(start - 1..start, "");

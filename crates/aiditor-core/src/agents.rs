@@ -382,8 +382,10 @@ struct Tool {
     ended: Option<Instant>,
     /// The group it is a row of.
     group: Option<usize>,
-    /// What its header shows at the right, the last part of the header.
+    /// Its time: at the right of its header in a group, else on the line under its block.
     time: String,
+    /// The length of that line under its block, 0 for none.
+    meta: usize,
     /// The terminal it announced, whose output it shows.
     term: Option<Term>,
     /// Its terminal changed since the block was last rendered.
@@ -688,7 +690,7 @@ impl Core {
         let end = session.end(buffer) - "\n\n".len();
         user_lines(buffer, echo..end);
         if let (true, Some(clock)) = (session.live(), clock) {
-            put_meta(buffer, end, META_INDENT, &[(&clock, FaceName::Annotation)]);
+            put_meta(buffer, end, PROMPT_META, &[(&clock, FaceName::Annotation)]);
         }
     }
 
@@ -761,7 +763,7 @@ impl Core {
         if group.is_some() {
             header.insert_str(0, "  ");
         }
-        if !time.is_empty() {
+        if !time.is_empty() && group.is_some() {
             header += &format!(" {time}");
         }
         let content = tool_content(&call, term.as_ref());
@@ -790,7 +792,7 @@ impl Core {
         let call_id = call.tool_call_id.clone();
         match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
-                let start = buffer.marker(tool.start).expect("live while shown");
+                let start = take_tool_meta(buffer, tool) - tool.len;
                 rewrite(buffer, start..start + tool.len, &text);
                 (tool.call, tool.header, tool.len) = (call, header, len);
                 (tool.term, tool.dirty, tool.faces, tool.output) = (term, false, faces, output);
@@ -811,6 +813,7 @@ impl Core {
                     ended,
                     group,
                     time,
+                    meta: 0,
                     term,
                     dirty: false,
                     faces,
@@ -823,6 +826,7 @@ impl Core {
                 session.add_row(buffer, Row::Tool(call_id.clone()));
             }
         };
+        put_tool_meta(buffer, session.tools.get_mut(&call_id).expect("just shown"));
         if group.is_none_or(|g| session.group_open(g)) {
             render_tool(buffer, &session.tools[&call_id]);
         }
@@ -1103,7 +1107,7 @@ impl Core {
                 (Block::Message(_), Some(clock), Some(message)) => {
                     let end = start + message.len;
                     let time = [(clock.as_str(), FaceName::Annotation)];
-                    put_meta(buffer, end, MESSAGE_META_INDENT, &time);
+                    put_meta(buffer, end, MESSAGE_META, &time);
                 }
                 _ => {}
             }
@@ -1202,6 +1206,13 @@ impl Core {
                 continue;
             };
             let text = waiting_text(now - ask.since);
+            if tool.group.is_none() {
+                if tool.time != text {
+                    tool.time = text;
+                    put_tool_meta(buffer, tool);
+                }
+                continue;
+            }
             let (old, start) = (tool.time.chars().count(), buffer.marker(tool.start));
             let end = start.expect("live while shown") + tool.header;
             let len = retime(buffer, end - old..end, &text, FaceName::Annotation);
@@ -2409,7 +2420,7 @@ impl Ctx<'_> {
             put_meta(
                 b,
                 echo + message.len,
-                META_INDENT,
+                PROMPT_META,
                 &[(&clock, FaceName::Annotation)],
             );
         }
@@ -4571,10 +4582,10 @@ mod tests {
         );
         assert_eq!(
             h.core.text(),
-            "> a\n\nLet me look.\n\n▸ ✓    Ran ls 0.0s\n```\n$ ls\na.rs\nb.rs\n```\n\n\
+            "> a\n\nLet me look.\n\n▸ ✓    Ran ls\n```\n$ ls\na.rs\nb.rs\n```\n0.0s\n\
              Done.\n\nWorking for 0s\n\n> "
         );
-        assert_eq!(shown(&mut h, 12)[4..7], ["▸ ✓   Ran ls 0.0s", "", "Done."]);
+        assert_eq!(shown(&mut h, 12)[4..7], ["▸ ✓   Ran ls", "0.0s", "Done."]);
         // Props stay in order, so the display can bisect them.
         let props: Vec<_> = h.core.current().properties().map(|(r, _)| r).collect();
         assert!(
@@ -4691,7 +4702,7 @@ mod tests {
         h.keys("M-< C-e TAB");
         tool(&mut h, ls().status(ToolCallStatus::Completed));
         assert_eq!(h.core.text().matches("Ran ls").count(), 1);
-        assert_eq!(shown(&mut h, 6)[..2], ["▾ ✓   Ran ls 0.0s", "$ ls"]);
+        assert_eq!(shown(&mut h, 6)[..2], ["▾ ✓   Ran ls", "$ ls"]);
         assert_eq!(h.core.current().line_col(h.core.point()).unwrap().0, 0);
         // TAB on a call without content leaves it folded.
         chunk(&mut h, "Next.");
@@ -4725,7 +4736,7 @@ mod tests {
         let path = read.clone().locations(at("/aiditor-test/app/src/a.rs"));
         assert_eq!(header(path.clone()), "▸ ●    Reading src/a.rs");
         let done = path.status(ToolCallStatus::Completed);
-        assert_eq!(header(done), "▸ ✓    Read src/a.rs 0.0s");
+        assert_eq!(header(done), "▸ ✓    Read src/a.rs");
         // Outside the primary root the path stays whole, and without one the title shows.
         assert_eq!(
             header(read.clone().locations(at("/etc/hosts"))),
@@ -4755,7 +4766,7 @@ mod tests {
         assert_eq!(header(gone.locations(at("/y"))), "▸ ●    Deleting /y");
         let moved = ToolCall::new("t", "x").kind(ToolKind::Move);
         let moved = moved.status(ToolCallStatus::Failed).locations(at("/y"));
-        assert_eq!(header(moved), "▸ ✗    Moved /y 0.0s");
+        assert_eq!(header(moved), "▸ ✗    Moved /y");
     }
 
     #[test]
@@ -4791,8 +4802,11 @@ mod tests {
         });
         meta_update(&mut h, ToolCallUpdateFields::new(), exit);
         let frame = h.joined_frame(800., 600.);
-        let line = &frame.windows[0].display.lines[0];
-        let span = |text: &str| line.spans.iter().find(|s| s.text.contains(text)).unwrap();
+        let lines = &frame.windows[0].display.lines;
+        let span = |text: &str| {
+            let mut spans = lines.iter().flat_map(|l| &l.spans);
+            spans.find(|s| s.text.contains(text)).unwrap()
+        };
         let failed = h.core.settings().theme.face(FaceName::StatusFailed).fg;
         assert_eq!(span("✗").face.fg, failed);
         assert_eq!(span("exit 2").face.fg, failed);
@@ -4834,18 +4848,18 @@ mod tests {
         let lines = shown(&mut h, 30);
         assert_eq!(
             lines[..3],
-            [
-                "▾ ✓   Ran ls 0.0s".to_string(),
-                "$ ls".into(),
-                "line 1".into()
-            ]
+            ["▾ ✓   Ran ls".to_string(), "$ ls".into(), "line 1".into()]
         );
         assert_eq!(
             (lines[2].as_str(), lines[21].as_str()),
             ("line 1", "line 20")
         );
         assert_eq!(lines[22], "… 30 more lines");
-        assert_eq!(lines[23..25], ["", "❯ "], "no row for the closing fence");
+        assert_eq!(
+            lines[23..25],
+            ["0.0s", "❯ "],
+            "no row for the closing fence"
+        );
         // The rest stays in the text, and props stay in order for bisecting.
         assert!(h.core.text().contains("line 50\n"));
         assert!(h.core.text().contains("```\n$ ls\n") && h.core.text().contains("line 50\n```"));
@@ -5801,9 +5815,12 @@ mod tests {
     fn a_failed_command_shows_its_exit_in_the_header() {
         let mut h = session();
         tool(&mut h, command());
+        // The header, and the time on the line under the block, above the prompt.
         let header = |h: &mut Harness| {
             h.joined_frame(800., 600.);
-            h.core.text().lines().next().unwrap().to_string()
+            let text = h.core.text();
+            let first = text.lines().next().unwrap();
+            format!("{first} | {}", text.lines().rev().nth(1).unwrap())
         };
         let exit = |code: Value, signal: Value| {
             serde_json::json!({"terminal_exit":
@@ -5811,16 +5828,16 @@ mod tests {
         };
         let failed = ToolCallUpdateFields::new().status(ToolCallStatus::Failed);
         meta_update(&mut h, failed, exit(2.into(), Value::Null));
-        assert_eq!(header(&mut h), "▸ ✗    Ran make exit 2");
+        assert_eq!(header(&mut h), "▸ ✗    Ran make | exit 2");
         meta_update(
             &mut h,
             ToolCallUpdateFields::new(),
             exit(Value::Null, "SIGTERM".into()),
         );
-        assert_eq!(header(&mut h), "▸ ✗    Ran make signal SIGTERM");
+        assert_eq!(header(&mut h), "▸ ✗    Ran make | signal SIGTERM");
         let completed = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
         meta_update(&mut h, completed, exit(0.into(), Value::Null));
-        assert_eq!(header(&mut h), "▸ ✓    Ran make 0.0s");
+        assert_eq!(header(&mut h), "▸ ✓    Ran make | 0.0s");
     }
 
     #[test]
@@ -6948,13 +6965,13 @@ mod tests {
         ask(&mut h, 1, "t", None);
         h.advance(secs(12));
         h.core.frame();
-        assert!(h.core.text().contains("Running ls waiting 0:12\n"));
+        assert!(h.core.text().contains("```\nwaiting 0:12\nPermission"));
         h.keys("C-c C-y");
         assert!(h.core.text().contains("Running ls\n"));
         h.advance(Duration::from_millis(1300));
         let done = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
         tool_update(&mut h, "t", done);
-        assert!(h.core.text().contains("Ran ls 2.3s\n"));
+        assert!(h.core.text().contains("```\n2.3s\n"));
         // Later updates keep it, and a long one reads as minutes.
         h.advance(secs(9));
         tool_update(
@@ -6962,7 +6979,7 @@ mod tests {
             "t",
             ToolCallUpdateFields::new().title("ls".to_string()),
         );
-        assert!(h.core.text().contains("Ran ls 2.3s\n"));
+        assert!(h.core.text().contains("```\n2.3s\n"));
         assert_eq!(short_duration(secs(125)), "2m 05s");
     }
 
@@ -6977,11 +6994,14 @@ mod tests {
         for n in 1..=3 {
             h.advance(secs(1));
             h.core.frame();
-            let want = format!("Running ls waiting 0:0{n}\n");
+            let want = format!("```\nwaiting 0:0{n}\n");
             assert!(h.core.text().contains(&want));
         }
         h.keys("M-<");
-        assert_eq!(shown(&mut h, 20)[2], "▸ ●   Running ls waiting 0:03");
+        assert_eq!(
+            shown(&mut h, 20)[2..4],
+            ["▸ ●   Running ls", "waiting 0:03"]
+        );
         h.keys("C-c C-c");
         assert!(h.core.text().contains("Running ls\n"));
     }
@@ -7138,12 +7158,34 @@ mod tests {
     }
 
     #[test]
+    fn times_under_a_block_start_two_columns_past_its_text() {
+        let mut h = session();
+        h.clock("14:01:00");
+        h.keys("a RET");
+        tool(&mut h, read("a", "a.rs"));
+        chunk(&mut h, "one");
+        tool(&mut h, read("b", "b.rs"));
+        tool(&mut h, read("c", "c.rs"));
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        let indents: Vec<_> = (props(&h).into_iter())
+            .filter_map(|(text, p)| match p {
+                Prop::Line(Decoration::Indent(n)) => Some((text, n)),
+                _ => None,
+            })
+            .collect();
+        // The prompt's after `> `, the call's after its verb, the message's at its start and the
+        // group's after its icon; the summary rule keeps its own.
+        let want = [("1", 4), ("0", 9), ("1", 2), ("0", 7), ("W", 2)];
+        assert_eq!(indents, want.map(|(t, n)| (t.to_string(), n)));
+    }
+
+    #[test]
     fn a_single_call_has_no_group_line_and_messages_split_groups() {
         let mut h = session();
         h.keys("a RET");
         tool(&mut h, read("a", "a.rs"));
         chunk(&mut h, "one");
-        assert_eq!(visible(&mut h)[1], "▸ ✓   Read a.rs 0.0s");
+        assert_eq!(visible(&mut h)[1..3], ["▸ ✓   Read a.rs", "0.0s"]);
         tool(&mut h, read("b", "b.rs"));
         tool(&mut h, read("c", "c.rs"));
         chunk(&mut h, "two");
