@@ -859,16 +859,6 @@ pub fn build(
         (false, true) => "Bot".to_string(),
         (false, false) => format!("{}%", first * 100 / text.len_chars()),
     };
-    if buffer.major_mode == "workspace-list-mode"
-        && let Some(number) = cursor
-            .map(|(l, _)| lines[l].number)
-            .filter(|n| buffer.workspace_rows.iter().any(|(line, _)| line == n))
-    {
-        for line in lines.iter_mut().filter(|l| l.number == number) {
-            line.decorations
-                .push(Decoration::Background(FaceName::CompletionSelected));
-        }
-    }
     WindowDisplay {
         lines,
         cursor,
@@ -886,35 +876,6 @@ pub fn build(
 /// `buffer`'s mode line with point at `line`:`col`, each buffer type adding its segments.
 fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
     let segment = |text: &str, face| vec![(text.to_string(), face)];
-    if buffer.major_mode == "workspace-list-mode" {
-        let (projects, workspaces) = buffer
-            .workspace_list
-            .as_ref()
-            .expect("list has a snapshot")
-            .counts();
-        let position = buffer
-            .workspace_rows
-            .partition_point(|(row, _)| *row < line)
-            .max(1);
-        return ModeLine {
-            left: vec![
-                segment(&buffer.name, FaceName::ModeLine),
-                segment(
-                    &format!("{projects} projects, {workspaces} workspaces"),
-                    FaceName::ModeLineDim,
-                ),
-            ],
-            // An empty list has no position.
-            right: (!buffer.workspace_rows.is_empty())
-                .then(|| {
-                    let rows = buffer.workspace_rows.len();
-                    segment(&format!("{position}/{rows}"), FaceName::ModeLine)
-                })
-                .into_iter()
-                .collect(),
-            path: None,
-        };
-    }
     let (state, state_face) = match (buffer.read_only, buffer.modified()) {
         (true, _) => ("%%", FaceName::StatusFailed),
         (_, true) => ("**", FaceName::StatusModified),

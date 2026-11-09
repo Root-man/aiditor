@@ -371,6 +371,8 @@ pub(crate) fn window_display(
         buffer, top, drawn, point, mark, settings, shown, wrap, roots, search,
     );
     if let Some(snapshot) = &buffer.workspace_list {
+        let line = buffer.line_col(point).map_or(0, |(l, _)| l) + 1;
+        snapshot.decorate(buffer, &mut display, line);
         snapshot.fit(&mut display.lines, cols, &settings.theme);
     }
     // The workspace modeline shows the workspace, so a fileless buffer's name drops its suffix.
