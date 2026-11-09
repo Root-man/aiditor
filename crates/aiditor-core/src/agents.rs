@@ -572,6 +572,9 @@ struct Stream {
     source: String,
     /// Chunks arrived since it was last rendered.
     dirty: bool,
+    /// Where a message's last rendered top-level block starts, in `source` bytes and chars from
+    /// `start`; earlier blocks keep their text and properties.
+    stable: markdown::Stable,
     /// When its first chunk arrived and the clock then; `None` when replayed.
     began: Option<(Instant, Option<String>)>,
 }
@@ -633,6 +636,7 @@ impl Core {
                 block,
                 source: text.into(),
                 dirty: true,
+                stable: (0, 0),
                 began: session.live().then_some((now, clock)),
             });
         }
@@ -1072,9 +1076,14 @@ impl Core {
                 // shortcut: links are found as the block renders; a file indexed later isn't
                 // linked until it renders again, and RET on one since dropped sends the prompt.
                 let index = self.index.get(&session.project);
-                let len = render_message(buffer, start..end, &stream.source, index);
+                let (byte, at) = stream.stable;
+                let tail = &stream.source[byte..];
+                let (len, (b, c)) = render_message(buffer, start + at..end, tail, index);
+                stream.stable = (byte + b, at + c);
+                #[cfg(debug_assertions)]
+                render::check_message(buffer, start..start + at + len, &stream.source, index);
                 if let Some(message) = session.messages.last_mut() {
-                    message.len = len;
+                    message.len = at + len;
                 }
             } else if !session.fold_stream(buffer) {
                 render(buffer, start..end, thought, None);
@@ -5748,6 +5757,37 @@ mod tests {
             Some(h.path("app/src/a.rs")),
             "files still visit"
         );
+    }
+
+    #[test]
+    fn a_message_streamed_in_any_split_renders_as_a_whole() {
+        let source = "# Title é\n\n- one\n- two\n  more\n- three\n\n```rust\nfn a() {}\n\nb\n```\n| k | v |\n|---|--:|\n| a | 1 |\n| bb | 22 |\n\nSetext\n===\n\nlast *words*";
+        let chars: Vec<char> = source.chars().collect();
+        for size in [1, 2, 5, 13] {
+            for first in 1..=size {
+                let mut h = session();
+                let mut sent = String::new();
+                let mut from = 0;
+                while from < chars.len() {
+                    let to = (if from == 0 { first } else { from + size }).min(chars.len());
+                    let text: String = chars[from..to].iter().collect();
+                    chunk(&mut h, &text);
+                    sent.push_str(&text);
+                    h.joined_frame(800., 600.);
+                    let message = &h.core.agents[&AgentId(0)].messages[0];
+                    let b = h.core.current();
+                    let start = b.marker(message.start).unwrap();
+                    check_message(b, start..start + message.len, &sent, None);
+                    from = to;
+                }
+                let stream = h.core.agents[&AgentId(0)].stream.as_ref().unwrap();
+                assert_eq!(
+                    &source[stream.stable.0..],
+                    "last *words*",
+                    "only the tail renders"
+                );
+            }
+        }
     }
 
     #[test]

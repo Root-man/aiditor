@@ -24,22 +24,47 @@ pub(super) fn render(
     }
 }
 
-/// Replaces `range` of `buffer`, a streamed message, with `source` rendered as markdown with its
-/// tables drawn, linking the files of `index`; returns the rendered length in chars.
+/// Replaces `range` of `buffer`, a streamed message or its tail, with `source` rendered as
+/// markdown with its tables drawn, linking the files of `index`; returns the rendered length in
+/// chars and where its last top-level block starts.
 pub(super) fn render_message(
     buffer: &mut Buffer,
     range: Range<usize>,
     source: &str,
     index: Option<&FileIndex>,
-) -> usize {
+) -> (usize, markdown::Stable) {
     let is_file = |word: &str| file_link(index, word).is_some();
-    let (text, props, _) = markdown::render(source, false, false, true, is_file);
+    let (text, props, stable) = markdown::render(source, false, false, true, is_file);
     rewrite(buffer, range.clone(), &text);
     for (r, prop) in props {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
-    text.chars().count()
+    (text.chars().count(), stable)
+}
+
+/// Checks that `range` of `buffer` shows `source` as a full render of the message would.
+#[cfg(debug_assertions)]
+pub(super) fn check_message(
+    buffer: &Buffer,
+    range: Range<usize>,
+    source: &str,
+    index: Option<&FileIndex>,
+) {
+    let is_file = |word: &str| file_link(index, word).is_some();
+    let (text, props, _) = markdown::render(source, false, false, true, is_file);
+    assert_eq!(buffer.text().slice(range.clone()).to_string(), text);
+    let mut want: Vec<_> = (props.into_iter())
+        .filter(|(r, _)| !r.is_empty())
+        .map(|(r, p)| format!("{r:?} {p:?}"))
+        .collect();
+    let mut have: Vec<_> = (buffer.properties_near(range.clone()).into_iter())
+        .filter(|(r, _)| !r.is_empty() && r.start >= range.start && r.end <= range.end)
+        .map(|(r, p)| format!("{:?} {p:?}", r.start - range.start..r.end - range.start))
+        .collect();
+    want.sort();
+    have.sort();
+    assert_eq!(have, want, "a tail render's properties");
 }
 
 /// Replaces `range` of `buffer`'s output with `text`, removing its properties, line by line so
