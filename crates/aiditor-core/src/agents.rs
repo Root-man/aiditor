@@ -587,16 +587,20 @@ struct Turn {
 }
 
 impl Core {
+    /// Session `id` and its buffer, borrowed apart.
+    fn session_buffer(&mut self, id: AgentId) -> Option<(&mut Session, &mut Buffer)> {
+        let session = self.agents.get_mut(&id)?;
+        let buffer = self.buffers.get_mut(session.buffer)?;
+        Some((session, buffer))
+    }
+
     /// Puts `text` above session `id`'s prompt line: as a new block followed by a blank line, or,
     /// for a chunk of the kind streaming, at the end of the streamed block. A chunk's block is
     /// rendered as markdown by the next frame.
     fn output(&mut self, id: AgentId, text: &str, block: Block) {
         let now = self.now();
         let clock = self.clock();
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         let end = session.end(buffer);
@@ -616,8 +620,9 @@ impl Core {
             return;
         }
         self.end_stream(id);
-        let session = self.agents.get_mut(&id).expect("found above");
-        let buffer = self.buffers.get_mut(session.buffer).expect("found above");
+        let Some((session, buffer)) = self.session_buffer(id) else {
+            return;
+        };
         let end = session.end(buffer);
         buffer.insert_output(end, &format!("{text}\n\n"));
         let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
@@ -848,9 +853,9 @@ impl Core {
             for call in session.group_calls(g) {
                 self.show_tool(id, self.agents[&id].tools[&call].call.clone());
             }
-            let session = self.agents.get_mut(&id).expect("found above");
-            let buffer = self.buffers.get_mut(session.buffer).expect("found above");
-            session.render_group(buffer, g);
+            if let Some((session, buffer)) = self.session_buffer(id) {
+                session.render_group(buffer, g);
+            }
         }
     }
 
@@ -893,10 +898,7 @@ impl Core {
         if self.agents.get(&id).is_some_and(|s| s.plan.is_none()) {
             self.end_stream(id);
         }
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         if session.plan.is_none() {
@@ -987,10 +989,7 @@ impl Core {
     ) {
         self.end_stream(id);
         let now = self.now();
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         // A non-blocking question stands apart, so the turn's later calls group below it.
@@ -1134,10 +1133,7 @@ impl Core {
     /// Drops the newlines a streamed message ends with, as Claude's does before a tool call, so
     /// one blank line still separates it from the next block.
     fn trim_message(&mut self, id: AgentId) {
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         let Some(Stream {
@@ -1978,8 +1974,12 @@ impl Ctx<'_> {
         let (content, shown, sent) = question.content(&answer);
         let line = format!("✓ {shown}");
         let accept = ElicitationAcceptAction::new().content(content);
-        let ask = &mut self.core.agents.get_mut(&id).expect("found above").asks[at];
-        if let Body::Question(question) = &mut ask.body {
+        let ask = self.core.agents.get_mut(&id).map(|s| &mut s.asks[at]);
+        if let Some(Ask {
+            body: Body::Question(question),
+            ..
+        }) = ask
+        {
             question.sent = sent;
         }
         let response = ClientResponse::CreateElicitationResponse(CreateElicitationResponse::new(
@@ -2506,7 +2506,7 @@ impl Ctx<'_> {
         }
         core.end_stream(id);
         let clock = core.clock();
-        let session = core.agents.get_mut(&id).expect("found above");
+        let session = core.agents.get_mut(&id).ok_or("the session is gone")?;
         let b = core
             .buffers
             .get_mut(buffer)
@@ -2541,7 +2541,6 @@ impl Ctx<'_> {
             );
         }
         let end = b.len_chars();
-        let session = core.agents.get_mut(&id).expect("found above");
         session.fold_pastes(b, start);
         session.messages.push(message);
         session.turn = Some(Turn {
@@ -2907,8 +2906,9 @@ impl Ctx<'_> {
             })
             .collect();
         (asks.iter().zip(lens)).for_each(|(ask, len)| core.close_wait(id, ask, len));
-        let session = core.agents.get_mut(&id).expect("found above");
-        if !std::mem::replace(&mut session.ended, true) {
+        if let Some(session) = core.agents.get_mut(&id)
+            && !std::mem::replace(&mut session.ended, true)
+        {
             let agent = &session.agent;
             let line = match signal {
                 Some(signal) => format!("{agent} session killed by {signal}"),
