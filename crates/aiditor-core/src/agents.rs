@@ -2652,73 +2652,49 @@ impl Ctx<'_> {
     /// Elsewhere in a group, it opens or folds the group. In a block of several questions, it
     /// opens the next one.
     pub(crate) fn agent_toggle_tool_call(&mut self) -> Result<(), String> {
-        if let Some((id, at, _)) = self.ask_at_point() {
-            let question = self.core.agents[&id].asks[at].question();
-            if question.is_some_and(|q| q.several()) {
+        let core = &mut *self.core;
+        let point = core.point();
+        let buffer = core.windows.window.buffer();
+        let session = (core.agents.iter_mut()).find(|(_, s)| s.buffer == buffer);
+        let b = core
+            .buffers
+            .get_mut(buffer)
+            .expect("current buffer is live");
+        let (&id, session) = session.ok_or("No tool call here")?;
+        // Point past the line it ends on goes back to its start.
+        let back = |(start, line): (usize, usize)| (point > line).then_some(start);
+        let to = match session.block_at(b, point).ok_or("No tool call here")? {
+            At::Ask(at) => {
                 self.open_question(id, at, |q| {
                     q.open = Some(q.open.map_or(0, |i| (i + 1) % q.fields.len()))
                 });
                 return Ok(());
             }
-        }
-        let core = &mut *self.core;
-        let point = core.point();
-        let buffer = core.windows.window.buffer();
-        let session = (core.agents.values_mut()).find(|s| s.buffer == buffer);
-        let b = core
-            .buffers
-            .get_mut(buffer)
-            .expect("current buffer is live");
-        let session = session.ok_or("No tool call here")?;
-        if let Some(start) = session.toggle_paste(b, point) {
-            return self.goto(start);
-        }
-        if let Some((start, line)) = session.toggle_answer(b, point) {
-            return if point > line {
-                self.goto(start)
-            } else {
-                Ok(())
-            };
-        }
-        let call = (session.tools.iter())
-            .find(|(_, t)| {
-                let len = t.range(b).len();
-                let end = if t.open { len } else { t.header };
-                // A row with nothing to open leaves `TAB` to its group.
-                (t.group.is_none() || len > t.header)
-                    && !session.hidden(t)
-                    && (b.marker(t.start)).is_some_and(|s| (s..=s + end).contains(&point))
-            })
-            .map(|(call, _)| call.clone());
-        let Some(call) = call else {
-            if let Some((start, first)) = session.toggle_thought(b, point) {
-                return if point > first {
-                    self.goto(start)
-                } else {
-                    Ok(())
-                };
+            At::Paste(i) => Some(session.toggle_paste(b, i)),
+            At::Answer(i) => back(session.toggle_answer(b, i)),
+            At::Thought(g, r) => back(session.toggle_thought(b, g, r)),
+            At::Group(g) => match session.toggle_group(b, g) {
+                (start, line, false) => back((start, line)),
+                _ => None,
+            },
+            At::Tool(call) => {
+                let tool = session.tools.get_mut(&call).expect("just found");
+                // Without content there is nothing to show, so it stays folded for when content
+                // comes.
+                let range = tool.range(b);
+                tool.open = !tool.open && range.len() > tool.header;
+                let start = range.start;
+                b.remove_properties(range);
+                let mark = start + if tool.group.is_some() { 2 } else { 0 };
+                b.replace_output(mark..mark + 1, if tool.open { "▾" } else { "▸" });
+                render_tool(b, tool);
+                back((start, start + tool.header))
             }
-            let (start, line, open) =
-                (session.toggle_group(b, point)).ok_or("No tool call here")?;
-            return if !open && point > line {
-                self.goto(start)
-            } else {
-                Ok(())
-            };
         };
-        let tool = session.tools.get_mut(&call).expect("just found");
-        // Without content there is nothing to show, so it stays folded for when content comes.
-        let range = tool.range(b);
-        tool.open = !tool.open && range.len() > tool.header;
-        let start = range.start;
-        b.remove_properties(range);
-        let mark = start + if tool.group.is_some() { 2 } else { 0 };
-        b.replace_output(mark..mark + 1, if tool.open { "▾" } else { "▸" });
-        render_tool(b, tool);
-        if point > start + tool.header {
-            return self.goto(start);
+        match to {
+            Some(start) => self.goto(start),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// `agent-cancel`: sends `session/cancel` while a turn runs, then answers the pending

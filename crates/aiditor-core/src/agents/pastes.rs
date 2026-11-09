@@ -95,15 +95,17 @@ impl Session {
         self.paint_pastes(buffer, from);
     }
 
-    pub(super) fn toggle_paste(&mut self, buffer: &mut Buffer, point: usize) -> Option<usize> {
-        let paste = self
-            .pastes
-            .iter_mut()
-            .find(|p| p.range(buffer).contains(&point))?;
+    /// The paste `point` is in.
+    pub(super) fn paste_at(&self, buffer: &Buffer, point: usize) -> Option<usize> {
+        (self.pastes.iter()).position(|p| p.range(buffer).contains(&point))
+    }
+
+    /// Opens or folds paste `i`, returning where it starts.
+    pub(super) fn toggle_paste(&mut self, buffer: &mut Buffer, i: usize) -> usize {
+        let paste = &mut self.pastes[i];
         paste.open = !paste.open;
-        let start = paste.range(buffer).start;
         paste.paint(buffer);
-        Some(start)
+        paste.range(buffer).start
     }
 }
 
