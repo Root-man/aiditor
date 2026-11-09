@@ -2389,9 +2389,8 @@ impl Ctx<'_> {
         Some((line, at))
     }
 
-    /// The URL of the link point is on, when it has a scheme; a relative destination is left
-    /// to file links.
-    fn url_at_point(&self) -> Option<String> {
+    /// The destination of the link point is on, outside tool call headers.
+    fn destination_at_point(&self) -> Option<String> {
         if self.tool_at_point().is_some() {
             return None;
         }
@@ -2403,7 +2402,13 @@ impl Ctx<'_> {
             Prop::Url(url) if r.contains(&point) => Some(url.clone()),
             _ => None,
         });
-        let url = kept.or_else(|| markdown::url_at(&line, at))?;
+        kept.or_else(|| markdown::url_at(&line, at))
+    }
+
+    /// The URL of the link point is on, when it has a scheme; a relative destination is left
+    /// to file links.
+    fn url_at_point(&self) -> Option<String> {
+        let url = self.destination_at_point()?;
         // A scheme is a letter, then letters, digits, `+`, `-` or `.`, before a `:` that isn't
         // a `path:line`'s.
         let (scheme, rest) = url.split_once(':')?;
@@ -2414,7 +2419,8 @@ impl Ctx<'_> {
         is_scheme.then_some(url)
     }
 
-    /// The file and line, from 1, of the link point is on: a tool call header's, else the word's.
+    /// The file and line, from 1, of the link point is on: a tool call header's, else a Markdown
+    /// link's destination, else the word's.
     fn link_at_point(&self) -> Option<(PathBuf, Option<usize>)> {
         let (line, at) = self.linked_line()?;
         let core = &*self.core;
@@ -2423,10 +2429,14 @@ impl Ctx<'_> {
         if let Some((_, call)) = self.tool_at_point() {
             return session.tools[&call].link.clone();
         }
+        let index = core.index.get(&session.project);
+        if let Some(to) = self.destination_at_point() {
+            return file_link(index, &to);
+        }
         let word = markdown::words(&line)
             .into_iter()
             .find(|w| w.contains(&at))?;
-        file_link(core.index.get(&session.project), &line[word])
+        file_link(index, &line[word])
     }
 
     /// The tool call whose header point is on.
@@ -5728,6 +5738,37 @@ mod tests {
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
         assert_eq!(h.core.current().file, Some(h.path("app/src/a.rs")));
         assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
+    }
+
+    #[test]
+    fn ret_anywhere_on_a_file_link_label_visits_its_destination() {
+        // Each message, the label text point goes to and where its char `n` is.
+        let cases = [
+            ("See [the spec](ABS/src/a.rs:3).", "the spec", 5),
+            ("See [src/main.rs, line 2](src/a.rs:3).", ", line", 0),
+            ("See [src/main.rs:2](./src/a.rs:3).", "main", 1),
+            ("| l |\n|---|\n| [the spec](src/a.rs:3) |\n", "the spec", 6),
+        ];
+        for (message, label, n) in cases {
+            let mut h = indexed_session();
+            let message = message.replace("ABS", &h.path("app").to_string_lossy());
+            h.keys("a RET");
+            chunk(&mut h, &message);
+            prompted(&mut h, Ok(StopReason::EndTurn));
+            h.joined_frame(800., 600.);
+            ops(&mut h);
+            point_in(&mut h, label, n);
+            h.keys("RET");
+            assert!(ops(&mut h).is_empty(), "{message}: nothing is sent");
+            assert_eq!(h.core.windows.tree.leaves().len(), 2, "{message}");
+            assert_eq!(
+                h.core.current().file,
+                Some(h.path("app/src/a.rs")),
+                "{message}"
+            );
+            let line = h.core.current().line_col(h.point()).unwrap();
+            assert_eq!(line, (2, 0), "{message}");
+        }
     }
 
     #[test]
