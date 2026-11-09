@@ -24,22 +24,47 @@ pub(super) fn render(
     }
 }
 
-/// Replaces `range` of `buffer`, a streamed message, with `source` rendered as markdown with its
-/// tables drawn, linking the files of `index`; returns the rendered length in chars.
+/// Replaces `range` of `buffer`, a streamed message or its tail, with `source` rendered as
+/// markdown with its tables drawn, linking the files of `index`; returns the rendered length in
+/// chars and where its last top-level block starts.
 pub(super) fn render_message(
     buffer: &mut Buffer,
     range: Range<usize>,
     source: &str,
     index: Option<&FileIndex>,
-) -> usize {
+) -> (usize, markdown::Stable) {
     let is_file = |word: &str| file_link(index, word).is_some();
-    let (text, props) = markdown::render(source, false, false, true, is_file);
+    let (text, props, stable) = markdown::render(source, false, false, true, is_file);
     rewrite(buffer, range.clone(), &text);
     for (r, prop) in props {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
-    text.chars().count()
+    (text.chars().count(), stable)
+}
+
+/// Checks that `range` of `buffer` shows `source` as a full render of the message would.
+#[cfg(debug_assertions)]
+pub(super) fn check_message(
+    buffer: &Buffer,
+    range: Range<usize>,
+    source: &str,
+    index: Option<&FileIndex>,
+) {
+    let is_file = |word: &str| file_link(index, word).is_some();
+    let (text, props, _) = markdown::render(source, false, false, true, is_file);
+    assert_eq!(buffer.text().slice(range.clone()).to_string(), text);
+    let mut want: Vec<_> = (props.into_iter())
+        .filter(|(r, _)| !r.is_empty())
+        .map(|(r, p)| format!("{r:?} {p:?}"))
+        .collect();
+    let mut have: Vec<_> = (buffer.properties_near(range.clone()).into_iter())
+        .filter(|(r, _)| !r.is_empty() && r.start >= range.start && r.end <= range.end)
+        .map(|(r, p)| format!("{:?} {p:?}", r.start - range.start..r.end - range.start))
+        .collect();
+    want.sort();
+    have.sort();
+    assert_eq!(have, want, "a tail render's properties");
 }
 
 /// Replaces `range` of `buffer`'s output with `text`, removing its properties, line by line so
@@ -81,7 +106,7 @@ pub(super) fn prompt_glyph(buffer: &mut Buffer, at: usize) {
 }
 
 /// Puts the `session-user` background on each line of the echo at `range`, a top border on its
-/// first and a bottom one on its last, and indents its later lines. A one-char range per line keeps the properties sorted.
+/// first and a bottom one on its last, and indents its later lines.
 pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
     let text = buffer.text().slice(range.clone()).to_string();
     let after_newlines = text.chars().enumerate().filter(|(_, c)| *c == '\n');
@@ -530,10 +555,12 @@ pub(super) fn answered(kind: PermissionOptionKind) -> &'static str {
 
 /// Replaces permission request `ask`'s block with the dim `line`.
 pub(super) fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
-    let start = buffer.marker(ask.start).expect("live while pending");
-    rewrite(buffer, start..start + ask.len, line);
-    (buffer.add_property(start..start + line.chars().count(), dim())).expect("inside the block");
+    let range = ask.range(buffer);
+    rewrite(buffer, range.clone(), line);
+    let end = range.start + line.chars().count();
+    (buffer.add_property(range.start..end, dim())).expect("inside the block");
     buffer.remove_marker(ask.start);
+    buffer.remove_marker(ask.end);
 }
 
 /// Replaces question `ask`'s block with its answered line, from `line`'s `<mark> <outcome>`,
@@ -545,7 +572,8 @@ pub(super) fn settle_question(
     clock: Option<&str>,
 ) -> Answered {
     let question = ask.question().expect("settled as a question");
-    let start = buffer.marker(ask.start).expect("live while pending");
+    let range = ask.range(buffer);
+    let start = range.start;
     let mut chars = line.chars();
     let mark = chars.next().expect("a mark");
     let label = question.label();
@@ -555,17 +583,19 @@ pub(super) fn settle_question(
     let rows: String = (question.sent.iter())
         .map(|(n, a)| format!("\n {n:<name$}  {a}"))
         .collect();
-    rewrite(buffer, start..start + ask.len, &format!("{head}{rows}"));
+    rewrite(buffer, range, &format!("{head}{rows}"));
     let outcome = head.chars().count();
     let time = clock.map_or(String::new(), |c| format!(" {c}"));
     buffer.insert_output(start + outcome, &time);
     let line = outcome + time.chars().count();
+    let end = start + line + rows.chars().count();
+    buffer.set_marker(ask.end, end).expect("just settled");
     Answered {
         start: ask.start,
         label: 4 + label.chars().count(),
         outcome,
         line,
-        len: line + rows.chars().count(),
+        end: ask.end,
         name,
         mark: match mark {
             '✓' => FaceName::StatusRunning,
@@ -579,7 +609,8 @@ pub(super) fn settle_question(
 /// Renders answered line `a`, two columns in when `grouped`: its marks, its dim outcome and
 /// time, and its rows on `session-block` when open, else hidden.
 pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) {
-    let start = buffer.marker(a.start).expect("live with its session");
+    let Range { start, end } = extent(buffer, a.start, a.end);
+    let len = end - start;
     let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
     let indent = if grouped { 2 } else { 0 };
     let mut props = vec![
@@ -595,10 +626,7 @@ pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) 
         props.push((a.outcome + 1..a.line, face(FaceName::Annotation)));
     }
     if a.open {
-        let rows = buffer
-            .text()
-            .slice(start + a.line..start + a.len)
-            .to_string();
+        let rows = buffer.text().slice(start + a.line..end).to_string();
         let mut at = a.line + 1;
         for row in rows.split('\n').skip(1) {
             // Under the label, the row's leading space its padding.
@@ -610,8 +638,8 @@ pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) 
             props.push((at + 1..at + 1 + a.name, dim()));
             at += row.chars().count() + 1;
         }
-    } else if a.len > a.line {
-        props.push((a.line..a.len, Prop::Invisible(String::new())));
+    } else if len > a.line {
+        props.push((a.line..len, Prop::Invisible(String::new())));
     }
     for (r, prop) in props {
         (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
@@ -799,7 +827,8 @@ pub(super) fn tool_output(call: &ToolCall, term: Option<&Term>) -> Option<(Strin
 #[derive(Default)]
 pub(super) struct Sgr {
     pub(super) text: String,
-    pub(super) len: usize,
+    /// `text`'s length in chars.
+    pub(super) chars: usize,
     face: Vec<FaceRef>,
     pub(super) faces: Faces,
     pub(super) backticks: usize,
@@ -812,11 +841,13 @@ impl Handler for Sgr {
         self.text.push(c);
         if !self.face.is_empty() {
             match self.faces.last_mut() {
-                Some((r, f)) if r.end == self.len && *f == self.face => r.end += 1,
-                _ => self.faces.push((self.len..self.len + 1, self.face.clone())),
+                Some((r, f)) if r.end == self.chars && *f == self.face => r.end += 1,
+                _ => self
+                    .faces
+                    .push((self.chars..self.chars + 1, self.face.clone())),
             }
         }
-        self.len += 1;
+        self.chars += 1;
     }
     fn put_tab(&mut self, count: u16) {
         (0..count).for_each(|_| self.input('\t'));
@@ -825,7 +856,7 @@ impl Handler for Sgr {
     fn linefeed(&mut self) {
         self.run = 0;
         self.text.push('\n');
-        self.len += 1;
+        self.chars += 1;
     }
     fn terminal_attribute(&mut self, attr: Attr) {
         let index = |c: Color| match c {
@@ -884,6 +915,12 @@ fn hidden_output(content: &str, at: usize) -> Option<(Range<usize>, usize)> {
     Some((ends[SHOWN_LINES - 1] + 1..ends[ends.len() - 1], lines))
 }
 
+/// The placeholder of an open command's `lines` hidden output lines.
+pub(super) fn more_lines(lines: usize) -> String {
+    let plural = if lines == 1 { "" } else { "s" };
+    format!("… {lines} more line{plural}")
+}
+
 /// The face of a call's time: `status-failed` for an exit code.
 pub(super) fn time_face(tool: &Tool) -> FaceName {
     let exit = tool.term.as_ref().and_then(|t| t.exit.as_ref());
@@ -895,7 +932,7 @@ pub(super) fn time_face(tool: &Tool) -> FaceName {
 
 /// Takes the line under a call that is not in a group off, returning where the block ends.
 pub(super) fn take_tool_meta(buffer: &mut Buffer, tool: &mut Tool) -> usize {
-    let end = buffer.marker(tool.start).expect("live while shown") + tool.len;
+    let end = tool.range(buffer).end;
     let meta = std::mem::take(&mut tool.meta);
     if meta > 0 {
         buffer.remove_properties(end + 1..end + 1 + meta);
@@ -917,12 +954,13 @@ pub(super) fn put_tool_meta(buffer: &mut Buffer, tool: &mut Tool) {
 /// hidden output gets no properties of its own, so no property contains another's end and starts
 /// and ends ascend.
 pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
-    let start = buffer.marker(tool.start).expect("live while shown");
+    let Range { start, end: last } = tool.range(buffer);
+    let len = last - start;
     if tool.replaced {
         // With what parts it from the row before in a group, else from the next block.
         let span = match tool.group {
-            Some(_) => start - 1..start + tool.len,
-            None => start..start + tool.len + "\n\n".len() + tool.meta,
+            Some(_) => start - 1..last,
+            None => start..last + "\n\n".len() + tool.meta,
         };
         buffer.remove_properties(span.clone());
         let hide = Prop::Invisible(String::new());
@@ -976,7 +1014,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         props.push((suffix..suffix + 1, Prop::AlignRight));
         props.push((suffix + 1..tool.header, face(time_face(tool))));
     }
-    let body = tool.header + 1..tool.len;
+    let body = tool.header + 1..len;
     if tool.open && !body.is_empty() {
         let content = buffer
             .text()
@@ -1005,9 +1043,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         });
         props.extend(faces.map(shifted));
         if let Some((hidden, lines)) = cut {
-            let plural = if lines == 1 { "" } else { "s" };
-            let more = format!("… {lines} more line{plural}");
-            props.push(shifted((hidden, Prop::Invisible(more))));
+            props.push(shifted((hidden, Prop::Invisible(more_lines(lines)))));
         }
         // Two columns past the status mark.
         let body_indent = Prop::Line(Decoration::Indent(STATUS.end + indent + 1));
@@ -1023,7 +1059,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             line += l.chars().count() + 1;
         }
     } else if !body.is_empty() {
-        props.push((tool.header..tool.len, Prop::Invisible(String::new())));
+        props.push((tool.header..len, Prop::Invisible(String::new())));
     }
     props.sort_by_key(|(r, _)| (r.start, r.end));
     for (r, prop) in props {

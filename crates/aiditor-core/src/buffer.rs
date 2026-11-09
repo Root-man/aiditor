@@ -134,7 +134,10 @@ impl Buffers {
             markers: BTreeMap::from([(MarkerId(0), (0, InsertionType::Stay))]),
             next_marker: 1,
             props: Vec::new(),
-            props_sorted: true,
+            by_start: Vec::new(),
+            reach: Vec::new(),
+            folds: 0,
+            in_order: true,
             history: History::default(),
             major_mode: "fundamental-mode",
             minor_modes: Vec::new(),
@@ -303,11 +306,21 @@ pub struct Buffer {
     // shortcut: every edit walks all markers, two per property, so a long session transcript holds thousands; index them when typing in one lags.
     markers: BTreeMap<MarkerId, (usize, InsertionType)>,
     next_marker: u64,
-    /// Text properties as (start, end) marker pairs, in order while sorted, else oldest first.
+    /// Text properties as (start, end) marker pairs, in their layering order (see `in_order`).
     props: Vec<(MarkerId, MarkerId, Prop)>,
-    /// Starts and ends each ascend from one property to the next, which edits keep, so
-    /// `properties_near` can bisect.
-    props_sorted: bool,
+    /// Indices into `props` sorted by start, which edits keep: every start advances and every
+    /// end stays, so neither starts nor ends ever pass each other. Empty while `in_order`,
+    /// where `props` is sorted by start itself.
+    by_start: Vec<u32>,
+    /// At each slot of `by_start`, the property with the largest end up to it, so
+    /// `properties_near` can bisect for the first one reaching a position.
+    reach: Vec<u32>,
+    /// How many properties hide text, empty ones included.
+    folds: usize,
+    /// While starts and ends each ascend from one property to the next, a new one goes to its
+    /// sorted place; once one breaks that, new ones go last. This sets only the stored order,
+    /// which layers them.
+    in_order: bool,
     history: History,
     /// Names the major mode's keymap in `Core`.
     pub major_mode: &'static str,
@@ -456,6 +469,13 @@ pub enum Prop {
     Url(String),
 }
 
+impl Prop {
+    /// Whether it hides the text of its range.
+    fn folds(&self) -> bool {
+        matches!(self, Prop::Invisible(_) | Prop::Display(_))
+    }
+}
+
 impl Buffer {
     /// The chars a visual row holds in a window `cols` wide and whether rows break at words, or
     /// `None` when long lines are cut instead; the last column is left for the `\` marker.
@@ -505,11 +525,13 @@ impl Buffer {
         };
         *copy = text;
         self.commands.clear();
-        self.props_sorted = true;
         for (start, end, _) in std::mem::take(&mut self.props) {
             self.markers.remove(&start);
             self.markers.remove(&end);
         }
+        self.by_start.clear();
+        self.reach.clear();
+        (self.folds, self.in_order) = (0, true);
         self.minor_modes.retain(|&m| m != "vterm-copy-mode");
         if self.copy_mode() {
             self.minor_modes.push("vterm-copy-mode");
@@ -768,77 +790,203 @@ impl Buffer {
         if range.start > range.end || range.end > self.len_chars() {
             return Err(Error::OutOfRange);
         }
-        let at = |id| {
-            self.marker(id)
-                .expect("a property's markers live as long as it")
-        };
+        let at = |id| self.markers[&id].0;
         let mut i = self.props.len();
-        if self.props_sorted {
+        let was_in_order = self.in_order;
+        if self.in_order {
             // Its sorted place, which keeps the order if the ends around it still ascend.
             i = (self.props)
                 .partition_point(|&(s, e, _)| (at(s), at(e)) <= (range.start, range.end));
             let before = i.checked_sub(1).map(|j| at(self.props[j].1));
             let after = self.props.get(i).map(|p| at(p.1));
             if before > Some(range.end) || after.is_some_and(|e| e < range.end) {
-                (self.props_sorted, i) = (false, self.props.len());
+                (self.in_order, i) = (false, self.props.len());
             }
+        }
+        if was_in_order && !self.in_order {
+            self.by_start = (0..self.props.len() as u32).collect();
         }
         let start = self.add_marker(range.start, InsertionType::Advance)?;
         let end = self.add_marker(range.end, InsertionType::Stay)?;
+        self.folds += usize::from(prop.folds());
         self.props.insert(i, (start, end, prop));
+        let slot = match self.in_order {
+            true => {
+                // Those after it moved up one; the slots before reach only properties before it.
+                for r in &mut self.reach[i..] {
+                    *r += u32::from(*r >= i as u32);
+                }
+                i
+            }
+            // Out of order, it went last, so no index moved.
+            false => {
+                let (start_of, _) = prop_ends(&self.props, &self.markers);
+                let slot = (self.by_start).partition_point(|&j| start_of(j) <= range.start);
+                self.by_start.insert(slot, i as u32);
+                slot
+            }
+        };
+        let i = i as u32;
+        let (_, end_of) = prop_ends(&self.props, &self.markers);
+        self.reach.insert(slot, i);
+        for k in slot..self.reach.len() {
+            let here = at_slot(&self.by_start, self.in_order, k);
+            let best = match k.checked_sub(1).map(|k| self.reach[k]) {
+                Some(before) if end_of(before) >= end_of(here) => before,
+                _ => here,
+            };
+            // Past the new one, an unchanged slot leaves the rest as they were.
+            if k > slot && self.reach[k] == best {
+                break;
+            }
+            self.reach[k] = best;
+        }
         Ok(())
+    }
+
+    /// The first stored invisible property ending at `end`: its index and its start.
+    pub(crate) fn fold_ending_at(&self, end: usize) -> Option<(u32, usize)> {
+        (self.stored_near(end..end))
+            .filter(|(_, r, p)| r.end == end && matches!(p, Prop::Invisible(_)))
+            .min_by_key(|&(i, ..)| i)
+            .map(|(i, r, _)| (i, r.start))
+    }
+
+    /// Moves the end of invisible property `i` from `fold_ending_at` on to `to` and gives it
+    /// `placeholder`, keeping its place in the stored order.
+    pub(crate) fn extend_fold(&mut self, i: u32, to: usize, placeholder: String) {
+        let len = self.len_chars();
+        let (_, end, prop) = &mut self.props[i as usize];
+        *prop = Prop::Invisible(placeholder);
+        let at = &mut self
+            .markers
+            .get_mut(end)
+            .expect("a property's markers live")
+            .0;
+        assert!(to >= *at && to <= len, "a fold only grows");
+        *at = to;
+        let (start_of, end_of) = prop_ends(&self.props, &self.markers);
+        // Its end raises the reach from its slot until a property reaching further.
+        let slot = match self.in_order {
+            true => i as usize,
+            false => {
+                let slot = (self.by_start).partition_point(|&j| start_of(j) < start_of(i));
+                let rest = self.by_start[slot..].iter().position(|&j| j == i);
+                slot + rest.expect("indexed")
+            }
+        };
+        for k in slot..self.reach.len() {
+            let r = self.reach[k];
+            if r != i && end_of(r) >= to {
+                break;
+            }
+            self.reach[k] = i;
+        }
+    }
+
+    /// Recomputes `reach` from `by_start`.
+    fn index_reach(&mut self) {
+        let (_, end_of) = prop_ends(&self.props, &self.markers);
+        let mut best = None;
+        self.reach = (0..self.props.len())
+            .map(|k| at_slot(&self.by_start, self.in_order, k))
+            .map(|i| {
+                let b = best.filter(|&b| end_of(b) >= end_of(i)).unwrap_or(i);
+                best = Some(b);
+                b
+            })
+            .collect();
     }
 
     /// Removes every property whose range lies within `range`.
     pub fn remove_properties(&mut self, range: Range<usize>) {
         let markers = &mut self.markers;
-        self.props.retain(|(start, end, _)| {
+        // Each property's new index, `u32::MAX` once removed.
+        let mut kept = 0;
+        let mut moved = Vec::with_capacity(self.props.len());
+        let folds = &mut self.folds;
+        self.props.retain(|(start, end, prop)| {
             let at = |id| markers.get(id).map(|&(pos, _)| pos);
             let inside = at(start) >= Some(range.start) && at(end) <= Some(range.end);
             if inside {
                 markers.remove(start);
                 markers.remove(end);
+                *folds -= usize::from(prop.folds());
+                moved.push(u32::MAX);
+            } else {
+                moved.push(kept);
+                kept += 1;
             }
             !inside
         });
+        if kept as usize != moved.len() {
+            // In order, `by_start` stays empty, as removing keeps the order.
+            (self.by_start).retain_mut(|i| {
+                *i = moved[*i as usize];
+                *i != u32::MAX
+            });
+            self.index_reach();
+        }
     }
 
     /// The non-empty property ranges touching `range`, from at its start to at its end, in
     /// stored order, then the prompt area's continuation indent.
     pub fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
         let touches = |r: &Range<usize>| r.end >= range.start && r.start <= range.end;
-        let mut near = self.stored_properties_near(&range, touches);
-        // The prompt's lines after its first start under its text, past `> `, as Claude Code's do.
+        debug_assert!(
+            self.index_holds(),
+            "the property index matches the properties"
+        );
+        let mut near: Vec<_> = self.stored_near(range.clone()).collect();
+        near.sort_unstable_by_key(|&(i, ..)| i);
+        let mut near: Vec<_> = near.into_iter().map(|(_, r, p)| (r, p)).collect();
         static CONTINUATION: Prop = Prop::Line(Decoration::Indent(2));
-        let line = self.text().char_to_line(self.prompt_start()) + 1;
-        if self.prompt.is_some() && line < self.text().len_lines() {
-            // Past the end, so an empty last line is inside it too.
-            let continuation = self.text().line_to_char(line)..self.len_chars() + 1;
-            if touches(&continuation) {
-                near.push((continuation, &CONTINUATION));
-            }
+        if let Some(continuation) = self.continuation().filter(touches) {
+            near.push((continuation, &CONTINUATION));
         }
         near
     }
 
-    fn stored_properties_near(
+    /// The prompt's lines after its first, which start under its text, past `> `, as Claude
+    /// Code's do; past the end, so an empty last line is inside it too.
+    fn continuation(&self) -> Option<Range<usize>> {
+        let line = self.text().char_to_line(self.prompt_start()) + 1;
+        (self.prompt.is_some() && line < self.text().len_lines())
+            .then(|| self.text().line_to_char(line)..self.len_chars() + 1)
+    }
+
+    /// The non-empty stored properties touching `range`, each with its index in stored order,
+    /// in no set order.
+    fn stored_near(
         &self,
-        range: &Range<usize>,
-        touches: impl Fn(&Range<usize>) -> bool,
-    ) -> Vec<(Range<usize>, &Prop)> {
-        if !self.props_sorted {
-            return self.properties().filter(|(r, _)| touches(r)).collect();
-        }
-        let at = |id| {
-            self.marker(id)
-                .expect("a property's markers live as long as it")
-        };
-        let from = (self.props).partition_point(|&(_, end, _)| at(end) < range.start);
-        let to = (self.props).partition_point(|&(start, ..)| at(start) <= range.end);
-        (self.props[from..to.max(from)].iter())
-            .map(|(s, e, prop)| (at(*s)..at(*e), prop))
-            .filter(|(r, _)| !r.is_empty())
-            .collect()
+        range: Range<usize>,
+    ) -> impl Iterator<Item = (u32, Range<usize>, &Prop)> + '_ {
+        let (start_of, end_of) = prop_ends(&self.props, &self.markers);
+        let index = |k| at_slot(&self.by_start, self.in_order, k);
+        let to = partition(self.props.len(), |k| start_of(index(k)) <= range.end);
+        let from = self.reach[..to].partition_point(|&i| end_of(i) < range.start);
+        (from..to).map(index).filter_map(move |i| {
+            let r = start_of(i)..end_of(i);
+            let touches = r.end >= range.start && r.start <= range.end;
+            (!r.is_empty() && touches).then(|| (i, r, &self.props[i as usize].2))
+        })
+    }
+
+    /// Whether `by_start` holds every property sorted by start and `reach` its largest ends.
+    fn index_holds(&self) -> bool {
+        let (start_of, end_of) = prop_ends(&self.props, &self.markers);
+        let slots: Vec<_> = (0..self.props.len())
+            .map(|k| at_slot(&self.by_start, self.in_order, k))
+            .collect();
+        let mut all = slots.clone();
+        all.sort_unstable();
+        let sorted = slots.is_sorted_by_key(|&i| start_of(i));
+        let mut max = 0;
+        let reach = (slots.iter().zip(&self.reach)).all(|(&i, &r)| {
+            max = max.max(end_of(i));
+            end_of(r) == max
+        });
+        all.into_iter().eq(0..self.props.len() as u32) && sorted && reach
     }
 
     /// `line`, or when it starts inside invisible text, the line after that fold (`down`) or the
@@ -850,12 +998,13 @@ impl Buffer {
             return line;
         }
         let (text, pos) = (self.text(), self.text().line_to_char(line));
-        // The kind first: the prompt's continuation indent ends past the text.
-        let fold = (self.properties_near(pos..pos).into_iter()).find(|(r, p)| {
-            matches!(p, Prop::Invisible(_) | Prop::Display(_))
-                && (r.start < pos || text.char_to_line(r.end) > line)
-                && pos < r.end
-        });
+        // The first stored one; the kind first, as a range can end past the text.
+        let fold = (self.stored_near(pos..pos))
+            .filter(|(_, r, p)| {
+                p.folds() && (r.start < pos || text.char_to_line(r.end) > line) && pos < r.end
+            })
+            .min_by_key(|&(i, ..)| i)
+            .map(|(_, r, p)| (r, p));
         match fold {
             Some((r, _)) if r.start == pos && down => text.char_to_line(r.end),
             Some((r, _)) if r.start == pos => match line {
@@ -872,8 +1021,8 @@ impl Buffer {
     /// Whether `line` is a drawn table's, which is cut at the window's edge, never wrapped.
     pub(crate) fn table_line(&self, line: usize) -> bool {
         let start = self.text().line_to_char(line);
-        (self.properties_near(start..start).into_iter())
-            .any(|(r, p)| r.start == start && matches!(p, Prop::Line(Decoration::Table { .. })))
+        (self.stored_near(start..start))
+            .any(|(_, r, p)| r.start == start && matches!(p, Prop::Line(Decoration::Table { .. })))
     }
 
     pub(crate) fn line_indent(&self, line: usize) -> usize {
@@ -882,17 +1031,22 @@ impl Buffer {
             .char_idx(line, usize::MAX)
             .unwrap_or(start)
             .max(start + 1);
-        (self.properties_near(start..end).into_iter())
-            .find_map(|(r, p)| match p {
-                Prop::Line(Decoration::Indent(n)) if r.start < end && r.end > start => Some(*n),
+        // The first stored one, else the prompt's continuation's.
+        let stored = (self.stored_near(start..end))
+            .filter_map(|(i, r, p)| match p {
+                Prop::Line(Decoration::Indent(n)) if r.start < end && r.end > start => {
+                    Some((i, *n))
+                }
                 _ => None,
             })
-            .unwrap_or(0)
+            .min_by_key(|&(i, _)| i);
+        let continued = (self.continuation()).is_some_and(|r| r.start < end && r.end > start);
+        stored.map_or(if continued { 2 } else { 0 }, |(_, n)| n)
     }
 
     /// Whether any property hides text.
     pub(crate) fn has_folds(&self) -> bool {
-        (self.props.iter()).any(|(.., prop)| matches!(prop, Prop::Invisible(_) | Prop::Display(_)))
+        self.folds > 0
     }
 
     /// The non-empty property ranges, in stored order.
@@ -1132,6 +1286,40 @@ pub fn decode(bytes: &[u8]) -> Result<(String, bool, bool), &'static str> {
         false => text.to_string(),
     };
     Ok((text, crlf, bom))
+}
+
+/// The property at `slot` of the start order: `by_start`'s, or while in order, `slot` itself.
+fn at_slot(by_start: &[u32], in_order: bool, slot: usize) -> u32 {
+    if in_order {
+        slot as u32
+    } else {
+        by_start[slot]
+    }
+}
+
+/// The first of `0..n` that `pred` rejects, where it accepts a prefix.
+fn partition(n: usize, pred: impl Fn(usize) -> bool) -> usize {
+    let (mut low, mut high) = (0, n);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match pred(mid) {
+            true => low = mid + 1,
+            false => high = mid,
+        }
+    }
+    low
+}
+
+/// Where property `i` of `props` starts and ends.
+fn prop_ends<'a>(
+    props: &'a [(MarkerId, MarkerId, Prop)],
+    markers: &'a BTreeMap<MarkerId, (usize, InsertionType)>,
+) -> (impl Fn(u32) -> usize + 'a, impl Fn(u32) -> usize + 'a) {
+    let at = |id| markers[&id].0;
+    (
+        move |i: u32| at(props[i as usize].0),
+        move |i: u32| at(props[i as usize].1),
+    )
 }
 
 #[cfg(test)]
@@ -1436,6 +1624,37 @@ mod tests {
             }
         }
 
+        /// Whatever order nested and overlapping properties are added, edited and removed in,
+        /// `properties_near` finds what a scan of every property would, in stored order.
+        #[test]
+        fn properties_near_matches_a_scan(
+            ops in proptest::collection::vec((0..5u8, 0..40usize, 0..12usize, "[a-zé]{0,3}"), 0..40),
+            queries in proptest::collection::vec((0..45usize, 0..6usize), 1..8),
+        ) {
+            let (mut buffers, id) = with_text(&"x".repeat(30));
+            let b = buffers.get_mut(id).unwrap();
+            for (n, (kind, at, len, text)) in ops.into_iter().enumerate() {
+                let at = at % (b.len_chars() + 1);
+                let end = (at + len).min(b.len_chars());
+                match kind {
+                    0 | 1 => {
+                        let face = Face { fg: Some(n as u32), ..Face::default() };
+                        b.add_property(at..end, Prop::Face(face)).unwrap();
+                    }
+                    2 => b.insert(at, &text).unwrap(),
+                    3 => b.delete(at..end).unwrap(),
+                    _ => b.remove_properties(at..end),
+                }
+                for &(start, len) in &queries {
+                    let q = start..start + len;
+                    let scan: Vec<_> = (b.properties())
+                        .filter(|(r, _)| r.end >= q.start && r.start <= q.end)
+                        .collect();
+                    proptest::prop_assert_eq!(b.properties_near(q), scan);
+                }
+            }
+        }
+
         /// Undo all restores the original text, redo all the final one, and markers never leave the text.
         #[test]
         fn undo_redo_round_trip_random_edits(
@@ -1517,9 +1736,33 @@ mod tests {
         // Removing keeps the rest in order.
         b.remove_properties(40..48);
         assert_eq!(near(b, 40..52), [52..57]);
-        // A long overlapping one makes the list unsorted by end; the full scan still finds it.
+        // A long one added last, over the others, is found from anywhere inside it.
         b.add_property(0..90, face(1)).unwrap();
         assert_eq!(near(b, 68..70), [0..90]);
+    }
+
+    #[test]
+    fn has_folds_counts_the_folds_a_scan_would() {
+        let (mut buffers, id) = with_text("abcdefghij");
+        let b = buffers.get_mut(id).unwrap();
+        let scan = |b: &Buffer| b.props.iter().any(|(.., p)| p.folds());
+        let check = |b: &Buffer| assert_eq!(b.has_folds(), scan(b));
+        b.add_property(0..2, Prop::Face(Face::default())).unwrap();
+        check(b);
+        b.add_property(2..4, Prop::Invisible(String::new()))
+            .unwrap();
+        b.add_property(5..7, Prop::Display(Vec::new())).unwrap();
+        check(b);
+        assert!(b.has_folds());
+        b.remove_properties(1..4);
+        check(b);
+        // Deleted to an empty range, it still counts, as the scan counted it.
+        b.delete(4..8).unwrap();
+        check(b);
+        assert!(b.has_folds());
+        b.remove_properties(0..10);
+        check(b);
+        assert!(!b.has_folds());
     }
 
     #[test]
@@ -1540,14 +1783,12 @@ mod tests {
         for r in [1..3, 1..6, 4..6, 5..9] {
             b.add_property(r, face.clone()).unwrap();
         }
-        assert!(b.props_sorted);
         let near = |b: &Buffer, r| -> Vec<_> {
             b.properties_near(r).into_iter().map(|(r, _)| r).collect()
         };
         assert_eq!(near(b, 4..4), [1..6, 4..6]);
-        // One added in the middle goes to its place and keeps the order.
+        // One added in the middle goes to its sorted place.
         b.add_property(3..6, face.clone()).unwrap();
-        assert!(b.props_sorted);
         assert_eq!(near(b, 3..3), [1..3, 1..6, 3..6]);
         b.remove_properties(3..6);
         b.remove_properties(0..6);

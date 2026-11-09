@@ -7,6 +7,17 @@ use super::render::{
 };
 use super::*;
 
+/// A block `TAB` acts on, by its index.
+pub(super) enum At {
+    Ask(usize),
+    Paste(usize),
+    Answer(usize),
+    Tool(ToolCallId),
+    /// A thought row, as its group and row.
+    Thought(usize, usize),
+    Group(usize),
+}
+
 /// A row of a run: a tool call, or a thought or permission block among its calls.
 pub(super) enum Row {
     Tool(ToolCallId),
@@ -23,26 +34,29 @@ pub(super) struct Thought {
     pub(super) start: MarkerId,
     /// Its first line's length, the row a group shows; 0 while it streams.
     first: usize,
-    pub(super) len: usize,
+    pub(super) end: MarkerId,
     open: bool,
 }
 
 impl Thought {
-    pub(super) fn new(start: MarkerId, len: usize) -> Self {
+    pub(super) fn new(start: MarkerId, end: MarkerId) -> Self {
         Self {
             start,
             first: 0,
-            len,
+            end,
             open: false,
         }
+    }
+
+    fn range(&self, buffer: &Buffer) -> Range<usize> {
+        extent(buffer, self.start, self.end)
     }
 
     /// Makes it a row: the indent and fold mark go before its first line.
     fn indent(&mut self, buffer: &mut Buffer) {
         let start = buffer.marker(self.start).expect("live with its run");
         buffer.insert_output(start, THOUGHT_ROW);
-        let added = THOUGHT_ROW.chars().count();
-        (self.first, self.len) = (self.first + added, self.len + added);
+        self.first += THOUGHT_ROW.chars().count();
     }
 }
 
@@ -62,8 +76,7 @@ pub(super) struct Group {
 }
 
 fn render_thought(buffer: &mut Buffer, thought: &Thought) {
-    let start = buffer.marker(thought.start).expect("live with its run");
-    let end = start + thought.len;
+    let Range { start, end } = thought.range(buffer);
     if thought.first == 0 {
         return render(buffer, start..end, true, None);
     }
@@ -78,10 +91,35 @@ fn render_thought(buffer: &mut Buffer, thought: &Thought) {
 }
 
 impl Session {
+    /// Each block's text, in transcript order, as its markers bound it.
+    #[cfg(test)]
+    pub(super) fn block_texts(&self, buffer: &Buffer) -> Vec<String> {
+        let rows = (self.run.iter()).chain(self.groups.iter().flat_map(|g| &g.rows));
+        let thoughts = rows.filter_map(|r| match r {
+            Row::Thought(t) => Some(t.range(buffer)),
+            _ => None,
+        });
+        let working = (self.turn.as_ref()).map(|t| {
+            buffer.marker(t.line).unwrap()..buffer.prompt_start() - PROMPT.len() - "\n\n".len()
+        });
+        let mut ranges: Vec<_> = (self.messages.iter().map(|m| m.range(buffer)))
+            .chain(self.tools.values().map(|t| t.range(buffer)))
+            .chain(self.asks.iter().map(|a| a.range(buffer)))
+            .chain((self.answers.iter()).map(|a| extent(buffer, a.start, a.end)))
+            .chain(thoughts)
+            .chain(self.plan.map(|(start, end)| extent(buffer, start, end)))
+            .chain(working)
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        (ranges.into_iter())
+            .map(|r| buffer.text().slice(r).to_string())
+            .collect()
+    }
+
     fn row_span(&self, buffer: &Buffer, row: &Row) -> Range<usize> {
         let (start, len) = match row {
-            Row::Tool(call) => (self.tools[call].start, self.tools[call].len),
-            Row::Thought(thought) => (thought.start, thought.len),
+            Row::Tool(call) => return self.tools[call].range(buffer),
+            Row::Thought(thought) => return thought.range(buffer),
             Row::Ask { start, len } => (*start, *len),
         };
         let start = buffer.marker(start).expect("live with its run");
@@ -125,33 +163,34 @@ impl Session {
         let answered = settle_question(buffer, ask, line, clock);
         let start = buffer.marker(answered.start).expect("just settled");
         render_answered(buffer, &answered, self.group_at(buffer, start).is_some());
-        let len = answered.len;
+        let len = extent(buffer, answered.start, answered.end).len();
         self.answers.push(answered);
         len
     }
 
-    /// Opens or folds the answered line `point` is on or in, if it sent anything, returning
-    /// where it starts and ends.
-    pub(super) fn toggle_answer(
-        &mut self,
-        buffer: &mut Buffer,
-        point: usize,
-    ) -> Option<(usize, usize)> {
+    /// The answered line `point` is on or in, if it sent anything and its group shows it.
+    fn answer_at(&self, buffer: &Buffer, point: usize) -> Option<usize> {
         let (i, start) = self.answers.iter().enumerate().find_map(|(i, a)| {
-            let start = buffer.marker(a.start).expect("live with its session");
-            let end = start + if a.open { a.len } else { a.line };
-            (a.len > a.line && (start..=end).contains(&point)).then_some((i, start))
+            let Range { start, end: all } = extent(buffer, a.start, a.end);
+            let end = if a.open { all } else { start + a.line };
+            (all - start > a.line && (start..=end).contains(&point)).then_some((i, start))
         })?;
         let group = self.group_at(buffer, start);
-        if group.is_some_and(|g| !self.groups[g].open) {
-            return None;
-        }
+        (!group.is_some_and(|g| !self.groups[g].open)).then_some(i)
+    }
+
+    /// Opens or folds answered line `i`, returning where it starts and where its line ends.
+    pub(super) fn toggle_answer(&mut self, buffer: &mut Buffer, i: usize) -> (usize, usize) {
+        let start = buffer
+            .marker(self.answers[i].start)
+            .expect("live with its session");
+        let group = self.group_at(buffer, start);
         let a = &mut self.answers[i];
         a.open = !a.open;
-        buffer.remove_properties(start..start + a.len);
+        buffer.remove_properties(extent(buffer, a.start, a.end));
         buffer.replace_output(start..start + 1, if a.open { "▾" } else { "▸" });
         render_answered(buffer, a, group.is_some());
-        Some((start, start + a.line))
+        (start, start + a.line)
     }
 
     /// Whether `row` shows under its folded group.
@@ -272,9 +311,11 @@ impl Session {
         for row in std::mem::take(&mut self.run) {
             match row {
                 Row::Tool(_) => {}
-                Row::Thought(Thought { start, .. }) | Row::Ask { start, .. } => {
-                    buffer.remove_marker(start)
+                Row::Thought(Thought { start, end, .. }) => {
+                    buffer.remove_marker(start);
+                    buffer.remove_marker(end);
                 }
+                Row::Ask { start, .. } => buffer.remove_marker(start),
             }
         }
     }
@@ -361,10 +402,11 @@ impl Session {
         })
     }
 
-    /// Counts `chars` more of the thought being streamed.
-    pub(super) fn thought_grew(&mut self, chars: usize) {
+    /// Counts `chars` more of the thought being streamed, added at its end.
+    pub(super) fn thought_grew(&mut self, buffer: &mut Buffer, chars: usize) {
         if let Some(thought) = self.last_thought() {
-            thought.len += chars;
+            let end = thought.range(buffer).end + chars;
+            buffer.set_marker(thought.end, end).expect("just inserted");
         }
     }
 
@@ -376,18 +418,17 @@ impl Session {
         let Some(thought) = self.last_thought() else {
             return;
         };
-        let start = buffer.marker(thought.start).expect("live with its run");
+        let range = thought.range(buffer);
         thought.first = header.unwrap_or_else(|| {
-            let line = buffer.text().slice(start..start + thought.len);
+            let line = buffer.text().slice(range);
             line.chars().take_while(|&c| c != '\n').count()
         });
-        thought.len += header.map_or(0, |n| n + 1);
         let Some(g) = group else {
             return;
         };
         thought.indent(buffer);
         if open {
-            buffer.remove_properties(start..start + thought.len);
+            buffer.remove_properties(thought.range(buffer));
             render_thought(buffer, thought);
         }
         self.show_group(buffer, g);
@@ -427,59 +468,89 @@ impl Session {
         self.groups[g].open
     }
 
-    /// Opens or folds the thought row `point` is on or in, returning where it starts and where
-    /// its first line ends.
+    /// The thought row `point` is on or in, in an open group, as its group and row.
+    fn thought_at(&self, buffer: &Buffer, point: usize) -> Option<(usize, usize)> {
+        let groups = self.groups.iter().enumerate().filter(|(_, g)| g.open);
+        groups
+            .flat_map(|(g, group)| (group.rows.iter().enumerate()).map(move |(r, row)| (g, r, row)))
+            .find_map(|(g, r, row)| {
+                let Row::Thought(thought) = row else {
+                    return None;
+                };
+                let range = thought.range(buffer);
+                let start = range.start;
+                let end = if thought.open {
+                    range.end
+                } else {
+                    start + thought.first
+                };
+                (range.len() != thought.first && (start..=end).contains(&point)).then_some((g, r))
+            })
+    }
+
+    /// Opens or folds row `r` of group `g`, a thought, returning where it starts and where its
+    /// first line ends.
     pub(super) fn toggle_thought(
         &mut self,
         buffer: &mut Buffer,
-        point: usize,
-    ) -> Option<(usize, usize)> {
-        for group in self.groups.iter_mut().filter(|g| g.open) {
-            for row in &mut group.rows {
-                let Row::Thought(thought) = row else {
-                    continue;
-                };
-                let start = buffer.marker(thought.start).expect("live with its session");
-                let end = start
-                    + if thought.open {
-                        thought.len
-                    } else {
-                        thought.first
-                    };
-                if thought.len == thought.first || !(start..=end).contains(&point) {
-                    continue;
-                }
-                thought.open = !thought.open;
-                buffer.remove_properties(start..start + thought.len);
-                let mark = start + THOUGHT_FOLD;
-                let fold = if thought.open { "▾" } else { "▸" };
-                buffer.replace_output(mark..mark + 1, fold);
-                render_thought(buffer, thought);
-                return Some((start, start + thought.first));
-            }
-        }
-        None
+        g: usize,
+        r: usize,
+    ) -> (usize, usize) {
+        let Row::Thought(thought) = &mut self.groups[g].rows[r] else {
+            unreachable!("found as a thought");
+        };
+        let range = thought.range(buffer);
+        let start = range.start;
+        thought.open = !thought.open;
+        buffer.remove_properties(range);
+        let mark = start + THOUGHT_FOLD;
+        let fold = if thought.open { "▾" } else { "▸" };
+        buffer.replace_output(mark..mark + 1, fold);
+        render_thought(buffer, thought);
+        (start, start + thought.first)
     }
 
-    /// Opens or folds the group `point` is in, returning where its line starts and ends and
-    /// whether it is open now.
-    pub(super) fn toggle_group(
-        &mut self,
-        buffer: &mut Buffer,
-        point: usize,
-    ) -> Option<(usize, usize, bool)> {
-        let inside = |g: &usize| {
-            let span = self.group_span(buffer, *g);
-            (span.start..=span.end).contains(&point)
-        };
-        let g = (0..self.groups.len()).find(inside)?;
+    /// Opens or folds group `g`, returning where its line starts and ends and whether it is
+    /// open now.
+    pub(super) fn toggle_group(&mut self, buffer: &mut Buffer, g: usize) -> (usize, usize, bool) {
         self.groups[g].open = !self.groups[g].open;
         self.render_group(buffer, g);
         let span = self.group_span(buffer, g);
-        Some((
-            span.start,
-            span.start + self.groups[g].line,
-            self.groups[g].open,
-        ))
+        let group = &self.groups[g];
+        (span.start, span.start + group.line, group.open)
+    }
+
+    /// The block `point` is in that `TAB` acts on, in its precedence: a question with several
+    /// fields, a paste, an answered line, a call, a thought row, then a group.
+    pub(super) fn block_at(&self, buffer: &Buffer, point: usize) -> Option<At> {
+        let ask = self.asks.iter().position(|ask| {
+            ask.question().is_some_and(|q| q.several())
+                && (ask.range(buffer).start..=ask.range(buffer).end).contains(&point)
+        });
+        let tool = || {
+            (self.tools.iter()).find(|(_, t)| {
+                let Range { start, end: all } = t.range(buffer);
+                let end = if t.open { all } else { start + t.header };
+                // A row with nothing to open leaves `TAB` to its group.
+                (t.group.is_none() || all - start > t.header)
+                    && !self.hidden(t)
+                    && (start..=end).contains(&point)
+            })
+        };
+        let group = || {
+            (0..self.groups.len()).find(|&g| {
+                let span = self.group_span(buffer, g);
+                (span.start..=span.end).contains(&point)
+            })
+        };
+        (ask.map(At::Ask))
+            .or_else(|| self.paste_at(buffer, point).map(At::Paste))
+            .or_else(|| self.answer_at(buffer, point).map(At::Answer))
+            .or_else(|| tool().map(|(call, _)| At::Tool(call.clone())))
+            .or_else(|| {
+                self.thought_at(buffer, point)
+                    .map(|(g, r)| At::Thought(g, r))
+            })
+            .or_else(|| group().map(At::Group))
     }
 }

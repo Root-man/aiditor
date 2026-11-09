@@ -3,6 +3,7 @@
 use crate::{
     Core, Ctx,
     buffer::{Buffer, BufferId, Decoration, FaceRef, Prop},
+    display::{ModeLine, WindowDisplay},
     project::ProjectId,
     settings::FaceName,
     workspace::WorkspaceId,
@@ -345,6 +346,41 @@ impl Snapshot {
             }
         }
         None
+    }
+
+    /// Puts the selected row's background and the list's mode line, with point on `line` (from
+    /// 1), on `buffer`'s `display`.
+    pub(crate) fn decorate(&self, buffer: &Buffer, display: &mut WindowDisplay, line: usize) {
+        let lines = &mut display.lines;
+        if let Some(number) = (display.cursor)
+            .map(|(l, _)| lines[l].number)
+            .filter(|n| buffer.workspace_rows.iter().any(|(line, _)| line == n))
+        {
+            for line in lines.iter_mut().filter(|l| l.number == number) {
+                (line.decorations).push(Decoration::Background(FaceName::CompletionSelected));
+            }
+        }
+        let segment = |text: &str, face| vec![(text.to_string(), face)];
+        let (projects, workspaces) = self.counts();
+        let rows = buffer.workspace_rows.len();
+        let position = (buffer.workspace_rows)
+            .partition_point(|(row, _)| *row < line)
+            .max(1);
+        display.mode_line = ModeLine {
+            left: vec![
+                segment(&buffer.name, FaceName::ModeLine),
+                segment(
+                    &format!("{projects} projects, {workspaces} workspaces"),
+                    FaceName::ModeLineDim,
+                ),
+            ],
+            // An empty list has no position.
+            right: (rows > 0)
+                .then(|| segment(&format!("{position}/{rows}"), FaceName::ModeLine))
+                .into_iter()
+                .collect(),
+            path: None,
+        };
     }
 
     pub(crate) fn fit(

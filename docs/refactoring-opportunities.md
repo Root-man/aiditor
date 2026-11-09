@@ -115,3 +115,38 @@ The earlier scan on this revision passed 570 Rust core/service tests with one ig
 Start with: **1 and 2**, because existing cleanup/replacement operations address concrete bugs with limited changes. **6** also deserves early attention because failed recovery persistence can remove the remaining on-disk copy. **5 is deferred to M5 in [#265](https://github.com/Root-man/aiditor/issues/265)**, with configurable parallelism defaulting to one worker.
 
 Not checked: GUI runtime behavior, Linux execution, other benchmark scenarios, or production parallel-search streaming/cancellation; the optional `ponytail-audit` skill was unavailable. File-open latency is measured, but attribution to a specific security product or kernel component remains unproven.
+
+## M6 scan, 2026-11-09
+
+Scope: the 52 commits after #404 (`34f6a0b..0f74a9b`): `aiditor-core`'s `agents/*`, `display.rs`, `frame.rs`, `buffer.rs`, `motion.rs`, `window.rs` and `workspace_list.rs`, `aiditor`'s `editor.rs` and `element.rs`, and `aiditor-services`' `agents.rs`, read against the [2026-11-08 full benchmark run](measurements/2026-11-08-full-benchmarks/README.md), with probes in a temporary worktree.
+
+What this code does: M6 built the interactive agent session buffer: streamed markdown, tool-call blocks and groups, questions, chips and a prompt pane docked at the bottom. The fixes are the `fix-m6-refactor-scan-findings` change, measured in [2026-11-09-scan-fixes](measurements/2026-11-09-scan-fixes/README.md).
+
+| # | Opportunity | Category | Where | Impact | Complexity | Status |
+|---|---|---|---|---|---|---|
+| 1 | Once one property is added out of order, the buffer never uses the sorted lookup again, so every later frame and line motion scans all of the transcript's properties. | Performance | `buffer.rs` (`add_property`, `stored_properties_near`) | high | med | Done: a sorted index (`by_start`, `reach`) beside the stored properties; layering order unchanged. |
+| 2 | `display::build` scans the nearby properties for icons on every char. | Performance | `display.rs` (`build`) | med | low | Done: icons collected once, found with a moving cursor; line faces once per line. |
+| 3 | An open tool call rebuilds its whole output on each chunk, though it shows 20 lines and a count. | Performance | `agents.rs` (`append_tool_output`, `show_tool`) | med | med | Done: open calls past the cut append and extend the `… N more lines` fold. |
+| 4 | Workspace-list code lives inside the generic display (`build` and `mode_line`). | SOLID: open/closed | `display.rs`, `frame.rs` | med | med | Done: `Snapshot::decorate` in `workspace_list.rs`, called from `frame.rs`. |
+| 5 | Each frame with new chunks re-parses and diffs the whole streamed message: 44 ms per frame for a 5,000-line reply. | Performance | `agents.rs` (`render_stream`), `agents/render.rs` | med | high | Done: only the last top-level block re-renders, checked against a full render in debug builds. |
+| 6 | Session blocks keep a start marker plus a hand-kept length; RET and TAB each run a chain of "what's at point" probes. | SOLID: open/closed | `agents.rs`, `agents/groups.rs` | med | high | Done: end markers (an `Advance` start marker for the working line); TAB dispatches on `Session::block_at`. RET keeps its probes, whose tool and chip rules differ from TAB's. |
+| 7 | `has_folds()` scans every property on each call. | Performance | `buffer.rs`, `motion.rs` | low | low | Done: a fold count. |
+| 8 | "Find the session, then its buffer" repeated 7 times, plus 8 `expect("found above")` re-lookups. | Lean | `agents.rs` | low | low | Done: `Core::session_buffer`; 3 sites that also read `self.index` or `self.chips` keep the two lookups. |
+| 9 | The whole `Theme` is cloned in `paint` on every frame. | Performance | `element.rs` | low | low | Done: decoration colours resolved in `prepaint`. |
+| 10 | The mode-line name is built with `<workspace>` and cut off again in `frame.rs`. | Smell | `frame.rs` | low | low | Dropped: leaving the suffix out in `display::mode_line` adds a parameter to the 10-parameter `display::build` and deletes nothing. |
+| 11 | `table_line`, `line_indent` and `unfolded_line` allocate a `Vec` of nearby properties per line. | Performance | `window.rs`, `buffer.rs` | low | med | Done: they iterate `stored_near`. |
+| 12 | `echo_area` is one 200-line function. | Smell | `editor.rs` | low | med | Done: `completion_row`. |
+
+Three smaller ones were left out: `terminal_tool` scans every tool per output chunk, `tool_update` clones the whole `ToolCall` on each update, and the agent tests take up 6,400 lines of `agents.rs`.
+
+#1: 19 of 229 agent tests turned the sorted flag off, every question test among them and both tests with thoughts inside a tool group. A probe with the bench's 5,000-line session (10.5k properties) measured a clean frame at 0.21–0.31 ms sorted and 51–55 ms unsorted.
+
+#2: copy mode measured 302 µs colored and 62 µs plain at `0f74a9b` (#404: 204 and 52). The colored scroll pair's remaining gap to #404 (4.17 against 3.12 ms) had another cause, not found.
+
+#3: 14.7 ms per frame at 5 MB of open output and 3.3 ms at 500 KB, past a 120 Hz frame.
+
+The 2026-11-08 report said "unchanged benchmark sources", but #457 (`3819d1f`) added a table to the `hot-stream` fixture, so its shown-clean, dirty and first-show comparisons aren't like-for-like.
+
+Start with: **#1**, the biggest win (about 170× on long sessions after any question or grouped thought), inside `buffer.rs`; then **#2**, a small change with a measured gain.
+
+Not checked: GPUI paint timing, Linux, and the cause of the remaining copy-mode scroll regression; `markdown.rs` tables, `questions.rs` and `services/files.rs` were not read in depth during the scan.

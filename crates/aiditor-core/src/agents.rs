@@ -112,7 +112,7 @@ pub(crate) struct Session {
     tools: HashMap<ToolCallId, Tool>,
     /// The plan's block: where it starts and its length in chars, the blank line after it not
     /// counted.
-    plan: Option<(MarkerId, usize)>,
+    plan: Option<(MarkerId, MarkerId)>,
     /// Permission requests and questions waiting for an answer, oldest first.
     asks: Vec<Ask>,
     /// The closed questions' lines.
@@ -198,7 +198,10 @@ impl Session {
 
     /// Where the transcript's next block goes: before the working line and the prompt line.
     fn end(&self, buffer: &Buffer) -> usize {
-        buffer.prompt_start() - PROMPT.len() - self.turn.as_ref().map_or(0, |t| t.len)
+        match &self.turn {
+            Some(turn) => buffer.marker(turn.line).expect("live while working"),
+            None => buffer.prompt_start() - PROMPT.len(),
+        }
     }
 
     /// The buffer lines of the message at `point`, the last one starting at or before it.
@@ -210,8 +213,8 @@ impl Session {
         let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
         let after = self.messages.partition_point(|m| start(m) <= point);
         let message = &self.messages[after.checked_sub(1)?];
-        let first = start(message);
-        let last = first + message.len.saturating_sub(1);
+        let range = message.range(buffer);
+        let (first, last) = (range.start, range.end.saturating_sub(1).max(range.start));
         Some(buffer.text().char_to_line(first)..=buffer.text().char_to_line(last))
     }
 
@@ -223,8 +226,9 @@ impl Session {
         point: usize,
     ) -> Option<(usize, Option<Preview>)> {
         self.asks.iter().find_map(|ask| {
-            let start = buffer.marker(ask.start)?;
-            let range = start..=start + ask.len;
+            buffer.marker(ask.start)?;
+            let Range { start, end } = ask.range(buffer);
+            let range = start..=end;
             let first = buffer.text().char_to_line(start);
             let line = buffer.text().char_to_line(point);
             let question = ask.question().filter(|_| range.contains(&point))?;
@@ -371,9 +375,10 @@ struct Tool {
     call: ToolCall,
     /// Where the block starts.
     start: MarkerId,
-    /// The header's and the whole block's lengths in chars, the blank line after it not counted.
+    /// The header's length in chars.
     header: usize,
-    len: usize,
+    /// Where the block ends, the blank line after it not counted; `Stay`, so its time stays out.
+    end: MarkerId,
     /// Whether its content shows.
     open: bool,
     /// When it arrived; `None` when replayed.
@@ -404,6 +409,13 @@ struct Tool {
     link: Option<(PathBuf, Option<usize>)>,
     /// A closed question's line stands for it, so it shows no row.
     replaced: bool,
+}
+
+impl Tool {
+    /// Its block's range in `buffer`, the blank line after it not counted.
+    fn range(&self, buffer: &Buffer) -> Range<usize> {
+        extent(buffer, self.start, self.end)
+    }
 }
 
 /// Faces on char ranges.
@@ -455,9 +467,9 @@ struct Ask {
     /// The tool call's title, or the question's message, for the block.
     title: String,
     body: Body,
-    /// Where the block starts and its length in chars, the blank line after it not counted.
+    /// Where the block starts and ends, the blank line after it not counted.
     start: MarkerId,
-    len: usize,
+    end: MarkerId,
     /// Its row's marker.
     row: MarkerId,
 }
@@ -487,6 +499,11 @@ impl Body {
 }
 
 impl Ask {
+    /// Its block's range in `buffer`.
+    fn range(&self, buffer: &Buffer) -> Range<usize> {
+        extent(buffer, self.start, self.end)
+    }
+
     fn question(&self) -> Option<&questions::Question> {
         match &self.body {
             Body::Question(q) => Some(q),
@@ -533,8 +550,8 @@ struct Answered {
     label: usize,
     outcome: usize,
     line: usize,
-    /// The whole text's length, the rows counted.
-    len: usize,
+    /// Where the whole text ends, the rows counted.
+    end: MarkerId,
     /// The rows' name width.
     name: usize,
     mark: FaceName,
@@ -559,8 +576,21 @@ struct Message {
     /// Whether it is the user's, which can't be a fork point.
     user: bool,
     start: MarkerId,
-    /// Its length in chars, the blank line after it not counted.
-    len: usize,
+    /// Where it ends, the blank line after it not counted; `Stay`, so its time stays out.
+    end: MarkerId,
+}
+
+impl Message {
+    /// Its text's range in `buffer`.
+    fn range(&self, buffer: &Buffer) -> Range<usize> {
+        extent(buffer, self.start, self.end)
+    }
+}
+
+/// The range from marker `start` to marker `end` of a shown block.
+fn extent(buffer: &Buffer, start: MarkerId, end: MarkerId) -> Range<usize> {
+    let at = |m| buffer.marker(m).expect("live while shown");
+    at(start)..at(end)
 }
 
 /// A block being streamed.
@@ -572,6 +602,9 @@ struct Stream {
     source: String,
     /// Chunks arrived since it was last rendered.
     dirty: bool,
+    /// Where a message's last rendered top-level block starts, in `source` bytes and chars from
+    /// `start`; earlier blocks keep their text and properties.
+    stable: markdown::Stable,
     /// When its first chunk arrived and the clock then; `None` when replayed.
     began: Option<(Instant, Option<String>)>,
 }
@@ -579,21 +612,25 @@ struct Stream {
 /// A running turn.
 struct Turn {
     start: Instant,
-    /// The working line's length in chars, the blank line after it counted.
-    len: usize,
+    /// Where the working line starts; `Advance`, so the blocks put before it move it on.
+    line: MarkerId,
 }
 
 impl Core {
+    /// Session `id` and its buffer, borrowed apart.
+    fn session_buffer(&mut self, id: AgentId) -> Option<(&mut Session, &mut Buffer)> {
+        let session = self.agents.get_mut(&id)?;
+        let buffer = self.buffers.get_mut(session.buffer)?;
+        Some((session, buffer))
+    }
+
     /// Puts `text` above session `id`'s prompt line: as a new block followed by a blank line, or,
     /// for a chunk of the kind streaming, at the end of the streamed block. A chunk's block is
     /// rendered as markdown by the next frame.
     fn output(&mut self, id: AgentId, text: &str, block: Block) {
         let now = self.now();
         let clock = self.clock();
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         let end = session.end(buffer);
@@ -604,41 +641,46 @@ impl Core {
             stream.source.push_str(text);
             stream.dirty = true;
             if let Block::Thought(_) = block {
-                session.thought_grew(text.chars().count());
+                session.thought_grew(buffer, text.chars().count());
                 return;
             }
-            if let (Block::Message(_), Some(message)) = (&block, session.messages.last_mut()) {
-                message.len += text.chars().count();
+            if let (Block::Message(_), Some(message)) = (&block, session.messages.last()) {
+                let to = end - "\n\n".len() + text.chars().count();
+                buffer.set_marker(message.end, to).expect("in the text");
             }
             return;
         }
         self.end_stream(id);
-        let session = self.agents.get_mut(&id).expect("found above");
-        let buffer = self.buffers.get_mut(session.buffer).expect("found above");
+        let Some((session, buffer)) = self.session_buffer(id) else {
+            return;
+        };
         let end = session.end(buffer);
         buffer.insert_output(end, &format!("{text}\n\n"));
-        let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
+        let mut marker = |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
         if let Block::Message(message) | Block::User(message) = &block {
             session.messages.push(Message {
                 id: message.clone(),
                 user: matches!(block, Block::User(_)),
-                start: marker(),
-                len: text.chars().count(),
+                start: marker(end),
+                end: marker(end + text.chars().count()),
             });
         }
-        let row = (matches!(block, Block::Thought(_))).then(&mut marker);
+        let row = (matches!(block, Block::Thought(_))).then(|| marker(end));
         if let Block::Message(_) | Block::Thought(_) = block {
             session.stream = Some(Stream {
-                start: marker(),
+                start: marker(end),
                 block,
                 source: text.into(),
                 dirty: true,
+                stable: (0, 0),
                 began: session.live().then_some((now, clock)),
             });
         }
         match row {
             Some(row) => {
-                let row = Row::Thought(Thought::new(row, text.chars().count()));
+                let end = (buffer.add_marker(end + text.chars().count(), InsertionType::Stay))
+                    .expect("in the text");
+                let row = Row::Thought(Thought::new(row, end));
                 session.add_row(buffer, row);
             }
             None => session.end_run(buffer),
@@ -665,18 +707,19 @@ impl Core {
         let last = (session.messages.last_mut()).filter(|m| m.id.is_some() && m.id == message);
         if let Some(last) = last
             && let Some(start) = buffer.marker(last.start)
-            && start + last.len == end
+            && buffer.marker(last.end) == Some(end)
             && session.stream.is_none()
         {
             buffer.insert_output(end, text);
-            last.len += text.chars().count();
-            let range = start + PROMPT.len()..start + last.len;
+            let to = end + text.chars().count();
+            buffer.set_marker(last.end, to).expect("just inserted");
+            let range = start + PROMPT.len()..to;
             render(buffer, range.clone(), false, None);
             self.chips.paint(buffer, range);
             // Its first line's band and borders go on again, the bottom one moving down.
             buffer.remove_properties(start..start + 1);
             prompt_glyph(buffer, start);
-            user_lines(buffer, start..start + last.len);
+            user_lines(buffer, start..to);
             return;
         }
         self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
@@ -782,7 +825,7 @@ impl Core {
             let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
             let command = tool_command(&call, Some(&*term)).map_or(0, fence_len);
             let fence = (term.sgr.backticks.max(2) + 1).max(command);
-            let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
+            let chars = term.sgr.chars - usize::from(term.sgr.text.ends_with('\n'));
             term.rendered = (!term.sgr.text.is_empty()).then(|| TermRender {
                 bytes: output.len(),
                 chars,
@@ -797,20 +840,26 @@ impl Core {
         let call_id = call.tool_call_id.clone();
         match session.tools.get_mut(&call.tool_call_id) {
             Some(tool) => {
-                let start = take_tool_meta(buffer, tool) - tool.len;
-                rewrite(buffer, start..start + tool.len, &text);
-                (tool.call, tool.header, tool.len) = (call, header, len);
+                take_tool_meta(buffer, tool);
+                let start = tool.range(buffer).start;
+                rewrite(buffer, tool.range(buffer), &text);
+                buffer
+                    .set_marker(tool.end, start + len)
+                    .expect("just rewritten");
+                (tool.call, tool.header) = (call, header);
                 (tool.term, tool.dirty, tool.faces, tool.output) = (term, false, faces, output);
                 (tool.ran, tool.ended, tool.time, tool.link) = (ran, ended, time, link);
             }
             None => {
                 let end = session.end(buffer);
                 buffer.insert_output(end, &format!("{text}\n\n"));
+                let mut marker =
+                    |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
                 let tool = Tool {
-                    start: (buffer.add_marker(end, InsertionType::Stay)).expect("in the text"),
+                    start: marker(end),
+                    end: marker(end + len),
                     call,
                     header,
-                    len,
                     open: false,
                     arrived,
                     waited,
@@ -844,9 +893,9 @@ impl Core {
             for call in session.group_calls(g) {
                 self.show_tool(id, self.agents[&id].tools[&call].call.clone());
             }
-            let session = self.agents.get_mut(&id).expect("found above");
-            let buffer = self.buffers.get_mut(session.buffer).expect("found above");
-            session.render_group(buffer, g);
+            if let Some((session, buffer)) = self.session_buffer(id) {
+                session.render_group(buffer, g);
+            }
         }
     }
 
@@ -889,10 +938,7 @@ impl Core {
         if self.agents.get(&id).is_some_and(|s| s.plan.is_none()) {
             self.end_stream(id);
         }
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         if session.plan.is_none() {
@@ -901,17 +947,18 @@ impl Core {
         let text = plan_text(plan);
         let len = text.chars().count();
         let start = match &mut session.plan {
-            Some((marker, old)) => {
-                let start = buffer.marker(*marker).expect("live while shown");
-                rewrite(buffer, start..start + *old, &text);
-                *old = len;
-                start
+            Some((start, end)) => {
+                let range = extent(buffer, *start, *end);
+                rewrite(buffer, range.clone(), &text);
+                (buffer.set_marker(*end, range.start + len)).expect("just rewritten");
+                range.start
             }
             None => {
                 let end = session.end(buffer);
                 buffer.insert_output(end, &format!("{text}\n\n"));
-                let marker = buffer.add_marker(end, InsertionType::Stay);
-                session.plan = Some((marker.expect("in the text"), len));
+                let mut marker =
+                    |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
+                session.plan = Some((marker(end), marker(end + len)));
                 end
             }
         };
@@ -983,10 +1030,7 @@ impl Core {
     ) {
         self.end_stream(id);
         let now = self.now();
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         // A non-blocking question stands apart, so the turn's later calls group below it.
@@ -1000,9 +1044,9 @@ impl Core {
         buffer.insert_output(end, &format!("{text}\n\n"));
         body.render(buffer, end, &title);
         let shown = (tool.as_ref()).and_then(|t| session.tools.get(t).map(|t| t.call.clone()));
-        let mut marker = || (buffer.add_marker(end, InsertionType::Stay)).expect("in the text");
-        let (start, row) = (marker(), marker());
+        let mut marker = |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
         let len = text.chars().count();
+        let (start, row, end) = (marker(end), marker(end), marker(end + len));
         session.asks.push(Ask {
             tool,
             since: now,
@@ -1010,7 +1054,7 @@ impl Core {
             title,
             body,
             start,
-            len,
+            end,
             row,
         });
         session.add_row(buffer, Row::Ask { start: row, len });
@@ -1072,9 +1116,16 @@ impl Core {
                 // shortcut: links are found as the block renders; a file indexed later isn't
                 // linked until it renders again, and RET on one since dropped sends the prompt.
                 let index = self.index.get(&session.project);
-                let len = render_message(buffer, start..end, &stream.source, index);
-                if let Some(message) = session.messages.last_mut() {
-                    message.len = len;
+                let (byte, at) = stream.stable;
+                let tail = &stream.source[byte..];
+                let (len, (b, c)) = render_message(buffer, start + at..end, tail, index);
+                stream.stable = (byte + b, at + c);
+                #[cfg(debug_assertions)]
+                render::check_message(buffer, start..start + at + len, &stream.source, index);
+                if let Some(message) = session.messages.last() {
+                    buffer
+                        .set_marker(message.end, start + at + len)
+                        .expect("just rendered");
                 }
             } else if !session.fold_stream(buffer) {
                 render(buffer, start..end, thought, None);
@@ -1110,7 +1161,7 @@ impl Core {
                     header = Some(end - start);
                 }
                 (Block::Message(_), Some(clock), Some(message)) => {
-                    let end = start + message.len;
+                    let end = message.range(buffer).end;
                     let time = [(clock.as_str(), FaceName::Annotation)];
                     put_meta(buffer, end, META_INDENT, &time);
                 }
@@ -1125,10 +1176,7 @@ impl Core {
     /// Drops the newlines a streamed message ends with, as Claude's does before a tool call, so
     /// one blank line still separates it from the next block.
     fn trim_message(&mut self, id: AgentId) {
-        let Some(session) = self.agents.get_mut(&id) else {
-            return;
-        };
-        let Some(buffer) = self.buffers.get_mut(session.buffer) else {
+        let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         let Some(Stream {
@@ -1151,10 +1199,8 @@ impl Core {
             .count();
         if n > 0 {
             buffer.replace_output(end - n..end, "");
+            // The message's end marker moves back with the deleted newlines.
             session.stream.as_mut().expect("matched above").dirty = true;
-            if let Some(message) = session.messages.last_mut() {
-                message.len -= n;
-            }
         }
     }
 
@@ -1173,7 +1219,8 @@ impl Core {
         };
         let end = session.end(buffer) - "\n\n".len();
         let text = format!("Worked {}", long_duration(now - turn.start));
-        let start = end + "\n\n".len() - turn.len;
+        let start = buffer.marker(turn.line).expect("live while working");
+        buffer.remove_marker(turn.line);
         let len = retime(buffer, start..end, &text, FaceName::Annotation);
         // Frame 6's summary rule: two columns in, a line through the rest of the row.
         for line in [
@@ -1197,9 +1244,10 @@ impl Core {
         if let Some(turn) = &mut session.turn {
             let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
             let text = format!("Working for {}", long_duration(now - turn.start));
-            let start = end + "\n\n".len() - turn.len;
-            let len = retime(buffer, start..end, &text, FaceName::SessionThought);
-            turn.len = len + "\n\n".len();
+            let start = buffer.marker(turn.line).expect("live while working");
+            retime(buffer, start..end, &text, FaceName::SessionThought);
+            // Text put at its start moved it on.
+            buffer.set_marker(turn.line, start).expect("just retimed");
         }
         for (at, ask) in session.asks.iter().enumerate() {
             // Its tool's oldest ask counts.
@@ -1218,11 +1266,14 @@ impl Core {
                 }
                 continue;
             }
-            let (old, start) = (tool.time.chars().count(), buffer.marker(tool.start));
-            let end = start.expect("live while shown") + tool.header;
+            let (old, range) = (tool.time.chars().count(), tool.range(buffer));
+            let end = range.start + tool.header;
             let len = retime(buffer, end - old..end, &text, FaceName::Annotation);
             tool.header = tool.header - old + len;
-            tool.len = tool.len - old + len;
+            // The time can end the block, where its `Stay` end doesn't follow an insertion.
+            buffer
+                .set_marker(tool.end, range.end - old + len)
+                .expect("retimed");
             tool.time = text;
         }
     }
@@ -1313,13 +1364,11 @@ impl Core {
         }
     }
 
-    // shortcut: open calls still rebuild all markdown properties; make them incremental if long open output is slow.
+    /// Appends a command's new output to its block: a folded call's, or an open call's past the
+    /// cut, into its hidden lines; false for the rest, which `show_tool` rebuilds.
     fn append_tool_output(&mut self, id: AgentId, call: &ToolCallId) -> bool {
         let session = self.agents.get_mut(&id).expect("known session");
         let tool = session.tools.get_mut(call).expect("dirty call");
-        if tool.open {
-            return false;
-        }
         let Some(term) = &mut tool.term else {
             return false;
         };
@@ -1331,15 +1380,27 @@ impl Core {
         }
         let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
         let tail = &output[rendered.bytes..];
-        let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
+        let chars = term.sgr.chars - usize::from(term.sgr.text.ends_with('\n'));
         let buffer = self
             .buffers
             .get_mut(session.buffer)
             .expect("session buffer");
-        let start = buffer.marker(tool.start).expect("live while shown");
-        let at = start + tool.len - rendered.fence - 1;
+        let at = extent(buffer, tool.start, tool.end).end - rendered.fence - 1;
+        // An open call's hidden lines end where its output does, under the `… N more lines` fold.
+        let fold = match tool.open {
+            true => match buffer.fold_ending_at(at) {
+                Some(fold) => Some(fold),
+                None => return false,
+            },
+            false => None,
+        };
         buffer.replace_output(at..at, tail);
-        tool.len += chars - rendered.chars;
+        if let Some((fold, from)) = fold {
+            let end = at + chars - rendered.chars;
+            let text = buffer.text();
+            let lines = text.char_to_line(end) - text.char_to_line(from) + 1;
+            buffer.extend_fold(fold, end, more_lines(lines));
+        }
         let keep = rendered.faces.saturating_sub(1);
         tool.faces
             .truncate(tool.faces.len() - rendered.faces + keep);
@@ -1957,8 +2018,12 @@ impl Ctx<'_> {
         let (content, shown, sent) = question.content(&answer);
         let line = format!("✓ {shown}");
         let accept = ElicitationAcceptAction::new().content(content);
-        let ask = &mut self.core.agents.get_mut(&id).expect("found above").asks[at];
-        if let Body::Question(question) = &mut ask.body {
+        let ask = self.core.agents.get_mut(&id).map(|s| &mut s.asks[at]);
+        if let Some(Ask {
+            body: Body::Question(question),
+            ..
+        }) = ask
+        {
             question.sent = sent;
         }
         let response = ClientResponse::CreateElicitationResponse(CreateElicitationResponse::new(
@@ -2042,11 +2107,11 @@ impl Ctx<'_> {
             .expect("a pending question's session");
         let ask = &mut session.asks[at];
         let buffer = self.core.buffers.get_mut(session.buffer)?;
-        let start = buffer.marker(ask.start).expect("live while pending");
+        let Range { start, end } = ask.range(buffer);
         let new = rows_text(&ask.body.rows(&ask.title));
         let len = new.chars().count();
         let mut kept = None;
-        if len == ask.len {
+        if len == end - start {
             let old: Vec<_> = buffer.text().slice(start..start + len).chars().collect();
             for (i, (o, n)) in old.into_iter().zip(new.chars()).enumerate() {
                 if o != n {
@@ -2057,16 +2122,19 @@ impl Ctx<'_> {
         } else {
             // Point's line and column in the block, kept as its lines change length.
             let text = buffer.text();
-            if selected == session.buffer && (start..=start + ask.len).contains(&point) {
+            if selected == session.buffer && (start..=end).contains(&point) {
                 let line = text.char_to_line(point);
                 kept = Some((
                     line - text.char_to_line(start),
                     point - text.line_to_char(line),
                 ));
             }
-            rewrite(buffer, start..start + ask.len, &new);
-            ask.len = len;
+            rewrite(buffer, start..end, &new);
         }
+        // A changed last char takes the `Stay` end back to it.
+        buffer
+            .set_marker(ask.end, start + len)
+            .expect("just redrawn");
         ask.body.render(buffer, start, &ask.title);
         let row = ask.row;
         session.settle_row(buffer, row, len);
@@ -2292,7 +2360,7 @@ impl Ctx<'_> {
         let (&id, session) = core.agents.iter().find(|(_, s)| s.buffer == buffer)?;
         session.asks.iter().enumerate().find_map(|(at, ask)| {
             let start = b.marker(ask.start)?;
-            if !(start..=start + ask.len).contains(&point) {
+            if !(start..=ask.range(b).end).contains(&point) {
                 return None;
             }
             let line = b.text().slice(start..point).chars().filter(|&c| c == '\n');
@@ -2485,7 +2553,7 @@ impl Ctx<'_> {
         }
         core.end_stream(id);
         let clock = core.clock();
-        let session = core.agents.get_mut(&id).expect("found above");
+        let session = core.agents.get_mut(&id).ok_or("the session is gone")?;
         let b = core
             .buffers
             .get_mut(buffer)
@@ -2500,32 +2568,28 @@ impl Ctx<'_> {
         prompt_glyph(b, end - PROMPT.len());
         b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
         let line = start + input.chars().count() + "\n\n".len();
+        let working_line = b.add_marker(line, InsertionType::Advance)?;
         (b.add_property(line..line + working.chars().count(), dim())).expect("just appended");
         let echo = start - PROMPT.len();
+        let to = start + input.chars().count();
         let message = Message {
             id: None,
             user: true,
             start: b.add_marker(echo, InsertionType::Stay)?,
-            len: PROMPT.len() + input.chars().count(),
+            end: b.add_marker(to, InsertionType::Stay)?,
         };
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
-        user_lines(b, echo..echo + message.len);
+        user_lines(b, echo..to);
         if let Some(clock) = clock {
-            put_meta(
-                b,
-                echo + message.len,
-                META_INDENT,
-                &[(&clock, FaceName::Annotation)],
-            );
+            put_meta(b, to, META_INDENT, &[(&clock, FaceName::Annotation)]);
         }
         let end = b.len_chars();
-        let session = core.agents.get_mut(&id).expect("found above");
         session.fold_pastes(b, start);
         session.messages.push(message);
         session.turn = Some(Turn {
             start: self.now,
-            len: working.chars().count() + "\n\n".len(),
+            line: working_line,
         });
         let request = PromptRequest::new(session_id, core.chips.blocks(&input));
         self.effects
@@ -2588,71 +2652,49 @@ impl Ctx<'_> {
     /// Elsewhere in a group, it opens or folds the group. In a block of several questions, it
     /// opens the next one.
     pub(crate) fn agent_toggle_tool_call(&mut self) -> Result<(), String> {
-        if let Some((id, at, _)) = self.ask_at_point() {
-            let question = self.core.agents[&id].asks[at].question();
-            if question.is_some_and(|q| q.several()) {
+        let core = &mut *self.core;
+        let point = core.point();
+        let buffer = core.windows.window.buffer();
+        let session = (core.agents.iter_mut()).find(|(_, s)| s.buffer == buffer);
+        let b = core
+            .buffers
+            .get_mut(buffer)
+            .expect("current buffer is live");
+        let (&id, session) = session.ok_or("No tool call here")?;
+        // Point past the line it ends on goes back to its start.
+        let back = |(start, line): (usize, usize)| (point > line).then_some(start);
+        let to = match session.block_at(b, point).ok_or("No tool call here")? {
+            At::Ask(at) => {
                 self.open_question(id, at, |q| {
                     q.open = Some(q.open.map_or(0, |i| (i + 1) % q.fields.len()))
                 });
                 return Ok(());
             }
-        }
-        let core = &mut *self.core;
-        let point = core.point();
-        let buffer = core.windows.window.buffer();
-        let session = (core.agents.values_mut()).find(|s| s.buffer == buffer);
-        let b = core
-            .buffers
-            .get_mut(buffer)
-            .expect("current buffer is live");
-        let session = session.ok_or("No tool call here")?;
-        if let Some(start) = session.toggle_paste(b, point) {
-            return self.goto(start);
-        }
-        if let Some((start, line)) = session.toggle_answer(b, point) {
-            return if point > line {
-                self.goto(start)
-            } else {
-                Ok(())
-            };
-        }
-        let call = (session.tools.iter())
-            .find(|(_, t)| {
-                let end = if t.open { t.len } else { t.header };
-                // A row with nothing to open leaves `TAB` to its group.
-                (t.group.is_none() || t.len > t.header)
-                    && !session.hidden(t)
-                    && (b.marker(t.start)).is_some_and(|s| (s..=s + end).contains(&point))
-            })
-            .map(|(call, _)| call.clone());
-        let Some(call) = call else {
-            if let Some((start, first)) = session.toggle_thought(b, point) {
-                return if point > first {
-                    self.goto(start)
-                } else {
-                    Ok(())
-                };
+            At::Paste(i) => Some(session.toggle_paste(b, i)),
+            At::Answer(i) => back(session.toggle_answer(b, i)),
+            At::Thought(g, r) => back(session.toggle_thought(b, g, r)),
+            At::Group(g) => match session.toggle_group(b, g) {
+                (start, line, false) => back((start, line)),
+                _ => None,
+            },
+            At::Tool(call) => {
+                let tool = session.tools.get_mut(&call).expect("just found");
+                // Without content there is nothing to show, so it stays folded for when content
+                // comes.
+                let range = tool.range(b);
+                tool.open = !tool.open && range.len() > tool.header;
+                let start = range.start;
+                b.remove_properties(range);
+                let mark = start + if tool.group.is_some() { 2 } else { 0 };
+                b.replace_output(mark..mark + 1, if tool.open { "▾" } else { "▸" });
+                render_tool(b, tool);
+                back((start, start + tool.header))
             }
-            let (start, line, open) =
-                (session.toggle_group(b, point)).ok_or("No tool call here")?;
-            return if !open && point > line {
-                self.goto(start)
-            } else {
-                Ok(())
-            };
         };
-        let tool = session.tools.get_mut(&call).expect("just found");
-        // Without content there is nothing to show, so it stays folded for when content comes.
-        tool.open = !tool.open && tool.len > tool.header;
-        let start = b.marker(tool.start).expect("live while shown");
-        b.remove_properties(start..start + tool.len);
-        let mark = start + if tool.group.is_some() { 2 } else { 0 };
-        b.replace_output(mark..mark + 1, if tool.open { "▾" } else { "▸" });
-        render_tool(b, tool);
-        if point > start + tool.header {
-            return self.goto(start);
+        match to {
+            Some(start) => self.goto(start),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// `agent-cancel`: sends `session/cancel` while a turn runs, then answers the pending
@@ -2886,8 +2928,9 @@ impl Ctx<'_> {
             })
             .collect();
         (asks.iter().zip(lens)).for_each(|(ask, len)| core.close_wait(id, ask, len));
-        let session = core.agents.get_mut(&id).expect("found above");
-        if !std::mem::replace(&mut session.ended, true) {
+        if let Some(session) = core.agents.get_mut(&id)
+            && !std::mem::replace(&mut session.ended, true)
+        {
             let agent = &session.agent;
             let line = match signal {
                 Some(signal) => format!("{agent} session killed by {signal}"),
@@ -4087,8 +4130,7 @@ mod tests {
         let buffer = h.core.buffers.get(session.buffer).unwrap();
         (session.messages.iter())
             .map(|m| {
-                let start = buffer.marker(m.start).unwrap();
-                let text = buffer.text().slice(start..start + m.len).to_string();
+                let text = buffer.text().slice(m.range(buffer)).to_string();
                 (m.id.as_ref().map(|id| id.0.to_string()), text)
             })
             .collect()
@@ -5289,6 +5331,41 @@ mod tests {
     }
 
     #[test]
+    fn appending_past_the_cut_matches_rendering_the_call_afresh() {
+        let more: String = (2..=40)
+            .map(|i| format!("\u{1b}[3{}mline {i}\u{1b}[0m plain\n", i % 7 + 1))
+            .collect();
+        for size in [1, 7, 64, 1000] {
+            let (mut fast, mut fresh) = (session(), session());
+            for h in [&mut fast, &mut fresh] {
+                tool(h, command());
+                output(h, "terminal_output", "t", "first\n");
+                h.joined_frame(800., 600.);
+                h.keys("M-< TAB");
+            }
+            for chunk in more.as_bytes().chunks(size) {
+                let chunk = std::str::from_utf8(chunk).unwrap();
+                for h in [&mut fast, &mut fresh] {
+                    output(h, "terminal_output_delta", "t", chunk);
+                    h.joined_frame(800., 600.);
+                }
+                let call = fresh.core.agents[&AgentId(0)].tools.values().next();
+                fresh.core.show_tool(AgentId(0), call.unwrap().call.clone());
+                assert_eq!(fast.core.text(), fresh.core.text(), "chunks of {size}");
+                // A fold first rendered one char long sorts before the rule and indent at its
+                // start, which it doesn't layer with, so only the set of properties is compared.
+                let sorted = |h: &Harness| {
+                    let mut props: Vec<_> = props(h).iter().map(|p| format!("{p:?}")).collect();
+                    props.sort();
+                    props
+                };
+                assert_eq!(sorted(&fast), sorted(&fresh), "chunks of {size}");
+            }
+            assert_eq!(shown(&mut fast, 30)[22], "… 20 more lines");
+        }
+    }
+
+    #[test]
     fn backticks_in_a_command_and_its_output_stay_fenced() {
         let mut h = session();
         let call = command().raw_input(serde_json::json!({"command": "echo ````"}));
@@ -5703,6 +5780,170 @@ mod tests {
         );
     }
 
+    fn blocks(h: &mut Harness) -> Vec<String> {
+        h.core.frame();
+        let session = &h.core.agents[&AgentId(0)];
+        session.block_texts(h.core.buffers.get(session.buffer).unwrap())
+    }
+
+    #[test]
+    fn block_ends_follow_streaming_rewrites_and_meta_lines() {
+        let mut h = session();
+        h.clock("14:01:05");
+        h.keys("a RET");
+        agent_chunk(&mut h, "m", "Hello");
+        assert_eq!(blocks(&mut h), ["> a", "Hello", "Working for 0s"]);
+        agent_chunk(&mut h, "m", " **world**\n\n");
+        thought(&mut h, "hmm");
+        assert_eq!(
+            blocks(&mut h),
+            ["> a", "Hello **world**", "hmm", "Working for 0s"]
+        );
+        tool(&mut h, ls());
+        h.advance(secs(3));
+        assert_eq!(
+            blocks(&mut h),
+            [
+                "> a",
+                "Hello **world**",
+                "Thought for 0s\nhmm",
+                "▸ ●    Running ls\n```\n$ ls\n```",
+                "Working for 3s"
+            ]
+        );
+        let done = ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Completed)
+            .raw_output(serde_json::json!("a.txt\nb.txt"));
+        tool_update(&mut h, "t", done);
+        let ran = "▸ ✓    Ran ls\n```\n$ ls\na.txt\nb.txt\n```";
+        assert!(
+            h.core.text().contains(&format!("{ran}\n3.0s\n")),
+            "its time under it"
+        );
+        let mut want = [
+            "> a",
+            "Hello **world**",
+            "Thought for 0s\nhmm",
+            ran,
+            "Working for 3s",
+        ];
+        assert_eq!(blocks(&mut h), want, "rewritten in place");
+        on_line(&mut h, "▸ ✓");
+        h.keys("TAB");
+        let open = ran.replace('▸', "▾");
+        want[3] = &open;
+        assert_eq!(blocks(&mut h), want, "opened");
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        assert!(h.core.text().contains("\nWorked 3s 14:01:08\n"));
+        assert_eq!(blocks(&mut h), want[..4], "the turn ended");
+    }
+
+    #[test]
+    fn block_ends_follow_asks_answers_waiting_counters_and_plans() {
+        use PlanEntryPriority::*;
+        use PlanEntryStatus::*;
+        let mut h = session();
+        h.keys("a RET");
+        tool(&mut h, ls());
+        ask(&mut h, 1, "t", None);
+        h.advance(secs(2));
+        h.core.frame();
+        let running = "▸ ●    Running ls\n```\n$ ls\n```";
+        assert!(
+            h.core
+                .text()
+                .contains(&format!("{running}\nwaiting 0:02\n"))
+        );
+        let permission = asked("`ls`");
+        assert_eq!(
+            blocks(&mut h),
+            ["> a", running, &permission, "Working for 2s"],
+            "the waiting counter goes under the call"
+        );
+        h.keys("C-c C-y");
+        assert!(
+            h.core
+                .text()
+                .contains(&format!("{running}\n\n✓ allowed once\n\n"))
+        );
+        assert_eq!(
+            blocks(&mut h),
+            ["> a", running, "Working for 2s"],
+            "the counter went"
+        );
+        question(&mut h, 2, None);
+        let asking = " Question  Which?\n   1   A  First\n   2   B\n   o   Own answer\n  1-2 answer   RET answer with the row at point   C-c C-k skip";
+        assert_eq!(
+            blocks(&mut h).last().map(String::as_str),
+            Some("Working for 2s")
+        );
+        assert_eq!(blocks(&mut h).iter().rev().nth(1).unwrap(), asking);
+        on_line(&mut h, "Question");
+        h.keys("2");
+        let answered = "▸ ✓ Which?  B\n question_0  B";
+        assert_eq!(
+            blocks(&mut h).iter().rev().nth(1).unwrap(),
+            answered,
+            "settled with its rows"
+        );
+        on_line(&mut h, "▸ ✓ Which?");
+        h.keys("TAB");
+        let open = answered.replace('▸', "▾");
+        assert_eq!(blocks(&mut h).iter().rev().nth(1).unwrap(), &open, "opened");
+        plan(&mut h, &[("Read the code", InProgress, High)]);
+        plan(
+            &mut h,
+            &[("Read", Completed, High), ("Write tests", Pending, Medium)],
+        );
+        let plan = "Plan\n  ✓ Read\n  ○ Write tests";
+        assert_eq!(
+            blocks(&mut h).iter().rev().nth(1).unwrap(),
+            plan,
+            "replaced in place"
+        );
+
+        let mut h = grouped();
+        ask(&mut h, 3, "a", None);
+        h.advance(secs(2));
+        let read = |file, time| format!("  ▸ ✓    Read {file}.rs {time}\nOutput:\n```\ntext\n```");
+        let (a, b) = (read("a", "waiting 0:02"), read("b", "0.0s"));
+        assert_eq!(
+            blocks(&mut h),
+            ["> a", &a, &b, &asked("Read a.rs"), "Working for 2s"],
+            "a grouped call's counter is in its header, the group's time under its rows"
+        );
+    }
+
+    #[test]
+    fn a_message_streamed_in_any_split_renders_as_a_whole() {
+        let source = "# Title é\n\n- one\n- two\n  more\n- three\n\n```rust\nfn a() {}\n\nb\n```\n| k | v |\n|---|--:|\n| a | 1 |\n| bb | 22 |\n\nSetext\n===\n\nlast *words*";
+        let chars: Vec<char> = source.chars().collect();
+        for size in [1, 2, 5, 13] {
+            for first in 1..=size {
+                let mut h = session();
+                let mut sent = String::new();
+                let mut from = 0;
+                while from < chars.len() {
+                    let to = (if from == 0 { first } else { from + size }).min(chars.len());
+                    let text: String = chars[from..to].iter().collect();
+                    chunk(&mut h, &text);
+                    sent.push_str(&text);
+                    h.joined_frame(800., 600.);
+                    let message = &h.core.agents[&AgentId(0)].messages[0];
+                    let b = h.core.current();
+                    check_message(b, message.range(b), &sent, None);
+                    from = to;
+                }
+                let stream = h.core.agents[&AgentId(0)].stream.as_ref().unwrap();
+                assert_eq!(
+                    &source[stream.stable.0..],
+                    "last *words*",
+                    "only the tail renders"
+                );
+            }
+        }
+    }
+
     #[test]
     fn tables_are_drawn_into_the_text() {
         let mut h = session();
@@ -5726,8 +5967,7 @@ mod tests {
         );
         let message = &h.core.agents[&AgentId(0)].messages[0];
         let b = h.core.current();
-        let start = b.marker(message.start).unwrap();
-        let text = b.text().slice(start..start + message.len).to_string();
+        let text = b.text().slice(message.range(b)).to_string();
         assert!(
             text.starts_with(" a   b \n x  10"),
             "its length follows: {text:?}"

@@ -69,6 +69,31 @@ fn tool_output(core: &mut Core, id: AgentId, text: &str) {
     );
 }
 
+fn update(core: &mut Core, id: AgentId, update: serde_json::Value) {
+    core.handle(
+        Instant::now(),
+        Msg::AgentUpdate {
+            id,
+            update: Box::new(SessionNotification::new(
+                "s",
+                serde_json::from_value(update).unwrap(),
+            )),
+        },
+    );
+}
+
+fn read(core: &mut Core, id: AgentId, call: &str) {
+    update(
+        core,
+        id,
+        serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": call, "title": format!("Read {call}.rs"),
+            "kind": "read", "status": "completed", "rawOutput": "text",
+            "locations": [{"path": format!("{call}.rs")}]
+        }),
+    );
+}
+
 fn session() -> (Core, AgentId) {
     let mut core = Core::default();
     let project =
@@ -121,6 +146,45 @@ fn session() -> (Core, AgentId) {
     );
     black_box(core.frame());
     (core, id)
+}
+
+/// Thought rows inside a tool group add their properties out of order.
+fn unsorted(output: &mut String) {
+    let (mut core, id) = session();
+    for call in ["a", "b", "c"] {
+        if call != "a" {
+            update(
+                &mut core,
+                id,
+                serde_json::json!({
+                    "sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "hmm"}
+                }),
+            );
+        }
+        read(&mut core, id, call);
+    }
+    let shows_thought = |core: &mut Core| {
+        (core.frame().windows[0].display.lines.iter()).any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.text.contains("Thought for"))
+        })
+    };
+    // Opens the group from its line, two above the end, then shows its rows.
+    command(&mut core, "end-of-buffer");
+    command(&mut core, "previous-line");
+    command(&mut core, "previous-line");
+    command(&mut core, "agent-toggle-tool-call");
+    command(&mut core, "end-of-buffer");
+    assert!(shows_thought(&mut core));
+    measure(
+        "hot-stream/unsorted-props-clean-frame",
+        || {
+            black_box(core.frame());
+        },
+        output,
+    );
+    assert!(shows_thought(&mut core));
 }
 
 fn main() {
@@ -306,6 +370,7 @@ fn main() {
             &mut output,
         );
     }
+    unsorted(&mut output);
     prepared(
         "hot-stream/hidden-first-show-frame",
         || {
