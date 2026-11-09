@@ -555,10 +555,12 @@ pub(super) fn answered(kind: PermissionOptionKind) -> &'static str {
 
 /// Replaces permission request `ask`'s block with the dim `line`.
 pub(super) fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
-    let start = buffer.marker(ask.start).expect("live while pending");
-    rewrite(buffer, start..start + ask.len, line);
-    (buffer.add_property(start..start + line.chars().count(), dim())).expect("inside the block");
+    let range = ask.range(buffer);
+    rewrite(buffer, range.clone(), line);
+    let end = range.start + line.chars().count();
+    (buffer.add_property(range.start..end, dim())).expect("inside the block");
     buffer.remove_marker(ask.start);
+    buffer.remove_marker(ask.end);
 }
 
 /// Replaces question `ask`'s block with its answered line, from `line`'s `<mark> <outcome>`,
@@ -570,7 +572,8 @@ pub(super) fn settle_question(
     clock: Option<&str>,
 ) -> Answered {
     let question = ask.question().expect("settled as a question");
-    let start = buffer.marker(ask.start).expect("live while pending");
+    let range = ask.range(buffer);
+    let start = range.start;
     let mut chars = line.chars();
     let mark = chars.next().expect("a mark");
     let label = question.label();
@@ -580,17 +583,19 @@ pub(super) fn settle_question(
     let rows: String = (question.sent.iter())
         .map(|(n, a)| format!("\n {n:<name$}  {a}"))
         .collect();
-    rewrite(buffer, start..start + ask.len, &format!("{head}{rows}"));
+    rewrite(buffer, range, &format!("{head}{rows}"));
     let outcome = head.chars().count();
     let time = clock.map_or(String::new(), |c| format!(" {c}"));
     buffer.insert_output(start + outcome, &time);
     let line = outcome + time.chars().count();
+    let end = start + line + rows.chars().count();
+    buffer.set_marker(ask.end, end).expect("just settled");
     Answered {
         start: ask.start,
         label: 4 + label.chars().count(),
         outcome,
         line,
-        len: line + rows.chars().count(),
+        end: ask.end,
         name,
         mark: match mark {
             '✓' => FaceName::StatusRunning,
@@ -604,7 +609,8 @@ pub(super) fn settle_question(
 /// Renders answered line `a`, two columns in when `grouped`: its marks, its dim outcome and
 /// time, and its rows on `session-block` when open, else hidden.
 pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) {
-    let start = buffer.marker(a.start).expect("live with its session");
+    let Range { start, end } = extent(buffer, a.start, a.end);
+    let len = end - start;
     let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
     let indent = if grouped { 2 } else { 0 };
     let mut props = vec![
@@ -620,10 +626,7 @@ pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) 
         props.push((a.outcome + 1..a.line, face(FaceName::Annotation)));
     }
     if a.open {
-        let rows = buffer
-            .text()
-            .slice(start + a.line..start + a.len)
-            .to_string();
+        let rows = buffer.text().slice(start + a.line..end).to_string();
         let mut at = a.line + 1;
         for row in rows.split('\n').skip(1) {
             // Under the label, the row's leading space its padding.
@@ -635,8 +638,8 @@ pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) 
             props.push((at + 1..at + 1 + a.name, dim()));
             at += row.chars().count() + 1;
         }
-    } else if a.len > a.line {
-        props.push((a.line..a.len, Prop::Invisible(String::new())));
+    } else if len > a.line {
+        props.push((a.line..len, Prop::Invisible(String::new())));
     }
     for (r, prop) in props {
         (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
@@ -926,7 +929,7 @@ pub(super) fn time_face(tool: &Tool) -> FaceName {
 
 /// Takes the line under a call that is not in a group off, returning where the block ends.
 pub(super) fn take_tool_meta(buffer: &mut Buffer, tool: &mut Tool) -> usize {
-    let end = buffer.marker(tool.start).expect("live while shown") + tool.len;
+    let end = tool.range(buffer).end;
     let meta = std::mem::take(&mut tool.meta);
     if meta > 0 {
         buffer.remove_properties(end + 1..end + 1 + meta);
@@ -948,12 +951,13 @@ pub(super) fn put_tool_meta(buffer: &mut Buffer, tool: &mut Tool) {
 /// hidden output gets no properties of its own, so no property contains another's end and starts
 /// and ends ascend.
 pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
-    let start = buffer.marker(tool.start).expect("live while shown");
+    let Range { start, end: last } = tool.range(buffer);
+    let len = last - start;
     if tool.replaced {
         // With what parts it from the row before in a group, else from the next block.
         let span = match tool.group {
-            Some(_) => start - 1..start + tool.len,
-            None => start..start + tool.len + "\n\n".len() + tool.meta,
+            Some(_) => start - 1..last,
+            None => start..last + "\n\n".len() + tool.meta,
         };
         buffer.remove_properties(span.clone());
         let hide = Prop::Invisible(String::new());
@@ -1007,7 +1011,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         props.push((suffix..suffix + 1, Prop::AlignRight));
         props.push((suffix + 1..tool.header, face(time_face(tool))));
     }
-    let body = tool.header + 1..tool.len;
+    let body = tool.header + 1..len;
     if tool.open && !body.is_empty() {
         let content = buffer
             .text()
@@ -1052,7 +1056,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             line += l.chars().count() + 1;
         }
     } else if !body.is_empty() {
-        props.push((tool.header..tool.len, Prop::Invisible(String::new())));
+        props.push((tool.header..len, Prop::Invisible(String::new())));
     }
     props.sort_by_key(|(r, _)| (r.start, r.end));
     for (r, prop) in props {
