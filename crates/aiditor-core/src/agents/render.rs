@@ -827,7 +827,8 @@ pub(super) fn tool_output(call: &ToolCall, term: Option<&Term>) -> Option<(Strin
 #[derive(Default)]
 pub(super) struct Sgr {
     pub(super) text: String,
-    pub(super) len: usize,
+    /// `text`'s length in chars.
+    pub(super) chars: usize,
     face: Vec<FaceRef>,
     pub(super) faces: Faces,
     pub(super) backticks: usize,
@@ -840,11 +841,13 @@ impl Handler for Sgr {
         self.text.push(c);
         if !self.face.is_empty() {
             match self.faces.last_mut() {
-                Some((r, f)) if r.end == self.len && *f == self.face => r.end += 1,
-                _ => self.faces.push((self.len..self.len + 1, self.face.clone())),
+                Some((r, f)) if r.end == self.chars && *f == self.face => r.end += 1,
+                _ => self
+                    .faces
+                    .push((self.chars..self.chars + 1, self.face.clone())),
             }
         }
-        self.len += 1;
+        self.chars += 1;
     }
     fn put_tab(&mut self, count: u16) {
         (0..count).for_each(|_| self.input('\t'));
@@ -853,7 +856,7 @@ impl Handler for Sgr {
     fn linefeed(&mut self) {
         self.run = 0;
         self.text.push('\n');
-        self.len += 1;
+        self.chars += 1;
     }
     fn terminal_attribute(&mut self, attr: Attr) {
         let index = |c: Color| match c {

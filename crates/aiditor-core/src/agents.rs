@@ -825,7 +825,7 @@ impl Core {
             let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
             let command = tool_command(&call, Some(&*term)).map_or(0, fence_len);
             let fence = (term.sgr.backticks.max(2) + 1).max(command);
-            let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
+            let chars = term.sgr.chars - usize::from(term.sgr.text.ends_with('\n'));
             term.rendered = (!term.sgr.text.is_empty()).then(|| TermRender {
                 bytes: output.len(),
                 chars,
@@ -1380,7 +1380,7 @@ impl Core {
         }
         let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
         let tail = &output[rendered.bytes..];
-        let chars = term.sgr.len - usize::from(term.sgr.text.ends_with('\n'));
+        let chars = term.sgr.chars - usize::from(term.sgr.text.ends_with('\n'));
         let buffer = self
             .buffers
             .get_mut(session.buffer)
