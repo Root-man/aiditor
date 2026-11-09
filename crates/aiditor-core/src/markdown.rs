@@ -9,23 +9,28 @@ use tree_sitter_md::MarkdownParser;
 use crate::buffer::{Decoration, FaceRef, Prop};
 use crate::settings::FaceName;
 
+/// Where a rendered text's last top-level block starts: a byte of the source and a char of
+/// the rendered text. Later text can change only how that block and what follows it render.
+pub(crate) type Stable = (usize, usize);
+
 /// The text that shows `text` as rendered markdown and its properties, in char offsets of that
 /// text, sorted by start then end. Faces and hidden markup never overlap, and code blocks
 /// decorate whole lines, so starts and ends both ascend. Words `is_file` accepts and bare web
 /// URLs are links. In a tool call's `body` a fence line takes no row: it hides with the newline
 /// joining it to its block. The text is `text` itself but for `tables`, where each top-level
-/// pipe table is replaced by its drawn lines.
+/// pipe table is replaced by its drawn lines. Last comes where its last top-level block starts.
 pub(crate) fn render(
     text: &str,
     thought: bool,
     body: bool,
     tables: bool,
     is_file: impl Fn(&str) -> bool,
-) -> (String, Vec<(Range<usize>, Prop)>) {
+) -> (String, Vec<(Range<usize>, Prop)>, Stable) {
     let mut parser = MarkdownParser::default();
     let parsed = parse(&mut parser, text, thought, body, Some(tables), &is_file);
+    let stable = text[..parsed.stable].chars().count();
     if parsed.tables.is_empty() {
-        return (text.into(), parsed.props);
+        return (text.into(), parsed.props, (parsed.stable, stable));
     }
     let mut shown = String::new();
     let mut drawn_props = Vec::new();
@@ -72,7 +77,9 @@ pub(crate) fn render(
         .chain(drawn_props)
         .collect();
     props.sort_by_key(|(r, _)| (r.start, r.end));
-    (shown, props)
+    let before = regions.iter().filter(|(region, _)| region.end <= stable);
+    let shown_stable = (stable as isize + before.map(|(_, grew)| grew).sum::<isize>()) as usize;
+    (shown, props, (parsed.stable, shown_stable))
 }
 
 /// A top-level pipe table's byte range and its header, delimiter and body rows'.
@@ -89,6 +96,8 @@ struct Parsed {
     props: Vec<(Range<usize>, Prop)>,
     links: Vec<(Range<usize>, String)>,
     tables: Vec<Table>,
+    /// The byte its last top-level block's line starts at, the block found inside sections.
+    stable: usize,
 }
 
 fn parse(
@@ -106,6 +115,7 @@ fn parse(
             props: Vec::new(),
             links,
             tables: found,
+            stable: 0,
         };
     };
     let title = &[FaceRef::Syntax("text.title"), FaceRef::Bold][..];
@@ -291,10 +301,22 @@ fn parse(
     let links = (links.into_iter())
         .map(|(r, url)| (chars[r.start]..chars[r.end], url))
         .collect();
+    let mut node = tree.block_tree().root_node();
+    let mut stable = 0;
+    while let Some(last) =
+        (node.named_child_count().checked_sub(1)).and_then(|i| node.named_child(i as u32))
+    {
+        if last.kind() != "section" {
+            stable = text[..last.start_byte()].rfind('\n').map_or(0, |i| i + 1);
+            break;
+        }
+        node = last;
+    }
     Parsed {
         props,
         links,
         tables: found,
+        stable,
     }
 }
 
@@ -779,7 +801,8 @@ mod tests {
 
     /// `text` rendered with tables drawn: its shown text and each table row's decoration.
     fn drawn(text: &str) -> (String, Vec<(Range<usize>, Prop)>) {
-        render(text, false, false, true, |w| w.starts_with("src/"))
+        let (text, props, _) = render(text, false, false, true, |w| w.starts_with("src/"));
+        (text, props)
     }
 
     /// The text of `shown`'s chars in `r`.
@@ -908,5 +931,49 @@ mod tests {
             };
             assert!(props.windows(2).all(ascend), "{props:?}");
         }
+    }
+
+    /// Where `text`'s last top-level block starts: its source text and rendered text from there.
+    fn stable(text: &str) -> (String, String) {
+        let (shown, _, (byte, char)) = render(text, false, false, true, |_| false);
+        (text[byte..].into(), shown.chars().skip(char).collect())
+    }
+
+    #[test]
+    fn the_stable_point_is_the_last_top_level_blocks_start() {
+        let same = |tail: &str| (tail.to_string(), tail.to_string());
+        assert_eq!(
+            stable("one\n\ntwo é\nmore"),
+            same("two é\nmore"),
+            "a paragraph"
+        );
+        assert_eq!(stable("one"), same("one"), "the only block");
+        assert_eq!(stable(""), same(""));
+        // Inside the sections headings open, down to the last.
+        assert_eq!(stable("# A\n\na\n\n## B\n\nlast"), same("last"));
+        assert_eq!(stable("# A\n\na\n\n## B\n"), same("## B\n"), "a heading");
+        assert_eq!(
+            stable("a\n\n- x\n- y\n\n  z"),
+            same("- x\n- y\n\n  z"),
+            "a list"
+        );
+        assert_eq!(
+            stable("a\n\n```\nb\n\nc"),
+            same("```\nb\n\nc"),
+            "an open fence"
+        );
+        assert_eq!(stable("a\n  b"), same("a\n  b"), "a lazy continuation");
+        assert_eq!(stable("a\n\nb\n==="), same("b\n==="), "a setext heading");
+    }
+
+    #[test]
+    fn the_stable_point_counts_the_chars_drawn_tables_add() {
+        let table = "| a | b |\n|---|--:|\n| 1 | 22 |\n";
+        let (source, shown) = stable(&format!("{table}\nafter é"));
+        assert_eq!((source.as_str(), shown.as_str()), ("after é", "after é"));
+        let text = format!("x\n\n{table}\nmid\n\n{table}");
+        let (source, shown) = stable(&text);
+        assert_eq!(source, table, "a table last");
+        assert_eq!(shown, render(table, false, false, true, |_| false).0);
     }
 }

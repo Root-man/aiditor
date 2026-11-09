@@ -554,6 +554,8 @@ pub fn build(
             _ => None,
         })
         .collect();
+    // The chars of the line last looked up in `line_faces`, and its face.
+    let under = std::cell::Cell::new((0..0, None));
     // The face of the char at `at`: its line's, its syntax, then its properties, then the region.
     let face_at = |at: usize| {
         let i = syntax.partition_point(|(range, _)| range.end <= at);
@@ -561,10 +563,18 @@ pub fn build(
             .filter(|(range, _)| range.start <= at)
             .map_or(Face::default(), |(_, face)| *face);
         if !line_faces.is_empty() {
-            let line = text.char_to_line(at);
-            if let Some((_, under)) = line_faces.iter().find(|(l, _)| *l == line) {
-                face = face.over(*under);
+            let (mut chars, mut line_face) = under.take();
+            if !chars.contains(&at) {
+                let line = text.char_to_line(at);
+                chars = text.line_to_char(line)..text.line_to_char(line + 1);
+                line_face = (line_faces.iter())
+                    .find(|(l, _)| *l == line)
+                    .map(|(_, f)| *f);
             }
+            if let Some(under) = line_face {
+                face = face.over(under);
+            }
+            under.set((chars, line_face));
         }
         for (range, prop) in &props {
             if !range.contains(&at) {
@@ -660,6 +670,15 @@ pub fn build(
     };
     // Display columns of `line` consumed so far, the skipped ones included.
     let mut col: usize = 0;
+    // Icon starts in position order, passed with `pos`, which only moves forward.
+    let mut icons: Vec<(usize, Icon)> = (props.iter())
+        .filter_map(|(r, prop)| match prop {
+            Prop::Icon(icon) if r.len() == 2 => Some((r.start, *icon)),
+            _ => None,
+        })
+        .collect();
+    icons.sort_by_key(|&(at, _)| at);
+    let mut next_icon = 0;
     let mut positions = search.map(|_| Vec::new());
     let mut source_positions = Vec::new();
     while lines.len() < rows {
@@ -792,10 +811,10 @@ pub fn build(
         if positions.is_some() {
             source_positions.push(Some(pos - 1));
         }
-        let icon = props.iter().find_map(|(r, prop)| match prop {
-            Prop::Icon(icon) if r.start == pos - 1 && r.len() == 2 => Some(*icon),
-            _ => None,
-        });
+        while icons.get(next_icon).is_some_and(|&(at, _)| at < pos - 1) {
+            next_icon += 1;
+        }
+        let icon = (icons.get(next_icon)).and_then(|&(at, icon)| (at == pos - 1).then_some(icon));
         if let Some(icon) = icon.filter(|_| range.contains(&col)) {
             line.icons.push((col - 1 - range.start, icon));
         }

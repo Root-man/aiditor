@@ -1313,13 +1313,11 @@ impl Core {
         }
     }
 
-    // shortcut: open calls still rebuild all markdown properties; make them incremental if long open output is slow.
+    /// Appends a command's new output to its block: a folded call's, or an open call's past the
+    /// cut, into its hidden lines; false for the rest, which `show_tool` rebuilds.
     fn append_tool_output(&mut self, id: AgentId, call: &ToolCallId) -> bool {
         let session = self.agents.get_mut(&id).expect("known session");
         let tool = session.tools.get_mut(call).expect("dirty call");
-        if tool.open {
-            return false;
-        }
         let Some(term) = &mut tool.term else {
             return false;
         };
@@ -1338,7 +1336,21 @@ impl Core {
             .expect("session buffer");
         let start = buffer.marker(tool.start).expect("live while shown");
         let at = start + tool.len - rendered.fence - 1;
+        // An open call's hidden lines end where its output does, under the `… N more lines` fold.
+        let fold = match tool.open {
+            true => match buffer.fold_ending_at(at) {
+                Some(fold) => Some(fold),
+                None => return false,
+            },
+            false => None,
+        };
         buffer.replace_output(at..at, tail);
+        if let Some((fold, from)) = fold {
+            let end = at + chars - rendered.chars;
+            let text = buffer.text();
+            let lines = text.char_to_line(end) - text.char_to_line(from) + 1;
+            buffer.extend_fold(fold, end, more_lines(lines));
+        }
         tool.len += chars - rendered.chars;
         let keep = rendered.faces.saturating_sub(1);
         tool.faces
@@ -5286,6 +5298,41 @@ mod tests {
         h.joined_frame(800., 600.);
         h.keys("TAB");
         assert_eq!(shown(&mut h, 30)[22], "… 7 more lines");
+    }
+
+    #[test]
+    fn appending_past_the_cut_matches_rendering_the_call_afresh() {
+        let more: String = (2..=40)
+            .map(|i| format!("\u{1b}[3{}mline {i}\u{1b}[0m plain\n", i % 7 + 1))
+            .collect();
+        for size in [1, 7, 64, 1000] {
+            let (mut fast, mut fresh) = (session(), session());
+            for h in [&mut fast, &mut fresh] {
+                tool(h, command());
+                output(h, "terminal_output", "t", "first\n");
+                h.joined_frame(800., 600.);
+                h.keys("M-< TAB");
+            }
+            for chunk in more.as_bytes().chunks(size) {
+                let chunk = std::str::from_utf8(chunk).unwrap();
+                for h in [&mut fast, &mut fresh] {
+                    output(h, "terminal_output_delta", "t", chunk);
+                    h.joined_frame(800., 600.);
+                }
+                let call = fresh.core.agents[&AgentId(0)].tools.values().next();
+                fresh.core.show_tool(AgentId(0), call.unwrap().call.clone());
+                assert_eq!(fast.core.text(), fresh.core.text(), "chunks of {size}");
+                // A fold first rendered one char long sorts before the rule and indent at its
+                // start, which it doesn't layer with, so only the set of properties is compared.
+                let sorted = |h: &Harness| {
+                    let mut props: Vec<_> = props(h).iter().map(|p| format!("{p:?}")).collect();
+                    props.sort();
+                    props
+                };
+                assert_eq!(sorted(&fast), sorted(&fresh), "chunks of {size}");
+            }
+            assert_eq!(shown(&mut fast, 30)[22], "… 20 more lines");
+        }
     }
 
     #[test]

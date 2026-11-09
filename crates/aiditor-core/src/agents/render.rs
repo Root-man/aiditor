@@ -33,7 +33,7 @@ pub(super) fn render_message(
     index: Option<&FileIndex>,
 ) -> usize {
     let is_file = |word: &str| file_link(index, word).is_some();
-    let (text, props) = markdown::render(source, false, false, true, is_file);
+    let (text, props, _) = markdown::render(source, false, false, true, is_file);
     rewrite(buffer, range.clone(), &text);
     for (r, prop) in props {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
@@ -81,7 +81,7 @@ pub(super) fn prompt_glyph(buffer: &mut Buffer, at: usize) {
 }
 
 /// Puts the `session-user` background on each line of the echo at `range`, a top border on its
-/// first and a bottom one on its last, and indents its later lines. A one-char range per line keeps the properties sorted.
+/// first and a bottom one on its last, and indents its later lines.
 pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
     let text = buffer.text().slice(range.clone()).to_string();
     let after_newlines = text.chars().enumerate().filter(|(_, c)| *c == '\n');
@@ -884,6 +884,12 @@ fn hidden_output(content: &str, at: usize) -> Option<(Range<usize>, usize)> {
     Some((ends[SHOWN_LINES - 1] + 1..ends[ends.len() - 1], lines))
 }
 
+/// The placeholder of an open command's `lines` hidden output lines.
+pub(super) fn more_lines(lines: usize) -> String {
+    let plural = if lines == 1 { "" } else { "s" };
+    format!("… {lines} more line{plural}")
+}
+
 /// The face of a call's time: `status-failed` for an exit code.
 pub(super) fn time_face(tool: &Tool) -> FaceName {
     let exit = tool.term.as_ref().and_then(|t| t.exit.as_ref());
@@ -1005,9 +1011,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         });
         props.extend(faces.map(shifted));
         if let Some((hidden, lines)) = cut {
-            let plural = if lines == 1 { "" } else { "s" };
-            let more = format!("… {lines} more line{plural}");
-            props.push(shifted((hidden, Prop::Invisible(more))));
+            props.push(shifted((hidden, Prop::Invisible(more_lines(lines)))));
         }
         // Two columns past the status mark.
         let body_indent = Prop::Line(Decoration::Indent(STATUS.end + indent + 1));
