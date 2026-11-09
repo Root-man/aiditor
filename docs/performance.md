@@ -133,6 +133,14 @@ The scope diagnostic rebuilt one scope at both sizes, retaining unrelated scope 
 
 The report separates these costs, includes all comparisons and the remaining GUI tail variation, and maps the specification scenarios to tests and inspection. Its real-window baseline/yes/cat runs each contain 120 input-to-paint samples; those event percentiles remain separate from headless batch averages. No CI timing gate is added.
 
+## Full suite, 2026-11-08
+
+The [full-suite report](measurements/2026-11-08-full-benchmarks/README.md) reruns `core`, `hot_paths`, `services` and the GUI suite on `main` after the interactive agent session milestone, compared with #404's after values on the same host. Display and frame construction cases are mostly 10–40% slower (still sub-millisecond), agent-buffer shown-clean frames 126 → 211 µs, dirty-stream frames 12% faster, grep about 10% faster; GUI tail latency is unchanged.
+
+## M6 scan fixes, 2026-11-09
+
+The [scan-fixes report](measurements/2026-11-09-scan-fixes/README.md) measures the `fix-m6-refactor-scan-findings` change ([scan record](refactoring-opportunities.md#m6-scan-2026-11-09)) against a baseline at `0f74a9b` and the 2026-11-08 run. A session with properties added out of order draws a clean frame in 0.24 ms instead of 56.7 ms, dirty-stream and first-show frames take 1.4 ms instead of about 44 ms, open command output appends in 0.27 ms whatever its size (was 3.4–15 ms), and the colored copy-mode scroll pair is 0.61 ms (was 4.0 ms). Display and frame cases are 6–20% faster. The 2026-11-08 report's `hot-stream/shown-*` comparisons with #404 are not like-for-like: #457 added a table to that fixture.
+
 ## GUI input during terminal floods
 
 ```sh
