@@ -164,6 +164,85 @@ impl Editor {
         })
     }
 
+    /// Minibuffer candidate `i`'s row: its name with its matches and its annotation.
+    fn completion_row(
+        &self,
+        mb: &aiditor_core::display::Minibuffer,
+        i: usize,
+        font: &Font,
+        cell: Pixels,
+    ) -> gpui::Div {
+        let settings = self.core.settings();
+        let theme = &settings.theme;
+        let line_height = px(settings.line_height());
+        let inset = px(TEXT_INSET);
+        let selected = theme
+            .face(FaceName::CompletionSelected)
+            .bg
+            .unwrap_or(theme.background());
+        let (c, note) = (&mb.candidates[i], &mb.annotations[i]);
+        let runs = if !mb.groups.is_empty() {
+            grep_runs(c, font, theme)
+        } else {
+            let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
+            faces.extend(
+                mb.highlights[i]
+                    .iter()
+                    .map(|range| (range.clone(), theme.face(FaceName::CompletionMatch))),
+            );
+            completion_runs(
+                c.len(),
+                &faces,
+                if mb.files && c.ends_with('/') {
+                    theme.face(FaceName::Directory)
+                } else {
+                    Face::default()
+                },
+                (Some(i) == mb.selected).then_some(selected),
+                font,
+                theme,
+            )
+        };
+        let text = div()
+            .debug_selector(|| format!("completion-name-{i}"))
+            .min_w_0()
+            .overflow_hidden()
+            .child(StyledText::new(c.clone()).with_runs(runs));
+        let text = if mb.files { text.flex_1() } else { text };
+        let note = (!note.is_empty()).then(|| {
+            let face = if mb.files {
+                theme.face(FaceName::Annotation)
+            } else {
+                Face::default()
+            };
+            let run = text_run(note.len(), face, false, font, theme);
+            let note = div()
+                .debug_selector(|| format!("completion-annotation-{i}"))
+                .ml(cell * 2.)
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(StyledText::new(note.clone()).with_runs(vec![run])),
+                );
+            if mb.files { note } else { note.opacity(0.6) }
+        });
+        let candidate = row(line_height)
+            .debug_selector(|| format!("completion-{i}"))
+            .flex()
+            .overflow_hidden()
+            .px(inset)
+            .child(text)
+            .children(note);
+        match Some(i) == mb.selected {
+            true => candidate.bg(rgb(selected)),
+            false => candidate,
+        }
+    }
+
     fn echo_area(
         &self,
         minibuffer: Option<aiditor_core::display::Minibuffer>,
@@ -178,13 +257,6 @@ impl Editor {
         let line_height = px(settings.line_height());
         let mode_line_height = px(settings.mode_line_height());
         let inset = px(TEXT_INSET);
-        let row = |height: Pixels| {
-            div()
-                .h(height)
-                .line_height(height)
-                .whitespace_nowrap()
-                .overflow_hidden()
-        };
         let line = || row(line_height);
         let cursor_fg = theme
             .face(FaceName::Cursor)
@@ -235,124 +307,53 @@ impl Editor {
                     .children(status);
                 let prompt = div().px(inset).child(prompt);
                 let padding = (mb.candidates.len() + mb.groups.len()..mb.rows).map(|_| line());
-                let selected = theme
-                    .face(FaceName::CompletionSelected)
-                    .bg
-                    .unwrap_or(theme.background());
-                let grep = !mb.groups.is_empty();
-                let mut groups = mb.groups.into_iter().peekable();
-                let rows = mb
-                    .candidates
-                    .into_iter()
-                    .zip(mb.highlights)
-                    .zip(mb.annotations)
-                    .enumerate();
-                let candidates = rows.flat_map(|(i, ((c, highlights), note))| {
-                    let header = if groups.peek().is_some_and(|(at, _)| *at == i) {
-                        let (_, label) = groups.next().unwrap();
-                        let rule = || {
-                            div().h(px(1.)).bg(rgb(theme
-                                .face(FaceName::Separator)
-                                .fg
-                                .unwrap_or(theme.foreground())))
-                        };
-                        let run = text_run(
-                            label.len(),
-                            theme.face(FaceName::GrepFile),
-                            false,
-                            font,
-                            theme,
-                        );
-                        Some(
-                            line()
-                                .debug_selector(|| format!("grep-header-{i}"))
-                                .flex()
-                                .items_center()
-                                .gap(cell)
-                                .px(inset)
-                                .child(
-                                    rule()
-                                        .w(cell * 2.)
-                                        .flex_shrink_0()
-                                        .debug_selector(|| format!("grep-rule-before-{i}")),
+                let mut groups = mb.groups.iter().peekable();
+                let candidates =
+                    (0..mb.candidates.len()).flat_map(|i| {
+                        let header =
+                            if groups.peek().is_some_and(|(at, _)| *at == i) {
+                                let (_, label) = groups.next().unwrap();
+                                let rule = || {
+                                    div().h(px(1.)).bg(rgb(theme
+                                        .face(FaceName::Separator)
+                                        .fg
+                                        .unwrap_or(theme.foreground())))
+                                };
+                                let run = text_run(
+                                    label.len(),
+                                    theme.face(FaceName::GrepFile),
+                                    false,
+                                    font,
+                                    theme,
+                                );
+                                Some(
+                                    line()
+                                        .debug_selector(|| format!("grep-header-{i}"))
+                                        .flex()
+                                        .items_center()
+                                        .gap(cell)
+                                        .px(inset)
+                                        .child(
+                                            rule()
+                                                .w(cell * 2.)
+                                                .flex_shrink_0()
+                                                .debug_selector(|| format!("grep-rule-before-{i}")),
+                                        )
+                                        .child(div().min_w_0().overflow_hidden().child(
+                                            StyledText::new(label.clone()).with_runs(vec![run]),
+                                        ))
+                                        .child(
+                                            rule()
+                                                .flex_1()
+                                                .debug_selector(|| format!("grep-rule-after-{i}")),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(StyledText::new(label).with_runs(vec![run])),
-                                )
-                                .child(
-                                    rule()
-                                        .flex_1()
-                                        .debug_selector(|| format!("grep-rule-after-{i}")),
-                                ),
-                        )
-                    } else {
-                        None
-                    };
-                    let runs = if grep {
-                        grep_runs(&c, font, theme)
-                    } else {
-                        let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
-                        faces.extend(
-                            highlights
-                                .into_iter()
-                                .map(|range| (range, theme.face(FaceName::CompletionMatch))),
-                        );
-                        completion_runs(
-                            c.len(),
-                            &faces,
-                            if mb.files && c.ends_with('/') {
-                                theme.face(FaceName::Directory)
                             } else {
-                                Face::default()
-                            },
-                            (Some(i) == mb.selected).then_some(selected),
-                            font,
-                            theme,
-                        )
-                    };
-                    let text = div()
-                        .debug_selector(|| format!("completion-name-{i}"))
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(StyledText::new(c).with_runs(runs));
-                    let text = if mb.files { text.flex_1() } else { text };
-                    let note = (!note.is_empty()).then(|| {
-                        let face = if mb.files {
-                            theme.face(FaceName::Annotation)
-                        } else {
-                            Face::default()
-                        };
-                        let run = text_run(note.len(), face, false, font, theme);
-                        let note = div()
-                            .debug_selector(|| format!("completion-annotation-{i}"))
-                            .ml(cell * 2.)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .flex()
-                            .justify_end()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .child(StyledText::new(note).with_runs(vec![run])),
-                            );
-                        if mb.files { note } else { note.opacity(0.6) }
+                                None
+                            };
+                        let candidate = self.completion_row(&mb, i, font, cell);
+                        header.into_iter().chain(Some(candidate))
                     });
-                    let candidate = line()
-                        .debug_selector(|| format!("completion-{i}"))
-                        .flex()
-                        .overflow_hidden()
-                        .px(inset)
-                        .child(text)
-                        .children(note);
-                    let candidate = match Some(i) == mb.selected {
-                        true => candidate.bg(rgb(selected)),
-                        false => candidate,
-                    };
-                    header.into_iter().chain(Some(candidate))
-                });
                 div().child(prompt).children(candidates).children(padding)
             }
             None if !key_hints.is_empty() => div()
@@ -698,6 +699,15 @@ impl Render for Editor {
         }
         root
     }
+}
+
+/// A one-line row `height` high that clips what doesn't fit.
+fn row(height: Pixels) -> gpui::Div {
+    div()
+        .h(height)
+        .line_height(height)
+        .whitespace_nowrap()
+        .overflow_hidden()
 }
 
 #[cfg(test)]
