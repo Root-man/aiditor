@@ -63,7 +63,8 @@ pub(crate) struct Row {
     pub(crate) height: Pixels,
     /// The height its text is set in: less than `height` on a `Small` line, so it sits at the top.
     text_height: Pixels,
-    decorations: Vec<Decoration>,
+    /// Each decoration with its colour.
+    decorations: Vec<(Decoration, Option<u32>)>,
     /// Where an `HRule` decoration shows, as x from the window's left.
     gaps: Vec<Range<Pixels>>,
     /// How far right of the text's start its text and background start.
@@ -270,7 +271,9 @@ impl Element for FrameElement {
                         height,
                         text_height,
                         gaps,
-                        decorations: line.decorations.clone(),
+                        decorations: (line.decorations.iter())
+                            .map(|d| (d.clone(), decoration_color(d, &settings.theme)))
+                            .collect(),
                         indent,
                         number,
                         text,
@@ -410,7 +413,12 @@ impl Element for FrameElement {
     ) {
         let editor = self.editor.read(cx);
         let focus = editor.focus.clone();
-        let theme = editor.core.settings().theme.clone();
+        let theme = &editor.core.settings().theme;
+        let (background, cursor_color) = (theme.background(), theme.cursor());
+        let (divider, separator) = (
+            theme.face(FaceName::Divider).bg,
+            theme.face(FaceName::Separator).fg,
+        );
         let line_height = px(editor.core.settings().line_height());
         let font_size = px(editor.core.settings().font_size);
         let mode_line_height = px(editor.core.settings().mode_line_height());
@@ -420,17 +428,17 @@ impl Element for FrameElement {
             cx,
         );
         // Windows tile the area, so the gaps between them are the only divider left showing.
-        if let Some(divider) = theme.face(FaceName::Divider).bg {
+        if let Some(divider) = divider {
             window.paint_quad(fill(bounds, rgb(divider)));
         }
         for p in painted.iter() {
-            window.paint_quad(fill(p.bounds, rgb(theme.background())));
+            window.paint_quad(fill(p.bounds, rgb(background)));
             let mask = ContentMask { bounds: p.bounds };
             window.with_content_mask(Some(mask), |window| {
                 let width = p.bounds.size.width;
                 for row in &p.rows {
                     let origin = p.bounds.origin + point(px(0.), row.top);
-                    for decoration in &row.decorations {
+                    for (decoration, color) in &row.decorations {
                         // An indented line's background runs from its text to the right inset.
                         let left = match row.indent > px(0.) {
                             true => p.text_x + row.indent,
@@ -438,42 +446,35 @@ impl Element for FrameElement {
                         };
                         let (h, one) = (row.height, px(1.));
                         // Each quad is x, y, width and height from the row's left top.
-                        let (color, quads) = match *decoration {
+                        let quads = match *decoration {
                             // The echo's band spans the window on its indented lines too.
                             Decoration::Background(name)
                                 if left > px(0.) && name != FaceName::SessionUser =>
                             {
                                 let w = width - left - p.text_right;
-                                (theme.face(name).bg, vec![(left, px(0.), w, h)])
+                                vec![(left, px(0.), w, h)]
                             }
-                            Decoration::Background(name) => {
-                                (theme.face(name).bg, vec![(left, px(0.), width, h)])
-                            }
-                            Decoration::Rule(name) => {
-                                (theme.face(name).fg, vec![(px(0.), px(0.), px(2.), h)])
-                            }
-                            Decoration::Bar(name) => {
-                                (theme.face(name).fg, vec![(px(0.), px(0.), px(3.), h)])
-                            }
-                            Decoration::Indent(_) | Decoration::Small => (None, Vec::new()),
-                            Decoration::Border { top, face } => {
+                            Decoration::Background(_) => vec![(left, px(0.), width, h)],
+                            Decoration::Rule(_) => vec![(px(0.), px(0.), px(2.), h)],
+                            Decoration::Bar(_) => vec![(px(0.), px(0.), px(3.), h)],
+                            Decoration::Indent(_) | Decoration::Small => Vec::new(),
+                            Decoration::Border { top, .. } => {
                                 let y = if top { px(0.) } else { h - one };
-                                (theme.face(face).fg, vec![(px(0.), y, width, one)])
+                                vec![(px(0.), y, width, one)]
                             }
                             Decoration::Table { ref edges, first } => {
                                 let text = p.text_x..width - p.text_right;
-                                let rules = table_rules(edges, first, text, p.cell, h);
-                                (theme.face(FaceName::Separator).fg, rules)
+                                table_rules(edges, first, text, p.cell, h)
                             }
-                            Decoration::HRule(face) => {
+                            Decoration::HRule(_) => {
                                 let y = (h / 2.).floor();
                                 let gaps =
                                     row.gaps.iter().map(|g| (g.start, y, g.end - g.start, one));
-                                (theme.face(face).fg, gaps.collect())
+                                gaps.collect()
                             }
                         };
                         for (x, y, w, h) in quads {
-                            if let Some(color) = color {
+                            if let Some(color) = *color {
                                 let at = origin + point(x, y);
                                 window.paint_quad(fill(Bounds::new(at, size(w, h)), rgb(color)));
                             }
@@ -499,7 +500,7 @@ impl Element for FrameElement {
                         window.paint_svg(bounds, path, unit, i.color, cx).ok();
                     }
                 }
-                if let (Some(rule), Some(color)) = (p.rule, theme.face(FaceName::Separator).fg) {
+                if let (Some(rule), Some(color)) = (p.rule, separator) {
                     window.paint_quad(fill(rule, rgb(color)));
                 }
                 for c in &p.cells {
@@ -512,9 +513,9 @@ impl Element for FrameElement {
                 }
                 // After the rows, so a block cursor covers text and icons alike.
                 if let Some(cursor) = p.cursor.filter(|_| p.hollow) {
-                    window.paint_quad(outline(cursor, rgb(theme.cursor()), BorderStyle::Solid));
+                    window.paint_quad(outline(cursor, rgb(cursor_color), BorderStyle::Solid));
                 } else if let Some(cursor) = p.cursor {
-                    window.paint_quad(fill(cursor, rgb(theme.cursor())));
+                    window.paint_quad(fill(cursor, rgb(cursor_color)));
                     if let Some(under) = &p.cursor_char {
                         under
                             .paint(cursor.origin, cursor.size.height, window, cx)
@@ -595,6 +596,19 @@ fn styled(font: &Font, bold: bool, italic: bool) -> Font {
 fn to_bounds(rect: Rect, origin: Point<Pixels>) -> Bounds<Pixels> {
     let at = point(px(rect.x), px(rect.y));
     Bounds::new(origin + at, size(px(rect.width), px(rect.height)))
+}
+
+/// The colour `decoration` paints in: a background's or else a line's colour.
+fn decoration_color(decoration: &Decoration, theme: &Theme) -> Option<u32> {
+    match *decoration {
+        Decoration::Background(name) => theme.face(name).bg,
+        Decoration::Rule(name) | Decoration::Bar(name) | Decoration::HRule(name) => {
+            theme.face(name).fg
+        }
+        Decoration::Border { face, .. } => theme.face(face).fg,
+        Decoration::Table { .. } => theme.face(FaceName::Separator).fg,
+        Decoration::Indent(_) | Decoration::Small => None,
+    }
 }
 
 pub(crate) fn text_run(
