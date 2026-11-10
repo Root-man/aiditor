@@ -671,6 +671,13 @@ impl Ctx<'_> {
         if let Err(err) = self.try_call(name, args) {
             self.core.echo(err);
         }
+        // Point never rests on a session's `> ` marker: the prompt area starts after it.
+        let core = &mut *self.core;
+        let start = core.current().prompt_start();
+        let marker = start.saturating_sub(agents::PROMPT.len())..start;
+        if core.current().prompt.is_some() && marker.contains(&core.point()) {
+            (core.windows.window.set_point(&mut core.buffers, start)).expect("in the buffer");
+        }
         // A command that changes the buffer deactivates the mark, as in Emacs.
         if self.core.windows.window.buffer() == buffer && self.core.current().tick() != tick {
             self.core.windows.window.set_active(false);

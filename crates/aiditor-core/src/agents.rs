@@ -39,7 +39,7 @@ pub(crate) use questions::Preview;
 use render::*;
 
 /// The prompt line's text, just before the prompt area.
-const PROMPT: &str = "> ";
+pub(crate) const PROMPT: &str = "> ";
 /// The session buffer's major mode.
 pub(crate) const MODE: &str = "agent-session-mode";
 /// How often a shown session's working line and waiting counters tick.
@@ -8358,6 +8358,29 @@ mod tests {
         assert_eq!(
             h.core.text(),
             "> a\n\nTurn ended: cancelled\n\nWorked 0s\n\n> "
+        );
+    }
+
+    #[test]
+    fn point_never_rests_on_the_prompt_marker() {
+        let mut h = session();
+        chunk(&mut h, "Hi");
+        h.keys("a b");
+        let start = h.core.current().prompt_start();
+        h.keys("C-a");
+        assert_eq!(h.point(), start, "C-a stops after `> `");
+        h.keys("C-b");
+        assert_eq!(h.point(), start, "C-b stops at the prompt area's start");
+        h.keys("C-p C-a C-n");
+        assert_eq!(
+            h.point(),
+            start,
+            "a line motion onto the marker lands after it"
+        );
+        h.keys("C-p");
+        assert!(
+            h.point() < start - PROMPT.len(),
+            "C-p still leaves the prompt"
         );
     }
 
