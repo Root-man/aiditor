@@ -1096,6 +1096,7 @@ impl Core {
 
     /// Renders session `id`'s streamed block if chunks arrived since it was last rendered.
     fn render_stream(&mut self, id: AgentId) {
+        let table_width = self.settings.table_width;
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
@@ -1118,10 +1119,17 @@ impl Core {
                 let index = self.index.get(&session.project);
                 let (byte, at) = stream.stable;
                 let tail = &stream.source[byte..];
-                let (len, (b, c)) = render_message(buffer, start + at..end, tail, index);
+                let (len, (b, c)) =
+                    render_message(buffer, start + at..end, tail, index, table_width);
                 stream.stable = (byte + b, at + c);
                 #[cfg(debug_assertions)]
-                render::check_message(buffer, start..start + at + len, &stream.source, index);
+                render::check_message(
+                    buffer,
+                    start..start + at + len,
+                    &stream.source,
+                    index,
+                    table_width,
+                );
                 if let Some(message) = session.messages.last() {
                     buffer
                         .set_marker(message.end, start + at + len)
@@ -6127,7 +6135,7 @@ mod tests {
                     h.joined_frame(800., 600.);
                     let message = &h.core.agents[&AgentId(0)].messages[0];
                     let b = h.core.current();
-                    check_message(b, message.range(b), &sent, None);
+                    check_message(b, message.range(b), &sent, None, 100);
                     from = to;
                 }
                 let stream = h.core.agents[&AgentId(0)].stream.as_ref().unwrap();
@@ -6149,6 +6157,7 @@ mod tests {
         let row = Decoration::Table {
             edges: vec![0, 3, 6],
             first: true,
+            last: true,
         };
         assert!(line.decorations.contains(&row), "{:?}", line.decorations);
         assert!(h.core.text().starts_with(" a  b \n"), "the header alone");
@@ -6182,6 +6191,19 @@ mod tests {
     }
 
     #[test]
+    fn tables_wrap_at_the_table_width_setting() {
+        let mut h = session();
+        h.send(Msg::SettingsLoaded(Ok(Some("table_width = 10".into()))));
+        chunk(&mut h, "| a | b |\n|---|---|\n| one two | x |\n");
+        h.joined_frame(800., 600.);
+        assert!(
+            (h.core.text()).starts_with(" a      b \n one    x \n two      \n"),
+            "{:?}",
+            h.core.text()
+        );
+    }
+
+    #[test]
     fn a_message_time_goes_under_its_table_rows() {
         let mut h = session();
         h.clock("14:01:00");
@@ -6206,6 +6228,8 @@ mod tests {
     #[test]
     fn wide_tables_are_cut_and_scroll_as_one() {
         let mut h = session();
+        // Under the cap, so only the window cuts it.
+        h.core.settings.table_width = 1000;
         let wide = "w".repeat(150);
         let prose = "word ".repeat(40);
         chunk(

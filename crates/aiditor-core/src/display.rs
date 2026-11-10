@@ -606,12 +606,13 @@ pub fn build(
             };
             // A table's rules move with the columns scrolled off its line.
             let d = match d {
-                Decoration::Table { edges, first } => {
+                Decoration::Table { edges, first, last } => {
                     let left = columns(line.number).start as isize;
                     let edges = edges.iter().map(|e| e - left).collect();
                     Decoration::Table {
                         edges,
                         first: *first,
+                        last: *last,
                     }
                 }
                 d => d.clone(),
@@ -1761,7 +1762,11 @@ mod tests {
     fn a_table_row_is_cut_with_its_edges_shifted_by_the_offset() {
         let mut h = Harness::new(&[("a.txt", "abcdefghij\nx\n")]);
         h.open("a.txt");
-        let row = |edges| Decoration::Table { edges, first: true };
+        let row = |edges| Decoration::Table {
+            edges,
+            first: true,
+            last: true,
+        };
         prop(&mut h, 0..1, Prop::Line(row(vec![0, 3, 10])));
         let wrap = super::Wrap {
             width: 4,

@@ -17,17 +17,25 @@ pub(crate) type Stable = (usize, usize);
 /// text, sorted by start then end. Faces and hidden markup never overlap, and code blocks
 /// decorate whole lines, so starts and ends both ascend. Words `is_file` accepts and bare web
 /// URLs are links. In a tool call's `body` a fence line takes no row: it hides with the newline
-/// joining it to its block. The text is `text` itself but for `tables`, where each top-level
-/// pipe table is replaced by its drawn lines. Last comes where its last top-level block starts.
+/// joining it to its block. The text is `text` itself but with `tables`, a width cap, where each
+/// top-level pipe table is replaced by its drawn lines. Last comes where its last top-level block
+/// starts.
 pub(crate) fn render(
     text: &str,
     thought: bool,
     body: bool,
-    tables: bool,
+    tables: Option<usize>,
     is_file: impl Fn(&str) -> bool,
 ) -> (String, Vec<(Range<usize>, Prop)>, Stable) {
     let mut parser = MarkdownParser::default();
-    let parsed = parse(&mut parser, text, thought, body, Some(tables), &is_file);
+    let parsed = parse(
+        &mut parser,
+        text,
+        thought,
+        body,
+        Some(tables.is_some()),
+        &is_file,
+    );
     let stable = text[..parsed.stable].chars().count();
     if parsed.tables.is_empty() {
         return (text.into(), parsed.props, (parsed.stable, stable));
@@ -42,7 +50,8 @@ pub(crate) fn render(
         let before = text[from..table.range.start].chars().count();
         shown.push_str(&text[from..table.range.start]);
         let (start, at) = (source_at + before, shown_at + before);
-        let (drawn, props) = draw(&mut parser, text, table, &is_file);
+        let cap = tables.expect("tables found only when drawn");
+        let (drawn, props) = draw(&mut parser, text, table, cap, &is_file);
         drawn_props.extend(
             props
                 .into_iter()
@@ -403,12 +412,14 @@ fn cells(row: &str) -> Vec<String> {
 
 /// `table` drawn: a line per header and body row, each cell a space, its text padded to its
 /// column's width as the delimiter row aligns it and a space, with the properties in its chars.
+/// A table wider than `cap` wraps its wide columns' cells onto more lines of their row.
 // shortcut: widths count chars, so wide characters misalign columns; measure display width if
 // CJK or emoji tables show up.
 fn draw(
     parser: &mut MarkdownParser,
     text: &str,
     table: &Table,
+    cap: usize,
     is_file: &impl Fn(&str) -> bool,
 ) -> (String, Vec<(Range<usize>, Prop)>) {
     let rows: Vec<Vec<Cell>> = (table.rows.iter())
@@ -424,7 +435,7 @@ fn draw(
             .collect()
     });
     let columns = rows.first().map_or(0, Vec::len);
-    let widths: Vec<usize> = (0..columns)
+    let natural: Vec<usize> = (0..columns)
         .map(|c| {
             (rows.iter())
                 .filter_map(|r| r.get(c))
@@ -433,6 +444,7 @@ fn draw(
                 .unwrap_or(0)
         })
         .collect();
+    let widths = shares(&natural, cap);
     let mut edges = vec![0];
     for w in &widths {
         edges.push(edges.last().expect("starts with 0") + *w as isize + 2);
@@ -440,62 +452,134 @@ fn draw(
     let (mut drawn, mut props) = (String::new(), Vec::new());
     let mut start = 0;
     for (i, row) in rows.iter().enumerate() {
-        let decoration = Decoration::Table {
-            edges: edges.clone(),
-            first: i == 0,
-        };
-        props.push((start..start + 1, Prop::Line(decoration)));
+        // Each cell's lines, as ranges of its text.
+        let wrapped: Vec<Vec<Range<usize>>> = (widths.iter().enumerate())
+            .map(|(c, &w)| row.get(c).map_or(vec![0..0], |c| wrap(&c.text, w)))
+            .collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         let base = match i {
             0 => vec![FaceRef::Face(FaceName::SessionBlock), FaceRef::Bold],
             _ => Vec::new(),
         };
-        // Each char's faces and link, merged into runs below.
-        let mut line: Vec<(char, Vec<FaceRef>, Option<&str>)> = Vec::new();
-        let pad = |line: &mut Vec<_>, n| line.extend((0..n).map(|_| (' ', base.clone(), None)));
-        for (c, &width) in widths.iter().enumerate() {
-            let cell = row.get(c);
-            let gap = width - cell.map_or(0, |c| c.text.len());
-            let left = match aligns.get(c) {
-                Some((true, true)) => gap / 2,
-                Some((false, true)) => gap,
-                _ => 0,
+        for l in 0..height {
+            let decoration = Decoration::Table {
+                edges: edges.clone(),
+                first: i == 0 && l == 0,
+                last: l + 1 == height,
             };
-            pad(&mut line, 1 + left);
-            for (k, &ch) in cell.map_or(&[][..], |c| &c.text).iter().enumerate() {
-                let cell = cell.expect("has text");
-                let mut refs = base.clone();
-                for (r, f) in &cell.faces {
-                    if r.contains(&k) {
-                        refs.extend(f);
+            props.push((start..start + 1, Prop::Line(decoration)));
+            // Each char's faces and link, merged into runs below.
+            let mut line: Vec<(char, Vec<FaceRef>, Option<&str>)> = Vec::new();
+            let pad = |line: &mut Vec<_>, n| line.extend((0..n).map(|_| (' ', base.clone(), None)));
+            for (c, &width) in widths.iter().enumerate() {
+                let part = wrapped[c].get(l).cloned().unwrap_or(0..0);
+                let gap = width - part.len();
+                let left = match aligns.get(c) {
+                    Some((true, true)) => gap / 2,
+                    Some((false, true)) => gap,
+                    _ => 0,
+                };
+                pad(&mut line, 1 + left);
+                for k in part {
+                    let cell = &row[c];
+                    let mut refs = base.clone();
+                    for (r, f) in &cell.faces {
+                        if r.contains(&k) {
+                            refs.extend(f);
+                        }
                     }
+                    let url = (cell.links.iter()).find(|(r, _)| r.contains(&k));
+                    line.push((cell.text[k], refs, url.map(|(_, u)| u.as_str())));
                 }
-                let url = (cell.links.iter()).find(|(r, _)| r.contains(&k));
-                line.push((ch, refs, url.map(|(_, u)| u.as_str())));
+                pad(&mut line, gap - left + 1);
             }
-            pad(&mut line, gap - left + 1);
-        }
-        let mut k = 0;
-        while k < line.len() {
-            let run = (line[k..].iter())
-                .take_while(|(_, f, u)| (f, u) == (&line[k].1, &line[k].2))
-                .count();
-            let range = start + k..start + k + run;
-            if !line[k].1.is_empty() {
-                props.push((range.clone(), Prop::Named(line[k].1.clone())));
+            let mut k = 0;
+            while k < line.len() {
+                let run = (line[k..].iter())
+                    .take_while(|(_, f, u)| (f, u) == (&line[k].1, &line[k].2))
+                    .count();
+                let range = start + k..start + k + run;
+                if !line[k].1.is_empty() {
+                    props.push((range.clone(), Prop::Named(line[k].1.clone())));
+                }
+                if let Some(url) = line[k].2 {
+                    props.push((range, Prop::Url(url.into())));
+                }
+                k += run;
             }
-            if let Some(url) = line[k].2 {
-                props.push((range, Prop::Url(url.into())));
+            drawn.extend(line.iter().map(|(c, ..)| c));
+            start += line.len();
+            if l + 1 < height || i + 1 < rows.len() || text[table.range.clone()].ends_with('\n') {
+                drawn.push('\n');
+                start += 1;
             }
-            k += run;
-        }
-        drawn.extend(line.iter().map(|(c, ..)| c));
-        start += line.len();
-        if i + 1 < rows.len() || text[table.range.clone()].ends_with('\n') {
-            drawn.push('\n');
-            start += 1;
         }
     }
     (drawn, props)
+}
+
+/// The widths of columns `natural` chars wide in a table at most `cap` wide, each cell taking
+/// two spaces more: the columns that fit an equal share of the room keep their width and the
+/// rest share what's left, the first ones taking the remainder, at least 1 each.
+fn shares(natural: &[usize], cap: usize) -> Vec<usize> {
+    if natural.iter().map(|w| w + 2).sum::<usize>() <= cap {
+        return natural.to_vec();
+    }
+    let mut room = cap.saturating_sub(2 * natural.len());
+    let mut widths: Vec<Option<usize>> = vec![None; natural.len()];
+    loop {
+        // Every column fixed, as when all are empty and the cap leaves no room: they keep theirs.
+        let open = widths.iter().filter(|w| w.is_none()).count();
+        if open == 0 {
+            break;
+        }
+        let share = room / open;
+        let mut fixed = false;
+        for (w, &n) in widths.iter_mut().zip(natural) {
+            if w.is_none() && n <= share {
+                (*w, room, fixed) = (Some(n), room - n, true);
+            }
+        }
+        if !fixed {
+            break;
+        }
+    }
+    let open = widths.iter().filter(|w| w.is_none()).count().max(1);
+    let (share, extra) = (room / open, room % open);
+    let mut k = 0;
+    (widths.into_iter())
+        .map(|w| {
+            w.unwrap_or_else(|| {
+                k += 1;
+                (share + usize::from(k <= extra)).max(1)
+            })
+        })
+        .collect()
+}
+
+/// `text`'s lines at most `width` chars long, as ranges of it: each broken at its last space
+/// that fits, else inside the word at `width`, without the spaces at the break.
+fn wrap(text: &[char], width: usize) -> Vec<Range<usize>> {
+    let width = width.max(1);
+    let (mut lines, mut start) = (Vec::new(), 0);
+    while text.len() - start > width {
+        let end = start + width;
+        let mut next = (start + 1..=end)
+            .rev()
+            .find(|&i| text[i] == ' ')
+            .unwrap_or(end);
+        let mut stop = next;
+        while stop > start && text[stop - 1] == ' ' {
+            stop -= 1;
+        }
+        lines.push(start..stop);
+        while text.get(next) == Some(&' ') {
+            next += 1;
+        }
+        start = next;
+    }
+    lines.push(start..text.len());
+    lines
 }
 
 /// The byte ranges of `text`'s words that could name a file: the runs between whitespace,
@@ -608,7 +692,7 @@ mod tests {
     /// for faces that aren't the default.
     fn shown(text: &str, thought: bool) -> (String, Vec<(String, Face)>) {
         let theme = Settings::default().theme;
-        let props = render(text, thought, false, false, |w| w.starts_with("src/")).1;
+        let props = render(text, thought, false, None, |w| w.starts_with("src/")).1;
         let chars: Vec<char> = text.chars().collect();
         let hidden = |i: usize| {
             (props.iter()).any(|(r, p)| matches!(p, Prop::Invisible(_)) && r.contains(&i))
@@ -675,7 +759,7 @@ mod tests {
     #[test]
     fn code_blocks_decorate_their_lines_and_hide_fences() {
         let text = "```rust\nfn main() {}\n```\nafter\n\n    indented\n";
-        let props = render(text, false, false, false, |_| false).1;
+        let props = render(text, false, false, None, |_| false).1;
         let lines: Vec<_> = (props.iter())
             .filter(|(_, p)| matches!(p, Prop::Line(_)))
             .map(|(r, _)| text.chars().skip(r.start).take(r.len()).collect::<String>())
@@ -801,7 +885,7 @@ mod tests {
 
     /// `text` rendered with tables drawn: its shown text and each table row's decoration.
     fn drawn(text: &str) -> (String, Vec<(Range<usize>, Prop)>) {
-        let (text, props, _) = render(text, false, false, true, |w| w.starts_with("src/"));
+        let (text, props, _) = render(text, false, false, Some(100), |w| w.starts_with("src/"));
         (text, props)
     }
 
@@ -826,6 +910,7 @@ mod tests {
         let row = |first| Decoration::Table {
             edges: vec![0, 3, 7],
             first,
+            last: true,
         };
         assert_eq!(rows(&props), [(0, row(true)), (8, row(false))]);
         let (shown, _) = drawn("| a | b |\n|:-:|:--|\n| xyz | 1 |\n");
@@ -847,6 +932,92 @@ mod tests {
         assert_eq!(shown, " a  b \n");
         let (shown, _) = drawn("| a | b |\n|---|---|\n| long | x |");
         assert_eq!(shown, " a     b \n long  x ");
+        let (lines, _) = capped("| a | b |\n|---|---|\n| one two | x |", 10);
+        assert_eq!(
+            lines,
+            [" a      b ", " one    x ", " two      "],
+            "a row arriving wraps"
+        );
+    }
+
+    /// `text` drawn with tables at most `cap` wide: its lines and their decorations' flags.
+    fn capped(text: &str, cap: usize) -> (Vec<String>, Vec<(bool, bool)>) {
+        let (shown, props, _) = render(text, false, false, Some(cap), |_| false);
+        let flags = (rows(&props).into_iter())
+            .map(|(_, d)| match d {
+                Decoration::Table { first, last, .. } => (first, last),
+                _ => unreachable!(),
+            })
+            .collect();
+        (shown.lines().map(String::from).collect(), flags)
+    }
+
+    #[test]
+    fn wide_tables_wrap_their_cells() {
+        let (lines, flags) = capped("| k | v |\n|---|---|\n| a | one two three four |\n", 20);
+        assert_eq!(
+            lines,
+            [
+                " k  v               ",
+                " a  one two three   ",
+                "    four            "
+            ],
+            "k keeps its width, v takes the rest"
+        );
+        let edges = |props: &[(Range<usize>, Prop)]| match &rows(props)[1].1 {
+            Decoration::Table { edges, .. } => edges.clone(),
+            _ => unreachable!(),
+        };
+        let text = "| k | v |\n|---|---|\n| a | one two three four |\n";
+        assert_eq!(
+            edges(&render(text, false, false, Some(20), |_| false).1),
+            [0, 3, 20]
+        );
+        assert_eq!(
+            flags,
+            [(true, true), (false, false), (false, true)],
+            "the top rule on the first line, a bottom rule under each row's last"
+        );
+        let (lines, _) = capped("| k | v |\n|---|--:|\n| a | one two three four |\n", 20);
+        assert_eq!(
+            lines[1..],
+            [" a    one two three ", "               four "],
+            "right-aligned per line"
+        );
+        let (lines, _) = capped("| v |\n|---|\n| abcdefgh ij |\n", 7);
+        assert_eq!(
+            lines,
+            [" v     ", " abcde ", " fgh   ", " ij    "],
+            "a long word is cut"
+        );
+        let (lines, flags) = capped("| a b c | x |\n|---|---|\n| 1 | 2 |\n", 8);
+        assert_eq!(
+            lines,
+            [" a b  x ", " c      ", " 1    2 "],
+            "the header wraps too"
+        );
+        assert_eq!(flags, [(true, false), (false, true), (false, true)]);
+        let fits = "| a | b |\n|---|--:|\n| x | 10 |\n";
+        assert_eq!(
+            capped(fits, 7).0,
+            [" a   b ", " x  10 "],
+            "a table that fits"
+        );
+    }
+
+    #[test]
+    fn columns_share_the_room_left_by_narrow_ones() {
+        assert_eq!(shares(&[1, 18], 20), [1, 15]);
+        assert_eq!(
+            shares(&[3, 30, 40], 30),
+            [3, 11, 10],
+            "wide columns split the rest"
+        );
+        assert_eq!(shares(&[5, 5], 4), [1, 1], "at least one char each");
+        assert_eq!(shares(&[2, 3], 100), [2, 3]);
+        assert_eq!(shares(&[0, 0], 1), [0, 0], "empty columns under a tiny cap");
+        assert_eq!(wrap(&"a  b".chars().collect::<Vec<_>>(), 1), [0..1, 3..4]);
+        assert_eq!(wrap(&[], 0), [0..0]);
     }
 
     #[test]
@@ -912,7 +1083,7 @@ mod tests {
         assert_eq!(drawn(listed).0, listed, "and inside a list item");
         let table = "| a |\n|---|\n";
         assert_eq!(
-            render(table, false, false, false, |_| false).0,
+            render(table, false, false, None, |_| false).0,
             table,
             "tables off"
         );
@@ -925,7 +1096,7 @@ mod tests {
         assert_eq!(shown, "é ünï ç\n\n\nß\nx\n\n");
         // A thought's dim face runs through the code lines too.
         for thought in [false, true] {
-            let props = render(text, thought, false, false, |_| false).1;
+            let props = render(text, thought, false, None, |_| false).1;
             let ascend = |w: &[(Range<usize>, Prop)]| {
                 w[0].0.start <= w[1].0.start && w[0].0.end <= w[1].0.end
             };
@@ -935,7 +1106,7 @@ mod tests {
 
     /// Where `text`'s last top-level block starts: its source text and rendered text from there.
     fn stable(text: &str) -> (String, String) {
-        let (shown, _, (byte, char)) = render(text, false, false, true, |_| false);
+        let (shown, _, (byte, char)) = render(text, false, false, Some(100), |_| false);
         (text[byte..].into(), shown.chars().skip(char).collect())
     }
 
@@ -974,6 +1145,6 @@ mod tests {
         let text = format!("x\n\n{table}\nmid\n\n{table}");
         let (source, shown) = stable(&text);
         assert_eq!(source, table, "a table last");
-        assert_eq!(shown, render(table, false, false, true, |_| false).0);
+        assert_eq!(shown, render(table, false, false, Some(100), |_| false).0);
     }
 }
