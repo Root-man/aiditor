@@ -2289,6 +2289,13 @@ milestones:
             acceptance:
               - "Decision recorded in docs/editor.md"
               - "The epic is broken down into tasks"
+      - key: m8-session-polish
+        title: "Agent session buffer polish"
+        labels: [frontend, acp]
+        design: "#acp-integration-and-session-management"
+        body: |
+          Fixes to the session buffer found in daily use: table layout and reaching the prompt while reading. Tasks are tracked as sub-issues.
+        tasks:
           - key: m8-session-table-wrap
             title: "Wrap session table cells at a width cap"
             design: "#acp-integration-and-session-management"
