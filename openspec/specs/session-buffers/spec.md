@@ -13,7 +13,11 @@ The session buffer: one comint-style buffer per agent session holding the read-o
 - **THEN** the selected window shows `*claude*<work>`, whose text is `> `
 
 ### Requirement: Read-only transcript, editable prompt area
-Text before the prompt area SHALL be read-only: an edit that inserts before the prompt area's start or deletes any of the text before it SHALL be refused with `Text is read-only` and change nothing. The prompt area, from after the `> ` prompt line to the end of the buffer, SHALL edit like any buffer, undo included. Output SHALL be inserted above the prompt line, moving the prompt area down and keeping its text and undo.
+Text before the prompt area SHALL be read-only: an edit that inserts before the prompt area's start or deletes any of the text before it SHALL be refused with `Text is read-only` and change nothing. The prompt area, from after the `> ` prompt line to the end of the buffer, SHALL edit like any buffer, undo included. Output SHALL be inserted above the prompt line, moving the prompt area down and keeping its text and undo. A command that leaves point on the prompt line's `> ` SHALL leave it at the prompt area's start instead.
+
+#### Scenario: Point skips the prompt marker
+- **WHEN** `C-a` is typed on the prompt line, or `C-b` at the prompt area's start
+- **THEN** point is at the prompt area's start, after `> `
 
 #### Scenario: Editing the transcript is refused
 - **WHEN** point is in the transcript and a char is typed
