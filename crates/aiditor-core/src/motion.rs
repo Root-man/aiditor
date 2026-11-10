@@ -207,6 +207,9 @@ impl Ctx<'_> {
 
     /// Scrolls `n` lines down the buffer, up when negative, keeping point in the window.
     pub(crate) fn scroll_lines(&mut self, n: i64) -> Result<(), String> {
+        if let Some(prompt) = self.prompt_line() {
+            return self.scroll_transcript(n, prompt);
+        }
         let core = &mut *self.core;
         let rows = core.windows.window.rows();
         let top = core.windows.window.scroll(&core.buffers, rows);
@@ -231,6 +234,60 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// The line a session's prompt is on, while point is in its prompt area.
+    pub(crate) fn prompt_line(&self) -> Option<usize> {
+        let buffer = self.core.current();
+        let start = buffer.prompt_start();
+        (buffer.prompt.is_some() && self.core.point() >= start)
+            .then(|| buffer.text().char_to_line(start))
+    }
+
+    /// Scrolls the transcript above line `prompt` `n` lines, keeping it from passing its end, and
+    /// moves the transcript point into the rows shown.
+    fn scroll_transcript(&mut self, n: i64, prompt: usize) -> Result<(), String> {
+        let core = &mut *self.core;
+        let window = &mut core.windows.window;
+        let buffer = core
+            .buffers
+            .get(window.buffer())
+            .expect("window buffer is live");
+        let rows = window.rows();
+        let end = window.back(buffer, (prompt, 0), rows);
+        let top = if window.follow {
+            end
+        } else {
+            window.top().min(end)
+        };
+        let line = (top.0 as i64).saturating_add(n).clamp(0, end.0 as i64) as usize;
+        let new = if line == end.0 { end } else { (line, 0) };
+        if new == top && n != 0 {
+            let end = if n > 0 { "End" } else { "Beginning" };
+            return Err(format!("{end} of buffer"));
+        }
+        window.show_from(new, rows);
+        window.follow = new >= end;
+        self.reading_point(prompt);
+        Ok(())
+    }
+
+    /// The transcript point, else the transcript's end, moved into the transcript rows shown
+    /// and kept there; `prompt` is the prompt's line.
+    pub(crate) fn reading_point(&mut self, prompt: usize) -> usize {
+        let core = &mut *self.core;
+        let window = &mut core.windows.window;
+        let buffer = core
+            .buffers
+            .get(window.buffer())
+            .expect("window buffer is live");
+        let last = buffer.text().line_to_char(prompt).saturating_sub(1);
+        let at = window.shown(
+            buffer,
+            window.remembered(&core.buffers, false).unwrap_or(last),
+        );
+        window.remember_at(&mut core.buffers, false, at);
+        at
+    }
+
     /// Scrolls a screenful less two lines for no prefix, the other way for a lone minus, or
     /// the prefix's count of lines; `sign` is -1 to scroll up the buffer.
     pub(crate) fn scroll_command(
@@ -249,6 +306,11 @@ impl Ctx<'_> {
 
     /// Puts point's line at a row: from the prefix, or middle, top, bottom on repeated calls.
     pub(crate) fn recenter(&mut self, prefix: Option<Prefix>) {
+        // From a session's prompt area, around the transcript point, leaving point.
+        let at = match self.prompt_line() {
+            Some(prompt) => self.reading_point(prompt),
+            None => self.core.point(),
+        };
         let core = &mut *self.core;
         let rows = core.windows.window.rows() as i64;
         // A prefixed call leaves the cycle where it was, as in Emacs.
@@ -264,10 +326,7 @@ impl Ctx<'_> {
                 (if n < 0 { rows + n } else { n }).clamp(0, rows - 1)
             }
         };
-        let (line, _) = core
-            .current()
-            .line_col(core.point())
-            .expect("point is in the buffer");
+        let (line, _) = core.current().line_col(at).expect("point is in the buffer");
         core.windows
             .window
             .set_top(line.saturating_sub(row as usize));

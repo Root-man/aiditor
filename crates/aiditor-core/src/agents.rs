@@ -2241,6 +2241,25 @@ impl Ctx<'_> {
         self.goto(at)
     }
 
+    /// `agent-toggle-prompt`: moves point from the prompt area to the transcript point, put in
+    /// the rows shown, and from the transcript to where point was left in the prompt area.
+    pub(crate) fn agent_toggle_prompt(&mut self) -> Result<(), String> {
+        self.core.current_session()?;
+        let at = match self.prompt_line() {
+            Some(prompt) => self.reading_point(prompt),
+            None => self.drafting_point(),
+        };
+        self.goto(at)
+    }
+
+    /// Where point was left in the current session's prompt area, else its end.
+    pub(crate) fn drafting_point(&self) -> usize {
+        let core = &*self.core;
+        (core.windows.window.remembered(&core.buffers, true))
+            .filter(|&p| p >= core.current().prompt_start())
+            .unwrap_or(core.current().len_chars())
+    }
+
     /// `1` to `9` and `o` in a session: on a pending question's lines a digit answers it with
     /// that option and `o` reads an own answer; elsewhere they insert themselves.
     pub(crate) fn agent_question_key(&mut self, args: Args) -> Result<(), String> {
@@ -2595,6 +2614,7 @@ impl Ctx<'_> {
             put_meta(b, to, META_INDENT, &[(&clock, FaceName::Annotation)]);
         }
         let end = b.len_chars();
+        core.windows.window.follow = true;
         session.fold_pastes(b, start);
         session.messages.push(message);
         session.turn = Some(Turn {
@@ -4504,6 +4524,141 @@ mod tests {
         h.keys("M-< C-u 4 9 C-n C-l");
         let (transcript, ..) = docked(&mut h, 30);
         assert_eq!(transcript[rows / 2], "line 49");
+    }
+
+    /// A session with 100 transcript lines, `line 0` to `line 99`, drawn in 30 rows.
+    fn long_session() -> Harness {
+        let mut h = session();
+        chunk(
+            &mut h,
+            &(0..100).map(|i| format!("line {i}\n")).collect::<String>(),
+        );
+        docked(&mut h, 30);
+        h
+    }
+
+    #[test]
+    fn the_transcript_keeps_its_rows_while_typing_scrolled_back() {
+        let mut h = long_session();
+        h.keys("M-< C-v M->");
+        let (before, ..) = docked(&mut h, 30);
+        assert_ne!(before[0], "line 0", "C-v scrolled it");
+        h.keys("h i");
+        chunk(&mut h, "more\nand more\n");
+        let (after, pane, cursor) = docked(&mut h, 30);
+        assert_eq!(after, before);
+        assert_eq!((pane, cursor), (vec!["❯ hi".to_string()], "pane"));
+        // Paging to the end follows output again.
+        h.keys("C-v C-v C-v C-v C-v");
+        chunk(&mut h, "last\n");
+        let (transcript, ..) = docked(&mut h, 30);
+        let tail: Vec<&str> = transcript
+            .iter()
+            .rev()
+            .take(3)
+            .map(String::as_str)
+            .collect();
+        assert!(tail.contains(&"last"), "{tail:?}");
+    }
+
+    #[test]
+    fn sending_shows_the_transcript_s_end() {
+        let mut h = long_session();
+        h.keys("M-v M-v");
+        assert!(!docked(&mut h, 30).0.contains(&"line 99".to_string()));
+        h.keys("h i RET");
+        let (transcript, ..) = docked(&mut h, 30);
+        assert!(
+            transcript
+                .iter()
+                .rev()
+                .take(3)
+                .any(|l| l.starts_with("Working for")),
+            "{transcript:?}"
+        );
+    }
+
+    #[test]
+    fn paging_from_the_prompt_moves_the_transcript_not_point() {
+        let mut h = long_session();
+        h.keys("h i");
+        let point = h.point();
+        let (end, ..) = docked(&mut h, 30);
+        h.keys("M-v");
+        let (paged, ..) = docked(&mut h, 30);
+        assert_ne!(paged, end);
+        assert_eq!(h.point(), point);
+        h.keys("C-v");
+        assert_eq!(docked(&mut h, 30).0, end);
+        h.keys("C-v");
+        assert_eq!(h.core.message(), Some("End of buffer"));
+        h.keys("M-v M-v M-v M-v M-v M-v");
+        assert_eq!(docked(&mut h, 30).0[0], "line 0");
+        h.keys("M-v");
+        assert_eq!(h.core.message(), Some("Beginning of buffer"));
+        // C-l recenters on the transcript point, kept within the rows shown.
+        h.keys("C-l");
+        let (transcript, _, cursor) = docked(&mut h, 30);
+        assert_eq!((h.point(), cursor), (point, "pane"));
+        let rows = h.core.windows.window.rows();
+        assert_eq!(transcript[rows / 2], format!("line {}", rows - 1));
+    }
+
+    #[test]
+    fn c_t_moves_between_the_prompt_and_the_transcript() {
+        let mut h = long_session();
+        h.keys("h i M-< C-u 4 0 C-n C-f C-f");
+        let (rows, ..) = docked(&mut h, 30);
+        let reading = h.point();
+        h.keys("C-t");
+        assert_eq!(
+            h.core
+                .current()
+                .text()
+                .slice(..h.point())
+                .to_string()
+                .rsplit('\n')
+                .next(),
+            Some("> hi")
+        );
+        assert_eq!(
+            docked(&mut h, 30),
+            (rows.clone(), vec!["❯ hi".to_string()], "pane")
+        );
+        h.keys("C-t");
+        assert_eq!(h.point(), reading);
+        assert_eq!(docked(&mut h, 30).0, rows);
+        // A transcript point paged out of view lands in the rows shown.
+        h.keys("C-t M-v M-v");
+        let (paged, ..) = docked(&mut h, 30);
+        h.keys("C-t");
+        let (transcript, _, cursor) = docked(&mut h, 30);
+        assert_eq!((transcript, cursor), (paged, "transcript"));
+        assert_ne!(h.point(), reading);
+        h.keys("C-t");
+        h.keys("M-x agent-toggle-prompt RET");
+        assert_eq!(docked(&mut h, 30).2, "transcript");
+    }
+
+    #[test]
+    fn typing_in_the_transcript_goes_to_the_prompt() {
+        let mut h = long_session();
+        h.keys("x M-< C-n");
+        let (rows, ..) = docked(&mut h, 30);
+        h.keys("a");
+        assert!(h.core.text().ends_with("> xa"));
+        assert_eq!(h.point(), h.core.text().chars().count());
+        assert_eq!(docked(&mut h, 30), (rows, vec!["❯ xa".to_string()], "pane"));
+        // Bound keys keep their meaning: TAB on a tool call's header opens it.
+        let call = ls().status(ToolCallStatus::Completed);
+        tool(&mut h, call.raw_output(serde_json::json!("out\n")));
+        point_in(&mut h, "Ran ls", 0);
+        h.keys("TAB");
+        assert!(
+            h.core.text().ends_with("> xa"),
+            "nothing typed in the prompt"
+        );
+        assert!(h.core.text().contains("$ ls"), "{}", h.core.text());
     }
 
     #[test]
@@ -8390,7 +8545,7 @@ mod tests {
         h.keys("a RET");
         chunk(&mut h, "Hi");
         let transcript = h.core.text();
-        h.keys("M-< z");
+        h.keys("M-< C-d");
         assert_eq!(h.core.message(), Some("Text is read-only"));
         h.keys("M-> DEL");
         assert_eq!(h.core.message(), Some("Text is read-only"));
