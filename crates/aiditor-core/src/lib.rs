@@ -678,6 +678,10 @@ impl Ctx<'_> {
         if core.current().prompt.is_some() && marker.contains(&core.point()) {
             (core.windows.window.set_point(&mut core.buffers, start)).expect("in the buffer");
         }
+        if core.current().prompt.is_some() {
+            let prompt = core.point() >= start;
+            core.windows.window.remember(&mut core.buffers, prompt);
+        }
         // A command that changes the buffer deactivates the mark, as in Emacs.
         if self.core.windows.window.buffer() == buffer && self.core.current().tick() != tick {
             self.core.windows.window.set_active(false);

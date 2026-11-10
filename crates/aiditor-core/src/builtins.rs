@@ -39,6 +39,11 @@ pub(crate) fn builtins() -> Vec<Command> {
                     Some(KeyCode::Char(c)) => c,
                     _ => return Err("self-insert-command must be run by a character key".into()),
                 };
+                // Typed in a session's read-only transcript, it goes to the prompt area.
+                if ctx.core.current().prompt.is_some() && ctx.prompt_line().is_none() {
+                    let at = ctx.drafting_point();
+                    ctx.goto(at)?;
+                }
                 ctx.insert_n(c.encode_utf8(&mut [0; 4]), args.count(), false)
             },
         },
@@ -757,6 +762,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             name: "agent-send-input",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.agent_send_input(),
+        },
+        Command {
+            name: "agent-toggle-prompt",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.agent_toggle_prompt(),
         },
         Command {
             name: "agent-toggle-tool-call",

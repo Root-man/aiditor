@@ -439,8 +439,9 @@ fn show_preview(
 
 /// A session window's display `cols` wide in a window `height` px high: the transcript in the
 /// rows above a pane docked at the bottom, which holds the prompt area, from the prompt line on.
-/// The transcript shows its last lines while point is in the prompt area and scrolls to keep
-/// point otherwise; the pane grows with the prompt area up to a third of the rows.
+/// While point is in the prompt area the transcript keeps its rows, following output only from
+/// its end; otherwise it scrolls to keep point. The pane grows with the prompt area up to a third
+/// of the rows.
 fn session_display(
     window: &mut Window,
     buffers: &mut Buffers,
@@ -479,14 +480,20 @@ fn session_display(
     let pane_rows = area.lines.len().clamp(1, most);
     let pane_height = pane_rows as f32 * settings.line_height() + display::PANE_CHROME;
     let rows = settings.text_rows(height - pane_height);
+    let end = window.back(buffer, (prompt, 0), rows);
     let top = match in_prompt {
         true => {
-            let top = window.back(buffer, (prompt, 0), rows);
+            let top = if window.follow {
+                end
+            } else {
+                window.top().min(end)
+            };
             window.show_from(top, rows);
             top
         }
         false => (window.scroll(buffers, rows), window.top_row()),
     };
+    window.follow = top >= end;
     let build = |top, rows| window_rows(window, buffer, settings, roots, top, rows, point, mark);
     let mut display = build(top, rows);
     let transcript = (display.lines.iter()).position(|l| l.number >= prompt);

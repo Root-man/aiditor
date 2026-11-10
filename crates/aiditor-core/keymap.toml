@@ -133,6 +133,7 @@
 "S-RET" = "newline"
 "C-c C-c" = "agent-cancel"
 "TAB" = "agent-toggle-tool-call"
+"C-t" = "agent-toggle-prompt"
 "S-TAB" = "agent-cycle-mode"
 "/" = "agent-slash"
 "@" = "agent-reference"

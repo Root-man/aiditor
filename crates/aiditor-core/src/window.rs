@@ -31,6 +31,10 @@ pub struct Window {
     prev: Vec<BufferId>,
     /// The buffers `previous-buffer` left, most recent last, for `next-buffer`.
     next: Vec<BufferId>,
+    /// Whether a session's transcript showed its end at the last redisplay, so it follows output.
+    pub(crate) follow: bool,
+    /// Where point was last in a session's transcript, and in its prompt area.
+    parts: [Option<MarkerId>; 2],
 }
 
 impl Window {
@@ -52,6 +56,8 @@ impl Window {
             left: 0,
             prev: Vec::new(),
             next: Vec::new(),
+            follow: true,
+            parts: [None; 2],
         }
     }
 
@@ -67,6 +73,7 @@ impl Window {
             rows: self.rows,
             cols: self.cols,
             left: self.left,
+            follow: self.follow,
             prev: self.prev.clone(),
             next: self.next.clone(),
             ..Window::new(buffers, self.buffer)
@@ -84,7 +91,7 @@ impl Window {
             old.set_marker(old.point, point)
                 .expect("point is in the buffer");
             old.remove_marker(self.point);
-            for &m in self.mark.iter().chain(&self.ring) {
+            for &m in (self.mark.iter().chain(&self.ring)).chain(self.parts.iter().flatten()) {
                 old.remove_marker(m);
             }
         }
@@ -181,6 +188,29 @@ impl Window {
 
     pub fn set_point(&self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
         self.live(buffers)?.set_marker(self.point, char_idx)
+    }
+
+    /// Records point as where it was last in the prompt area when `prompt`, else in the transcript.
+    pub(crate) fn remember(&mut self, buffers: &mut Buffers, prompt: bool) {
+        let point = self.point(buffers);
+        self.remember_at(buffers, prompt, point);
+    }
+
+    /// Records `point` as where point was last in the prompt area when `prompt`, else in the
+    /// transcript.
+    pub(crate) fn remember_at(&mut self, buffers: &mut Buffers, prompt: bool, point: usize) {
+        let buffer = buffers.get_mut(self.buffer).expect("window buffer is live");
+        match self.parts[usize::from(prompt)] {
+            Some(m) => buffer.set_marker(m, point),
+            None => (buffer.add_marker(point, InsertionType::Stay))
+                .map(|m| self.parts[usize::from(prompt)] = Some(m)),
+        }
+        .expect("point is in the buffer");
+    }
+
+    /// Where point was last in the prompt area when `prompt`, else in the transcript.
+    pub(crate) fn remembered(&self, buffers: &Buffers, prompt: bool) -> Option<usize> {
+        self.parts[usize::from(prompt)].and_then(|m| buffers.get(self.buffer)?.marker(m))
     }
 
     /// The mark, or `None` until a command sets it.
@@ -280,6 +310,11 @@ impl Window {
         display::row_starts(len, width, word, |i| text.char(i).is_whitespace())
     }
 
+    /// The first line shown and its first row.
+    pub(crate) fn top(&self) -> (usize, usize) {
+        (self.top, self.top_row)
+    }
+
     /// The first row shown of the first line at the last `scroll`.
     pub fn top_row(&self) -> usize {
         self.top_row
@@ -303,6 +338,29 @@ impl Window {
             }
         }
         (line, row)
+    }
+
+    /// `at`, or the nearest row start the `rows` rows from the top show.
+    pub(crate) fn shown(&self, buffer: &Buffer, at: usize) -> usize {
+        let (line, col) = buffer.line_col(at).unwrap_or_default();
+        let row = self.row_starts(buffer, line).partition_point(|&s| s <= col) - 1;
+        let top = (self.top, self.top_row);
+        let mut to = match (line, row) < top {
+            true => top,
+            // shortcut: clamps by whole lines, so a point below the rows lands on a line start; walk rows if that bites.
+            // No line past this one shows, as each takes a row.
+            false => (line, row).min((self.top + self.rows, 0)),
+        };
+        while self.back(buffer, to, self.rows - 1) > top {
+            to = self.back(buffer, to, 1);
+        }
+        match to == (line, row) {
+            true => at,
+            false => {
+                let start = self.row_starts(buffer, to.0)[to.1];
+                buffer.char_idx(to.0, start).expect("a shown line")
+            }
+        }
     }
 
     /// Shows `rows` rows from `(top, top_row)`, as `scroll` would have.
@@ -332,7 +390,7 @@ impl Window {
 
     /// Shows from `line` on; the next `scroll` moves it if point's line is not shown.
     pub fn set_top(&mut self, line: usize) {
-        (self.top, self.top_row) = (line, 0);
+        (self.top, self.top_row, self.follow) = (line, 0, false);
     }
 
     pub fn rows(&self) -> usize {
