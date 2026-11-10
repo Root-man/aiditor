@@ -2289,3 +2289,32 @@ milestones:
             acceptance:
               - "Decision recorded in docs/editor.md"
               - "The epic is broken down into tasks"
+          - key: m8-session-table-wrap
+            title: "Wrap session table cells at a width cap"
+            design: "#acp-integration-and-session-management"
+            body: |
+              A drawn table in a session buffer is one rope line per row however long its cells are, so a wide table runs off the window and scrolls sideways. When a table's natural width passes `table_width` columns (a new setting in `settings.toml`, bundled as 100), `markdown::draw` keeps the columns that fit their share at their natural width, shares the rest among the wide ones and wraps their cells at words into several rope lines per row, breaking a word longer than its column. Only a row's last line draws the row's bottom rule (`Decoration::Table`), and alignment applies to each line. The cap doesn't depend on the window, as the rope is shared by every window on the session; a window narrower than the table still cuts it and scrolls the run holding point sideways, as today.
+            acceptance:
+              - "A table wider than `table_width` draws no wider than it, its long cells wrapped at words onto more lines of the same row"
+              - "A table that fits is drawn as today"
+              - "Rules: one bottom rule per row, under its last line; column rules on every line"
+              - "`table_width` in settings.toml overrides the cap; a bad value is reported as other settings errors"
+              - "A streaming table still re-draws as rows arrive"
+              - "Core tests cover the wrap, alignment and rules"
+              - "Spec updated in docs/editor.md and openspec/specs"
+          - key: m8-session-prompt-anywhere
+            title: "Type in the session prompt while reading the transcript"
+            design: "#acp-integration-and-session-management"
+            body: |
+              With point in the prompt area, the transcript is pinned to its end (`session_display`), and there is no mouse, so reading history means leaving the prompt. Make them independent:
+              - **Keep the view.** When point enters the prompt area the transcript keeps the rows it showed. It follows new output only while it shows its end, as `tail -f`. With point in the prompt area, `C-v`, `M-v` and `C-l` page and recenter the transcript without moving point.
+              - **Reading spot and `C-t`.** The window keeps a second point for the transcript. `C-t` (`agent-toggle-prompt`) in a session moves point between the prompt area, where it was left, and the transcript point, keeping the transcript's rows. Leaving the prompt any other way updates the transcript point as usual.
+              - **Typing goes to the prompt.** A printable key with no binding in the session keymap, typed with point in the read-only transcript, inserts at the prompt area's point and moves point there, keeping the transcript's rows. Bound keys (`TAB`, permission and question keys) keep their meaning.
+            acceptance:
+              - "Point in the prompt area with the transcript scrolled back: the transcript stays put while typing and while output streams"
+              - "With the transcript at its end, output arriving while typing keeps it at the end"
+              - "`C-v`, `M-v` and `C-l` in the prompt area move the transcript rows, not point"
+              - "`C-t` from the transcript goes to the prompt and back to the same transcript point, with the rows unchanged both ways"
+              - "Typing `a` in the transcript inserts `a` at the prompt, and the transcript keeps its rows; `TAB` on a tool group still folds it"
+              - "Core tests cover each case with the docked pane"
+              - "Spec updated in docs/editor.md and openspec/specs"
