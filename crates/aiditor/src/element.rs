@@ -462,9 +462,13 @@ impl Element for FrameElement {
                                 let y = if top { px(0.) } else { h - one };
                                 vec![(px(0.), y, width, one)]
                             }
-                            Decoration::Table { ref edges, first } => {
+                            Decoration::Table {
+                                ref edges,
+                                first,
+                                last,
+                            } => {
                                 let text = p.text_x..width - p.text_right;
-                                table_rules(edges, first, text, p.cell, h)
+                                table_rules(edges, first, last, text, p.cell, h)
                             }
                             Decoration::HRule(_) => {
                                 let y = (h / 2.).floor();
@@ -904,6 +908,7 @@ fn rule_gaps(
 fn table_rules(
     edges: &[isize],
     first: bool,
+    last: bool,
     text: Range<Pixels>,
     cell: Pixels,
     h: Pixels,
@@ -920,7 +925,9 @@ fn table_rules(
         .map(|x| (x, px(0.), one, h))
         .collect();
     if from < to {
-        rules.push((from, h - one, to - from, one));
+        if last {
+            rules.push((from, h - one, to - from, one));
+        }
         if first {
             rules.push((from, px(0.), to - from, one));
         }
@@ -937,7 +944,7 @@ mod tests {
         let (one, h) = (px(1.), px(20.));
         let text = px(12.)..px(400.);
         assert_eq!(
-            table_rules(&[0, 3, 7], true, text.clone(), px(10.), h),
+            table_rules(&[0, 3, 7], true, true, text.clone(), px(10.), h),
             [
                 (px(12.), px(0.), one, h),
                 (px(42.), px(0.), one, h),
@@ -948,8 +955,13 @@ mod tests {
         );
         // Scrolled sideways and wider than the window: only the edges inside are drawn.
         assert_eq!(
-            table_rules(&[-5, 3, 50], false, text, px(10.), h),
+            table_rules(&[-5, 3, 50], false, true, text.clone(), px(10.), h),
             [(px(42.), px(0.), one, h), (px(12.), h - one, px(388.), one),]
+        );
+        // A wrapped row's line before its last: column rules alone.
+        assert_eq!(
+            table_rules(&[0, 3], false, false, text, px(10.), h),
+            [(px(12.), px(0.), one, h), (px(42.), px(0.), one, h)]
         );
     }
 

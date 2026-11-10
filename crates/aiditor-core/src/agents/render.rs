@@ -18,23 +18,24 @@ pub(super) fn render(
     buffer.remove_properties(range.clone());
     let text = buffer.text().slice(range.clone()).to_string();
     let is_file = |word: &str| file_link(index, word).is_some();
-    for (r, prop) in markdown::render(&text, thought, false, false, is_file).1 {
+    for (r, prop) in markdown::render(&text, thought, false, None, is_file).1 {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
             .expect("inside the rendered range");
     }
 }
 
 /// Replaces `range` of `buffer`, a streamed message or its tail, with `source` rendered as
-/// markdown with its tables drawn, linking the files of `index`; returns the rendered length in
-/// chars and where its last top-level block starts.
+/// markdown with its tables drawn at most `table_width` wide, linking the files of `index`;
+/// returns the rendered length in chars and where its last top-level block starts.
 pub(super) fn render_message(
     buffer: &mut Buffer,
     range: Range<usize>,
     source: &str,
     index: Option<&FileIndex>,
+    table_width: usize,
 ) -> (usize, markdown::Stable) {
     let is_file = |word: &str| file_link(index, word).is_some();
-    let (text, props, stable) = markdown::render(source, false, false, true, is_file);
+    let (text, props, stable) = markdown::render(source, false, false, Some(table_width), is_file);
     rewrite(buffer, range.clone(), &text);
     for (r, prop) in props {
         (buffer.add_property(range.start + r.start..range.start + r.end, prop))
@@ -50,9 +51,10 @@ pub(super) fn check_message(
     range: Range<usize>,
     source: &str,
     index: Option<&FileIndex>,
+    table_width: usize,
 ) {
     let is_file = |word: &str| file_link(index, word).is_some();
-    let (text, props, _) = markdown::render(source, false, false, true, is_file);
+    let (text, props, _) = markdown::render(source, false, false, Some(table_width), is_file);
     assert_eq!(buffer.text().slice(range.clone()).to_string(), text);
     let mut want: Vec<_> = (props.into_iter())
         .filter(|(r, _)| !r.is_empty())
@@ -1032,7 +1034,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
             Some(h) if r.start >= h.start => r.start + h.len()..r.end + h.len(),
             _ => r,
         };
-        let markdown = markdown::render(&visible, false, true, false, |_| false)
+        let markdown = markdown::render(&visible, false, true, None, |_| false)
             .1
             .into_iter();
         props.extend(markdown.map(|(r, p)| (past(r), p)).map(shifted));

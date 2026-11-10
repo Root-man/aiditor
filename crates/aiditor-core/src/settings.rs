@@ -71,6 +71,8 @@ pub struct Settings {
     /// Files project grep searches at once.
     pub grep_workers: NonZeroUsize,
     pub paste_fold_lines: usize,
+    /// The widest a session draws a table, in chars; wider ones wrap their cells.
+    pub table_width: usize,
     /// The file's `theme`: which of `themes` is drawn.
     #[serde(rename = "theme")]
     pub theme_name: String,
@@ -348,6 +350,7 @@ mod tests {
         assert_eq!(s.max_watched_files, 10000);
         assert_eq!(s.grep_workers.get(), 1);
         assert_eq!(s.paste_fold_lines, 20);
+        assert_eq!(s.table_width, 100);
         let s = Settings::parse(Some("grep_workers = 8")).unwrap();
         assert_eq!(s.grep_workers.get(), 8);
         assert_eq!(
@@ -367,6 +370,16 @@ mod tests {
         for value in ["-1", "1.5", "\"many\""] {
             let error = Settings::parse(Some(&format!("paste_fold_lines = {value}"))).unwrap_err();
             assert!(error.contains("paste_fold_lines"), "{error}");
+        }
+    }
+
+    #[test]
+    fn table_width_accepts_nonnegative_widths() {
+        let settings = Settings::parse(Some("table_width = 60")).unwrap();
+        assert_eq!(settings.table_width, 60);
+        for value in ["-1", "\"wide\""] {
+            let error = Settings::parse(Some(&format!("table_width = {value}"))).unwrap_err();
+            assert!(error.contains("table_width"), "{error}");
         }
     }
 
