@@ -40,7 +40,7 @@ pub(crate) fn builtins() -> Vec<Command> {
                     _ => return Err("self-insert-command must be run by a character key".into()),
                 };
                 // Typed in a session's read-only transcript, it goes to the prompt area.
-                if ctx.core.current().prompt.is_some() && ctx.prompt_line().is_none() {
+                if ctx.core.current().prompt().is_some() && ctx.prompt_line().is_none() {
                     let at = ctx.drafting_point();
                     ctx.goto(at)?;
                 }

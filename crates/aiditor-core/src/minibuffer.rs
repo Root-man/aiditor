@@ -1040,7 +1040,7 @@ impl Core {
             let mb = self.prompts.minibuffer.as_mut().expect("previewing");
             mb.reading = None;
             if let Some(old) = mb.peek.take() {
-                _ = self.buffers.kill(old);
+                self.kill_buffer(old);
             }
             if let Ok(Some(text)) = result {
                 let id = self.buffers.create_for_prepared_file(&request.path, text);
@@ -1153,7 +1153,7 @@ impl Core {
         let mb = self.prompts.minibuffer.take()?;
         self.prompts.pending_preview = None;
         if let Some(peek) = mb.peek {
-            _ = self.buffers.kill(peek);
+            self.kill_buffer(peek);
         }
         self.select(mb.from);
         let window =
@@ -1167,7 +1167,7 @@ impl Core {
         if mb.history && mb.completion.as_ref().is_some_and(|c| c.filtered.is_some()) {
             self.prompts.remember(&mb.prompt, text.clone());
         }
-        _ = self.buffers.kill(window.buffer());
+        self.kill_buffer(window.buffer());
         Some(mb)
     }
 }

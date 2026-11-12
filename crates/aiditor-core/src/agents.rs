@@ -20,13 +20,15 @@ use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::buffer::{self, Buffer, BufferId, Decoration, FaceRef, InsertionType, MarkerId, Prop};
+use crate::buffer::{
+    self, Buffer, BufferId, Decoration, FaceRef, InsertionType, Kind, MarkerId, Prop,
+};
 use crate::command::Args;
 use crate::display::ModeLine;
 use crate::markdown;
 use crate::project::ProjectId;
 use crate::settings::FaceName;
-use crate::{AgentId, AgentOp, Core, Ctx, Effect, Effects, Msg, Open, Request};
+use crate::{AgentId, AgentOp, Core, Ctx, Effect, Msg, Open, Request};
 
 mod chips;
 mod groups;
@@ -1334,7 +1336,7 @@ impl Core {
     /// The chip at point in a session buffer.
     fn chip_at_point(&self) -> Option<&chips::Chip> {
         let buffer = self.windows.window.buffer();
-        self.agents.values().find(|s| s.buffer == buffer)?;
+        self.session_of(buffer)?;
         // A command chip has nothing to open, so `RET` on it sends the prompt.
         (self
             .chips
@@ -1423,13 +1425,23 @@ impl Core {
         true
     }
 
+    /// The agent and session whose session buffer is `buffer`.
+    pub(crate) fn session_of(&self, buffer: BufferId) -> Option<(AgentId, &Session)> {
+        let id = self.buffers.get(buffer)?.agent()?;
+        Some((id, self.agents.get(&id)?))
+    }
+
     /// The session whose buffer the selected window shows.
     fn current_session(&mut self) -> Result<(AgentId, &mut Session), String> {
-        let buffer = self.windows.window.buffer();
-        (self.agents.iter_mut())
-            .find(|(_, s)| s.buffer == buffer)
-            .map(|(&id, s)| (id, s))
-            .ok_or_else(|| "Not in an agent session buffer".into())
+        let id = self
+            .current()
+            .agent()
+            .ok_or("Not in an agent session buffer")?;
+        let session = self
+            .agents
+            .get_mut(&id)
+            .ok_or("Not in an agent session buffer")?;
+        Ok((id, session))
     }
 
     /// The current session, once its `session/new` is answered and while its agent runs.
@@ -1453,8 +1465,9 @@ impl Core {
         Option<&SessionConfigValueId>,
     ) {
         let buffer = self.windows.window.buffer();
-        let session =
-            (self.agents.values().find(|s| s.buffer == buffer)).and_then(|s| s.session.as_ref());
+        let session = self
+            .session_of(buffer)
+            .and_then(|(_, s)| s.session.as_ref());
         let options = (session.and_then(|s| s.config_options.as_deref())).unwrap_or_default();
         match select_option(options, category) {
             Some((_, select)) => (self::options(select), Some(&select.current_value)),
@@ -1483,9 +1496,7 @@ impl Core {
     /// The current session's slash commands; none outside a session buffer.
     pub(crate) fn session_commands(&self) -> &[AvailableCommand] {
         let buffer = self.windows.window.buffer();
-        (self.agents.values())
-            .find(|s| s.buffer == buffer)
-            .map_or(&[], |s| &s.commands)
+        self.session_of(buffer).map_or(&[], |(_, s)| &s.commands)
     }
 
     /// The `Command:` annotation of the current session's command `name`: its argument hint and
@@ -1536,7 +1547,7 @@ impl Core {
     /// The state label of the session `agent` started or answered as `id`, while it is open.
     pub(crate) fn session_state(&self, agent: &str, id: &SessionId) -> Option<&'static str> {
         let buffer = self.open_session(agent, id)?;
-        let s = self.agents.values().find(|s| s.buffer == buffer)?;
+        let (_, s) = self.session_of(buffer)?;
         Some(if s.ended {
             "[ended]"
         } else if s.session.is_none() && s.load.is_some() {
@@ -1557,9 +1568,7 @@ impl Core {
     fn session_at_point(&self) -> Result<(&Session, SessionId, Option<Option<&Message>>), String> {
         let (point, buffer) = (self.point(), self.current());
         let shown = self.windows.window.buffer();
-        let session = (self.agents.values())
-            .find(|s| s.buffer == shown)
-            .ok_or("Not in an agent session buffer")?;
+        let (_, session) = (self.session_of(shown)).ok_or("Not in an agent session buffer")?;
         let source = (session.session.as_ref())
             .map(|r| r.session_id.clone())
             .ok_or_else(|| format!("{} is not ready", session.agent))?;
@@ -1579,7 +1588,7 @@ impl Core {
 
     /// Whether buffer `id` is the session buffer of a session that hasn't ended.
     pub(crate) fn live_agent(&self, id: BufferId) -> bool {
-        self.agents.values().any(|s| s.buffer == id && !s.ended)
+        self.session_of(id).is_some_and(|(_, s)| !s.ended)
     }
 
     /// Puts rolled back session buffer `source`'s fork, `buffer` with its `log`, in its place:
@@ -1587,7 +1596,9 @@ impl Core {
     /// its agent, then the fork's agent `id` deletes its session. Nothing happens once the
     /// source is gone.
     fn take_place(&mut self, id: AgentId, source: BufferId, buffer: BufferId, log: BufferId) {
-        let Some(old) = self.agents.values_mut().find(|s| s.buffer == source) else {
+        let Some(old) = (self.buffers.get(source).and_then(Buffer::agent))
+            .and_then(|old| self.agents.get_mut(&old))
+        else {
             return;
         };
         old.delete = Some(id);
@@ -1617,33 +1628,30 @@ impl Core {
         }
     }
 
-    /// Stops the agents of sessions whose session buffer was killed and forgets them, cancelling
-    /// their pending requests first.
-    pub(crate) fn sync_agents(&mut self, effects: &mut Effects) {
-        let buffers = &self.buffers;
-        self.agents.retain(|&id, session| {
-            let live = buffers.get(session.buffer).is_some();
-            if !live {
-                for ask in &session.asks {
-                    let (response, _) = ask.cancelled();
-                    effects.push(Effect::Agent(AgentOp::Reply {
-                        id,
-                        request: ask.request.clone(),
-                        result: Ok(response),
-                    }));
-                }
-                let opened = session.session.as_ref().map(|r| r.session_id.clone());
-                effects.push(Effect::Agent(match session.delete.zip(opened) {
-                    Some((fork, session)) => AgentOp::Delete {
-                        id: fork,
-                        source: id,
-                        session,
-                    },
-                    None => AgentOp::Kill { id },
-                }));
-            }
-            live
-        });
+    /// Stops the agent of session `id`, whose session buffer was killed, and forgets it,
+    /// cancelling its pending requests first.
+    pub(crate) fn release_session(&mut self, id: AgentId) {
+        let Some(session) = self.agents.remove(&id) else {
+            return;
+        };
+        for ask in &session.asks {
+            let (response, _) = ask.cancelled();
+            self.released.push(Effect::Agent(AgentOp::Reply {
+                id,
+                request: ask.request.clone(),
+                result: Ok(response),
+            }));
+        }
+        let opened = session.session.as_ref().map(|r| r.session_id.clone());
+        self.released
+            .push(Effect::Agent(match session.delete.zip(opened) {
+                Some((fork, session)) => AgentOp::Delete {
+                    id: fork,
+                    source: id,
+                    session,
+                },
+                None => AgentOp::Kill { id },
+            }));
     }
 }
 
@@ -1688,7 +1696,8 @@ impl Ctx<'_> {
         b.append(PROMPT);
         prompt_glyph(b, 0);
         let start = PROMPT.len();
-        b.prompt = Some((b.add_marker(start, InsertionType::Stay)).expect("after the prompt"));
+        let prompt = (b.add_marker(start, InsertionType::Stay)).expect("after the prompt");
+        b.kind = Kind::Session { agent: id, prompt };
         b.set_marker(b.point, start).expect("after the prompt");
         b.major_mode = MODE;
         let from = core.windows.window.buffer();
@@ -2384,7 +2393,7 @@ impl Ctx<'_> {
         let core = &*self.core;
         let (point, buffer) = (core.point(), core.windows.window.buffer());
         let b = core.buffers.get(buffer)?;
-        let (&id, session) = core.agents.iter().find(|(_, s)| s.buffer == buffer)?;
+        let (id, session) = core.session_of(buffer)?;
         session.asks.iter().enumerate().find_map(|(at, ask)| {
             let start = b.marker(ask.start)?;
             if !(start..=ask.range(b).end).contains(&point) {
@@ -2452,7 +2461,7 @@ impl Ctx<'_> {
         let (line, at) = self.linked_line()?;
         let core = &*self.core;
         let buffer = core.windows.window.buffer();
-        let session = core.agents.values().find(|s| s.buffer == buffer)?;
+        let (_, session) = core.session_of(buffer)?;
         if let Some((_, call)) = self.tool_at_point() {
             return session.tools[&call].link.clone();
         }
@@ -2472,7 +2481,7 @@ impl Ctx<'_> {
         let point = core.point();
         let buffer = core.windows.window.buffer();
         let b = core.buffers.get(buffer)?;
-        let (&id, session) = core.agents.iter().find(|(_, s)| s.buffer == buffer)?;
+        let (id, session) = core.session_of(buffer)?;
         let tool = (session.tools.iter()).find(|(_, t)| {
             let shown = !session.hidden(t);
             shown && (b.marker(t.start)).is_some_and(|s| (s..=s + t.header).contains(&point))
@@ -2603,7 +2612,7 @@ impl Ctx<'_> {
         core.chips.paint(b, start..start + input.chars().count());
         let end = b.len_chars();
         prompt_glyph(b, end - PROMPT.len());
-        b.set_marker(b.prompt.expect("a session buffer has a prompt"), end)?;
+        b.set_marker(b.prompt().expect("a session buffer has a prompt"), end)?;
         let line = start + input.chars().count() + "\n\n".len();
         let working_line = b.add_marker(line, InsertionType::Advance)?;
         (b.add_property(line..line + working.chars().count(), dim())).expect("just appended");
@@ -2693,12 +2702,13 @@ impl Ctx<'_> {
         let core = &mut *self.core;
         let point = core.point();
         let buffer = core.windows.window.buffer();
-        let session = (core.agents.iter_mut()).find(|(_, s)| s.buffer == buffer);
+        let agent = core.buffers.get(buffer).and_then(Buffer::agent);
+        let session = agent.and_then(|id| Some((id, core.agents.get_mut(&id)?)));
         let b = core
             .buffers
             .get_mut(buffer)
             .expect("current buffer is live");
-        let (&id, session) = session.ok_or("No tool call here")?;
+        let (id, session) = session.ok_or("No tool call here")?;
         // Point past the line it ends on goes back to its start.
         let back = |(start, line): (usize, usize)| (point > line).then_some(start);
         let to = match session.block_at(b, point).ok_or("No tool call here")? {
@@ -4375,6 +4385,40 @@ mod tests {
         assert!(!h.core.agents.contains_key(&AgentId(0)));
         h.keys("h i RET");
         assert_eq!(ops(&mut h), ["prompt 1 f \"hi\""]);
+    }
+
+    #[test]
+    fn every_kill_of_a_waiting_session_cancels_its_ask_then_stops_it() {
+        let mut h = session();
+        ask(&mut h, 4, "c", Some("Edit a.txt"));
+        let strings = vec!["*claude*<work>".into(), "yes".into()];
+        h.call(
+            "kill-buffer",
+            Args {
+                strings,
+                ..Args::default()
+            },
+        );
+        h.send(Msg::Tick);
+        assert_eq!(ops(&mut h), ["reply 0 4 cancelled", "kill 0"]);
+
+        let mut h = session();
+        ask(&mut h, 4, "c", Some("Edit a.txt"));
+        let work = h.core.workspace().unwrap();
+        h.new_workspace("other", "home");
+        h.core.kill_workspace(work).unwrap();
+        h.send(Msg::Tick);
+        assert_eq!(ops(&mut h), ["reply 0 4 cancelled", "kill 0"]);
+
+        let mut h = rolled_back("yes");
+        ask(&mut h, 4, "c", Some("Edit a.txt"));
+        rollbacks(&mut h);
+        let response = NewSessionResponse::new("f").config_options(options("auto"));
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Ok(response),
+        });
+        assert_eq!(ops(&mut h), ["reply 0 4 cancelled", "delete 1 0 s"]);
     }
 
     #[test]

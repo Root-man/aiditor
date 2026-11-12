@@ -532,8 +532,9 @@ impl Syntax {
     }
 
     /// Reparses `text`, reusing the old tree, if it was edited since the last parse.
-    pub(crate) fn reparse(&mut self, text: &Rope) {
-        if std::mem::take(&mut self.stale) {
+    pub(crate) fn reparse(&mut self, text: &Rope) -> bool {
+        let stale = std::mem::take(&mut self.stale);
+        if stale {
             self.tree = parse(&mut self.parser, text, Some(&self.tree));
             self.injections = injections(
                 self.grammar,
@@ -543,6 +544,7 @@ impl Syntax {
             );
             self.cache.take();
         }
+        stale
     }
 
     /// The faces `palette` gives the chars of sorted, disjoint `ranges` of `text`, as sorted,

@@ -238,7 +238,7 @@ impl Ctx<'_> {
     pub(crate) fn prompt_line(&self) -> Option<usize> {
         let buffer = self.core.current();
         let start = buffer.prompt_start();
-        (buffer.prompt.is_some() && self.core.point() >= start)
+        (buffer.prompt().is_some() && self.core.point() >= start)
             .then(|| buffer.text().char_to_line(start))
     }
 

@@ -100,7 +100,7 @@ A project defines the filesystem scope; a workspace is the unit of work inside i
 | Additional root | Another repo or folder the agent gets filesystem access to | Path | In the project file |
 | Workspace | Everything for one task, tied to one project | Window configuration, its buffers (files, terminals, agent sessions) | No |
 | Buffer | Content plus metadata, independent of any window, owned by one workspace | Content backend, undo history, major and minor modes, markers, text properties (face, invisible with a placeholder, line decoration, icon), file binding or kind | No (auto-save files aside, see Crash safety) |
-| Buffer kind | File, Terminal, AgentSession, Messages, Scratch | Kind-specific payload (PTY handle, session id) | No |
+| Buffer kind | Text (files, scratch, `*Messages*` and the rest), Terminal, Session, WorkspaceList, SessionList | Kind-specific payload: a terminal's id, emulator grid, copy-mode text and command marks; a session's agent id and prompt marker; `*Workspaces*`' snapshot and row lines; `*Sessions*`' listings and rows | No |
 | Window | A viewport onto one buffer | Buffer id, point, mark, scroll position | No |
 | Window configuration | Split tree of windows (`C-x 2` / `C-x 3`) | Windows, split ratios, selected window | No |
 | Frame | The app's single OS window | Shows one workspace at a time | No |
@@ -110,7 +110,7 @@ A buffer never knows which windows show it, and a window holds only a buffer id.
 
 A window's point and mark are markers in its buffer, so edits made elsewhere move them. Its first visible line moves only as far as needed to keep point's line on screen; the core does that at redisplay, given the rows the frontend can show.
 
-Buffers have more than one content backend: a rope for file, scratch and Messages buffers, the emulator grid for terminals, and a structured transcript for agent sessions, which the core renders into a rope (see Session buffer under ACP integration).
+Buffers have more than one content backend: a rope for text buffers, the emulator grid for terminals (whose rope is copy mode's text), and a structured transcript for agent sessions, kept by the agent id the buffer's kind holds and rendered into its rope (see Session buffer under ACP integration). Killing a buffer, by any path, releases what its kind holds: a terminal's shell, or an agent's process and the requests it is waiting on.
 
 Each workspace owns its buffers, and a buffer belongs to exactly one workspace, `*Messages*` excepted. Killing a workspace kills its buffers. The same file can have several buffers: a file open in two workspaces has two, kept in sync through the disk. When the file changes on disk (a save from the other workspace, an agent's edit, a `git checkout` in a terminal), every buffer visiting it reverts automatically. The watcher reports every change, the editor's own saves included, and each buffer compares the new disk hash with its own: the buffer that saved sees no change, and the other buffers of that file revert.
 

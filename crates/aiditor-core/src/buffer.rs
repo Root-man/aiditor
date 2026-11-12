@@ -13,6 +13,7 @@ use crate::settings::{FaceName, LineNumbers};
 use crate::syntax::{self, Syntax};
 use crate::terminal::{ShellCommand, Terminal};
 use crate::workspace::WorkspaceId;
+use crate::{AgentId, TerminalId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferId(u64);
@@ -112,7 +113,8 @@ impl Buffers {
         self.add(Buffer {
             name: name.to_string(),
             workspace: self.workspace,
-            content: Content::Text(Rope::new()),
+            text: Rope::new(),
+            kind: Kind::Text,
             file: None,
             crlf: false,
             bom: false,
@@ -141,12 +143,8 @@ impl Buffers {
             history: History::default(),
             major_mode: "fundamental-mode",
             minor_modes: Vec::new(),
-            workspace_rows: Vec::new(),
-            workspace_list: None,
             point: MarkerId(0),
-            commands: Vec::new(),
             syntax: None,
-            prompt: None,
         })
     }
 
@@ -157,13 +155,19 @@ impl Buffers {
         id
     }
 
-    /// A new read-only buffer named `name`, made unique, holding `terminal`'s grid.
-    pub fn create_terminal(&mut self, name: &str, terminal: Terminal) -> BufferId {
-        let id = self.create(&unique(name, |n| self.find(n).is_some()));
-        let buffer = self.map.get_mut(&id).expect("just created");
-        (buffer.content, buffer.read_only) = (Content::Terminal(Box::new(terminal), None), true);
+    /// A new read-only buffer named `name`, made unique, holding terminal `id`'s grid.
+    pub fn create_terminal(&mut self, name: &str, id: TerminalId, terminal: Terminal) -> BufferId {
+        let buffer_id = self.create(&unique(name, |n| self.find(n).is_some()));
+        let buffer = self.map.get_mut(&buffer_id).expect("just created");
+        buffer.kind = Kind::Terminal {
+            id,
+            terminal: Box::new(terminal),
+            copy: None,
+            commands: Vec::new(),
+        };
+        buffer.read_only = true;
         buffer.major_mode = "vterm-mode";
-        id
+        buffer_id
     }
 
     /// Renames buffer `id` to `name`, appending `<2>`, `<3>`, ... while another buffer has it.
@@ -184,7 +188,7 @@ impl Buffers {
         let id = self.create(&file_name(path));
         let buffer = self.map.get_mut(&id).expect("just created");
         buffer.syntax = Syntax::for_file(path, &text);
-        buffer.content = Content::Text(text);
+        buffer.text = text;
         buffer.file = Some(path.to_path_buf());
         id
     }
@@ -259,11 +263,30 @@ impl Buffers {
     }
 }
 
-/// The content backend.
-pub enum Content {
-    Text(Rope),
-    /// A terminal's grid, and copy mode's text built from its scrollback while in copy mode.
-    Terminal(Box<Terminal>, Option<Rope>),
+/// What kind of buffer it is, with what only that kind holds.
+pub(crate) enum Kind {
+    Text,
+    /// A terminal's grid, copy mode's text built from its scrollback while in copy mode, and in
+    /// copy mode each command's marks in the text, sorted by start. Its `text` stays empty.
+    Terminal {
+        id: TerminalId,
+        terminal: Box<Terminal>,
+        copy: Option<Rope>,
+        commands: Vec<ShellCommand>,
+    },
+    /// Agent session `agent`'s transcript, with a `Stay` marker at its prompt area: the text
+    /// before it is read-only.
+    Session {
+        agent: AgentId,
+        prompt: MarkerId,
+    },
+    /// `*Workspaces*`: what it lists, and each row's line.
+    WorkspaceList {
+        snapshot: crate::workspace_list::Snapshot,
+        rows: Vec<(usize, crate::workspace_list::Row)>,
+    },
+    /// `*Sessions*`.
+    SessionList(crate::sessions::SessionList),
 }
 
 static EMPTY: LazyLock<Rope> = LazyLock::new(Rope::new);
@@ -272,7 +295,8 @@ pub struct Buffer {
     pub name: String,
     /// The workspace that owns it; `None` only for the global `*Messages*`.
     pub workspace: Option<WorkspaceId>,
-    content: Content,
+    text: Rope,
+    pub(crate) kind: Kind,
     pub file: Option<PathBuf>,
     /// The file's line breaks are CRLF, written back on save.
     pub crlf: bool,
@@ -326,16 +350,10 @@ pub struct Buffer {
     pub major_mode: &'static str,
     /// Names the minor modes' keymaps in `Core`, highest priority first.
     pub minor_modes: Vec<&'static str>,
-    pub(crate) workspace_list: Option<crate::workspace_list::Snapshot>,
-    pub(crate) workspace_rows: Vec<(usize, crate::workspace_list::Row)>,
     /// The point of the last window that stopped showing this buffer, where the next one starts.
     pub point: MarkerId,
-    /// In copy mode, each command's marks in the text, sorted by start.
-    pub(crate) commands: Vec<ShellCommand>,
     /// The parse of a file in a language aiditor highlights.
     syntax: Option<Syntax>,
-    /// A `Stay` marker at a session buffer's prompt area: the text before it is read-only.
-    pub(crate) prompt: Option<MarkerId>,
 }
 
 /// One recorded edit: where, and the text inserted or deleted there.
@@ -487,7 +505,7 @@ impl Buffer {
         let word = prose || self.major_mode == crate::agents::MODE;
         // The minibuffer and fitted workspace-list rows each occupy one visual row.
         let truncate = self.truncate_lines
-            || self.workspace_list.is_some()
+            || self.workspace_list().is_some()
             || self.major_mode == "minibuffer-mode";
         (!truncate && cols >= 2).then(|| (cols - 1, word))
     }
@@ -508,25 +526,25 @@ impl Buffer {
     }
 
     pub fn text(&self) -> &Rope {
-        match &self.content {
-            Content::Text(rope) => rope,
-            Content::Terminal(_, copy) => copy.as_ref().unwrap_or(&EMPTY),
+        match &self.kind {
+            Kind::Terminal { copy, .. } => copy.as_ref().unwrap_or(&EMPTY),
+            _ => &self.text,
         }
     }
 
     /// Whether this terminal buffer is in copy mode.
     pub fn copy_mode(&self) -> bool {
-        matches!(self.content, Content::Terminal(_, Some(_)))
+        matches!(self.kind, Kind::Terminal { copy: Some(_), .. })
     }
 
     /// Sets a terminal buffer's copy-mode text, `None` to leave copy mode, past read-only and
     /// without undo, dropping the old text's properties; markers past its end move to it.
     pub(crate) fn set_copy_text(&mut self, text: Option<Rope>) {
-        let Content::Terminal(_, copy) = &mut self.content else {
+        let Kind::Terminal { copy, commands, .. } = &mut self.kind else {
             return;
         };
         *copy = text;
-        self.commands.clear();
+        commands.clear();
         for (start, end, _) in std::mem::take(&mut self.props) {
             self.markers.remove(&start);
             self.markers.remove(&end);
@@ -545,17 +563,25 @@ impl Buffer {
         self.tick += 1;
     }
 
+    /// In copy mode, each command's marks in the text, sorted by start.
+    pub(crate) fn commands(&self) -> &[ShellCommand] {
+        match &self.kind {
+            Kind::Terminal { commands, .. } => commands,
+            _ => &[],
+        }
+    }
+
     pub fn terminal(&self) -> Option<&Terminal> {
-        match &self.content {
-            Content::Terminal(terminal, _) => Some(terminal),
-            Content::Text(_) => None,
+        match &self.kind {
+            Kind::Terminal { terminal, .. } => Some(terminal),
+            _ => None,
         }
     }
 
     pub(crate) fn terminal_mut(&mut self) -> Option<&mut Terminal> {
-        match &mut self.content {
-            Content::Terminal(terminal, _) => Some(terminal),
-            Content::Text(_) => None,
+        match &mut self.kind {
+            Kind::Terminal { terminal, .. } => Some(terminal),
+            _ => None,
         }
     }
 
@@ -590,11 +616,17 @@ impl Buffer {
     /// Replaces `range` with `text` as `insert_output` inserts, the undo history's positions
     /// from the range's end on moving by the change in length.
     pub(crate) fn replace_output(&mut self, range: Range<usize>, text: &str) {
-        let (read_only, prompt) = (std::mem::take(&mut self.read_only), self.prompt.take());
+        let read_only = std::mem::take(&mut self.read_only);
+        // Output goes before a session's prompt, whose guard is only for typing.
+        let session = matches!(self.kind, Kind::Session { .. })
+            .then(|| std::mem::replace(&mut self.kind, Kind::Text));
         (self.raw_delete(range.clone()))
             .and_then(|()| self.raw_insert(range.start, text))
             .expect("output goes inside the text");
-        (self.read_only, self.prompt) = (read_only, prompt);
+        self.read_only = read_only;
+        if let Some(kind) = session {
+            self.kind = kind;
+        }
         let (at, n) = (range.end, text.chars().count());
         let shift = |pos: &mut usize| {
             if *pos >= at {
@@ -621,7 +653,53 @@ impl Buffer {
 
     /// Where the prompt boundary is, 0 without one.
     pub(crate) fn prompt_start(&self) -> usize {
-        self.prompt.and_then(|m| self.marker(m)).unwrap_or(0)
+        self.prompt().and_then(|m| self.marker(m)).unwrap_or(0)
+    }
+
+    /// A session buffer's prompt marker.
+    pub(crate) fn prompt(&self) -> Option<MarkerId> {
+        match self.kind {
+            Kind::Session { prompt, .. } => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// What a workspace list lists.
+    pub(crate) fn workspace_list(&self) -> Option<&crate::workspace_list::Snapshot> {
+        match &self.kind {
+            Kind::WorkspaceList { snapshot, .. } => Some(snapshot),
+            _ => None,
+        }
+    }
+
+    /// A workspace list's rows, each with its line.
+    pub(crate) fn workspace_rows(&self) -> &[(usize, crate::workspace_list::Row)] {
+        match &self.kind {
+            Kind::WorkspaceList { rows, .. } => rows,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn session_list(&self) -> Option<&crate::sessions::SessionList> {
+        match &self.kind {
+            Kind::SessionList(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn session_list_mut(&mut self) -> Option<&mut crate::sessions::SessionList> {
+        match &mut self.kind {
+            Kind::SessionList(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    /// The agent whose session buffer it is.
+    pub(crate) fn agent(&self) -> Option<AgentId> {
+        match self.kind {
+            Kind::Session { agent, .. } => Some(agent),
+            _ => None,
+        }
     }
 
     /// Ends the open undo group with point at `point`; the next edit starts a group with point there.
@@ -704,11 +782,11 @@ impl Buffer {
         }
         let start = (self.syntax.is_some() && char_idx <= self.len_chars())
             .then(|| syntax::position(self.text(), char_idx));
-        match &mut self.content {
-            Content::Text(rope) => rope.try_insert(char_idx, text)?,
+        match self.kind {
             // Not even the paths past read-only edit a grid.
-            Content::Terminal(..) if !text.is_empty() => return Err(Error::ReadOnly),
-            Content::Terminal(..) => {}
+            Kind::Terminal { .. } if !text.is_empty() => return Err(Error::ReadOnly),
+            Kind::Terminal { .. } => {}
+            _ => self.text.try_insert(char_idx, text)?,
         }
         let n = text.chars().count();
         if let Some(start) = start {
@@ -743,10 +821,10 @@ impl Buffer {
                         syntax::position(self.text(), range.end),
                     )
                 });
-        match &mut self.content {
-            Content::Text(rope) => rope.try_remove(range.clone())?,
-            Content::Terminal(..) if changed => return Err(Error::ReadOnly),
-            Content::Terminal(..) => {}
+        match self.kind {
+            Kind::Terminal { .. } if changed => return Err(Error::ReadOnly),
+            Kind::Terminal { .. } => {}
+            _ => self.text.try_remove(range.clone())?,
         }
         if let (Some(syntax), Some((start, old_end))) = (&mut self.syntax, ends) {
             syntax.edit(start, old_end, start);
@@ -953,7 +1031,7 @@ impl Buffer {
     /// Code's do; past the end, so an empty last line is inside it too.
     fn continuation(&self) -> Option<Range<usize>> {
         let line = self.text().char_to_line(self.prompt_start()) + 1;
-        (self.prompt.is_some() && line < self.text().len_lines())
+        (self.prompt().is_some() && line < self.text().len_lines())
             .then(|| self.text().line_to_char(line)..self.len_chars() + 1)
     }
 
@@ -1059,11 +1137,17 @@ impl Buffer {
         })
     }
 
-    /// Brings the syntax tree up to date with the text's edits.
-    pub(crate) fn reparse(&mut self) {
-        if let (Some(syntax), Content::Text(rope)) = (&mut self.syntax, &self.content) {
-            syntax.reparse(rope);
+    /// Brings the syntax tree up to date with the text's edits, saying whether it parsed.
+    pub fn reparse(&mut self) -> bool {
+        match (&mut self.syntax, &self.kind) {
+            (Some(syntax), Kind::Text) => syntax.reparse(&self.text),
+            _ => false,
         }
+    }
+
+    /// How many markers it holds, properties' included.
+    pub fn marker_count(&self) -> usize {
+        self.markers.len()
     }
 
     /// The name of the language its file is in, for the mode line.
@@ -1485,7 +1569,11 @@ mod tests {
     fn text_before_the_prompt_is_read_only_and_output_keeps_undo() {
         let (mut buffers, id) = with_text("> ");
         let b = buffers.get_mut(id).unwrap();
-        b.prompt = Some(b.add_marker(2, InsertionType::Stay).unwrap());
+        let prompt = b.add_marker(2, InsertionType::Stay).unwrap();
+        b.kind = Kind::Session {
+            agent: crate::AgentId(0),
+            prompt,
+        };
         assert_eq!(b.insert(1, "x"), Err(Error::TextReadOnly));
         assert_eq!(b.delete(1..3), Err(Error::TextReadOnly));
         b.insert(2, "ab").unwrap();
@@ -1771,7 +1859,11 @@ mod tests {
     fn unfolded_line_skips_the_prompt_continuation_past_the_end() {
         let (mut buffers, id) = with_text("hi\n> a\nb");
         let b = buffers.get_mut(id).unwrap();
-        b.prompt = Some(b.add_marker(5, InsertionType::Stay).unwrap());
+        let prompt = b.add_marker(5, InsertionType::Stay).unwrap();
+        b.kind = Kind::Session {
+            agent: crate::AgentId(0),
+            prompt,
+        };
         b.add_property(0..1, Prop::Invisible(String::new()))
             .unwrap();
         assert_eq!(b.unfolded_line(2, true), 2);

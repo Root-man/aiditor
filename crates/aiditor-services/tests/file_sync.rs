@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use aiditor_core::buffer::hash;
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{Core, Effect, FileOp, Msg};
-use aiditor_services::{files, projects, watcher::Watcher};
+use aiditor_services::runner::{Run, Runner};
+use aiditor_services::{agents, files, grep, projects, terminal, watcher::Watcher};
 
 #[path = "support/native.rs"]
 mod native;
@@ -17,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Editor {
     core: Core,
-    watcher: Watcher,
+    runner: Runner,
     reports: Receiver<Msg>,
     root: PathBuf,
     hold_operations: bool,
@@ -44,10 +45,17 @@ impl Editor {
         )
         .unwrap();
         let (tx, reports) = mpsc::channel();
-        let watcher = Watcher::spawn(move |msg| _ = tx.send(msg));
         let mut editor = Self {
             core: Core::default(),
-            watcher,
+            runner: Runner {
+                tx: aiditor_services::channel().0,
+                grep: grep::Grep::default(),
+                terminals: terminal::Terminals::default(),
+                agents: agents::Agents::default(),
+                watcher: Watcher::spawn(move |msg| _ = tx.send(msg)),
+                recovery: None,
+                config_dir: None,
+            },
             reports,
             root,
             hold_operations: false,
@@ -88,21 +96,23 @@ impl Editor {
         let effects = self.core.handle(Instant::now(), msg);
         let mut replies = Vec::new();
         for effect in effects {
-            match effect {
-                Effect::Terminal(_) | Effect::Agent(_) => {}
-                Effect::File(op) if self.hold_operations => self.operations.push(op),
-                Effect::File(op) => replies.push(files::run(op)),
-                Effect::Watch(set) => self.watcher.set(set),
-                Effect::Recovery(_)
-                | Effect::SetClipboard(_)
-                | Effect::OpenWithSystem(_)
-                | Effect::OpenUrl(_) => {}
+            let effect = match effect {
+                Effect::File(op) if self.hold_operations => {
+                    self.operations.push(op);
+                    continue;
+                }
                 Effect::Grep(_)
                 | Effect::LoadConfiguration { .. }
                 | Effect::CaptureEnvironment { .. }
                 | Effect::Quit => {
                     panic!("unexpected effect in file sync test")
                 }
+                effect => effect,
+            };
+            match self.runner.run(effect) {
+                Run::Blocking(work) => replies.push(work()),
+                Run::Reply(msg) => replies.push(msg),
+                Run::Done | Run::Drain(_) | Run::Platform(_) => {}
             }
         }
         if self.hold_replies {

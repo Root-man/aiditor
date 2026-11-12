@@ -1,13 +1,17 @@
 use std::hint::black_box;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use agent_client_protocol_schema::v1::{
     ContentChunk, NewSessionResponse, SessionNotification, SessionUpdate,
 };
+use aiditor_core::buffer::Buffers;
 use aiditor_core::command::{Args, Prefix};
 use aiditor_core::project::{Loaded, Project};
-use aiditor_core::{AgentId, AgentOp, Core, Ctx, Effect, Msg};
+use aiditor_core::{AgentId, AgentOp, Core, Ctx, Effect, FileOp, Msg};
+
+/// The markers `session()`'s transcript holds once a char is typed in its prompt.
+const MARKERS: usize = 21_010;
 
 #[path = "../../../benches/support.rs"]
 mod support;
@@ -187,8 +191,125 @@ fn unsorted(output: &mut String) {
     assert!(shows_thought(&mut core));
 }
 
+/// One byte of terminal output in a core visiting 200 files of two watched projects that index
+/// 1,000 directories each, which is nearly all `handle`'s tail.
+fn tail(output: &mut String) {
+    let mut core = Core::default();
+    let projects = ["a", "b"].map(|name| {
+        let project = Project::parse(&format!(
+            "name = '{name}'\n[primary]\npath = '/tail/{name}'\n"
+        ));
+        Ok(Loaded {
+            project: project.unwrap(),
+            file: None,
+        })
+    });
+    core.handle(
+        Instant::now(),
+        Msg::ProjectsLoaded {
+            dir: None,
+            projects: projects.into(),
+        },
+    );
+    for name in ["a", "b"] {
+        let project = core.project_id(name).unwrap();
+        core.new_workspace(name, project);
+    }
+    let walks: Vec<_> = (core.handle(Instant::now(), Msg::Tick).into_iter())
+        .filter_map(|e| match e {
+            Effect::File(FileOp::Index { project, walk, .. }) => Some((project, walk)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(walks.len(), 2, "both watched projects ask for a walk");
+    for (project, walk) in walks {
+        let root = PathBuf::from(format!("/tail/{}", core.project_name(project)));
+        let files = (0..100).map(|i| format!("d{i}/f.rs").into()).collect();
+        let directories = (0..1_000).map(|i| root.join(format!("d{i}"))).collect();
+        core.handle(
+            Instant::now(),
+            Msg::Indexed {
+                project,
+                walk,
+                roots: vec![(root, Ok(files))],
+                directories,
+            },
+        );
+    }
+    for name in ["a", "b"] {
+        for i in 0..100 {
+            let path = format!("/tail/{name}/d{i}/f.rs");
+            core.open(
+                Path::new(&path),
+                Some((format!("fn f{i}() {{}}\n").into(), 0)),
+            );
+        }
+    }
+    let (id, _) = core.create_terminal("*terminal*", 24, 80);
+    core.handle(Instant::now(), Msg::Tick);
+    let set = core.watch_set();
+    assert_eq!(set.roots.len(), 2);
+    assert!(set.files.len() >= 200, "{} watched files", set.files.len());
+    assert_eq!(
+        set.directories.iter().map(|d| d.len()).sum::<usize>(),
+        2_000
+    );
+    let output_byte = Msg::TerminalOutput {
+        id,
+        bytes: b"x".to_vec(),
+    };
+    let effects = core.handle(Instant::now(), output_byte);
+    assert!(effects.is_empty(), "{} effects", effects.len());
+    measure(
+        "handle-tail/terminal-output-200-file-buffers",
+        || {
+            black_box(core.handle(
+                Instant::now(),
+                Msg::TerminalOutput {
+                    id,
+                    bytes: b"x".to_vec(),
+                },
+            ));
+        },
+        output,
+    );
+}
+
 fn main() {
     let mut output = String::new();
+    tail(&mut output);
+    // A self-insert in the prompt walks every marker the transcript holds.
+    prepared(
+        "hot-stream/prompt-typing-5000-line-transcript",
+        || {
+            let (mut core, _) = session();
+            command(&mut core, "end-of-buffer");
+            core
+        },
+        |core| {
+            black_box(core.handle(
+                Instant::now(),
+                Msg::Insert {
+                    text: "x".into(),
+                    replace: None,
+                },
+            ));
+        },
+        &mut output,
+    );
+    let (mut core, _) = session();
+    command(&mut core, "end-of-buffer");
+    core.handle(
+        Instant::now(),
+        Msg::Insert {
+            text: "x".into(),
+            replace: None,
+        },
+    );
+    assert!(core.text().ends_with("> x"));
+    let markers = core.current().marker_count();
+    println!("hot-stream/prompt-typing-5000-line-transcript: {markers} markers");
+    assert_eq!(markers, MARKERS);
     for lines in [10_000, 100_000] {
         let source: String = (0..lines)
             .map(|i| {
@@ -204,6 +325,22 @@ fn main() {
             .collect();
         let mut core = open("/scopes.rs", &source);
         let middle = core.current().text().line_to_char(lines / 2);
+        if lines == 10_000 {
+            prepared(
+                "syntax-parse/rs/10000-lines-after-edit",
+                || {
+                    let mut buffers = Buffers::default();
+                    let id = buffers.create_for_file(Path::new("/scopes.rs"), &source);
+                    let buffer = buffers.get_mut(id).unwrap();
+                    buffer.insert(middle, " ").unwrap();
+                    (buffers, id)
+                },
+                |(buffers, id)| {
+                    assert!(buffers.get_mut(*id).unwrap().reparse(), "the edit reparses");
+                },
+                &mut output,
+            );
+        }
         call(
             &mut core,
             "forward-char",

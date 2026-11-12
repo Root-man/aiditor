@@ -2,10 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::buffer::{self, Buffer, BufferId, Buffers};
+use crate::buffer::{self, Buffer, BufferId, Buffers, Kind};
 use crate::command::Args;
 use crate::workspace::WorkspaceId;
-use crate::{Core, Ctx, Effect, FileOp, VisitIntent};
+use crate::{Core, Ctx, Effect, FileOp, TerminalOp, VisitIntent};
 
 pub(crate) struct PendingVisit {
     pub intent: VisitIntent,
@@ -557,16 +557,29 @@ impl Core {
             self.pending_visit = None;
         }
         let next = replacement(&self.buffers, id, self.buffers.workspace);
+        let saved = (self.workspaces.iter_mut()).filter_map(|w| w.windows.as_mut());
+        let shown = (std::iter::once(&mut self.windows).chain(saved))
+            .any(|windows| windows.windows_mut().any(|w| w.buffer() == id));
         // Killed first, so a new scratch gets its name.
-        _ = self.buffers.kill(id);
-        let next = next.unwrap_or_else(|| match self.current_workspace() {
-            Ok(workspace) => {
+        match self.buffers.kill(id).map(|b| b.kind) {
+            Ok(Kind::Terminal { id, .. }) if self.terminals.remove(&id).is_some() => {
+                self.released
+                    .push(Effect::Terminal(TerminalOp::Kill { id }));
+            }
+            Ok(Kind::Session { agent, .. }) => self.release_session(agent),
+            _ => {}
+        }
+        let next = match (next, self.current_workspace()) {
+            (Some(next), _) => next,
+            // No window needs a replacement, as for a minibuffer or a list no longer shown.
+            (None, _) if !shown => id,
+            (None, Ok(workspace)) => {
                 let name = workspace.name.clone();
                 self.buffers.create_scratch(&name)
             }
             // The lobby's last buffer gives way to `*Messages*`, made empty if need be.
-            Err(_) => self.messages(),
-        });
+            (None, Err(_)) => self.messages(),
+        };
         let current = self.buffers.workspace;
         self.windows.drop_killed(&mut self.buffers, current, next);
         for workspace in &mut self.workspaces {

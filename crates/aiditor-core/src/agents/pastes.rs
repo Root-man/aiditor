@@ -112,7 +112,7 @@ impl Session {
 impl Core {
     pub(crate) fn fold_yank(&mut self, start: usize, text: &str) {
         let buffer = self.windows.window.buffer();
-        let Some(session) = self.agents.values_mut().find(|s| s.buffer == buffer) else {
+        let Some(session) = (self.current().agent()).and_then(|id| self.agents.get_mut(&id)) else {
             return;
         };
         let buffer = self.buffers.get_mut(buffer).expect("current buffer");

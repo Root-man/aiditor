@@ -16,7 +16,7 @@ use alacritty_terminal::term::{Config, Term, TermMode, test::TermSize};
 use alacritty_terminal::vte::ansi::{Color, CursorShape as Shape, NamedColor, Processor, Rgb};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 
-use crate::buffer::{Buffer, BufferId, Face, Prop};
+use crate::buffer::{Buffer, BufferId, Face, Kind, Prop};
 use crate::display::{self, CursorShape, Run, TEXT_INSET};
 use crate::key::{Key, KeyCode};
 use crate::settings::Theme;
@@ -689,7 +689,12 @@ impl Ctx<'_> {
         for (range, face) in faces {
             buffer.add_property(range, Prop::Face(face))?;
         }
-        buffer.commands = commands;
+        if let Kind::Terminal {
+            commands: marks, ..
+        } = &mut buffer.kind
+        {
+            *marks = commands;
+        }
         let at = buffer.char_idx(line, col)?;
         core.windows.window.set_point(&mut core.buffers, at)?;
         Ok(())
@@ -700,7 +705,7 @@ impl Ctx<'_> {
     pub(crate) fn vterm_next_prompt(&mut self, n: i64) -> Result<(), String> {
         let core = &mut *self.core;
         let point = core.point();
-        let mut prompts: Vec<usize> = core.current().commands.iter().map(|c| c.input).collect();
+        let mut prompts: Vec<usize> = core.current().commands().iter().map(|c| c.input).collect();
         prompts.sort_unstable();
         prompts.dedup();
         let at = crate::motion::nth_mark(&prompts, point, n).ok_or("No prompt found")?;
@@ -713,7 +718,7 @@ impl Ctx<'_> {
     pub(crate) fn vterm_mark_output(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
         let (buffer, point) = (core.current(), core.point());
-        let commands = &buffer.commands;
+        let commands = buffer.commands();
         let i = (commands.iter().rposition(|c| c.start <= point)).ok_or("No command at point")?;
         let output = commands[i].output.ok_or("No command at point")?;
         let mut end = (commands[i].end)
@@ -753,7 +758,7 @@ impl Ctx<'_> {
     /// sends the terminal its one kill, which releases it.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
         let core = &mut *self.core;
-        // Removed first, so `sync_terminals` sends no second kill; this one sends no signal, it
+        // Removed first, so `kill_buffer` sends no second kill; this one sends no signal, it
         // only has the service release the PTY and input thread.
         let Some(buffer) = core.terminals.remove(&id) else {
             return;
@@ -797,11 +802,10 @@ impl Core {
     /// The current buffer's terminal while it takes keys: its shell is live, it isn't in copy
     /// mode and no key sequence is pending.
     pub(crate) fn char_mode(&self) -> Option<TerminalId> {
-        let buffer = self.windows.window.buffer();
-        (self.pending.is_empty() && !self.current().copy_mode())
-            .then(|| self.terminals.iter().find(|&(_, &b)| b == buffer))
-            .flatten()
-            .map(|(&id, _)| id)
+        let Kind::Terminal { id, copy: None, .. } = self.current().kind else {
+            return None;
+        };
+        (self.pending.is_empty() && self.terminals.contains_key(&id)).then_some(id)
     }
 
     /// Whether buffer `id` is a terminal whose shell hasn't exited.
@@ -840,17 +844,9 @@ impl Core {
         .collect()
     }
 
-    /// Kills the shells of killed terminal buffers, then sizes each terminal to the smallest
-    /// window showing it, as Emacs's `window-adjust-process-window-size-smallest`.
-    pub(crate) fn sync_terminals(&mut self, effects: &mut Effects) {
-        let buffers = &self.buffers;
-        self.terminals.retain(|&id, &mut buffer| {
-            let live = buffers.get(buffer).is_some();
-            if !live {
-                effects.push(Effect::Terminal(TerminalOp::Kill { id }));
-            }
-            live
-        });
+    /// Sizes each terminal to the smallest window showing it, as Emacs's
+    /// `window-adjust-process-window-size-smallest`.
+    pub(crate) fn size_terminals(&mut self, effects: &mut Effects) {
         let mut sizes: BTreeMap<BufferId, (u16, u16)> = BTreeMap::new();
         for (_, buffer, rows, cols) in self.window_cells() {
             let size = sizes.entry(buffer).or_insert((rows, cols));
@@ -1328,7 +1324,7 @@ mod tests {
             h.collect_effects = true;
             output(&mut h, TerminalId(99), "\x1b[6n");
             assert!(h.effects.is_empty());
-            h.core.buffers.kill(buffer).unwrap();
+            h.core.kill_buffer(buffer);
             output(&mut h, id, "\x1b[6n");
             // No reply; only the kill of the killed buffer's shell.
             assert!(
