@@ -141,6 +141,10 @@ The [full-suite report](measurements/2026-11-08-full-benchmarks/README.md) rerun
 
 The [scan-fixes report](measurements/2026-11-09-scan-fixes/README.md) measures the `fix-m6-refactor-scan-findings` change ([scan record](refactoring-opportunities.md#m6-scan-2026-11-09)) against a baseline at `0f74a9b` and the 2026-11-08 run. A session with properties added out of order draws a clean frame in 0.24 ms instead of 56.7 ms, dirty-stream and first-show frames take 1.4 ms instead of about 44 ms, open command output appends in 0.27 ms whatever its size (was 3.4–15 ms), and the colored copy-mode scroll pair is 0.61 ms (was 4.0 ms). Display and frame cases are 6–20% faster. The 2026-11-08 report's `hot-stream/shown-*` comparisons with #404 are not like-for-like: #457 added a table to that fixture.
 
+## Architecture review, 2026-11-12
+
+The [architecture-review report](measurements/2026-11-12-architecture-review/README.md) measures the `architecture-review-refactors` change ([review record](refactoring-opportunities.md#architecture-review-2026-11-12)) against a baseline at `f0e4d13` on a Ryzen 7 5800X3D running Linux. Edit frames in files over 64 KiB no longer parse: the 100k-line Rust `/*` pair is 4.1 ms instead of 485 ms. Dirty-stream and first-show session frames halve to 1.2 ms, and a message's tail with 200 visited files is 9.7 µs instead of 1.0 ms. Four cases are 5–8% slower, each by under 25 µs.
+
 ## GUI input during terminal floods
 
 ```sh

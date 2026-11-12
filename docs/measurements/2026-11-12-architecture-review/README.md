@@ -92,3 +92,78 @@ Readings:
 - A `/*` that recolours the rest of the file now costs what a one-char edit does.
 - `revert-apply-frame/rs/*` stays near 190 ms: those costs are the revert's per-hunk edits, not the parse or the locals index.
 - The 5–50% slowdowns the first run showed in `hot-stream/*` and `handle-tail/*` are gone in this sequential run (within 5%), so they were host noise.
+
+## Session transcript as one block list (task 5.6)
+
+Run on `3e9e8d0` (groups 1–5) on the baseline host and setup, `core` then `hot_paths`, sequentially. All self-checks passed. Raw data: [core](block-list-core.tsv), [hot_paths](block-list-hot_paths.tsv).
+
+| Benchmark | Baseline | Now | Change |
+| --- | ---: | ---: | ---: |
+| `hot-stream/shown-clean-frame` | 441.9 µs | 462.3 µs | +4.6% |
+| `hot-stream/hidden-clean-frame` | 4.9 µs | 4.9 µs | 0% |
+| `hot-stream/unsorted-props-clean-frame` | 583.7 µs | 577.8 µs | −1.0% |
+| `hot-stream/shown-dirty-frame` | 2.5 ms | 1.2 ms | −51.9% |
+| `hot-stream/hidden-dirty-frame` | 13.2 µs | 13.4 µs | +1.7% |
+| `hot-stream/hidden-first-show-frame` | 2.5 ms | 1.2 ms | −50.3% |
+| `hot-stream/tool-output-shown-open-500000` | 694.0 µs | 701.6 µs | +1.1% |
+| `hot-stream/tool-output-shown-open-5000000` | 698.5 µs | 696.9 µs | −0.2% |
+| `hot-stream/tool-output-shown-folded-5000000` | 1.06 ms | 1.06 ms | −0.2% |
+| `hot-stream/tool-output-hidden-500000` | 11.9 µs | 12.3 µs | +3.3% |
+| `hot-stream/tool-output-hidden-5000000` | 12.0 µs | 13.6 µs | +13.4% |
+| `session-render/5000-line-styled-message` | 110.6 ms | 105.4 ms | −4.7% |
+| `hot-stream/prompt-typing-5000-line-transcript` | 60.0 µs | 52.8 µs | −12.1% |
+
+Readings:
+
+- Every clean, dirty-stream and first-show frame is within 10% of the baseline or faster; the dirty and first-show frames take half the time.
+- `tool-output-hidden-5000000` is 1.6 µs slower (+13%); it is not one of the frames task 5.6 checks, and its 500,000-byte twin moved +3%.
+- **Marker store input:** typing in the prompt of the 5,000-line transcript costs 52.8 µs and the buffer holds **21,010 markers**, the same count as the baseline, so the block list did not reduce the marker count, as the review's correction expected.
+
+## Per-message tail (tasks 6.1, 6.2)
+
+6.1: on `3e9e8d0` (groups 1–5), `handle-tail/terminal-output-200-file-buffers` took **1.05 ms** ([block-list hot_paths](block-list-hot_paths.tsv)), over D5's 20 µs. A `perf record --call-graph dwarf` of the case put the time in `watch_set`: building every file buffer's language-version candidate paths, sorting them, and cloning and comparing the indexed directories, on every message.
+
+6.2: `Watch` keeps the last set behind a `dirty` flag. It is raised when a file buffer is made or killed (`Buffers::files_changed`), when a head is answered, on a project add, edit, write, reload or release, a workspace add or kill, an index request or reply, and new settings. In debug builds, a message that leaves the flag down asserts the kept set equals a fresh one. Five tests that write those fields directly now raise the flag too. Same host and setup, `hot_paths` only. Raw data: [hot_paths](watch-set-hot_paths.tsv).
+
+| Benchmark | Before | Now |
+| --- | ---: | ---: |
+| `handle-tail/terminal-output-200-file-buffers` | 1.05 ms | **11.6 µs** |
+
+The other cases in this run were 15–35% slower than the 5.6 run, `hot-stream/*` frames included. Frames don't call `handle`, so that is host noise, not this change.
+
+## Final run (task 7.2)
+
+Run on `3e9e8d0` plus group 6 (the whole change), on the baseline host and setup, `core`, `hot_paths` then `services`, sequentially, with the host otherwise idle (load average 2.7 at the start, falling). All self-checks passed. Raw data: [core](final-core.tsv), [hot_paths](final-hot_paths.tsv), [services](final-services.tsv).
+
+Every `core` and `hot_paths` case is in the baseline. `services` was not run at baseline on this host (the 2026-11-09 run was an Apple M5 Pro), so its numbers are a first record here, not a comparison.
+
+| Benchmark | Baseline | Final | Change |
+| --- | ---: | ---: | ---: |
+| `handle-tail/terminal-output-200-file-buffers` | 1.0 ms | 9.7 µs | −99.0% |
+| `hot-stream/shown-dirty-frame` | 2.5 ms | 1.2 ms | −51.5% |
+| `hot-stream/hidden-first-show-frame` | 2.5 ms | 1.2 ms | −51.3% |
+| `hot-stream/shown-clean-frame` | 441.9 µs | 453.0 µs | +2.5% |
+| `hot-stream/prompt-typing-5000-line-transcript` | 60.0 µs | 51.8 µs | −13.7% |
+| `syntax-edit-frame/rs/10000-lines-comment-delimiter-undo-pair` | 48.2 ms | 2.2 ms | −95.5% |
+| `syntax-edit-frame/rs/100000-lines-character-undo-pair` | 26.9 ms | 4.1 ms | −84.7% |
+| `syntax-edit-frame/rs/100000-lines-comment-delimiter-undo-pair` | 485.2 ms | 4.1 ms | −99.1% |
+| `syntax-edit-frame/tsx/100000-lines-comment-delimiter-undo-pair` | 59.4 ms | 6.7 ms | −88.7% |
+| `hot-scopes/100000-lines-edit-highlight-undo-pair` | 26.5 ms | 4.2 ms | −84.2% |
+| `revert-apply-frame/rs/100k-lines-scattered` | 251.2 ms | 186.8 ms | −25.7% |
+| `session-render/5000-line-styled-message` | 110.6 ms | 106.2 ms | −4.0% |
+| `frame/1-panes-shared-rust` | 384.8 µs | 393.1 µs | +2.1% |
+| `frame/4-panes-distinct-rust` | 1.6 ms | 1.6 ms | −0.7% |
+
+| Services benchmark | Final |
+| --- | ---: |
+| `index/10k-files-two-roots-warm-cache` | 16.5 ms |
+| `grep/10k-hits-two-roots-complete-warm-cache` | 99.9 ms |
+| `grep/first-batch-two-roots-warm-cache` | 585.4 µs |
+| `grep/sparse-later-root-complete-warm-cache` | 80.1 ms |
+| `grep/10k-hits-two-roots-complete-warm-cache-4-workers` | 30.8 ms |
+
+Readings:
+
+- `syntax-load/*` (−99.7 to −99.9%), `syntax-edit-frame/*`, `revert-apply-frame/rs/*` and `hot-scopes/*` changed what they measure in group 4 (see above): buffers over 64 KiB no longer parse on the UI thread. Their drops are the parse leaving the frame, not a faster parse.
+- Regressions over 5%, all under 25 µs in absolute terms: `edit-undo/100k-lines` 340 → 365 ns (+7.5%), `terminal-display/50x120-screen` 133.8 → 141.2 µs (+5.6%), `finder/10000-paths-open-close` 1.0 → 1.1 ms (+5.5%) and `hot-stream/tool-output-hidden-5000000` 12.0 → 12.6 µs (+5.4%; +13% in the 5.6 run). None was repeated; the other 89 like-for-like cases are within 5% or faster.
+- The 15–35% slowdowns in the 6.2 run are gone: that run shared the host with a game.
