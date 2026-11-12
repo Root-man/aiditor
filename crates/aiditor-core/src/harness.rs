@@ -50,6 +50,8 @@ pub struct Harness {
     pub terminal_ops: Vec<crate::TerminalOp>,
     /// The agent work the core asked for, in order.
     pub agent_ops: Vec<crate::AgentOp>,
+    /// The parses the core asked for, held until `parse` delivers them.
+    pub parses: Vec<(BufferId, crate::Parse)>,
 }
 
 impl Harness {
@@ -90,6 +92,7 @@ impl Harness {
             effects: Vec::new(),
             terminal_ops: Vec::new(),
             agent_ops: Vec::new(),
+            parses: Vec::new(),
         };
         for (name, text) in files {
             harness.read_reply(name, Some(text.as_bytes()));
@@ -203,6 +206,14 @@ impl Harness {
         let effects = self.core.handle(self.now, msg);
         self.run(effects);
         self.settle();
+        self
+    }
+
+    /// Runs the parses the core asked for and delivers their results, in order.
+    pub fn parse(&mut self) -> &mut Self {
+        for (buffer, parse) in std::mem::take(&mut self.parses) {
+            self.send(parse.run(buffer));
+        }
         self
     }
 
@@ -424,6 +435,7 @@ impl Harness {
                     }
                 }
                 Effect::Grep(GrepOp::Cancel) => self.greps.push(None),
+                Effect::Parse { buffer, parse } => self.parses.push((buffer, parse)),
                 Effect::LoadConfiguration { request } => {
                     let settings = self.fixture_text("settings.toml");
                     let keymap = self.fixture_text("keymap.toml");

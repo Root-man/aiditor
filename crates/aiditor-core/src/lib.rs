@@ -38,6 +38,7 @@ mod sessions;
 pub mod settings;
 mod swiper;
 mod syntax;
+pub use syntax::Parse;
 pub mod terminal;
 pub mod timer;
 mod visiting;
@@ -171,6 +172,11 @@ pub enum Msg {
         buffer: BufferId,
         request: u64,
         version: Option<String>,
+    },
+    /// The answer to `Effect::Parse`.
+    Parsed {
+        buffer: BufferId,
+        parse: Parse,
     },
     /// A watch registration failure or recovery, shown in the echo area and Messages.
     WatchStatus(String),
@@ -397,6 +403,8 @@ pub enum Effect {
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
+    /// Parse a large buffer's text off the UI thread with `Parse::run`.
+    Parse { buffer: BufferId, parse: Parse },
     /// Capture the login shell's environment in `dir` and send `Msg::EnvironmentCaptured`.
     CaptureEnvironment {
         project: ProjectId,
@@ -886,6 +894,11 @@ impl Ctx<'_> {
                     file.language_version = version;
                 }
             }
+            Msg::Parsed { buffer, parse } => {
+                if let Some(buffer) = self.core.buffers.get_mut(buffer) {
+                    buffer.parsed(parse);
+                }
+            }
             Msg::WatchStatus(message) => self.core.report(message),
             Msg::Hint => {
                 self.core.hint_timer = None;
@@ -1232,6 +1245,7 @@ impl Core {
         }
         ctx.ensure_watch_indexes();
         ctx.ask_heads();
+        ctx.ask_parses();
         ctx.ask_language_versions();
         ctx.ensure_environments();
         ctx.ask_on_focus();

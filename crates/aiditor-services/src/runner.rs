@@ -42,6 +42,7 @@ impl Runner {
             Effect::Terminal(op) => self.terminals.run(op).map_or(Run::Done, Run::Drain),
             Effect::Agent(op) => self.agents.run(op).map_or(Run::Done, Run::Drain),
             Effect::File(op) => Run::Blocking(Box::new(move || files::run(op))),
+            Effect::Parse { buffer, parse } => Run::Blocking(Box::new(move || parse.run(buffer))),
             Effect::Grep(op) => {
                 self.grep.run(op, self.tx.clone());
                 Run::Done

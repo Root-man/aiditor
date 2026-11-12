@@ -34,7 +34,7 @@ fn command(core: &mut Core, name: &str) {
 fn open(path: &str, text: &str) -> Core {
     let mut core = Core::default();
     core.open(Path::new(path), Some((text.as_bytes().to_vec(), 0)));
-    core.handle(
+    let effects = core.handle(
         Instant::now(),
         Msg::Resize {
             width: 960.,
@@ -42,6 +42,12 @@ fn open(path: &str, text: &str) -> Core {
             cell_width: 8.,
         },
     );
+    // A large file's first parse arrives before the cases act, as it would in the app.
+    for effect in effects {
+        if let Effect::Parse { buffer, parse } = effect {
+            core.handle(Instant::now(), parse.run(buffer));
+        }
+    }
     core
 }
 
@@ -332,11 +338,18 @@ fn main() {
                     let mut buffers = Buffers::default();
                     let id = buffers.create_for_file(Path::new("/scopes.rs"), &source);
                     let buffer = buffers.get_mut(id).unwrap();
+                    let Msg::Parsed { parse, .. } = buffer.ask_parse().unwrap().run(id) else {
+                        unreachable!()
+                    };
+                    buffer.parsed(parse);
                     buffer.insert(middle, " ").unwrap();
-                    (buffers, id)
+                    // The buffers and the result live on, so no tree is freed while timed.
+                    (buffer.ask_parse(), None, buffers, id)
                 },
-                |(buffers, id)| {
-                    assert!(buffers.get_mut(*id).unwrap().reparse(), "the edit reparses");
+                |(parse, parsed, _, id)| {
+                    let parse = parse.take().expect("the edit asks for a parse");
+                    *parsed = Some(parse.run(*id));
+                    assert!(matches!(parsed, Some(Msg::Parsed { .. })));
                 },
                 &mut output,
             );

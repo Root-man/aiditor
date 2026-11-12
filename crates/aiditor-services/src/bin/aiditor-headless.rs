@@ -66,6 +66,7 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
         let reply = match effect {
             Effect::Terminal(_) | Effect::Agent(_) => continue,
             Effect::File(op) => files::run(op),
+            Effect::Parse { buffer, parse } => parse.run(buffer),
             // Runs to the end before the next key, so nothing is left to cancel.
             Effect::Grep(GrepOp::Search(op)) => {
                 let mut replies = Vec::new();

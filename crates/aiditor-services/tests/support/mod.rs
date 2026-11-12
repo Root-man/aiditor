@@ -45,6 +45,7 @@ impl Driver {
                 Effect::Terminal(_) | Effect::Agent(_) => {}
                 Effect::File(op) if self.hold_files => self.files.push_back(op),
                 Effect::File(op) => self.replies.push_back(files::run(op)),
+                Effect::Parse { buffer, parse } => self.replies.push_back(parse.run(buffer)),
                 Effect::Grep(GrepOp::Search(op)) => {
                     grep::search(&op, || false, |msg| self.replies.push_back(msg));
                 }

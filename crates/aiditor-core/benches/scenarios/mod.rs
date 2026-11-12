@@ -46,7 +46,7 @@ fn open(path: &str, text: &str) -> Core {
         Path::new(path),
         Some((text.as_bytes().to_vec(), buffer::hash(text.as_bytes()))),
     );
-    core.handle(
+    let effects = core.handle(
         Instant::now(),
         Msg::Resize {
             width: 960.,
@@ -54,7 +54,17 @@ fn open(path: &str, text: &str) -> Core {
             cell_width: 8.,
         },
     );
+    parse(&mut core, effects);
     core
+}
+
+/// Delivers the parses `effects` ask for, as they would arrive before the next key in the app.
+fn parse(core: &mut Core, effects: Vec<Effect>) {
+    for effect in effects {
+        if let Effect::Parse { buffer, parse } = effect {
+            core.handle(Instant::now(), parse.run(buffer));
+        }
+    }
 }
 
 /// `lines` lines of `ext` code, one item each; Rust and TSX items are nested 100 to a module or
@@ -621,7 +631,7 @@ fn splits(output: &mut String) {
                     );
                 }
             }
-            core.handle(
+            let effects = core.handle(
                 Instant::now(),
                 Msg::Resize {
                     width: 960. * panes as f32,
@@ -629,6 +639,7 @@ fn splits(output: &mut String) {
                     cell_width: 8.,
                 },
             );
+            parse(&mut core, effects);
             let frame = core.frame();
             assert_eq!(frame.windows.len(), panes);
             assert!(colored(&frame));

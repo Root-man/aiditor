@@ -10,7 +10,7 @@ use ropey::Rope;
 use serde::Deserialize;
 
 use crate::settings::{FaceName, LineNumbers};
-use crate::syntax::{self, Syntax};
+use crate::syntax::{self, Parse, Syntax};
 use crate::terminal::{ShellCommand, Terminal};
 use crate::workspace::WorkspaceId;
 use crate::{AgentId, TerminalId};
@@ -1141,11 +1141,29 @@ impl Buffer {
         })
     }
 
-    /// Brings the syntax tree up to date with the text's edits, saying whether it parsed.
+    /// Brings the syntax tree up to date with the text's edits, saying whether it parsed. Text
+    /// over the cut is left to a `Parse`, its edited tree drawn meanwhile.
     pub fn reparse(&mut self) -> bool {
         match (&mut self.syntax, &self.kind) {
-            (Some(syntax), Kind::Text) => syntax.reparse(&self.text),
+            (Some(syntax), Kind::Text) if self.text.len_bytes() <= syntax::PARSE_CUT => {
+                syntax.reparse(&self.text)
+            }
             _ => false,
+        }
+    }
+
+    /// A parse for a service, if its text is over the cut, edited since and none is outstanding.
+    pub fn ask_parse(&mut self) -> Option<Parse> {
+        match (&mut self.syntax, &self.kind) {
+            (Some(syntax), Kind::Text) => syntax.ask(&self.text),
+            _ => None,
+        }
+    }
+
+    /// Takes its outstanding parse's result.
+    pub fn parsed(&mut self, parse: Parse) {
+        if let Some(syntax) = &mut self.syntax {
+            syntax.parsed(parse);
         }
     }
 

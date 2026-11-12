@@ -1,6 +1,7 @@
 //! Tree-sitter parsing of a visited file and highlighting of the lines a window shows.
 
-use crate::buffer::Face;
+use crate::Msg;
+use crate::buffer::{BufferId, Face};
 use ropey::Rope;
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -135,8 +136,10 @@ static TOML: LazyLock<Grammar> = LazyLock::new(|| {
     )
 });
 
+/// Text over this many bytes is parsed by a `Parse` effect, not on the core thread.
+pub(crate) const PARSE_CUT: usize = 64 * 1024;
+
 /// A buffer's syntax tree, kept in step with its text.
-// shortcut: parses on the core thread, so a huge file stalls visiting and big edits; move it to the syntax service when that shows.
 pub(crate) struct Syntax {
     /// The language's name, for the mode line.
     pub(crate) name: &'static str,
@@ -146,10 +149,20 @@ pub(crate) struct Syntax {
     injections: Vec<Injection>,
     /// Edits since the last parse.
     stale: bool,
+    /// A `Parse` is outstanding.
+    parsing: bool,
+    /// The edits made since the outstanding `Parse` was asked for, replayed on its result.
+    since: Vec<InputEdit>,
     /// The last highlights: their ranges, palette and runs, reused while the tree is unchanged.
     cache: RefCell<Option<Highlights>>,
     locals: RefCell<locals::Cache>,
 }
+
+// The core hands a `Syntax` to a service in a `Parse`.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Syntax>();
+};
 
 type Runs = Vec<(Range<usize>, Face)>;
 type Highlights = (Vec<Range<usize>>, BTreeMap<String, Face>, Runs);
@@ -456,6 +469,14 @@ pub(crate) fn face(palette: &BTreeMap<String, Face>, mut name: &str) -> Option<F
 
 impl Syntax {
     pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            locals: self.locals.clone(),
+            ..self.copy()
+        }
+    }
+
+    /// A copy without the locals cache, which a parse doesn't touch.
+    fn copy(&self) -> Self {
         let mut parser = Parser::new();
         parser
             .set_language(&self.grammar.language)
@@ -467,12 +488,15 @@ impl Syntax {
             tree: self.tree.clone(),
             injections: self.injections.clone(),
             stale: false,
+            parsing: false,
+            since: Vec::new(),
             cache: RefCell::default(),
-            locals: self.locals.clone(),
+            locals: RefCell::default(),
         }
     }
 
-    /// `text` parsed in the language `path`'s extension names, if aiditor has its grammar.
+    /// `text` parsed in the language `path`'s extension names, if aiditor has its grammar. Text
+    /// over the cut is left for a `Parse`.
     pub(crate) fn for_file(path: &Path, text: &Rope) -> Option<Syntax> {
         let mut ext = path.extension()?.to_str()?;
         // An EEx template (`a.html.heex.eex`) is highlighted as the file it generates.
@@ -493,7 +517,12 @@ impl Syntax {
         };
         let mut parser = Parser::new();
         (parser.set_language(&grammar.language)).expect("bundled grammars suit this tree-sitter");
-        let tree = parse(&mut parser, text, None);
+        // Text over the cut starts uncoloured, with an empty tree, until its `Parse` arrives.
+        let large = text.len_bytes() > PARSE_CUT;
+        let tree = match large {
+            true => parser.parse("", None).expect("an empty parse finishes"),
+            false => parse(&mut parser, text, None),
+        };
         let injections = injections(grammar, text, &tree, Vec::new());
         Some(Syntax {
             name,
@@ -501,7 +530,9 @@ impl Syntax {
             parser,
             tree,
             injections,
-            stale: false,
+            stale: large,
+            parsing: false,
+            since: Vec::new(),
             cache: RefCell::default(),
             locals: RefCell::default(),
         })
@@ -522,12 +553,23 @@ impl Syntax {
             old_end_position: old_end.1,
             new_end_position: new_end.1,
         };
-        self.locals.get_mut().edit(&self.tree, &edit);
-        self.tree.edit(&edit);
-        for injection in &mut self.injections {
-            injection.edit(&edit);
+        self.apply(&edit);
+        if self.parsing {
+            self.since.push(edit);
         }
         self.stale = true;
+    }
+
+    fn apply(&mut self, edit: &InputEdit) {
+        self.locals.get_mut().edit(&self.tree, edit);
+        self.apply_to_trees(edit);
+    }
+
+    fn apply_to_trees(&mut self, edit: &InputEdit) {
+        self.tree.edit(edit);
+        for injection in &mut self.injections {
+            injection.edit(edit);
+        }
         self.cache.take();
     }
 
@@ -535,16 +577,50 @@ impl Syntax {
     pub(crate) fn reparse(&mut self, text: &Rope) -> bool {
         let stale = std::mem::take(&mut self.stale);
         if stale {
-            self.tree = parse(&mut self.parser, text, Some(&self.tree));
-            self.injections = injections(
-                self.grammar,
-                text,
-                &self.tree,
-                std::mem::take(&mut self.injections),
-            );
-            self.cache.take();
+            self.parse(text);
         }
         stale
+    }
+
+    fn parse(&mut self, text: &Rope) {
+        // An empty tree stands in for one never parsed, which has nothing to reuse.
+        let old = (self.tree.root_node().child_count() > 0).then_some(&self.tree);
+        self.tree = parse(&mut self.parser, text, old);
+        self.injections = injections(
+            self.grammar,
+            text,
+            &self.tree,
+            std::mem::take(&mut self.injections),
+        );
+        self.cache.take();
+    }
+
+    /// A parse of `text` for a service, if it is over the cut, was edited since the last parse
+    /// and none is outstanding.
+    pub(crate) fn ask(&mut self, text: &Rope) -> Option<Parse> {
+        if text.len_bytes() <= PARSE_CUT || !self.stale || self.parsing {
+            return None;
+        }
+        (self.stale, self.parsing) = (false, true);
+        Some(Parse {
+            syntax: self.copy(),
+            text: text.clone(),
+        })
+    }
+
+    /// Takes the outstanding parse's result, moved by the edits made since it was asked for. The
+    /// locals cache stays: it saw every edit, and a new tree rebuilds what changed.
+    pub(crate) fn parsed(&mut self, parse: Parse) {
+        if !std::mem::take(&mut self.parsing) {
+            return;
+        }
+        (self.tree, self.injections) = (parse.syntax.tree, parse.syntax.injections);
+        let since = std::mem::take(&mut self.since);
+        for edit in &since {
+            self.apply_to_trees(edit);
+        }
+        self.stale |= !since.is_empty();
+        self.cache.take();
     }
 
     /// The faces `palette` gives the chars of sorted, disjoint `ranges` of `text`, as sorted,
@@ -592,9 +668,53 @@ impl Syntax {
     }
 }
 
+/// A large buffer's text and last tree, parsed off the core thread by `Parse::run`.
+pub struct Parse {
+    syntax: Syntax,
+    text: Rope,
+}
+
+impl Parse {
+    /// Parses the text, reusing the last tree, and answers with `Msg::Parsed`.
+    pub fn run(mut self, buffer: BufferId) -> Msg {
+        self.syntax.parse(&self.text);
+        Msg::Parsed {
+            buffer,
+            parse: self,
+        }
+    }
+}
+
+impl Clone for Parse {
+    fn clone(&self) -> Self {
+        Parse {
+            syntax: self.syntax.copy(),
+            text: self.text.clone(),
+        }
+    }
+}
+
+/// `Tree` has no `PartialEq`; its S-expression shows every node.
+impl PartialEq for Parse {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.syntax.tree.root_node().to_sexp() == other.syntax.tree.root_node().to_sexp()
+    }
+}
+
+impl std::fmt::Debug for Parse {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        (f.debug_struct("Parse"))
+            .field("language", &self.syntax.name)
+            .field("bytes", &self.text.len_bytes())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Harness;
 
     fn fg(color: u32) -> Face {
         Face {
@@ -1436,6 +1556,201 @@ mod tests {
         assert_eq!(syntax.highlights(&rope, &[0..9], &p), [(0..9, fg(7))]);
         syntax.edit(start, start, start);
         assert_eq!(syntax.cache.borrow().as_ref(), None, "an edit drops them");
+    }
+
+    /// Rust text a little over the parse cut.
+    fn large() -> String {
+        let line = "fn f(value: i32) -> &'static str { let s = \"x\"; value; s }\n";
+        line.repeat(PARSE_CUT / line.len() + 1)
+    }
+
+    /// Its parse result, as `Parse::run` answers it.
+    fn run(parse: Parse, id: BufferId) -> Parse {
+        let Msg::Parsed { parse, .. } = parse.run(id) else {
+            unreachable!("a parse answers with Parsed")
+        };
+        parse
+    }
+
+    #[test]
+    fn a_parse_of_an_edited_tree_matches_a_fresh_parse() {
+        let mut buffers = crate::buffer::Buffers::default();
+        let id = buffers.create_for_file(Path::new("/a.rs"), &large());
+        let b = buffers.get_mut(id).unwrap();
+        if let Some(parse) = b.ask_parse() {
+            b.parsed(run(parse, id));
+        }
+        b.insert(0, "// ").unwrap();
+        let parse = b
+            .ask_parse()
+            .expect("an edit over the cut asks for a parse");
+        b.parsed(run(parse, id));
+        let p = palette(&[("keyword", 1), ("string", 4), ("comment", 7)]);
+        let all = [0..b.len_chars()];
+        let mut fresh = Syntax::for_file(Path::new("/a.rs"), b.text()).unwrap();
+        fresh.stale = true;
+        fresh.reparse(b.text());
+        assert_eq!(b.highlights(&all, &p), fresh.highlights(b.text(), &all, &p));
+        assert_eq!(b.highlights(&[0..3], &p), [(0..3, fg(7))]);
+    }
+
+    /// A fresh parse of `text`, as a visit of a small file makes.
+    fn fresh(path: &str, text: &Rope) -> Syntax {
+        let mut syntax = Syntax::for_file(Path::new(path), text).unwrap();
+        syntax.stale = true;
+        syntax.reparse(text);
+        syntax
+    }
+
+    /// The text and foreground of each span in the window's first `rows` lines.
+    fn colors(h: &mut Harness, rows: usize) -> Vec<(String, Option<u32>)> {
+        (h.display(rows).lines.into_iter())
+            .flat_map(|l| l.spans)
+            .map(|s| (s.text, s.face.fg))
+            .collect()
+    }
+
+    /// A harness visiting `a.rs`, over the cut, with its first parse delivered.
+    fn visiting_large() -> (Harness, BufferId) {
+        let mut h = Harness::new(&[("a.rs", &large()), ("b.rs", "fn f() {}\n")]);
+        h.open("a.rs").send(Msg::Tick).parse();
+        assert!(h.parses.is_empty());
+        let id = h.core.buffers.find("a.rs").unwrap();
+        (h, id)
+    }
+
+    #[test]
+    fn an_edit_burst_over_the_cut_asks_for_one_parse_and_one_under_it_for_none() {
+        let (mut h, id) = visiting_large();
+        h.keys("x");
+        assert!(h.text().starts_with("xfn f("));
+        assert_eq!(h.parses.iter().map(|(b, _)| *b).collect::<Vec<_>>(), [id]);
+        h.keys("y z");
+        assert_eq!(
+            h.parses.len(),
+            1,
+            "edits during a parse ask for no second one"
+        );
+        h.parses.clear();
+        h.open("b.rs").keys("/ / SPC");
+        assert!(h.parses.is_empty());
+        let comment = h.core.settings().theme.syntax["comment"].fg;
+        assert_eq!(colors(&mut h, 1), [("// fn f() {}".into(), comment)]);
+    }
+
+    #[test]
+    fn colours_move_with_a_line_inserted_above_while_a_parse_is_outstanding() {
+        let (mut h, _) = visiting_large();
+        let before = colors(&mut h, 2);
+        let keyword = h.core.settings().theme.syntax["keyword"].fg;
+        assert!(before.contains(&("fn".into(), keyword)));
+        h.keys("RET");
+        assert_eq!(h.parses.len(), 1);
+        assert!(colors(&mut h, 3).ends_with(&before));
+    }
+
+    #[test]
+    fn a_late_parse_is_moved_asks_again_and_settles_to_a_fresh_parse() {
+        let (mut h, id) = visiting_large();
+        h.keys("C-e").send(Msg::Insert {
+            text: " //x".into(),
+            replace: None,
+        });
+        let held = std::mem::take(&mut h.parses);
+        h.keys("y z");
+        h.parses = held;
+        h.parse();
+        let comment = h.core.settings().theme.syntax["comment"].fg;
+        let first = colors(&mut h, 1);
+        // The result's comment, moved: tree-sitter grows a node over an insert at its end.
+        assert_eq!(first.last(), Some(&("//xyz".into(), comment)));
+        assert_eq!(h.parses.len(), 1, "a late result asks for one more parse");
+        h.parse();
+        assert!(h.parses.is_empty(), "a current result asks for none");
+        let p = h.core.settings().theme.syntax.clone();
+        let b = h.core.buffers.get(id).unwrap();
+        let all = [0..b.len_chars()];
+        let fresh = fresh("/a.rs", b.text());
+        assert_eq!(b.highlights(&all, &p), fresh.highlights(b.text(), &all, &p));
+    }
+
+    #[test]
+    fn a_parse_for_a_killed_buffer_changes_nothing() {
+        let (mut h, id) = visiting_large();
+        h.keys("x");
+        let (_, parse) = h.parses.pop().unwrap();
+        h.core.kill_buffer(id);
+        h.send(Msg::Tick);
+        let text = h.text();
+        assert!(h.core.handle(h.now, parse.run(id)).is_empty());
+        assert_eq!(h.text(), text);
+        assert!(h.core.buffers.get(id).is_none());
+    }
+
+    #[test]
+    fn a_large_file_opens_uncoloured_and_is_coloured_when_its_parse_arrives() {
+        let mut h = Harness::new(&[("a.rs", &large())]);
+        h.open("a.rs").send(Msg::Tick);
+        let keyword = h.core.settings().theme.syntax["keyword"].fg;
+        assert!(h.text().starts_with("fn f("));
+        assert!(colors(&mut h, 2).iter().all(|(_, fg)| fg.is_none()));
+        assert_eq!(h.parses.len(), 1);
+        h.parse();
+        assert!(h.parses.is_empty());
+        assert!(colors(&mut h, 2).contains(&("fn".into(), keyword)));
+    }
+
+    proptest::proptest! {
+        /// The same edits to a small buffer, parsed on each frame, and to the same text after a
+        /// large prefix, parsed by `Parse` results arriving at random points, colour the shared
+        /// text as a fresh parse of each buffer does. The two are not compared with each other:
+        /// tree-sitter recovers from broken text differently after a prefix, even fresh.
+        #[test]
+        fn parses_off_the_core_colour_as_parses_on_it(
+            edits in proptest::collection::vec(
+                (proptest::bool::ANY, 0..80usize, 0..4usize, "[a-z é;{}\"\n]{0,3}", proptest::bool::ANY),
+                0..20,
+            ),
+        ) {
+            let shared = "const A: u32 = 1;\nfn f(value: i32) { let s = \"é\"; value; }\n";
+            let pad = large();
+            let mut buffers = crate::buffer::Buffers::default();
+            let small = buffers.create_for_file(Path::new("/a.rs"), shared);
+            let padded = buffers.create_for_file(Path::new("/b.rs"), &(pad.clone() + shared));
+            let off = pad.chars().count();
+            let mut held = None;
+            for (insert, at, len, text, deliver) in edits {
+                let n = buffers.get(small).unwrap().len_chars();
+                let at = at % (n + 1);
+                let range = at..(at + len).min(n);
+                for (id, by) in [(small, 0), (padded, off)] {
+                    let b = buffers.get_mut(id).unwrap();
+                    if insert {
+                        b.insert(at + by, &text).unwrap();
+                    } else {
+                        b.delete(range.start + by..range.end + by).unwrap();
+                    }
+                }
+                buffers.get_mut(small).unwrap().reparse();
+                let b = buffers.get_mut(padded).unwrap();
+                if deliver && let Some(parse) = held.take() {
+                    b.parsed(run(parse, padded));
+                }
+                held = held.or_else(|| b.ask_parse());
+            }
+            let b = buffers.get_mut(padded).unwrap();
+            while let Some(parse) = held.take().or_else(|| b.ask_parse()) {
+                b.parsed(run(parse, padded));
+            }
+            let p = crate::settings::Settings::default().theme.syntax;
+            let n = buffers.get(small).unwrap().len_chars();
+            for (id, by) in [(small, 0), (padded, off)] {
+                let b = buffers.get(id).unwrap();
+                let shared = [by..by + n];
+                let fresh = fresh("/a.rs", b.text()).highlights(b.text(), &shared, &p);
+                proptest::prop_assert_eq!(b.highlights(&shared, &p), fresh);
+            }
+        }
     }
 
     #[test]

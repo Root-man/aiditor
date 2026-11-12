@@ -1321,7 +1321,7 @@ milestones:
         labels: [text]
         design: "#subsystems"
         body: |
-          Incremental parsing for Elixir (with HEEx), Rust, JS/TS, YAML and Markdown; highlighting, folding and structural motion. Highlighting comes first, parsed on the core thread; moving parsing off it, inline Markdown, injections (code fences, `~H` sigils), folding and structural motion follow.
+          Incremental parsing for Elixir (with HEEx), Rust, JS/TS, YAML and Markdown; highlighting, folding and structural motion. Highlighting comes first, parsed on the core thread; buffers over 64 KiB are now parsed by a service, and inline Markdown, injections (code fences, `~H` sigils), folding and structural motion follow.
         tasks:
           - key: m5-highlight-js
             title: "Highlight JavaScript and TypeScript"

@@ -148,6 +148,15 @@ impl Ctx<'_> {
         }
     }
 
+    /// Asks for a parse of each large buffer edited since its last one.
+    pub(crate) fn ask_parses(&mut self) {
+        for (id, buffer) in self.core.buffers.iter_mut() {
+            if let Some(parse) = buffer.ask_parse() {
+                self.effects.push(Effect::Parse { buffer: id, parse });
+            }
+        }
+    }
+
     /// Takes the file service's answer to `FileOp::Head`.
     pub(crate) fn on_heads(&mut self, files: Vec<(PathBuf, Option<Head>)>) {
         for (path, head) in files {
