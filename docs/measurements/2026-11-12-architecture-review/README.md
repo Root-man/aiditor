@@ -167,3 +167,10 @@ Readings:
 - `syntax-load/*` (−99.7 to −99.9%), `syntax-edit-frame/*`, `revert-apply-frame/rs/*` and `hot-scopes/*` changed what they measure in group 4 (see above): buffers over 64 KiB no longer parse on the UI thread. Their drops are the parse leaving the frame, not a faster parse.
 - Regressions over 5%, all under 25 µs in absolute terms: `edit-undo/100k-lines` 340 → 365 ns (+7.5%), `terminal-display/50x120-screen` 133.8 → 141.2 µs (+5.6%), `finder/10000-paths-open-close` 1.0 → 1.1 ms (+5.5%) and `hot-stream/tool-output-hidden-5000000` 12.0 → 12.6 µs (+5.4%; +13% in the 5.6 run). None was repeated; the other 89 like-for-like cases are within 5% or faster.
 - The 15–35% slowdowns in the 6.2 run are gone: that run shared the host with a game.
+
+## Checks (task 7.1)
+
+On f2276b2, cargo fmt --all --check, cargo clippy --all-targets -- -D warnings, cargo test, CI's aiditor-core dependency and panic-abort checks and scripts/test_benchmarks.py passed on both hosts:
+
+- Linux: AMD Ryzen 7 5800X3D, Fedora 45, Rust 1.99.0. Tests: core 995, aiditor 59, services 105, scenarios and file_sync included; benchmark scripts 21.
+- macOS: Apple M5 Pro, macOS 27.2.1, Rust 1.99.0. Tests: core 995, aiditor 59, services 105; benchmark scripts 21.

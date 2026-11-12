@@ -45,6 +45,6 @@
 
 ## 7. Integration and records
 
-- [ ] 7.1 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, the `aiditor-core` dependency check from `.github/workflows/ci.yml` and `python3 -m unittest discover -s scripts -p test_benchmarks.py`. Verify all pass on Linux and macOS, and record which hosts ran.
+- [x] 7.1 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, the `aiditor-core` dependency check from `.github/workflows/ci.yml` and `python3 -m unittest discover -s scripts -p test_benchmarks.py`. Verify all pass on Linux and macOS, and record which hosts ran.
 - [x] 7.2 Rerun the `core`, `hot_paths` and `services` suites sequentially on the baseline host, save the TSVs beside the task 1.1 baseline with a README comparing like-for-like cases and naming any regression, and link the run from `docs/performance.md`. Verify every self-check passes.
 - [x] 7.3 Record the review in `docs/refactoring-opportunities.md` as a dated section: the five rows, each marked done or dropped with its reason, and the correction that #1 does not reduce the marker count. Verify `openspec validate architecture-review-refactors --strict` passes.
