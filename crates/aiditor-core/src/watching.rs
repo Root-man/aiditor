@@ -11,6 +11,9 @@ use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, Head, WatchSet};
 pub(crate) struct Watch {
     pub(crate) watching: WatchSet,
     pub(crate) refresh: bool,
+    /// An input of `watch_set` changed since `watching` was made: a file buffer made or killed,
+    /// a head answered, a project, workspace, index or the settings changed.
+    pub(crate) dirty: bool,
     pub(crate) refusals: std::collections::BTreeMap<ProjectId, (usize, usize, usize)>,
 }
 
@@ -47,15 +50,11 @@ impl Core {
         roots.dedup();
         let mut files: Vec<PathBuf> = (self.buffers.recent())
             .flat_map(|(_, b)| {
-                b.file
-                    .iter()
-                    .cloned()
-                    .chain(b.head.iter().flat_map(Head::watched))
-                    .chain(
-                        b.file
-                            .iter()
-                            .flat_map(|p| crate::language_version::candidates(p, b.language())),
-                    )
+                b.file.iter().flat_map(|f| {
+                    std::iter::once(f.path.clone())
+                        .chain(f.head.iter().flat_map(Head::watched))
+                        .chain(crate::language_version::candidates(&f.path, b.language()))
+                })
             })
             .collect();
         files.sort();
@@ -76,6 +75,15 @@ impl Core {
 
     /// Sends the watch set when it changed since last sent.
     pub(crate) fn watch(&mut self, effects: &mut Effects) {
+        let dirty =
+            std::mem::take(&mut self.watch.dirty) | std::mem::take(&mut self.buffers.files_changed);
+        if !dirty && !self.watch.refresh {
+            debug_assert!(
+                self.watch_set() == self.watch.watching,
+                "a watch_set input changed without raising `dirty`"
+            );
+            return;
+        }
         let refusals: std::collections::BTreeMap<_, _> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
             .filter_map(|p| Some((p.id, self.watch_counts(p)?)))
@@ -99,16 +107,17 @@ impl Core {
 impl Ctx<'_> {
     pub(crate) fn ask_language_versions(&mut self) {
         for (id, buffer) in self.core.buffers.iter_mut() {
-            if !std::mem::replace(&mut buffer.version_asked, true)
-                && let Some(path) = &buffer.file
-                && !crate::language_version::candidates(path, buffer.language()).is_empty()
+            let language = buffer.language();
+            if let Some(file) = &mut buffer.file
+                && !std::mem::replace(&mut file.version_asked, true)
+                && !crate::language_version::candidates(&file.path, language).is_empty()
             {
-                buffer.version_request += 1;
+                file.version_request += 1;
                 self.effects.push(Effect::File(FileOp::LanguageVersion {
                     buffer: id,
-                    request: buffer.version_request,
-                    path: path.clone(),
-                    language: buffer.language(),
+                    request: file.version_request,
+                    path: file.path.clone(),
+                    language,
                 }));
             }
         }
@@ -140,8 +149,10 @@ impl Ctx<'_> {
     pub(crate) fn ask_heads(&mut self) {
         let mut files = Vec::new();
         for (_, buffer) in self.core.buffers.iter_mut() {
-            if !std::mem::replace(&mut buffer.head_asked, true) {
-                files.extend(buffer.file.clone());
+            if let Some(file) = &mut buffer.file
+                && !std::mem::replace(&mut file.head_asked, true)
+            {
+                files.push(file.path.clone());
             }
         }
         if !files.is_empty() {
@@ -149,12 +160,24 @@ impl Ctx<'_> {
         }
     }
 
+    /// Asks for a parse of each large buffer edited since its last one.
+    pub(crate) fn ask_parses(&mut self) {
+        for (id, buffer) in self.core.buffers.iter_mut() {
+            if let Some(parse) = buffer.ask_parse() {
+                self.effects.push(Effect::Parse { buffer: id, parse });
+            }
+        }
+    }
+
     /// Takes the file service's answer to `FileOp::Head`.
     pub(crate) fn on_heads(&mut self, files: Vec<(PathBuf, Option<Head>)>) {
         for (path, head) in files {
             let visiting = self.core.buffers.iter_mut();
-            for (_, buffer) in visiting.filter(|(_, b)| b.file.as_ref() == Some(&path)) {
-                buffer.head.clone_from(&head);
+            for file in visiting.filter_map(|(_, b)| b.file.as_mut()) {
+                if file.path == path {
+                    file.head.clone_from(&head);
+                    self.core.watch.dirty = true;
+                }
             }
         }
     }
@@ -173,22 +196,25 @@ impl Ctx<'_> {
         }
         for (path, hash) in files {
             let visiting = self.core.buffers.iter_mut();
-            for (id, buffer) in visiting.filter(|(_, b)| b.file.as_ref() == Some(&path)) {
-                buffer.deleted = hash.is_none();
-                if buffer.deleted {
+            for (id, buffer) in visiting.filter(|(_, b)| b.path() == Some(&path)) {
+                let (modified, tick, text) =
+                    (buffer.modified(), buffer.tick(), buffer.text().clone());
+                let file = buffer.file.as_mut().expect("visiting `path`");
+                file.deleted = hash.is_none();
+                if file.deleted {
                     // Nothing on disk is lost by writing the buffer back, so there is no conflict.
-                    (buffer.disk, buffer.conflict) = (None, None);
-                } else if buffer.disk == hash {
-                    buffer.conflict = None;
-                } else if !buffer.modified() {
+                    (file.disk, file.conflict) = (None, None);
+                } else if file.disk == hash {
+                    file.conflict = None;
+                } else if !modified {
                     self.effects.push(Effect::File(FileOp::Revert {
                         buffer: id,
-                        tick: buffer.tick(),
+                        tick,
                         path: path.clone(),
-                        text: buffer.text().clone(),
+                        text,
                     }));
-                } else if buffer.conflict != hash {
-                    (buffer.conflict, buffer.conflict_asked) = (hash, false);
+                } else if file.conflict != hash {
+                    (file.conflict, file.conflict_asked) = (hash, false);
                 }
             }
         }
@@ -202,9 +228,12 @@ impl Ctx<'_> {
         }
         let id = self.core.windows.window.buffer();
         let focused = std::mem::replace(&mut self.core.focused, id);
-        let buffer = self.core.current_mut();
-        if focused != id && buffer.conflict.is_some() && !buffer.conflict_asked {
-            buffer.conflict_asked = true;
+        if let Some(file) = &mut self.core.current_mut().file
+            && focused != id
+            && file.conflict.is_some()
+            && !file.conflict_asked
+        {
+            file.conflict_asked = true;
             self.call("resolve-conflict", Args::default());
         }
     }
@@ -213,7 +242,7 @@ impl Ctx<'_> {
     /// re-walks the indexes a create or delete made stale.
     pub(crate) fn on_files_changed(&mut self, mut paths: Vec<(PathBuf, Disk)>, rescan: bool) {
         let mut check: Vec<PathBuf> = (self.core.buffers.recent())
-            .filter_map(|(_, b)| b.file.clone())
+            .filter_map(|(_, b)| b.path().map(Path::to_path_buf))
             .filter(|file| rescan || paths.iter().any(|(path, _)| file.starts_with(path)))
             .collect();
         // shortcut: chips outside watched roots are checked only when first seen or on a rescan;
@@ -236,20 +265,19 @@ impl Ctx<'_> {
         let reported = |path: &PathBuf| paths.iter().any(|(p, _)| p == path);
         let mut git = std::collections::BTreeSet::new();
         for (_, buffer) in self.core.buffers.iter_mut() {
-            let candidates = buffer
-                .file
-                .iter()
-                .flat_map(|p| crate::language_version::candidates(p, buffer.language()));
+            let language = buffer.language();
+            let Some(file) = &mut buffer.file else {
+                continue;
+            };
+            let candidates = crate::language_version::candidates(&file.path, language);
             let version_stale = rescan
                 || candidates
                     .into_iter()
                     .any(|candidate| paths.iter().any(|(path, _)| candidate.starts_with(path)));
-            buffer.version_asked &= !version_stale;
-            let watched: Vec<_> = buffer.head.iter().flat_map(Head::watched).collect();
-            let stale = rescan
-                || buffer.file.as_ref().is_some_and(reported)
-                || watched.iter().any(reported);
-            buffer.head_asked &= !stale;
+            file.version_asked &= !version_stale;
+            let watched: Vec<_> = file.head.iter().flat_map(Head::watched).collect();
+            let stale = rescan || reported(&file.path) || watched.iter().any(reported);
+            file.head_asked &= !stale;
             git.extend(watched);
         }
         // Git's files are watched for the mode line; they say nothing about the index.
@@ -356,7 +384,7 @@ mod tests {
         h.open("a.rs");
         h.send(Msg::Tick);
         let id = h.core.windows.window.buffer();
-        let old = h.core.current().version_request;
+        let old = h.core.current().file.as_ref().unwrap().version_request;
         h.read_reply(".tool-versions", Some(b"rust 1.99.0"));
         report(&mut h, &[".tool-versions"]);
         assert!(mode_line(&mut h).contains("Rust 1.99.0"));
@@ -366,7 +394,7 @@ mod tests {
             version: Some("1.98.0".into()),
         });
         assert!(mode_line(&mut h).contains("Rust 1.99.0"));
-        let request = h.core.current().version_request;
+        let request = h.core.current().file.as_ref().unwrap().version_request;
         h.keys("C-x k RET");
         h.send(Msg::LanguageVersion {
             buffer: id,
@@ -430,8 +458,8 @@ mod tests {
             });
             assert!(mode_line(&mut h).contains("⎇ main ±"));
             h.heads.insert(a.clone(), on("main"));
-            h.core.current_mut().head_asked = true;
-            h.core.current_mut().head = Some(on("main"));
+            h.core.current_mut().file.as_mut().unwrap().head_asked = true;
+            h.core.current_mut().file.as_mut().unwrap().head = Some(on("main"));
         }
         h.heads.remove(&a);
         h.send(Msg::FilesChanged {
@@ -510,7 +538,7 @@ mod tests {
         assert_eq!(h.display(5).mode_line.left[1][0].1, FaceName::StatusFailed);
         assert_eq!(h.text(), "a\n");
         let buffer = h.core.current();
-        assert!(!buffer.modified() && buffer.disk.is_none());
+        assert!(!buffer.modified() && buffer.file.as_ref().unwrap().disk.is_none());
         h.read_reply("a.txt", Some("back\n".as_ref()));
         report(&mut h, &["a.txt"]);
         // A clean buffer reverts to the file that came back, taking its hash.
@@ -623,7 +651,10 @@ mod tests {
         let candidates = h.core.minibuffer().unwrap().candidates;
         assert_eq!(candidates, ["Compare", "Take disk", "Keep mine"]);
         h.keys("C-g");
-        assert_eq!(h.core.current().disk, Some(hash(b"a\n")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(hash(b"a\n"))
+        );
         assert!(mode_line(&mut h).contains("[conflict]"));
     }
 
@@ -643,7 +674,10 @@ mod tests {
     fn keep_mine_from_m_x_waits_for_the_save() {
         let mut h = conflicted();
         h.keys("M-x resolve-conflict RET Keep SPC mine RET");
-        assert_eq!(h.core.current().disk, Some(hash(b"other\n")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(hash(b"other\n"))
+        );
         assert_eq!(
             mode_line(&mut h),
             "● /aiditor-test/a.txt │ Fundamental  1:1 │ All"
@@ -661,7 +695,10 @@ mod tests {
         report(&mut h, &["a.txt"]);
         h.keys("Keep SPC mine RET");
         assert_eq!(h.core.message(), None);
-        assert_eq!(h.core.current().disk, Some(hash(b"a\n")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(hash(b"a\n"))
+        );
     }
 
     #[test]
@@ -691,7 +728,10 @@ mod tests {
         let diff = h.core.windows.others[&other].buffer();
         let text = h.core.buffers.get(diff).unwrap().text().to_string();
         assert!(text.contains("-other\n+xa\n"), "{text}");
-        assert_eq!(h.core.current().disk, Some(hash(b"a\n")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(hash(b"a\n"))
+        );
     }
 
     #[test]
@@ -797,8 +837,17 @@ mod tests {
             rescan: true,
         });
         let a = h.core.buffers.find("a.txt").unwrap();
-        assert!(h.core.buffers.get(a).unwrap().deleted);
-        assert!(!h.core.current().deleted);
+        assert!(
+            h.core
+                .buffers
+                .get(a)
+                .unwrap()
+                .file
+                .as_ref()
+                .unwrap()
+                .deleted
+        );
+        assert!(!h.core.current().file.as_ref().unwrap().deleted);
     }
 
     #[test]
@@ -911,6 +960,7 @@ mod tests {
             .unwrap()
             .project
             .max_watched_files = None;
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, []);
         let message =
@@ -987,6 +1037,7 @@ mod tests {
                 .contains("files = 1, directories = 3")
         );
         h.core.settings.max_watched_files = 3;
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
         let b = h.path("b");
@@ -997,6 +1048,7 @@ mod tests {
             .project
             .roots
             .push(Root { path: b });
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, []);
         assert!(h.core.message().unwrap().contains("directories = 4"));
@@ -1052,6 +1104,7 @@ mod tests {
         }
         // An unchanged refusal is not reported again by a reload's re-walk.
         h.core.settings.max_watched_files = 0;
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert!(h.core.message().unwrap().contains("max_watched_files = 0"));
         h.core.message = None;

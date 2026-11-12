@@ -5,7 +5,7 @@ use agent_client_protocol_schema::v1::{SessionId, SessionInfo};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
-use crate::buffer::BufferId;
+use crate::buffer::{BufferId, Kind};
 use crate::project::ProjectId;
 use crate::{AgentOp, Core, Ctx, Open};
 
@@ -54,10 +54,9 @@ impl Core {
         project: ProjectId,
         vars: &[(String, String)],
     ) -> Vec<AgentOp> {
-        let buffers = &self.buffers;
-        self.session_lists
-            .retain(|id, _| buffers.get(*id).is_some());
-        let lists = (self.session_lists.values_mut()).filter(|l| l.project == project);
+        let lists = (self.buffers.iter_mut())
+            .filter_map(|(_, b)| b.session_list_mut())
+            .filter(|l| l.project == project);
         let held = lists
             .flat_map(|l| &mut l.agents)
             .filter_map(|a| a.held.take());
@@ -72,17 +71,15 @@ impl Core {
 
     /// Rebuilds the live sessions buffers whose rows' states changed since they were rendered.
     pub(crate) fn sync_session_lists(&mut self) {
-        let buffers = &self.buffers;
-        self.session_lists
-            .retain(|id, _| buffers.get(*id).is_some());
-        let stale: Vec<_> = (self.session_lists.iter())
+        let stale: Vec<_> = (self.buffers.recent())
+            .filter_map(|(id, b)| Some((id, b.session_list()?)))
             .filter(|(_, list)| {
                 let states = (list.rows.iter()).map(|(_, agent, session)| {
                     self.session_state(&list.agents[*agent].name, session)
                 });
                 !states.eq(list.states.iter().copied())
             })
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id)
             .collect();
         for id in stale {
             self.render_sessions(id);
@@ -92,8 +89,9 @@ impl Core {
     /// Drops `agent`'s session `id`, being deleted, from the sessions buffers' answers.
     // shortcut: assumes the agent can delete it; `g` lists it again if it can't.
     pub(crate) fn forget_listed(&mut self, agent: &str, id: &SessionId) {
-        let changed: Vec<_> = (self.session_lists.iter_mut())
-            .filter_map(|(&buffer, list)| {
+        let changed: Vec<_> = (self.buffers.iter_mut())
+            .filter_map(|(buffer, b)| {
+                let list = b.session_list_mut()?;
                 let listing = list.agents.iter_mut().find(|a| a.name == agent)?;
                 let Some(Ok(sessions)) = &mut listing.answer else {
                     return None;
@@ -110,7 +108,10 @@ impl Core {
 
     /// Rebuilds sessions buffer `id`'s text from its answers, keeping point on its session.
     fn render_sessions(&mut self, id: BufferId) {
-        let (Some(list), Some(buffer)) = (self.session_lists.get(&id), self.buffers.get(id)) else {
+        let Some(buffer) = self.buffers.get(id) else {
+            return;
+        };
+        let Some(list) = buffer.session_list() else {
             return;
         };
         // Point where a window shows the buffer, else the buffer's own.
@@ -179,9 +180,9 @@ impl Core {
                 .map(|r| (r.1, r.2.clone())),
         };
         let rows_first = rows.first().map(|row| row.0);
-        let list = self.session_lists.get_mut(&id).expect("checked above");
-        (list.rows, list.states, list.at) = (rows, states, at);
         let buffer = self.buffers.get_mut(id).expect("checked above");
+        let list = buffer.session_list_mut().expect("checked above");
+        (list.rows, list.states, list.at) = (rows, states, at);
         buffer.set_text(&lines.join("\n"));
         let point = match target {
             Some(line) => buffer.char_idx(line, 0).expect("a row is a line"),
@@ -241,32 +242,27 @@ impl Ctx<'_> {
                 answer: None,
             });
         }
-        let buffers = &core.buffers;
-        core.session_lists
-            .retain(|id, _| buffers.get(*id).is_some());
         let here = core.workspace();
-        let found = (core.session_lists.keys())
-            .find(|id| {
-                core.buffers
-                    .get(**id)
-                    .is_some_and(|b| b.workspace.is_some() && b.workspace == here)
+        let found = (core.buffers.recent())
+            .find(|(_, b)| {
+                b.session_list().is_some() && b.workspace.is_some() && b.workspace == here
             })
-            .copied();
+            .map(|(id, _)| id);
         let id = found.unwrap_or_else(|| {
             let id = core.buffers.create(&name);
             let buffer = core.buffers.get_mut(id).expect("just created");
             (buffer.major_mode, buffer.read_only) = (MODE, true);
             id
         });
-        let at = core.session_lists.remove(&id).and_then(|l| l.at);
-        let list = SessionList {
+        let buffer = core.buffers.get_mut(id).expect("live");
+        let at = buffer.session_list_mut().and_then(|l| l.at.take());
+        buffer.kind = Kind::SessionList(SessionList {
             project,
             agents,
             rows: Vec::new(),
             states: Vec::new(),
             at,
-        };
-        core.session_lists.insert(id, list);
+        });
         core.switch_to(id);
         core.render_sessions(id);
         self.release_agents(project);
@@ -276,12 +272,10 @@ impl Ctx<'_> {
     /// Keeps an answer to the latest request of a live sessions buffer and rebuilds it.
     pub(crate) fn agent_listed(&mut self, request: u64, result: Result<Vec<SessionInfo>, String>) {
         let core = &mut *self.core;
-        let buffers = &core.buffers;
-        core.session_lists
-            .retain(|id, _| buffers.get(*id).is_some());
-        let found = (core.session_lists.iter_mut()).find_map(|(id, list)| {
+        let found = (core.buffers.iter_mut()).find_map(|(id, b)| {
+            let list = b.session_list_mut()?;
             let listing = list.agents.iter_mut().find(|a| a.request == request)?;
-            Some((*id, listing))
+            Some((id, listing))
         });
         if let Some((id, listing)) = found {
             listing.answer = Some(result);
@@ -290,8 +284,7 @@ impl Ctx<'_> {
     }
 
     fn session_rows(&self) -> Result<&SessionList, String> {
-        let id = self.core.windows.window.buffer();
-        (self.core.session_lists.get(&id)).ok_or_else(|| "Not in a sessions buffer".into())
+        (self.core.current().session_list()).ok_or_else(|| "Not in a sessions buffer".into())
     }
 
     /// `agent-sessions-next` and `-previous`: to the next or previous session row.
@@ -350,7 +343,6 @@ impl Ctx<'_> {
     pub(crate) fn sessions_quit(&mut self) -> Result<(), String> {
         self.session_rows()?;
         let id = self.core.windows.window.buffer();
-        self.core.session_lists.remove(&id);
         self.core.kill_buffer(id);
         Ok(())
     }

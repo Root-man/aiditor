@@ -79,6 +79,7 @@ impl Core {
         self.next_workspace += 1;
         let name = unique(name, |n| self.workspaces.iter().any(|w| w.name == n));
         self.workspaces.push(Workspace::new(id, &name, project));
+        self.watch.dirty = true;
         let scratch = self.buffers.create_scratch(&name);
         self.buffers
             .get_mut(scratch)
@@ -121,11 +122,11 @@ impl Core {
         if let Some(id) = id {
             if current.is_none() {
                 let lists: Vec<_> = (self.buffers.recent())
-                    .filter(|(_, b)| b.workspace.is_none() && b.workspace_list.is_some())
+                    .filter(|(_, b)| b.workspace.is_none() && b.workspace_list().is_some())
                     .map(|(b, _)| b)
                     .collect();
                 for list in lists {
-                    _ = self.buffers.kill(list);
+                    self.kill_buffer(list);
                 }
             }
             self.shown += 1;
@@ -168,6 +169,7 @@ impl Core {
             }
         }
         let mut killed = self.workspaces.remove(at);
+        self.watch.dirty = true;
         let windows = killed
             .windows
             .as_mut()
@@ -177,10 +179,12 @@ impl Core {
         }
         let jumps = killed.back.drain(..).chain(killed.forward.drain(..));
         crate::jump::release(&mut self.buffers, jumps);
-        let owned: Vec<_> = (self.buffers.recent())
+        let mut owned: Vec<_> = (self.buffers.recent())
             .filter(|(_, b)| b.workspace == Some(id))
             .map(|(b, _)| b)
             .collect();
+        // Oldest first, so their terminals and agents are released in the order they started.
+        owned.sort_unstable();
         for buffer in owned {
             self.kill_buffer(buffer);
         }

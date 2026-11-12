@@ -1,6 +1,6 @@
 //! Auto-saving buffers and recovering them after a crash.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::buffer::{Buffer, BufferId};
@@ -99,8 +99,8 @@ impl Ctx<'_> {
                 request,
                 tick,
                 name: b.name.clone(),
-                path: b.file.clone(),
-                hash: b.disk,
+                path: b.path().map(Path::to_path_buf),
+                hash: b.file.as_ref().and_then(|f| f.disk),
                 text: b.text().clone(),
                 replaces,
             }));
@@ -142,7 +142,7 @@ impl Ctx<'_> {
                 state.retry = Some(self.now + AUTOSAVE_IDLE);
                 if state.error.as_ref() != Some(&error) {
                     state.error = Some(error.clone());
-                    if let Some(path) = core.buffers.get(buffer).and_then(|b| b.file.as_ref()) {
+                    if let Some(path) = core.buffers.get(buffer).and_then(|b| b.path()) {
                         core.echo(format!("Auto-save {}: {error}", path.display()));
                     }
                 }
@@ -187,8 +187,10 @@ impl Ctx<'_> {
                 buffer.undo_boundary(point);
                 // Past read-only too: a file refused since keeps its text.
                 (buffer.replace(&[(0..len, r.text.clone())])).expect("in range");
-                if r.path.is_some() {
-                    buffer.disk = r.hash;
+                if r.path.is_some()
+                    && let Some(file) = &mut buffer.file
+                {
+                    file.disk = r.hash;
                 }
                 keep = r.path.is_some();
                 if keep {
@@ -672,7 +674,7 @@ mod tests {
         assert_eq!(h.core.minibuffer().map(|mb| mb.prompt), Some(prompt));
         h.keys("RET");
         let b = h.core.current();
-        assert_eq!(b.file.as_deref(), Some(h.path("a").as_path()));
+        assert_eq!(b.path(), Some(h.path("a").as_path()));
         assert!(b.modified() && h.text() == "1\nx\n");
         // Written again under this session before the old file goes.
         assert_eq!(
@@ -748,7 +750,10 @@ mod tests {
             h.path("a").display()
         )));
         h.send(Msg::Recover(vec![r])).keys("RET C-x C-s");
-        assert_eq!(h.core.current().disk, Some(hash(b"1\n")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(hash(b"1\n"))
+        );
         assert!(h.core.current().modified());
         assert!(h.core.message().unwrap().contains("changed on disk"));
     }

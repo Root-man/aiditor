@@ -38,6 +38,7 @@ mod sessions;
 pub mod settings;
 mod swiper;
 mod syntax;
+pub use syntax::Parse;
 pub mod terminal;
 pub mod timer;
 mod visiting;
@@ -171,6 +172,11 @@ pub enum Msg {
         buffer: BufferId,
         request: u64,
         version: Option<String>,
+    },
+    /// The answer to `Effect::Parse`.
+    Parsed {
+        buffer: BufferId,
+        parse: Parse,
     },
     /// A watch registration failure or recovery, shown in the echo area and Messages.
     WatchStatus(String),
@@ -397,6 +403,8 @@ pub enum Effect {
     Watch(WatchSet),
     /// A recovery file's write or delete, carried out off the UI thread with no answer.
     Recovery(RecoveryOp),
+    /// Parse a large buffer's text off the UI thread with `Parse::run`.
+    Parse { buffer: BufferId, parse: Parse },
     /// Capture the login shell's environment in `dir` and send `Msg::EnvironmentCaptured`.
     CaptureEnvironment {
         project: ProjectId,
@@ -675,10 +683,10 @@ impl Ctx<'_> {
         let core = &mut *self.core;
         let start = core.current().prompt_start();
         let marker = start.saturating_sub(agents::PROMPT.len())..start;
-        if core.current().prompt.is_some() && marker.contains(&core.point()) {
+        if core.current().prompt().is_some() && marker.contains(&core.point()) {
             (core.windows.window.set_point(&mut core.buffers, start)).expect("in the buffer");
         }
-        if core.current().prompt.is_some() {
+        if core.current().prompt().is_some() {
             let prompt = core.point() >= start;
             core.windows.window.remember(&mut core.buffers, prompt);
         }
@@ -828,6 +836,7 @@ impl Ctx<'_> {
                         let old = &self.core.settings;
                         settings.zoom(old.font_size - old.default_font_size);
                         self.core.settings = settings;
+                        self.core.watch.dirty = true;
                     }
                     Err(err) => self.core.report(format!("settings: {err}")),
                 }
@@ -847,7 +856,8 @@ impl Ctx<'_> {
                 self.core.projects_dir = dir;
                 self.core.reconcile_projects(projects);
                 // The lobby list shows every project, so it follows the loaded ones.
-                if self.core.workspace().is_none() && self.core.current().workspace_list.is_some() {
+                if self.core.workspace().is_none() && self.core.current().workspace_list().is_some()
+                {
                     self.core
                         .list_workspaces()
                         .expect("a refreshed list has its point");
@@ -878,10 +888,16 @@ impl Ctx<'_> {
                 request,
                 version,
             } => {
-                if let Some(buffer) = self.core.buffers.get_mut(buffer)
-                    && buffer.version_request == request
+                if let Some(file) =
+                    (self.core.buffers.get_mut(buffer)).and_then(|b| b.file.as_mut())
+                    && file.version_request == request
                 {
-                    buffer.language_version = version;
+                    file.language_version = version;
+                }
+            }
+            Msg::Parsed { buffer, parse } => {
+                if let Some(buffer) = self.core.buffers.get_mut(buffer) {
+                    buffer.parsed(parse);
                 }
             }
             Msg::WatchStatus(message) => self.core.report(message),
@@ -1073,12 +1089,14 @@ pub struct Core {
     /// The selected window's buffer after the last message handled with no minibuffer open,
     /// for `ask_on_focus`.
     focused: BufferId,
-    /// Each live terminal's buffer, until its shell exits or `sync_terminals` sees the buffer
+    /// Each live terminal's buffer, until its shell exits or its buffer is
     /// killed.
     terminals: BTreeMap<TerminalId, BufferId>,
     next_terminal: u64,
     /// Each agent session, until its session buffer is killed.
     agents: BTreeMap<AgentId, agents::Session>,
+    /// What killing buffers releases, such as their terminals' and agents' kills, for `handle`.
+    released: Effects,
     /// Every file chip seen, shared by all sessions.
     chips: agents::Chips,
     next_agent: u64,
@@ -1087,7 +1105,6 @@ pub struct Core {
     environments: HashMap<ProjectId, environment::Environment>,
     environment_requests: u64,
     /// Each sessions buffer's state, until its buffer is killed.
-    session_lists: HashMap<BufferId, sessions::SessionList>,
     /// The number of the last list request, so each answer names its request.
     list_requests: u64,
     /// The zone sessions' times show in.
@@ -1157,17 +1174,20 @@ impl Default for Core {
             quitting: Vec::new(),
             then_kill: None,
             autosave: autosave::Autosave::default(),
-            watch: watching::Watch::default(),
+            watch: watching::Watch {
+                dirty: true,
+                ..Default::default()
+            },
             focused: list,
             terminals: BTreeMap::new(),
             next_terminal: 0,
             agents: BTreeMap::new(),
+            released: Vec::new(),
             chips: agents::Chips::default(),
             next_agent: 0,
             capture: false,
             environments: HashMap::new(),
             environment_requests: 0,
-            session_lists: HashMap::new(),
             list_requests: 0,
             time_zone: jiff::tz::TimeZone::system(),
         };
@@ -1229,6 +1249,7 @@ impl Core {
         }
         ctx.ensure_watch_indexes();
         ctx.ask_heads();
+        ctx.ask_parses();
         ctx.ask_language_versions();
         ctx.ensure_environments();
         ctx.ask_on_focus();
@@ -1237,8 +1258,8 @@ impl Core {
         self.poll_completion(now, &mut effects);
         self.preview(&mut effects);
         self.watch(&mut effects);
-        self.sync_terminals(&mut effects);
-        self.sync_agents(&mut effects);
+        effects.append(&mut self.released);
+        self.size_terminals(&mut effects);
         let unchecked = std::mem::take(&mut self.chips.unchecked);
         if !unchecked.is_empty() {
             effects.push(Effect::File(FileOp::Check(unchecked)));
@@ -1253,7 +1274,7 @@ impl Core {
     pub fn create_terminal(&mut self, name: &str, rows: u16, cols: u16) -> (TerminalId, BufferId) {
         let id = TerminalId(self.next_terminal);
         self.next_terminal += 1;
-        let buffer = (self.buffers).create_terminal(name, terminal::Terminal::new(rows, cols));
+        let buffer = (self.buffers).create_terminal(name, id, terminal::Terminal::new(rows, cols));
         self.terminals.insert(id, buffer);
         (id, buffer)
     }

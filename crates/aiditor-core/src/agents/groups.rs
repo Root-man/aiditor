@@ -2,81 +2,52 @@
 //! apart in the rope, and a folded group's hidden rows carry no properties, only the `Invisible`
 //! runs over them, so properties never nest.
 
-use super::render::{
-    META_INDENT, dim, group_line, group_meta, put_meta, render, render_tool, take_tool_meta,
-};
+use super::blocks::{Block, BlockKind, BlockPath, Look};
+use super::render::{answered_props, dim, group_line, group_meta, hide_replaced, paint, render};
+use super::render::{settled_question, tool_props};
 use super::*;
 
-/// A block `TAB` acts on, by its index.
+/// A block `TAB` acts on.
+#[derive(Debug, PartialEq)]
 pub(super) enum At {
-    Ask(usize),
+    Ask(BlockPath),
     Paste(usize),
-    Answer(usize),
+    Answer(BlockPath),
     Tool(ToolCallId),
-    /// A thought row, as its group and row.
-    Thought(usize, usize),
+    /// A thought row of a group.
+    Thought(BlockPath),
     Group(usize),
 }
 
-/// A row of a run: a tool call, or a thought or permission block among its calls.
-pub(super) enum Row {
-    Tool(ToolCallId),
-    Thought(Thought),
-    /// `start` is the row's own, as `Ask::start` goes with the answer and the line stays.
-    Ask {
-        start: MarkerId,
-        len: usize,
-    },
-}
-
-/// A thought's block in a run.
+/// A thought's block, a row of a run.
+#[derive(Default)]
 pub(super) struct Thought {
-    pub(super) start: MarkerId,
     /// Its first line's length, the row a group shows; 0 while it streams.
-    first: usize,
-    pub(super) end: MarkerId,
-    open: bool,
-}
-
-impl Thought {
-    pub(super) fn new(start: MarkerId, end: MarkerId) -> Self {
-        Self {
-            start,
-            first: 0,
-            end,
-            open: false,
-        }
-    }
-
-    fn range(&self, buffer: &Buffer) -> Range<usize> {
-        extent(buffer, self.start, self.end)
-    }
-
-    /// Makes it a row: the indent and fold mark go before its first line.
-    fn indent(&mut self, buffer: &mut Buffer) {
-        let start = buffer.marker(self.start).expect("live with its run");
-        buffer.insert_output(start, THOUGHT_ROW);
-        self.first += THOUGHT_ROW.chars().count();
-    }
+    pub(super) first: usize,
+    pub(super) open: bool,
 }
 
 const THOUGHT_ROW: &str = "  ▸ ";
 /// Where a thought row's fold mark is.
 const THOUGHT_FOLD: usize = 2;
 
-/// A group: its line, then its rows.
+/// A group's line, its rows under it.
 pub(super) struct Group {
-    start: MarkerId,
     /// Its line's length in chars, the newline not counted.
-    line: usize,
-    open: bool,
-    rows: Vec<Row>,
-    /// The length of its failed count and time on the line under its last row, 0 for none.
-    meta: usize,
+    pub(super) line: usize,
+    pub(super) open: bool,
+    pub(super) rows: Vec<Block>,
 }
 
-fn render_thought(buffer: &mut Buffer, thought: &Thought) {
-    let Range { start, end } = thought.range(buffer);
+fn thought_mut(block: &mut Block) -> &mut Thought {
+    match &mut block.kind {
+        BlockKind::Thought(thought) => thought,
+        _ => unreachable!("a thought"),
+    }
+}
+
+fn render_thought(buffer: &mut Buffer, block: &Block, thought: &Thought) {
+    let Range { start, end } = block.range(buffer);
     if thought.first == 0 {
         return render(buffer, start..end, true, None);
     }
@@ -91,140 +62,120 @@ fn render_thought(buffer: &mut Buffer, thought: &Thought) {
 }
 
 impl Session {
-    /// Each block's text, in transcript order, as its markers bound it.
+    /// Each block's text, in transcript order, as its markers bound it; a group's line and the
+    /// session's own lines left out.
     #[cfg(test)]
     pub(super) fn block_texts(&self, buffer: &Buffer) -> Vec<String> {
-        let rows = (self.run.iter()).chain(self.groups.iter().flat_map(|g| &g.rows));
-        let thoughts = rows.filter_map(|r| match r {
-            Row::Thought(t) => Some(t.range(buffer)),
-            _ => None,
-        });
-        let working = (self.turn.as_ref()).map(|t| {
-            buffer.marker(t.line).unwrap()..buffer.prompt_start() - PROMPT.len() - "\n\n".len()
-        });
-        let mut ranges: Vec<_> = (self.messages.iter().map(|m| m.range(buffer)))
-            .chain(self.tools.values().map(|t| t.range(buffer)))
-            .chain(self.asks.iter().map(|a| a.range(buffer)))
-            .chain((self.answers.iter()).map(|a| extent(buffer, a.start, a.end)))
-            .chain(thoughts)
-            .chain(self.plan.map(|(start, end)| extent(buffer, start, end)))
-            .chain(working)
-            .collect();
+        let blocks = self
+            .all()
+            .filter(|(_, b)| !matches!(b.kind, BlockKind::Line { .. } | BlockKind::Group(_)));
+        let mut ranges: Vec<_> = blocks.map(|(_, b)| b.range(buffer)).collect();
         ranges.sort_by_key(|r| r.start);
         (ranges.into_iter())
             .map(|r| buffer.text().slice(r).to_string())
             .collect()
     }
 
-    fn row_span(&self, buffer: &Buffer, row: &Row) -> Range<usize> {
-        let (start, len) = match row {
-            Row::Tool(call) => return self.tools[call].range(buffer),
-            Row::Thought(thought) => return thought.range(buffer),
-            Row::Ask { start, len } => (*start, *len),
-        };
-        let start = buffer.marker(start).expect("live with its run");
-        start..start + len
+    pub(super) fn group(&self, g: usize) -> &Group {
+        match &self.blocks[g].kind {
+            BlockKind::Group(group) => group,
+            _ => unreachable!("a group"),
+        }
     }
 
-    /// Where group `g`'s line starts and its last row ends.
-    fn group_span(&self, buffer: &Buffer, g: usize) -> Range<usize> {
-        let group = &self.groups[g];
-        let last = group.rows.last().expect("a group has rows");
-        let start = buffer.marker(group.start).expect("live with its session");
-        start..self.row_span(buffer, last).end
+    fn group_mut(&mut self, g: usize) -> &mut Group {
+        match &mut self.blocks[g].kind {
+            BlockKind::Group(group) => group,
+            _ => unreachable!("a group"),
+        }
     }
 
     /// Whether `tool` is out of sight: in a folded group, or replaced by its question's line.
     pub(super) fn hidden(&self, tool: &Tool) -> bool {
-        let waiting = (self.asks.iter()).any(|a| a.holds(&tool.call.tool_call_id));
-        tool.replaced || !waiting && tool.group.is_some_and(|g| !self.groups[g].open)
+        let waiting = (self.asks()).any(|(_, a)| a.holds(&tool.call.tool_call_id));
+        tool.replaced || !waiting && tool.group.is_some_and(|g| !self.group(g).open)
     }
 
-    /// The group with a row starting at `at`, an answered line's.
-    fn group_at(&self, buffer: &Buffer, at: usize) -> Option<usize> {
-        let starts =
-            |r: &Row| matches!(r, Row::Ask { start, .. } if buffer.marker(*start) == Some(at));
-        self.groups.iter().position(|g| g.rows.iter().any(starts))
-    }
-
-    /// Replaces `ask`'s block with `line`, returning its length: a question's answered line, `clock`
-    /// at its right, or a permission request's dim line.
+    /// Replaces pending request `path`'s block with `line`, returning the request: a question's
+    /// answered line, `clock` at its right, or a permission request's dim line.
     pub(super) fn settle(
         &mut self,
         buffer: &mut Buffer,
-        ask: &Ask,
+        path: BlockPath,
         line: &str,
         clock: Option<&str>,
-    ) -> usize {
-        if ask.question().is_none() {
-            settle(buffer, ask, line);
-            return line.chars().count();
-        }
-        let answered = settle_question(buffer, ask, line, clock);
-        let start = buffer.marker(answered.start).expect("just settled");
-        render_answered(buffer, &answered, self.group_at(buffer, start).is_some());
-        let len = extent(buffer, answered.start, answered.end).len();
-        self.answers.push(answered);
-        len
+        look: &Look,
+    ) -> Ask {
+        let kind = match self.ask(path).question() {
+            Some(question) => BlockKind::Answered(settled_question(question, line, clock)),
+            None => BlockKind::Line {
+                text: line.into(),
+                dim: true,
+            },
+        };
+        let BlockKind::Ask(ask) = std::mem::replace(&mut self.block_mut(path).kind, kind) else {
+            unreachable!("a pending request");
+        };
+        let rendered = self.render(path, look);
+        self.write(buffer, path, rendered, look);
+        ask
     }
 
-    /// The answered line `point` is on or in, if it sent anything and its group shows it.
-    fn answer_at(&self, buffer: &Buffer, point: usize) -> Option<usize> {
-        let (i, start) = self.answers.iter().enumerate().find_map(|(i, a)| {
-            let Range { start, end: all } = extent(buffer, a.start, a.end);
-            let end = if a.open { all } else { start + a.line };
-            (all - start > a.line && (start..=end).contains(&point)).then_some((i, start))
-        })?;
-        let group = self.group_at(buffer, start);
-        (!group.is_some_and(|g| !self.groups[g].open)).then_some(i)
-    }
-
-    /// Opens or folds answered line `i`, returning where it starts and where its line ends.
-    pub(super) fn toggle_answer(&mut self, buffer: &mut Buffer, i: usize) -> (usize, usize) {
-        let start = buffer
-            .marker(self.answers[i].start)
-            .expect("live with its session");
-        let group = self.group_at(buffer, start);
-        let a = &mut self.answers[i];
+    /// Opens or folds answered line `path`, returning where it starts and where its line ends.
+    pub(super) fn toggle_answer(
+        &mut self,
+        buffer: &mut Buffer,
+        path: BlockPath,
+        look: &Look,
+    ) -> (usize, usize) {
+        let BlockKind::Answered(a) = &mut self.block_mut(path).kind else {
+            unreachable!("found as an answer");
+        };
         a.open = !a.open;
-        buffer.remove_properties(extent(buffer, a.start, a.end));
-        buffer.replace_output(start..start + 1, if a.open { "▾" } else { "▸" });
-        render_answered(buffer, a, group.is_some());
-        (start, start + a.line)
+        let mark = if a.open { "▾" } else { "▸" };
+        a.text.replace_range(..'▸'.len_utf8(), mark);
+        let line = a.line;
+        let rendered = self.render(path, look);
+        self.write(buffer, path, rendered, look);
+        let start = self.range(buffer, path).start;
+        (start, start + line)
     }
 
     /// Whether `row` shows under its folded group.
-    fn waiting(&self, row: &Row) -> bool {
-        match row {
-            Row::Tool(call) => self.asks.iter().any(|a| a.holds(call)),
-            Row::Thought(_) => false,
-            Row::Ask { start, .. } => self.asks.iter().any(|a| a.row == *start),
+    fn waiting(&self, row: &Block) -> bool {
+        match &row.kind {
+            BlockKind::Tool(call) => self.asks().any(|(_, a)| a.holds(call)),
+            BlockKind::Ask(_) => true,
+            _ => false,
         }
     }
 
-    fn render_row(&self, buffer: &mut Buffer, row: &Row) {
-        match row {
-            Row::Tool(call) => render_tool(buffer, &self.tools[call]),
-            Row::Thought(thought) => render_thought(buffer, thought),
-            Row::Ask { start, len } => {
-                let at = buffer.marker(*start).expect("live with its run");
-                let answered = (self.answers.iter()).find(|a| buffer.marker(a.start) == Some(at));
-                match (self.asks.iter().find(|a| a.row == *start), answered) {
-                    (Some(ask), _) => ask.body.render(buffer, at, &ask.title),
-                    (None, Some(a)) => render_answered(buffer, a, true),
-                    (None, None) => {
-                        (buffer.add_property(at..at + len, dim())).expect("inside the block");
-                    }
+    fn render_row(&self, buffer: &mut Buffer, row: &Block) {
+        let range = row.range(buffer);
+        match &row.kind {
+            BlockKind::Tool(call) => {
+                let tool = &self.tools[call];
+                if tool.replaced {
+                    return hide_replaced(buffer, tool, range, row.meta);
                 }
+                let text = buffer.text().slice(range.clone()).to_string();
+                paint(buffer, range.start, tool_props(tool, &text));
             }
+            BlockKind::Thought(thought) => render_thought(buffer, row, thought),
+            BlockKind::Ask(ask) => paint(buffer, range.start, ask.body.props(&ask.title)),
+            BlockKind::Answered(a) => paint(buffer, range.start, answered_props(a, true)),
+            BlockKind::Line { dim: true, .. } => {
+                (buffer.add_property(range, dim())).expect("inside the block");
+            }
+            _ => {}
         }
     }
 
     /// Lays folded group `g`'s properties below its line: its waiting rows, and over the rest
     /// `Invisible` runs, each from the end of what shows above it.
     fn fold_rows(&self, buffer: &mut Buffer, g: usize) {
-        let span = self.group_span(buffer, g);
-        let group = &self.groups[g];
+        let span = self.range(buffer, (g, None));
+        let group = self.group(g);
         let fold = |buffer: &mut Buffer, run: Range<usize>| {
             if !run.is_empty() {
                 let hide = Prop::Invisible(String::new());
@@ -235,7 +186,7 @@ impl Session {
         buffer.remove_properties(shown..span.end);
         let (mut from, mut to) = (shown, shown);
         for row in &group.rows {
-            let row_span = self.row_span(buffer, row);
+            let row_span = row.range(buffer);
             if self.waiting(row) {
                 fold(buffer, from..to);
                 self.render_row(buffer, row);
@@ -249,82 +200,81 @@ impl Session {
     /// Brings group `g`'s line up to date, and its fold when folded. An open group's rows
     /// render on their own.
     pub(super) fn show_group(&mut self, buffer: &mut Buffer, g: usize) {
-        let group = &self.groups[g];
+        let group = self.group(g);
         let calls: Vec<_> = (group.rows.iter())
-            .filter_map(|row| match row {
-                Row::Tool(call) => Some(&self.tools[call]),
+            .filter_map(|row| match &row.kind {
+                BlockKind::Tool(call) => Some(&self.tools[call]),
                 _ => None,
             })
             .collect();
-        let start = buffer.marker(group.start).expect("live with its session");
+        let start = buffer
+            .marker(self.blocks[g].start)
+            .expect("live with its session");
         let meta = group_meta(&calls);
         let line = group_line(buffer, start..start + group.line, &calls, group.open);
-        self.groups[g].line = line;
-        self.take_meta(buffer, g);
+        self.group_mut(g).line = line;
         // A thought streaming as its last row grows into the line under it.
-        if !(self.group == Some(g) && self.stream.is_some()) {
-            let end = self.group_span(buffer, g).end;
-            let parts: Vec<_> = meta.iter().map(|(t, f)| (t.as_str(), *f)).collect();
-            self.groups[g].meta = put_meta(buffer, end, META_INDENT, &parts);
-        }
-        if !self.groups[g].open {
+        let streaming = self.group == Some(g) && self.stream.is_some();
+        let meta = if streaming { vec![] } else { meta };
+        self.set_meta(buffer, (g, None), &meta);
+        if !self.group(g).open {
             self.fold_rows(buffer, g);
-        }
-    }
-
-    /// Takes group `g`'s failed count and time off the line under it.
-    fn take_meta(&mut self, buffer: &mut Buffer, g: usize) {
-        let at = self.group_span(buffer, g).end + 1;
-        let meta = std::mem::take(&mut self.groups[g].meta);
-        if meta > 0 {
-            buffer.remove_properties(at..at + meta);
-            buffer.replace_output(at..at + meta, "");
         }
     }
 
     /// Renders all of group `g`, after it opened or folded.
     pub(super) fn render_group(&mut self, buffer: &mut Buffer, g: usize) {
         self.show_group(buffer, g);
-        if self.groups[g].open {
-            let span = self.group_span(buffer, g);
-            buffer.remove_properties(span.start + self.groups[g].line..span.end);
-            for row in &self.groups[g].rows {
+        let group = self.group(g);
+        if group.open {
+            let span = self.range(buffer, (g, None));
+            buffer.remove_properties(span.start + group.line..span.end);
+            for row in &group.rows {
                 self.render_row(buffer, row);
             }
         }
     }
 
-    /// Adds `row`, whose block was just put above the prompt line, to the run.
-    pub(super) fn add_row(&mut self, buffer: &mut Buffer, row: Row) {
+    /// Adds `row`, whose block was just put above the prompt line, to the run, returning its
+    /// place.
+    pub(super) fn add_row(&mut self, buffer: &mut Buffer, row: Block) -> BlockPath {
         let Some(g) = self.group else {
-            return self.run.push(row);
+            let at = self.tail();
+            self.blocks.insert(at, row);
+            return (at, None);
         };
-        self.take_meta(buffer, g);
-        let start = self.row_span(buffer, &row).start;
+        self.set_meta(buffer, (g, None), &[]);
+        let start = buffer.marker(row.start).expect("just put");
         buffer.replace_output(start - 1..start, "");
-        self.groups[g].rows.push(row);
+        self.blocks[g].end = row.end;
+        let rows = &mut self.group_mut(g).rows;
+        rows.push(row);
+        (g, Some(rows.len() - 1))
     }
 
-    /// Ends the run, freeing the markers of rows no group kept.
+    /// Ends the run, dropping the rows no group kept that nothing acts on: its thoughts and
+    /// settled permission requests' lines.
     pub(super) fn end_run(&mut self, buffer: &mut Buffer) {
         self.group = None;
-        for row in std::mem::take(&mut self.run) {
-            match row {
-                Row::Tool(_) => {}
-                Row::Thought(Thought { start, end, .. }) => {
-                    buffer.remove_marker(start);
-                    buffer.remove_marker(end);
+        let mut at = self.run;
+        while at < self.tail() {
+            match self.blocks[at].kind {
+                BlockKind::Thought(_) | BlockKind::Line { dim: true, .. } => {
+                    let block = self.blocks.remove(at);
+                    buffer.remove_marker(block.start);
+                    buffer.remove_marker(block.end);
                 }
-                Row::Ask { start, .. } => buffer.remove_marker(start),
+                _ => at += 1,
             }
         }
+        self.run = self.tail();
     }
 
     /// Whether the run has just got its second call.
     pub(super) fn forms_group(&self) -> bool {
         self.group.is_none()
-            && (self.run.iter())
-                .filter(|r| matches!(r, Row::Tool(_)))
+            && (self.blocks[self.run..self.tail()].iter())
+                .filter(|b| matches!(b.kind, BlockKind::Tool(_)))
                 .count()
                 == 2
     }
@@ -332,81 +282,83 @@ impl Session {
     /// Turns the run into a group: joins its rows, puts an empty line above them and marks them
     /// as rows. Its calls still need showing indented.
     pub(super) fn form_group(&mut self, buffer: &mut Buffer) {
-        let mut rows = std::mem::take(&mut self.run);
+        let g = self.run;
         // Its calls' times go back into their headers when they are shown as rows.
-        for row in &rows {
-            if let Row::Tool(call) = row {
-                take_tool_meta(buffer, self.tools.get_mut(call).expect("shown"));
+        for at in g..self.tail() {
+            if let BlockKind::Tool(_) = self.blocks[at].kind {
+                self.set_meta(buffer, (at, None), &[]);
             }
         }
+        let tail = self.tail();
+        let mut rows: Vec<Block> = self.blocks.drain(g..tail).collect();
         for row in &rows[1..] {
-            let start = self.row_span(buffer, row).start;
+            let start = buffer.marker(row.start).expect("live with its run");
             buffer.replace_output(start - 1..start, "");
         }
-        let at = self.row_span(buffer, &rows[0]).start;
+        let at = buffer.marker(rows[0].start).expect("live with its run");
         let start = (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
-        // The markers at `at` stay before the line, as blocks' do when text goes in at them.
+        // The first row's start stays before the line, as blocks' do when text goes in at them.
         buffer.insert_output(at, "\n");
-        let first = match &rows[0] {
-            Row::Tool(call) => self.tools[call].start,
-            Row::Thought(thought) => thought.start,
-            Row::Ask { start, .. } => *start,
-        };
-        let asks = self.asks.iter().map(|a| a.start);
-        let answers = self.answers.iter().map(|a| a.start);
-        for marker in asks.chain(answers).chain([first]) {
-            if buffer.marker(marker) == Some(at) {
-                buffer.set_marker(marker, at + 1).expect("in the text");
-            }
-        }
-        let g = self.groups.len();
+        buffer
+            .set_marker(rows[0].start, at + 1)
+            .expect("in the text");
         for row in &mut rows {
-            match row {
-                Row::Tool(call) => {
-                    self.tools.get_mut(call).expect("shown").group = Some(g);
-                }
-                Row::Thought(thought) => thought.indent(buffer),
-                Row::Ask { .. } => {}
+            if let BlockKind::Tool(call) = &row.kind {
+                self.tools.get_mut(call).expect("shown").group = Some(g);
+            }
+            if let BlockKind::Thought(_) = row.kind {
+                buffer.insert_output(at_start(buffer, row), THOUGHT_ROW);
+                thought_mut(row).first += THOUGHT_ROW.chars().count();
             }
         }
-        let open = (rows.iter()).any(|r| matches!(r, Row::Tool(call) if self.tools[call].open));
-        self.groups.push(Group {
-            start,
+        let open = (rows.iter())
+            .any(|r| matches!(&r.kind, BlockKind::Tool(call) if self.tools[call].open));
+        let end = rows.last().expect("a group has rows").end;
+        let group = Group {
             line: 0,
             open,
             rows,
-            meta: 0,
-        });
+        };
+        self.blocks.insert(
+            g,
+            Block {
+                start,
+                end,
+                meta: 0,
+                kind: BlockKind::Group(group),
+            },
+        );
         self.group = Some(g);
     }
 
     /// The ids of group `g`'s calls.
     pub(super) fn group_calls(&self, g: usize) -> Vec<ToolCallId> {
-        (self.groups[g].rows.iter())
-            .filter_map(|row| match row {
-                Row::Tool(call) => Some(call.clone()),
+        (self.group(g).rows.iter())
+            .filter_map(|row| match &row.kind {
+                BlockKind::Tool(call) => Some(call.clone()),
                 _ => None,
             })
             .collect()
     }
 
-    /// The thought being streamed, the run's last.
-    fn last_thought(&mut self) -> Option<&mut Thought> {
-        let rows = match self.group {
-            Some(g) => &mut self.groups[g].rows,
-            None => &mut self.run,
-        };
-        rows.iter_mut().rev().find_map(|row| match row {
-            Row::Thought(thought) => Some(thought),
-            _ => None,
-        })
+    /// The place of the thought being streamed, the run's last.
+    fn last_thought(&self) -> Option<BlockPath> {
+        let is = |b: &Block| matches!(b.kind, BlockKind::Thought(_));
+        match self.group {
+            Some(g) => Some((g, Some(self.group(g).rows.iter().rposition(is)?))),
+            None => {
+                let run = &self.blocks[self.run..self.tail()];
+                Some((self.run + run.iter().rposition(is)?, None))
+            }
+        }
     }
 
     /// Counts `chars` more of the thought being streamed, added at its end.
     pub(super) fn thought_grew(&mut self, buffer: &mut Buffer, chars: usize) {
-        if let Some(thought) = self.last_thought() {
-            let end = thought.range(buffer).end + chars;
-            buffer.set_marker(thought.end, end).expect("just inserted");
+        if let Some(path) = self.last_thought() {
+            let block = self.block(path);
+            let end = block.range(buffer).end + chars;
+            buffer.set_marker(block.end, end).expect("just inserted");
         }
     }
 
@@ -414,29 +366,35 @@ impl Session {
     /// group it becomes a row.
     pub(super) fn end_thought(&mut self, buffer: &mut Buffer, header: Option<usize>) {
         let group = self.group;
-        let open = group.is_some_and(|g| self.groups[g].open);
-        let Some(thought) = self.last_thought() else {
+        let open = group.is_some_and(|g| self.group(g).open);
+        let Some(path) = self.last_thought() else {
             return;
         };
-        let range = thought.range(buffer);
-        thought.first = header.unwrap_or_else(|| {
+        let block = self.block_mut(path);
+        let range = block.range(buffer);
+        thought_mut(block).first = header.unwrap_or_else(|| {
             let line = buffer.text().slice(range);
             line.chars().take_while(|&c| c != '\n').count()
         });
         let Some(g) = group else {
             return;
         };
-        thought.indent(buffer);
+        buffer.insert_output(at_start(buffer, block), THOUGHT_ROW);
+        thought_mut(block).first += THOUGHT_ROW.chars().count();
         if open {
-            buffer.remove_properties(thought.range(buffer));
-            render_thought(buffer, thought);
+            buffer.remove_properties(block.range(buffer));
+            let block = self.block(path);
+            let BlockKind::Thought(thought) = &block.kind else {
+                unreachable!("a thought");
+            };
+            render_thought(buffer, block, thought);
         }
         self.show_group(buffer, g);
     }
 
     /// Whether the thought being streamed is hidden in a folded group; it is rendered with it.
     pub(super) fn fold_stream(&mut self, buffer: &mut Buffer) -> bool {
-        match self.group.filter(|&g| !self.groups[g].open) {
+        match self.group.filter(|&g| !self.group(g).open) {
             Some(g) => {
                 self.fold_rows(buffer, g);
                 true
@@ -445,112 +403,48 @@ impl Session {
         }
     }
 
-    /// The permission block of `row` became an answer of `len` chars.
-    pub(super) fn settle_row(&mut self, buffer: &mut Buffer, row: MarkerId, len: usize) {
-        let answer = |rows: &mut [Row]| {
-            let new = rows.iter_mut().find_map(|r| match r {
-                Row::Ask { start, len } if *start == row => Some(len),
-                _ => None,
-            });
-            new.map(|old| *old = len).is_some()
-        };
-        if answer(&mut self.run) {
-            return;
-        }
-        let g = (self.groups.iter_mut()).rposition(|group| answer(&mut group.rows));
-        if let Some(g) = g {
-            self.show_group(buffer, g);
-        }
-    }
-
     /// Whether group `g` shows its rows.
     pub(super) fn group_open(&self, g: usize) -> bool {
-        self.groups[g].open
+        self.group(g).open
     }
 
-    /// The thought row `point` is on or in, in an open group, as its group and row.
-    fn thought_at(&self, buffer: &Buffer, point: usize) -> Option<(usize, usize)> {
-        let groups = self.groups.iter().enumerate().filter(|(_, g)| g.open);
-        groups
-            .flat_map(|(g, group)| (group.rows.iter().enumerate()).map(move |(r, row)| (g, r, row)))
-            .find_map(|(g, r, row)| {
-                let Row::Thought(thought) = row else {
-                    return None;
-                };
-                let range = thought.range(buffer);
-                let start = range.start;
-                let end = if thought.open {
-                    range.end
-                } else {
-                    start + thought.first
-                };
-                (range.len() != thought.first && (start..=end).contains(&point)).then_some((g, r))
-            })
-    }
-
-    /// Opens or folds row `r` of group `g`, a thought, returning where it starts and where its
-    /// first line ends.
+    /// Opens or folds thought row `path`, returning where it starts and where its first line
+    /// ends.
     pub(super) fn toggle_thought(
         &mut self,
         buffer: &mut Buffer,
-        g: usize,
-        r: usize,
+        path: BlockPath,
     ) -> (usize, usize) {
-        let Row::Thought(thought) = &mut self.groups[g].rows[r] else {
-            unreachable!("found as a thought");
-        };
-        let range = thought.range(buffer);
+        let block = self.block_mut(path);
+        let range = block.range(buffer);
         let start = range.start;
+        let thought = thought_mut(block);
         thought.open = !thought.open;
+        let fold = if thought.open { "▾" } else { "▸" };
         buffer.remove_properties(range);
         let mark = start + THOUGHT_FOLD;
-        let fold = if thought.open { "▾" } else { "▸" };
         buffer.replace_output(mark..mark + 1, fold);
-        render_thought(buffer, thought);
+        let block = self.block(path);
+        let BlockKind::Thought(thought) = &block.kind else {
+            unreachable!("a thought");
+        };
+        render_thought(buffer, block, thought);
         (start, start + thought.first)
     }
 
     /// Opens or folds group `g`, returning where its line starts and ends and whether it is
     /// open now.
     pub(super) fn toggle_group(&mut self, buffer: &mut Buffer, g: usize) -> (usize, usize, bool) {
-        self.groups[g].open = !self.groups[g].open;
+        let group = self.group_mut(g);
+        group.open = !group.open;
         self.render_group(buffer, g);
-        let span = self.group_span(buffer, g);
-        let group = &self.groups[g];
-        (span.start, span.start + group.line, group.open)
+        let start = self.range(buffer, (g, None)).start;
+        let group = self.group(g);
+        (start, start + group.line, group.open)
     }
+}
 
-    /// The block `point` is in that `TAB` acts on, in its precedence: a question with several
-    /// fields, a paste, an answered line, a call, a thought row, then a group.
-    pub(super) fn block_at(&self, buffer: &Buffer, point: usize) -> Option<At> {
-        let ask = self.asks.iter().position(|ask| {
-            ask.question().is_some_and(|q| q.several())
-                && (ask.range(buffer).start..=ask.range(buffer).end).contains(&point)
-        });
-        let tool = || {
-            (self.tools.iter()).find(|(_, t)| {
-                let Range { start, end: all } = t.range(buffer);
-                let end = if t.open { all } else { start + t.header };
-                // A row with nothing to open leaves `TAB` to its group.
-                (t.group.is_none() || all - start > t.header)
-                    && !self.hidden(t)
-                    && (start..=end).contains(&point)
-            })
-        };
-        let group = || {
-            (0..self.groups.len()).find(|&g| {
-                let span = self.group_span(buffer, g);
-                (span.start..=span.end).contains(&point)
-            })
-        };
-        (ask.map(At::Ask))
-            .or_else(|| self.paste_at(buffer, point).map(At::Paste))
-            .or_else(|| self.answer_at(buffer, point).map(At::Answer))
-            .or_else(|| tool().map(|(call, _)| At::Tool(call.clone())))
-            .or_else(|| {
-                self.thought_at(buffer, point)
-                    .map(|(g, r)| At::Thought(g, r))
-            })
-            .or_else(|| group().map(At::Group))
-    }
+/// Where `block` starts.
+fn at_start(buffer: &Buffer, block: &Block) -> usize {
+    buffer.marker(block.start).expect("live with its session")
 }

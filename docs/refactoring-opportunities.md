@@ -150,3 +150,17 @@ The 2026-11-08 report said "unchanged benchmark sources", but #457 (`3819d1f`) a
 Start with: **#1**, the biggest win (about 170× on long sessions after any question or grouped thought), inside `buffer.rs`; then **#2**, a small change with a measured gain.
 
 Not checked: GPUI paint timing, Linux, and the cause of the remaining copy-mode scroll regression; `markdown.rs` tables, `questions.rs` and `services/files.rs` were not read in depth during the scan.
+
+## Architecture review, 2026-11-12
+
+The 2026-11-11 architectural review of the core, carried out as the `architecture-review-refactors` change in the order #4, #3, #2, #1, #5. Measured in [2026-11-12-architecture-review](measurements/2026-11-12-architecture-review/README.md) on one Linux host.
+
+| # | Problem | Outcome |
+| ---: | --- | --- |
+| 1 | A session keeps seven parallel collections, each with its own markers. | Done: one ordered block list, each block with a start and end marker, written by one function and checked against a full render in debug builds. Dirty-stream and first-show frames 2.5 → 1.2 ms. |
+| 2 | Parsing runs on the UI thread: about 21 ms per `/*` keystroke at 10k lines, 186–445 ms at 100k. | Done: buffers over 64 KiB parse in a service and draw with the shifted old tree until the new one arrives; the locals index is kept across rebuilds. The 100k-line `/*` pair 485 → 4.3 ms. |
+| 3 | A buffer's kind is spread over flat fields and side maps polled after every message. | Done: `Buffer::kind` and `FileState`; every kill goes through one function that emits the terminal and agent effects, and the three sync passes stopped polling. |
+| 4 | The effect runner is written four times. | Done: one runner in `aiditor-services`, used by the app, `tests/scenario.rs` and `tests/file_sync.rs`; `aiditor-headless` keeps its synchronous loop. |
+| 5 | The 13 passes at the end of `Core::handle` run after every message. | Done: the watch set cost 1.05 ms per message with 200 file buffers, over the 20 µs threshold; it is now kept behind a `dirty` flag, 11.6 µs. |
+
+Correction: the review said #1 would retire the `buffer.rs` marker shortcut. It does not reduce the marker count: properties, not block bookkeeping, hold most markers. Typing in a 5,000-line transcript's prompt meets **21,010 markers** before and after #1 (52.8 µs per keystroke), the input for a later decision on a faster marker store.

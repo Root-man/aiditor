@@ -105,7 +105,8 @@ impl Core {
             workspace.as_deref(),
             None,
         );
-        if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
+        let buffer = window.buffer();
+        if let Some((_, session)) = self.session_of(buffer) {
             display.mode_line = session.mode_line();
         }
         display
@@ -168,7 +169,8 @@ impl Core {
                     && (selected || origin == Some(id))
                     && (buffer.numbered() || buffer.copy_mode());
                 let width = display::gutter_width(buffer.len_lines(), cell_width);
-                let session = self.agents.values().any(|s| s.buffer == window.buffer());
+                let agent = buffer.agent().and_then(|id| self.agents.get(&id));
+                let session = agent.is_some();
                 let inset = match session {
                     true => SESSION_INSET,
                     false => (TEXT_INSET, TEXT_INSET),
@@ -180,11 +182,9 @@ impl Core {
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
                 let matches = search.filter(|(from, _)| *from == id).map(|(_, s)| s);
-                let question = (self.agents.values())
-                    .find(|s| s.buffer == window.buffer())
-                    .and_then(|s| {
-                        s.question_row(buffers.get(window.buffer())?, window.point(buffers))
-                    });
+                let question = agent.and_then(|s| {
+                    s.question_row(buffers.get(window.buffer())?, window.point(buffers))
+                });
                 let mut display = match session {
                     true => session_display(
                         window,
@@ -206,7 +206,7 @@ impl Core {
                         matches,
                     ),
                 };
-                if let Some(session) = self.agents.values().find(|s| s.buffer == window.buffer()) {
+                if let Some(session) = agent {
                     display.mode_line = session.mode_line();
                     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
                     let point = window.point(buffers);
@@ -236,7 +236,7 @@ impl Core {
                 if buffers
                     .get(window.buffer())
                     .unwrap()
-                    .workspace_list
+                    .workspace_list()
                     .is_some()
                     && (bar_cols < crate::workspace_list::WIDE_COLUMNS
                         || display.mode_line.text().chars().count() > bar_cols)
@@ -272,7 +272,7 @@ impl Core {
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
-            key_hints: if self.current().workspace_list.is_some()
+            key_hints: if self.current().workspace_list().is_some()
                 && self.message.is_none()
                 && self.prompts.minibuffer.is_none()
             {
@@ -370,7 +370,7 @@ pub(crate) fn window_display(
     let mut display = display::build(
         buffer, top, drawn, point, mark, settings, shown, wrap, roots, search,
     );
-    if let Some(snapshot) = &buffer.workspace_list {
+    if let Some(snapshot) = buffer.workspace_list() {
         let line = buffer.line_col(point).map_or(0, |(l, _)| l) + 1;
         snapshot.decorate(buffer, &mut display, line);
         snapshot.fit(&mut display.lines, cols, &settings.theme);

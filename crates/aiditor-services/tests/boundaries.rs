@@ -70,7 +70,10 @@ fn production_visit_save_and_index_replies_can_be_held() {
     assert_eq!(d.core.workspace().unwrap(), second);
     assert_eq!(d.core.text(), "");
     d.core.switch_workspace(origin).unwrap();
-    assert_eq!(d.core.current().disk, Some(hash(b"saved original\n")));
+    assert_eq!(
+        d.core.current().file.as_ref().unwrap().disk,
+        Some(hash(b"saved original\n"))
+    );
     assert_eq!(d.core.text(), "saved original\n");
     assert!(!d.core.current().modified());
 }
@@ -573,7 +576,10 @@ fn visits_saves_reverts_and_diffs_use_real_encoding_and_read_failures() {
     assert_eq!(d.core.text(), "alpha\nbeta\n");
     d.keys("x C-x C-s");
     assert_eq!(fs::read(&path).unwrap(), b"\xef\xbb\xbfxalpha\r\nbeta\r\n");
-    assert_eq!(d.core.current().disk, Some(hash(&fs::read(&path).unwrap())));
+    assert_eq!(
+        d.core.current().file.as_ref().unwrap().disk,
+        Some(hash(&fs::read(&path).unwrap()))
+    );
     assert!(!d.core.current().modified());
 
     fs::write(&path, "replaced\n").unwrap();

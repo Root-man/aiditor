@@ -50,6 +50,8 @@ pub struct Harness {
     pub terminal_ops: Vec<crate::TerminalOp>,
     /// The agent work the core asked for, in order.
     pub agent_ops: Vec<crate::AgentOp>,
+    /// The parses the core asked for, held until `parse` delivers them.
+    pub parses: Vec<(BufferId, crate::Parse)>,
 }
 
 impl Harness {
@@ -90,6 +92,7 @@ impl Harness {
             effects: Vec::new(),
             terminal_ops: Vec::new(),
             agent_ops: Vec::new(),
+            parses: Vec::new(),
         };
         for (name, text) in files {
             harness.read_reply(name, Some(text.as_bytes()));
@@ -203,6 +206,14 @@ impl Harness {
         let effects = self.core.handle(self.now, msg);
         self.run(effects);
         self.settle();
+        self
+    }
+
+    /// Runs the parses the core asked for and delivers their results, in order.
+    pub fn parse(&mut self) -> &mut Self {
+        for (buffer, parse) in std::mem::take(&mut self.parses) {
+            self.send(parse.run(buffer));
+        }
         self
     }
 
@@ -424,6 +435,7 @@ impl Harness {
                     }
                 }
                 Effect::Grep(GrepOp::Cancel) => self.greps.push(None),
+                Effect::Parse { buffer, parse } => self.parses.push((buffer, parse)),
                 Effect::LoadConfiguration { request } => {
                     let settings = self.fixture_text("settings.toml");
                     let keymap = self.fixture_text("keymap.toml");
@@ -466,7 +478,7 @@ impl Harness {
             .core
             .buffers
             .recent()
-            .filter(|(_, b)| b.file.as_ref() == Some(&path))
+            .filter(|(_, b)| b.path() == Some(path.as_path()))
         {
             self.reverts.insert(
                 id,
@@ -519,13 +531,27 @@ fn collected_saves_can_be_answered_in_reverse_order_across_workspaces() {
     assert_eq!(h.core.workspace().unwrap(), second);
     assert_eq!(h.text(), "second original\n");
     assert_eq!(
-        h.core.buffers.get(second_buffer).unwrap().disk,
+        h.core
+            .buffers
+            .get(second_buffer)
+            .unwrap()
+            .file
+            .as_ref()
+            .unwrap()
+            .disk,
         Some(hash(b"second original\n"))
     );
     h.core.switch_workspace(first).unwrap();
     assert_eq!(h.text(), "first original\n");
     assert_eq!(
-        h.core.buffers.get(first_buffer).unwrap().disk,
+        h.core
+            .buffers
+            .get(first_buffer)
+            .unwrap()
+            .file
+            .as_ref()
+            .unwrap()
+            .disk,
         Some(hash(b"first original\n"))
     );
 }

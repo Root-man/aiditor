@@ -2,7 +2,7 @@
 
 use crate::{
     Core, Ctx,
-    buffer::{Buffer, BufferId, Decoration, FaceRef, Prop},
+    buffer::{Buffer, BufferId, Decoration, FaceRef, Kind, Prop},
     display::{ModeLine, WindowDisplay},
     project::ProjectId,
     settings::FaceName,
@@ -354,7 +354,7 @@ impl Snapshot {
         let lines = &mut display.lines;
         if let Some(number) = (display.cursor)
             .map(|(l, _)| lines[l].number)
-            .filter(|n| buffer.workspace_rows.iter().any(|(line, _)| line == n))
+            .filter(|n| buffer.workspace_rows().iter().any(|(line, _)| line == n))
         {
             for line in lines.iter_mut().filter(|l| l.number == number) {
                 (line.decorations).push(Decoration::Background(FaceName::CompletionSelected));
@@ -362,8 +362,9 @@ impl Snapshot {
         }
         let segment = |text: &str, face| vec![(text.to_string(), face)];
         let (projects, workspaces) = self.counts();
-        let rows = buffer.workspace_rows.len();
-        let position = (buffer.workspace_rows)
+        let rows = buffer.workspace_rows().len();
+        let position = buffer
+            .workspace_rows()
             .partition_point(|(row, _)| *row < line)
             .max(1);
         display.mode_line = ModeLine {
@@ -401,10 +402,11 @@ impl Snapshot {
         }
     }
 
-    fn render(&self, buffer: &mut Buffer) {
+    /// Renders it into `buffer`, which then holds it.
+    fn install(self, buffer: &mut Buffer) {
         buffer.remove_properties(0..buffer.len_chars());
         buffer.set_text("");
-        buffer.workspace_rows.clear();
+        let mut rows = Vec::new();
         if self.entries.is_empty() {
             buffer.insert_output(0, "No projects");
             let refs = vec![FaceRef::Face(FaceName::Annotation)];
@@ -414,7 +416,7 @@ impl Snapshot {
             if let Some(entry) = entry {
                 entry.render(buffer);
                 if let Some(row) = entry.row {
-                    buffer.workspace_rows.push((line, row));
+                    rows.push((line, row));
                 }
             } else {
                 buffer.insert_output(buffer.len_chars(), "\n ");
@@ -428,6 +430,10 @@ impl Snapshot {
             }
         }
         buffer.set_saved();
+        buffer.kind = Kind::WorkspaceList {
+            snapshot: self,
+            rows,
+        };
     }
 }
 
@@ -437,7 +443,7 @@ fn details(
     buffer: &Buffer,
     roots: &[PathBuf],
 ) -> (crate::display::Segment, crate::display::Segment) {
-    if let Some(session) = core.agents.values().find(|s| s.buffer == id) {
+    if let Some((_, session)) = core.session_of(id) {
         let location = session.model_effort();
         let state = session
             .activity()
@@ -462,8 +468,7 @@ fn details(
         return (vec![(location, FaceName::Annotation)], state);
     }
     let location = buffer
-        .file
-        .as_ref()
+        .path()
         .map(|file| {
             crate::display::file_mode_line(buffer, file, roots, None, (1, 0), "All").left[0]
                 .iter()
@@ -472,13 +477,14 @@ fn details(
                 .collect()
         })
         .unwrap_or_default();
+    let deleted = buffer.file.as_ref().is_some_and(|f| f.deleted);
     let mut state = Vec::new();
     for (shown, text, face) in [
         (buffer.modified(), "● unsaved", FaceName::StatusModified),
         (buffer.read_only, "⊘ read-only", FaceName::StatusFailed),
-        (buffer.deleted, "[deleted]", FaceName::StatusFailed),
+        (deleted, "[deleted]", FaceName::StatusFailed),
         (
-            !buffer.deleted && buffer.conflict.is_some(),
+            !deleted && buffer.file.as_ref().is_some_and(|f| f.conflict.is_some()),
             "[conflict]",
             FaceName::StatusFailed,
         ),
@@ -564,7 +570,7 @@ impl Core {
         let selections: Vec<_> = found
             .map(|id| {
                 let buffer = core.buffers.get(id).unwrap();
-                let Some(snapshot) = buffer.workspace_list.as_ref() else {
+                let Some(snapshot) = buffer.workspace_list() else {
                     return Vec::new();
                 };
                 std::iter::once((core.windows.selected, &core.windows.window))
@@ -574,7 +580,7 @@ impl Core {
                     .collect()
             })
             .unwrap_or_default();
-        let old = found.and_then(|id| core.buffers.get(id).unwrap().workspace_list.as_ref());
+        let old = found.and_then(|id| core.buffers.get(id).unwrap().workspace_list());
         let folded = |row, default| {
             old.and_then(|snapshot| snapshot.entries().find(|e| e.row == Some(row)))
                 .map_or(default, |e| e.folded)
@@ -630,7 +636,7 @@ impl Core {
                         b.workspace == Some(workspace.id)
                             && (b.file.is_some()
                                 || b.terminal().is_some()
-                                || core.agents.values().any(|session| session.buffer == *id))
+                                || core.session_of(*id).is_some())
                     })
                     .collect();
                 buffers.sort_unstable_by(|(_, a), (_, b)| a.name.cmp(&b.name));
@@ -694,10 +700,8 @@ impl Core {
         let buffer = core.buffers.get_mut(id).expect("list buffer is live");
         buffer.major_mode = MODE;
         buffer.read_only = true;
-        let snapshot = Snapshot { entries };
-        snapshot.render(buffer);
-        buffer.workspace_list = Some(snapshot);
-        let rows = &buffer.workspace_rows;
+        Snapshot { entries }.install(buffer);
+        let rows = buffer.workspace_rows();
         let target = match current {
             Some(c) if rows.iter().any(|(_, r)| *r == Row::Workspace(c)) => Some(Row::Workspace(c)),
             Some(c) => Some(Row::Project(
@@ -718,7 +722,7 @@ impl Core {
         let selected_preserved = selections
             .iter()
             .any(|(id, _)| *id == core.windows.selected);
-        let snapshot = buffer.workspace_list.as_ref().expect("list has a snapshot");
+        let snapshot = buffer.workspace_list().expect("list has a snapshot");
         let points: Vec<_> = selections
             .into_iter()
             .map(|(id, (targets, col))| {
@@ -744,10 +748,10 @@ impl Core {
 impl Ctx<'_> {
     fn workspace_list_rows(&self) -> Result<&[(usize, Row)], String> {
         let buffer = self.core.current();
-        if buffer.major_mode != MODE || buffer.workspace_list.is_none() {
+        if buffer.major_mode != MODE || buffer.workspace_list().is_none() {
             return Err("Not in a workspace list".into());
         }
-        Ok(&buffer.workspace_rows)
+        Ok(buffer.workspace_rows())
     }
 
     pub(crate) fn workspace_list_move(&mut self, forward: bool) -> Result<(), String> {
@@ -773,7 +777,9 @@ impl Ctx<'_> {
         };
         let row = *row;
         let buffer = self.core.current_mut();
-        let mut snapshot = buffer.workspace_list.take().expect("list has a snapshot");
+        let Kind::WorkspaceList { snapshot, .. } = &mut buffer.kind else {
+            unreachable!("checked by workspace_list_rows");
+        };
         let entry = snapshot.entries.iter_mut().find(|e| e.row == Some(row));
         let entry = match entry {
             Some(entry) => Some(entry),
@@ -785,14 +791,16 @@ impl Ctx<'_> {
         }
         .expect("visible row belongs to snapshot");
         if entry.children.is_empty() {
-            buffer.workspace_list = Some(snapshot);
             return Ok(());
         }
         entry.folded = !entry.folded;
-        snapshot.render(buffer);
-        buffer.workspace_list = Some(snapshot);
+        let Kind::WorkspaceList { snapshot, .. } = std::mem::replace(&mut buffer.kind, Kind::Text)
+        else {
+            unreachable!("checked above");
+        };
+        snapshot.install(buffer);
         let line = buffer
-            .workspace_rows
+            .workspace_rows()
             .iter()
             .find(|(_, r)| *r == row)
             .unwrap()
@@ -868,7 +876,7 @@ mod tests {
         let line = h.core.current().line_col(h.point()).unwrap().0;
         h.core
             .current()
-            .workspace_rows
+            .workspace_rows()
             .iter()
             .find(|(l, _)| *l == line)
             .unwrap()
@@ -879,7 +887,7 @@ mod tests {
         let line = h
             .core
             .current()
-            .workspace_rows
+            .workspace_rows()
             .iter()
             .find(|(_, row)| *row == target)
             .unwrap()
@@ -1081,7 +1089,7 @@ mod tests {
         h.keys("C-x t l TAB");
         let text = h.text();
         let point = h.point();
-        let rows = h.core.current().workspace_rows.clone();
+        let rows = h.core.current().workspace_rows().to_vec();
         let list = h.core.windows.window.buffer();
         h.open("later");
         h.core.switch_to(list);
@@ -1141,7 +1149,7 @@ mod tests {
         assert_eq!(restored.display.lines, wide.display.lines);
         assert_eq!(h.text(), text);
         assert_eq!(h.point(), point);
-        assert_eq!(h.core.current().workspace_rows, rows);
+        assert_eq!(h.core.current().workspace_rows(), rows);
         assert_eq!(row(&h), Row::Workspace(current));
         h.keys("TAB");
         assert!(h.text().lines().any(|l| l.trim() == "notes.txt"));
@@ -1190,8 +1198,7 @@ mod tests {
         let buffer_line = h
             .core
             .current()
-            .workspace_list
-            .as_ref()
+            .workspace_list()
             .unwrap()
             .visible()
             .iter()
@@ -1283,7 +1290,7 @@ mod tests {
                     assert!(
                         h.core
                             .current()
-                            .workspace_rows
+                            .workspace_rows()
                             .iter()
                             .any(|(row, _)| *row == line.number + 1)
                     );
@@ -1456,7 +1463,7 @@ mod tests {
             .add_project(Loaded::ad_hoc("empty", &h.path("empty")));
         h.keys("C-x t l");
         let original = h.text();
-        let blank = h.core.current().workspace_rows[3].0 - 1;
+        let blank = h.core.current().workspace_rows()[3].0 - 1;
         for line in [3, 4, blank] {
             let at = h.core.current().char_idx(line, 0).unwrap();
             h.core
@@ -1596,10 +1603,24 @@ mod tests {
             let locked = h.core.buffers.find_here("locked.rs").unwrap();
             h.core.buffers.get_mut(locked).unwrap().read_only = true;
             let gone = h.core.buffers.find_here("gone.rs").unwrap();
-            h.core.buffers.get_mut(gone).unwrap().deleted = true;
+            h.core
+                .buffers
+                .get_mut(gone)
+                .unwrap()
+                .file
+                .as_mut()
+                .unwrap()
+                .deleted = true;
             let conflict = h.core.buffers.find_here("conflict.rs").unwrap();
             h.core.switch_to(dirty);
-            h.core.buffers.get_mut(conflict).unwrap().conflict = Some(0);
+            h.core
+                .buffers
+                .get_mut(conflict)
+                .unwrap()
+                .file
+                .as_mut()
+                .unwrap()
+                .conflict = Some(0);
             let (running, _) = h.core.create_terminal("vterm1<task>", 2, 10);
             let (failed, _) = h.core.create_terminal("vterm2<task>", 2, 10);
             for (id, bytes) in [
@@ -1726,7 +1747,7 @@ mod tests {
             assert_eq!(h.text(), snapshot);
             let buffer = h.core.buffers.get_mut(dirty).unwrap();
             buffer.read_only = true;
-            buffer.conflict = Some(0);
+            buffer.file.as_mut().unwrap().conflict = Some(0);
             h.keys("C-x t l");
             assert_eq!(
                 contents(&h)[7],
@@ -1747,7 +1768,7 @@ mod tests {
             }
             let buffer = h.core.buffers.get_mut(dirty).unwrap();
             buffer.read_only = false;
-            buffer.conflict = None;
+            buffer.file.as_mut().unwrap().conflict = None;
             buffer.set_saved();
             h.keys("C-x t l");
             assert_eq!(contents(&h)[4], "▾ * task 7 buffers");
@@ -1812,7 +1833,7 @@ mod tests {
         assert_eq!(row(&h), Row::Workspace(h.core.workspace().unwrap()));
         assert!(h.core.current().read_only);
         assert_eq!(
-            (h.core.current().file.as_ref(), h.core.current().modified()),
+            (h.core.current().path(), h.core.current().modified()),
             (None, false)
         );
         let text = h.text();
@@ -1920,7 +1941,7 @@ mod tests {
         let line = h.frame(1400., 600.).windows[0].display.mode_line.text();
         assert_eq!(line, "*Workspaces* │ 5 projects, 4 workspaces  2/9");
         h.keys("TAB");
-        let buffer_line = h.core.current().workspace_rows[1].0 + 1;
+        let buffer_line = h.core.current().workspace_rows()[1].0 + 1;
         let at = h.core.current().char_idx(buffer_line, 0).unwrap();
         h.core
             .windows
@@ -2098,7 +2119,7 @@ mod tests {
         assert_eq!(h.core.windows.window.buffer(), other_list);
         h.keys("C-x t l q C-x t l");
         assert_eq!(h.core.current().name, "*Workspaces*");
-        assert_eq!(h.core.current().workspace_rows.len(), 4);
+        assert_eq!(h.core.current().workspace_rows().len(), 4);
     }
 
     fn mode_line(h: &mut Harness) -> String {

@@ -66,6 +66,7 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
         let reply = match effect {
             Effect::Terminal(_) | Effect::Agent(_) => continue,
             Effect::File(op) => files::run(op),
+            Effect::Parse { buffer, parse } => parse.run(buffer),
             // Runs to the end before the next key, so nothing is left to cancel.
             Effect::Grep(GrepOp::Search(op)) => {
                 let mut replies = Vec::new();
@@ -147,7 +148,7 @@ mod tests {
         for key in parse_keys("RET").unwrap() {
             send(&mut core, &mut service, Msg::Key(key));
         }
-        assert_eq!(core.current().file.as_ref(), Some(&file));
+        assert_eq!(core.current().path(), Some(file.as_path()));
         assert_eq!(core.point(), 1);
         let (tx, thread) = service.take().unwrap();
         drop(tx);

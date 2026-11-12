@@ -1,16 +1,14 @@
 pub(crate) mod benchmark;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
 use aiditor_core::display::TEXT_INSET;
 use aiditor_core::settings::FaceName;
-use aiditor_core::{Core, Effect, Msg, RecoveryOp};
-use aiditor_services::{
-    agents, clock, configuration, environment, files, grep, recovery, terminal, watcher,
-};
+use aiditor_core::{Core, Effect, Msg};
+use aiditor_services::runner::{Run, Runner};
+use aiditor_services::{agents, clock, grep, recovery, terminal, watcher};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, FontFeatures, KeyDownEvent, Pixels, StyledText,
     Task, Window, div, font, prelude::*, px, rgb,
@@ -27,24 +25,13 @@ pub(crate) struct Editor {
     pub(crate) core: Core,
     pub(crate) benchmark: Option<benchmark::Run>,
     pub(crate) focus: FocusHandle,
-    /// Services send their results to the core on this.
-    tx: mpsc::Sender<Msg>,
+    /// Carries out the core's effects on the services.
+    pub(crate) runner: Runner,
     /// Wakes the core at its next deadline; replacing it cancels the old one.
     timer: Option<Task<()>>,
     clock: String,
     title: String,
     _clock_task: Task<()>,
-    /// Where the user's settings and keymap files are, if known.
-    config_dir: Option<PathBuf>,
-    grep: grep::Grep,
-    terminals: terminal::Terminals,
-    agents: agents::Agents,
-    watcher: watcher::Watcher,
-    /// The recovery service, when there is a data dir.
-    recovery: Option<(
-        std::sync::mpsc::Sender<RecoveryOp>,
-        std::thread::JoinHandle<()>,
-    )>,
     /// Set by `--debug`: the stats line drawn at the top.
     pub(crate) debug: Option<Stats>,
     /// The input method's marked text, drawn at point but not in the buffer.
@@ -114,17 +101,19 @@ impl Editor {
             core,
             benchmark: None,
             focus: cx.focus_handle(),
-            tx,
+            runner: Runner {
+                tx,
+                grep: grep::Grep::default(),
+                terminals: terminal::Terminals::new(args.zsh_dir),
+                agents: agents::Agents::default(),
+                watcher,
+                recovery,
+                config_dir: args.config_dir,
+            },
             timer: None,
             clock: clock::minute_text(time),
             title: String::new(),
             _clock_task: clock_task,
-            config_dir: args.config_dir,
-            grep: grep::Grep::default(),
-            terminals: terminal::Terminals::new(args.zsh_dir),
-            agents: agents::Agents::default(),
-            watcher,
-            recovery,
             debug: args.debug.then(Stats::default),
             marked: None,
             painted: Vec::new(),
@@ -483,82 +472,24 @@ impl Editor {
             debug.handle = start.elapsed();
         }
         for effect in effects {
-            match effect {
-                Effect::Terminal(op) => {
-                    if let Some(rx) = self.terminals.run(op) {
-                        Self::drain(rx, cx)
-                    }
+            match self.runner.run(effect) {
+                Run::Done => {}
+                Run::Drain(rx) => Self::drain(rx, cx),
+                Run::Blocking(work) => {
+                    let tx = self.runner.tx.clone();
+                    tokio::task::spawn_blocking(move || _ = tx.blocking_send(work()));
                 }
-                Effect::Agent(op) => {
-                    if let Some(rx) = self.agents.run(op) {
-                        Self::drain(rx, cx)
-                    }
-                }
-                Effect::File(op) => {
-                    let tx = self.tx.clone();
-                    tokio::task::spawn_blocking(move || _ = tx.blocking_send(files::run(op)));
-                }
-                Effect::Grep(op) => self.grep.run(op, self.tx.clone()),
-                Effect::Watch(set) => self.watcher.set(set),
-                Effect::SetClipboard(text) => {
+                Run::Reply(msg) => self.handle(msg, cx),
+                Run::Platform(Effect::SetClipboard(text)) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
-                Effect::OpenWithSystem(path) => cx.open_with_system(&path),
-                Effect::OpenUrl(url) => cx.open_url(&url),
-                Effect::Recovery(op) => {
-                    let failure = if let Some((tx, _)) = &self.recovery {
-                        tx.send(op)
-                            .err()
-                            .and_then(|e| e.0.failed("Recovery service closed".into()))
-                    } else {
-                        op.failed("Recovery service unavailable".into())
-                    };
-                    if let Some(msg) = failure {
-                        self.handle(msg, cx);
-                    }
-                }
-                Effect::Quit => {
-                    // Lets queued recovery deletes finish before the process exits.
-                    if let Some((tx, thread)) = self.recovery.take() {
-                        drop(tx);
-                        _ = thread.join();
-                    }
-                    self.terminals.kill_all();
-                    self.agents.kill_all();
+                Run::Platform(Effect::OpenWithSystem(path)) => cx.open_with_system(&path),
+                Run::Platform(Effect::OpenUrl(url)) => cx.open_url(&url),
+                Run::Platform(Effect::Quit) => {
+                    self.runner.shutdown();
                     cx.quit()
                 }
-                Effect::CaptureEnvironment {
-                    project,
-                    request,
-                    dir,
-                } => {
-                    let tx = self.tx.clone();
-                    tokio::spawn(async move {
-                        let mut result = environment::run(&dir).await;
-                        let direnv = match &mut result {
-                            Ok(vars) => {
-                                environment::direnv(vars, &dir, environment::DIRENV_TIMEOUT)
-                                    .await
-                                    .err()
-                            }
-                            Err(_) => None,
-                        };
-                        _ = (tx.send(Msg::EnvironmentCaptured {
-                            project,
-                            request,
-                            result,
-                            direnv,
-                        }))
-                        .await;
-                    });
-                }
-                Effect::LoadConfiguration { request } => {
-                    let dir = self.config_dir.clone();
-                    let tx = self.tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        _ = tx.blocking_send(configuration::load(dir.as_deref(), request));
-                    });
-                }
+                Run::Platform(_) => unreachable!("the runner carries out every other effect"),
             }
         }
         self.timer = self.core.next_deadline().map(|deadline| {
@@ -717,8 +648,10 @@ mod tests {
     use aiditor_core::key::parse_keys;
     use aiditor_core::key::{Key, KeyCode};
     use aiditor_core::keymap::{self, Binding, Keymap};
+    use aiditor_services::files;
     use gpui::{Bounds, EntityInputHandler, ShapedLine};
     use gpui::{TestAppContext, VisualTestContext};
+    use std::path::PathBuf;
 
     thread_local! {
         static WATCHERS: std::cell::RefCell<Vec<std::sync::mpsc::Receiver<()>>> = const {
@@ -1809,7 +1742,7 @@ mod tests {
         let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
-        let path = editor.read_with(cx, |e, _| e.core.current().file.clone().unwrap());
+        let path = editor.read_with(cx, |e, _| e.core.current().path().unwrap().to_path_buf());
         assert!(!cx.simulate_close(), "the window stays open");
         let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
         assert_eq!(prompt, Some(format!("Save file {}? ", path.display())));
@@ -1991,10 +1924,7 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         wait(cx, "ordinary visit", |core| {
-            core.current()
-                .file
-                .as_ref()
-                .is_some_and(|p| p.ends_with("sub/c"))
+            core.current().path().is_some_and(|p| p.ends_with("sub/c"))
         });
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "needle c\n");
 
@@ -2041,11 +1971,7 @@ mod tests {
         }
         cx.simulate_keystrokes("enter");
         wait(cx, "accepted grep hit", |core| {
-            core.current()
-                .file
-                .as_ref()
-                .is_some_and(|p| p.ends_with("sub/c"))
-                && core.point() == 0
+            core.current().path().is_some_and(|p| p.ends_with("sub/c")) && core.point() == 0
         });
 
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -2085,7 +2011,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-x ctrl-s");
         release.send(()).unwrap();
         wait(cx, "conflicting save replies", |core| {
-            core.current().conflict.is_some()
+            core.current().file.as_ref().unwrap().conflict.is_some()
         });
         assert_eq!(
             std::fs::read_to_string(root.join("sub/c")).unwrap(),
@@ -2439,14 +2365,17 @@ mod tests {
         for _ in 0..1000 {
             cx.run_until_parked();
             if editor.read_with(cx, |e, _| {
-                e.core.current().file.as_ref() == Some(&base.join("docs/a"))
+                e.core.current().path() == Some(base.join("docs/a").as_path())
             }) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
-            editor.read_with(cx, |e, _| (e.core.current().file.clone(), e.core.point())),
+            editor.read_with(cx, |e, _| (
+                e.core.current().path().map(PathBuf::from),
+                e.core.point()
+            )),
             (Some(base.join("docs/a")), 0)
         );
         cx.update(|window, _| window.remove_window());

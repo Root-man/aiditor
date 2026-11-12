@@ -309,7 +309,7 @@ impl Ctx<'_> {
         let mut roots: Vec<_> = roots.into_iter().zip(names).collect();
         let prompt = format!("Grep in {}: ", loaded.name);
         if args.prefix.is_none()
-            && let Some(file) = &self.core.current().file
+            && let Some(file) = self.core.current().path()
             && let Some(at) = roots
                 .iter()
                 .enumerate()
@@ -346,6 +346,7 @@ impl Ctx<'_> {
 mod tests {
     use std::time::Duration;
 
+    use crate::buffer::FileState;
     use crate::harness::{Harness, line_start};
     use crate::project::Root;
     use crate::{Hit, Msg};
@@ -523,7 +524,10 @@ mod tests {
     fn origin(h: &Harness) -> (Option<std::path::PathBuf>, usize) {
         let window = &h.core.windows.others[&h.core.windows.tree.leaves()[0]];
         let buffer = h.core.buffers.get(window.buffer()).unwrap();
-        (buffer.file.clone(), window.point(&h.core.buffers))
+        (
+            buffer.path().map(std::path::PathBuf::from),
+            window.point(&h.core.buffers),
+        )
     }
 
     const HITS: &[(&str, &str, usize, usize, &str)] = &[
@@ -557,7 +561,11 @@ mod tests {
             let mut h = grepping(&[], &[]);
             let docs = h.path("docs");
             h.core.projects[0].project.roots.push(Root { path: docs });
-            h.core.current_mut().file = file.map(|p| h.path(p));
+            h.core.current_mut().file = file.map(|p| FileState {
+                path: h.path(p),
+                ..FileState::default()
+            });
+            h.core.watch.dirty = true;
             h.keys("C-x p g");
             let op = search(&mut h);
             assert_eq!(
@@ -574,7 +582,11 @@ mod tests {
         h.core.projects[0].project.roots.push(Root {
             path: nested.clone(),
         });
-        h.core.current_mut().file = Some(nested.join("a"));
+        h.core.current_mut().file = Some(FileState {
+            path: nested.join("a"),
+            ..FileState::default()
+        });
+        h.core.watch.dirty = true;
         h.keys("C-x p g");
         assert_eq!(
             search(&mut h).roots,
@@ -618,7 +630,10 @@ mod tests {
         assert_eq!(listed(&mut h), ["  2:   needle"]);
         assert_eq!(h.core.minibuffer().unwrap().groups, [(0, "a.rs".into())]);
         h.keys("RET");
-        assert_eq!(h.core.current().file, Some(h.path("lib/a.rs")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("lib/a.rs"))
+        );
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         h.keys("C-u C-x p g lib RET M-p");
         assert_eq!(h.text(), "needle");
@@ -681,7 +696,10 @@ mod tests {
     fn search_move_jump() {
         let mut h = grepping(FILES, HITS);
         h.keys("C-x p g needle").advance(WAIT).keys("C-n RET");
-        assert_eq!(h.core.current().file, Some(h.path("app/b.rs")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("app/b.rs"))
+        );
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         assert!(h.core.prompts.minibuffer.is_none());
         // A visited file is switched to at once.
@@ -691,7 +709,10 @@ mod tests {
         assert_eq!(h.point(), line_start(&h, 1) + 2);
         h.keys("C-x p g needle").advance(WAIT).keys("RET");
         assert_eq!(
-            (h.core.current().file.clone(), h.point()),
+            (
+                h.core.current().path().map(std::path::PathBuf::from),
+                h.point()
+            ),
             (Some(h.path("app/a.rs")), 0)
         );
     }
@@ -992,7 +1013,10 @@ mod tests {
         assert_eq!(h.core.minibuffer().unwrap().count, "   2/3 ");
         assert_eq!(origin(&h), (Some(h.path("app/same:名.rs")), 9));
         h.keys("C-n RET");
-        assert_eq!(h.core.current().file, Some(h.path("lib/same:名.rs")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("lib/same:名.rs"))
+        );
     }
 
     #[test]
@@ -1270,7 +1294,10 @@ mod tests {
             "out of view centers"
         );
         h.keys("C-g");
-        assert_eq!(h.core.current().file, Some(h.path("start.txt")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("start.txt"))
+        );
         assert_eq!(h.point(), 5);
         assert_eq!(h.core.windows.window.scroll(&h.core.buffers, 20), 0);
     }
@@ -1287,7 +1314,13 @@ mod tests {
             "the minibuffer stays selected"
         );
         h.keys("C-g");
-        assert_eq!((h.core.current().file.clone(), h.point()), (None, 0));
+        assert_eq!(
+            (
+                h.core.current().path().map(std::path::PathBuf::from),
+                h.point()
+            ),
+            (None, 0)
+        );
     }
 
     #[test]
@@ -1307,6 +1340,12 @@ mod tests {
         assert_eq!(h.core.buffers.visiting(&path), Some(first));
         assert_eq!(origin(&h), (Some(path), 11));
         h.keys("C-g");
-        assert_eq!((h.core.current().file.clone(), h.point()), (None, 0));
+        assert_eq!(
+            (
+                h.core.current().path().map(std::path::PathBuf::from),
+                h.point()
+            ),
+            (None, 0)
+        );
     }
 }

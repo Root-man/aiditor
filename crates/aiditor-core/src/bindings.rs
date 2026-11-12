@@ -134,7 +134,10 @@ mod tests {
         h.open("a.txt");
         h.keys("C-x a C-x C-x b");
         assert_eq!(h.text(), "b");
-        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(crate::buffer::hash(b""))
+        );
     }
 
     #[test]
@@ -414,7 +417,10 @@ mod tests {
         assert_eq!(h.core.message(), Some("Quit"));
         h.keys("C-r");
         assert_eq!(h.core.message(), Some("C-r is undefined"));
-        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(crate::buffer::hash(b""))
+        );
         h.keys("C-g");
         assert_eq!(h.core.message(), Some("Quit"));
     }

@@ -12,7 +12,7 @@ use agent_client_protocol_schema::v1::{
 
 use super::ToolCallId;
 use super::render::{dim, first_line};
-use crate::buffer::{Buffer, Decoration, FaceRef, Prop};
+use crate::buffer::{Decoration, FaceRef, Prop};
 use crate::settings::FaceName;
 
 /// A line's faces, by char range.
@@ -523,24 +523,27 @@ impl Question {
         lines
     }
 
-    /// Draws the block of `lines()` at `start`, whose properties were removed: each line in the
-    /// `permission` box, one column in, with its faces.
-    pub(super) fn render(&self, buffer: &mut Buffer, start: usize) {
-        let mut at = start;
+    /// The properties of the block of `lines()`, from its start: each line in the `permission`
+    /// box, one column in, with its faces.
+    pub(super) fn props(&self) -> Faces {
+        let mut out = Vec::new();
+        let mut at = 0;
         for (text, props) in self.lines() {
             let decorations = [
                 Decoration::Indent(1),
                 Decoration::Background(FaceName::Permission),
             ];
             for decoration in decorations {
-                (buffer.add_property(at..at + 1, Prop::Line(decoration)))
-                    .expect("inside the block");
+                out.push((at..at + 1, Prop::Line(decoration)));
             }
-            for (r, prop) in props {
-                (buffer.add_property(at + r.start..at + r.end, prop)).expect("inside the block");
-            }
+            out.extend(
+                props
+                    .into_iter()
+                    .map(|(r, p)| (at + r.start..at + r.end, p)),
+            );
             at += text.chars().count() + 1;
         }
+        out
     }
 
     /// The line of the block the open field's first option is on; with none open, the last

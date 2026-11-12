@@ -79,6 +79,8 @@ type Environment = Vec<(usize, i128)>;
 #[derive(Clone, Default)]
 pub(super) struct Cache {
     root: Option<Arc<Fragment>>,
+    /// Every fragment under `root` by node id, kept across rebuilds so an edit costs what it changed.
+    index: HashMap<usize, Arc<Fragment>>,
     // Pins the allocations whose node identities the immutable fragments refer to.
     tree: Option<Tree>,
     edited: HashSet<usize>,
@@ -116,16 +118,33 @@ impl Cache {
                 .as_ref()
                 .is_none_or(|r| r.id != root.id() || !r.ready(root.start_byte(), &bytes))
         {
-            let mut old = HashMap::new();
-            if let Some(root) = &self.root {
-                root.index(&mut old);
-            }
             for id in &self.edited {
-                old.remove(id);
+                self.index.remove(id);
             }
-            let root = fragment(grammar, root, text, &bytes, &old, true);
-            let mut live = HashMap::new();
-            root.index(&mut live);
+            let mut reused = HashSet::new();
+            let root = fragment(
+                grammar,
+                root,
+                text,
+                &bytes,
+                &mut self.index,
+                &mut reused,
+                true,
+            );
+            if let Some(old) = &self.root {
+                prune(old, &mut self.index, &reused);
+            }
+            #[cfg(debug_assertions)]
+            {
+                let mut full = HashMap::new();
+                root.index(&mut full);
+                debug_assert!(
+                    full.len() == self.index.len()
+                        && full.iter().all(|(id, f)| Arc::ptr_eq(f, &self.index[id])),
+                    "the kept index is the root's"
+                );
+            }
+            let live = &self.index;
             self.facts
                 .retain(|id, _| live.contains_key(id) && !self.edited.contains(id));
             self.resolved
@@ -230,19 +249,37 @@ impl Cache {
     }
 }
 
+/// Removes from `index` the fragments under `old`, the last root, that the new tree neither
+/// reused nor replaced.
+fn prune(old: &Arc<Fragment>, index: &mut HashMap<usize, Arc<Fragment>>, reused: &HashSet<usize>) {
+    if reused.contains(&old.id) {
+        return;
+    }
+    if index.get(&old.id).is_some_and(|f| Arc::ptr_eq(f, old)) {
+        index.remove(&old.id);
+    }
+    for (_, child) in &old.children {
+        prune(child, index, reused);
+    }
+}
+
+/// `node`'s fragment, reusing the one `index` has for it if it is ready for `bytes` and noting
+/// its id in `reused`, else building one and putting it in `index`.
 fn fragment(
     grammar: &Grammar,
     node: Node,
     text: &Rope,
     bytes: &Range<usize>,
-    old: &HashMap<usize, Arc<Fragment>>,
+    index: &mut HashMap<usize, Arc<Fragment>>,
+    reused: &mut HashSet<usize>,
     root: bool,
 ) -> Arc<Fragment> {
     let id = node.id();
-    let previous = old.get(&id);
-    if let Some(old) = previous
+    let previous = index.get(&id).cloned();
+    if let Some(old) = &previous
         && old.ready(node.start_byte(), bytes)
     {
+        reused.insert(id);
         return old.clone();
     }
     let start = node.start_byte();
@@ -293,21 +330,23 @@ fn fragment(
             .map(|child| {
                 (
                     child.start_byte() - start,
-                    fragment(grammar, child, text, bytes, old, false),
+                    fragment(grammar, child, text, bytes, index, reused, false),
                 )
             })
             .collect()
     } else {
         Vec::new()
     };
-    Arc::new(Fragment {
+    let fragment = Arc::new(Fragment {
         id,
         len: node.byte_range().len(),
         scope,
         expanded,
         events,
         children,
-    })
+    });
+    index.insert(id, fragment.clone());
+    fragment
 }
 
 fn facts(grammar: &Grammar, tree: &Tree, text: &Rope, node: &Fragment, start: usize) -> Facts {

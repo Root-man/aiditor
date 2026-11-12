@@ -95,7 +95,7 @@ fn input(
     let mut run = editor.benchmark.take().unwrap();
     if run.latency.len() == SAMPLES {
         run.finish_phase();
-        editor.terminals.kill_all();
+        editor.runner.terminals.kill_all();
         if let Some(id) = run.terminal.take() {
             editor.handle(
                 Msg::TerminalExited {
@@ -136,6 +136,7 @@ fn input(
             ]
         };
         let rx = editor
+            .runner
             .terminals
             .run(TerminalOp::Spawn {
                 id,

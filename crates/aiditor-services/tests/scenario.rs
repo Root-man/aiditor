@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{Core, Effect, Msg};
-use aiditor_services::agents::Agents;
-use aiditor_services::{files, projects, watcher::Watcher};
+use aiditor_services::runner::{Run, Runner};
+use aiditor_services::{agents, files, grep, projects, terminal, watcher::Watcher};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver, unbounded_channel};
 
 const AGENT: &str = env!("CARGO_BIN_EXE_aiditor-fake-agent");
@@ -16,14 +16,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 struct App {
     core: Core,
-    agents: Agents,
+    runner: Runner,
     agent: Option<Receiver<Msg>>,
     pid: Option<libc::pid_t>,
     stderr: Vec<String>,
     started: bool,
     prompted: bool,
     exited: bool,
-    watcher: Watcher,
     reports: UnboundedReceiver<Msg>,
     root: PathBuf,
     _dir: tempfile::TempDir,
@@ -47,14 +46,21 @@ impl App {
         let (tx, reports) = unbounded_channel();
         let mut app = Self {
             core: Core::default(),
-            agents: Agents::default(),
+            runner: Runner {
+                tx: aiditor_services::channel().0,
+                grep: grep::Grep::default(),
+                terminals: terminal::Terminals::default(),
+                agents: agents::Agents::default(),
+                watcher: Watcher::spawn(move |msg| _ = tx.send(msg)),
+                recovery: None,
+                config_dir: None,
+            },
             agent: None,
             pid: None,
             stderr: Vec::new(),
             started: false,
             prompted: false,
             exited: false,
-            watcher: Watcher::spawn(move |msg| _ = tx.send(msg)),
             reports,
             root,
             _dir: dir,
@@ -73,26 +79,19 @@ impl App {
 
     fn send(&mut self, msg: Msg) {
         for effect in self.core.handle(Instant::now(), msg) {
-            match effect {
-                Effect::Agent(op) => {
-                    if let Some(rx) = self.agents.run(op) {
-                        self.agent = Some(rx);
-                    }
-                }
-                Effect::File(op) => {
-                    let reply = files::run(op);
-                    self.send(reply);
-                }
-                Effect::Watch(set) => self.watcher.set(set),
-                Effect::Terminal(_)
-                | Effect::Recovery(_)
-                | Effect::SetClipboard(_)
-                | Effect::OpenWithSystem(_)
-                | Effect::OpenUrl(_) => {}
-                Effect::Grep(_)
-                | Effect::LoadConfiguration { .. }
-                | Effect::CaptureEnvironment { .. }
-                | Effect::Quit => panic!("unexpected effect in the scenario"),
+            if let Effect::Grep(_)
+            | Effect::LoadConfiguration { .. }
+            | Effect::CaptureEnvironment { .. }
+            | Effect::Quit = effect
+            {
+                panic!("unexpected effect in the scenario");
+            }
+            match self.runner.run(effect) {
+                // The scenario starts no terminal, so a new channel is the agent's.
+                Run::Drain(rx) => self.agent = Some(rx),
+                Run::Blocking(work) => self.send(work()),
+                Run::Reply(msg) => self.send(msg),
+                Run::Done | Run::Platform(_) => {}
             }
         }
     }
