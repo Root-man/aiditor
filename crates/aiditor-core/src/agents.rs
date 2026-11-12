@@ -30,11 +30,13 @@ use crate::project::ProjectId;
 use crate::settings::FaceName;
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Msg, Open, Request};
 
+mod blocks;
 mod chips;
 mod groups;
 mod pastes;
 mod questions;
 mod render;
+use blocks::{Block, BlockKind, BlockPath, Look, Rendered};
 pub(crate) use chips::{Chips, is_chip};
 use groups::*;
 pub(crate) use questions::Preview;
@@ -108,24 +110,15 @@ pub(crate) struct Session {
     turn: Option<Turn>,
     /// The last block above the prompt line, while an agent message or thought streams into it.
     stream: Option<Stream>,
-    /// The agent and user messages, in transcript order.
-    messages: Vec<Message>,
+    /// The transcript, in order; their starts ascend.
+    blocks: Vec<Block>,
     /// The tool calls shown, by id.
     tools: HashMap<ToolCallId, Tool>,
-    /// The plan's block: where it starts and its length in chars, the blank line after it not
-    /// counted.
-    plan: Option<(MarkerId, MarkerId)>,
-    /// Permission requests and questions waiting for an answer, oldest first.
-    asks: Vec<Ask>,
-    /// The closed questions' lines.
-    answers: Vec<Answered>,
-    /// The tool calls and what sits among them since the last message, plan or prompt, until
-    /// they form a group.
-    run: Vec<Row>,
-    /// The run's group, once it has one.
+    /// Where the run starts in `blocks`: the tool calls and what sits among them since the last
+    /// message, plan or prompt, until they form a group.
+    run: usize,
+    /// The run's group, by its index in `blocks`, once it has one.
     group: Option<usize>,
-    /// The tool groups, in transcript order.
-    groups: Vec<Group>,
     /// The buffer's tick when the prompt area's chips were last painted.
     painted: u64,
     /// The slash commands from the latest `available_commands_update`.
@@ -200,9 +193,9 @@ impl Session {
 
     /// Where the transcript's next block goes: before the working line and the prompt line.
     fn end(&self, buffer: &Buffer) -> usize {
-        match &self.turn {
-            Some(turn) => buffer.marker(turn.line).expect("live while working"),
-            None => buffer.prompt_start() - PROMPT.len(),
+        match (&self.turn, self.blocks.last()) {
+            (Some(_), Some(working)) => buffer.marker(working.start).expect("live while working"),
+            _ => buffer.prompt_start() - PROMPT.len(),
         }
     }
 
@@ -212,10 +205,7 @@ impl Session {
         buffer: &Buffer,
         point: usize,
     ) -> Option<RangeInclusive<usize>> {
-        let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
-        let after = self.messages.partition_point(|m| start(m) <= point);
-        let message = &self.messages[after.checked_sub(1)?];
-        let range = message.range(buffer);
+        let range = self.message_at(buffer, point)?.0.range(buffer);
         let (first, last) = (range.start, range.end.saturating_sub(1).max(range.start));
         Some(buffer.text().char_to_line(first)..=buffer.text().char_to_line(last))
     }
@@ -227,9 +217,8 @@ impl Session {
         buffer: &Buffer,
         point: usize,
     ) -> Option<(usize, Option<Preview>)> {
-        self.asks.iter().find_map(|ask| {
-            buffer.marker(ask.start)?;
-            let Range { start, end } = ask.range(buffer);
+        self.asks().find_map(|(path, ask)| {
+            let Range { start, end } = self.range(buffer, path);
             let range = start..=end;
             let first = buffer.text().char_to_line(start);
             let line = buffer.text().char_to_line(point);
@@ -245,9 +234,9 @@ impl Session {
     pub(crate) fn activity(&self) -> Option<Activity> {
         if self.ended {
             Some(Activity::Failed)
-        } else if self.asks.iter().any(|a| a.question().is_none()) {
+        } else if self.asks().any(|(_, a)| a.question().is_none()) {
             Some(Activity::Waiting)
-        } else if self.asks.iter().any(Ask::blocks) {
+        } else if self.asks().any(|(_, a)| a.blocks()) {
             Some(Activity::Asking)
         } else if self.turn.is_some() {
             Some(Activity::Working)
@@ -323,7 +312,7 @@ impl Session {
         if let Some(activity) = self.activity() {
             right.push(segment(activity.text(), activity.face()));
         }
-        match self.asks.iter().filter(|a| !a.blocks()).count() {
+        match self.asks().filter(|(_, a)| !a.blocks()).count() {
             0 => {}
             1 => right.push(segment("1 question", FaceName::StatusWaiting)),
             n => right.push(segment(&format!("{n} questions"), FaceName::StatusWaiting)),
@@ -375,12 +364,8 @@ fn effort_quality(value: &str) -> Option<FaceName> {
 struct Tool {
     /// The call, with every update merged in.
     call: ToolCall,
-    /// Where the block starts.
-    start: MarkerId,
     /// The header's length in chars.
     header: usize,
-    /// Where the block ends, the blank line after it not counted; `Stay`, so its time stays out.
-    end: MarkerId,
     /// Whether its content shows.
     open: bool,
     /// When it arrived; `None` when replayed.
@@ -395,8 +380,6 @@ struct Tool {
     group: Option<usize>,
     /// Its time: at the right of its header in a group, else on the line under its block.
     time: String,
-    /// The length of that line under its block, 0 for none.
-    meta: usize,
     /// The terminal it announced, whose output it shows.
     term: Option<Term>,
     /// Its terminal changed since the block was last rendered.
@@ -411,13 +394,6 @@ struct Tool {
     link: Option<(PathBuf, Option<usize>)>,
     /// A closed question's line stands for it, so it shows no row.
     replaced: bool,
-}
-
-impl Tool {
-    /// Its block's range in `buffer`, the blank line after it not counted.
-    fn range(&self, buffer: &Buffer) -> Range<usize> {
-        extent(buffer, self.start, self.end)
-    }
 }
 
 /// Faces on char ranges.
@@ -469,11 +445,6 @@ struct Ask {
     /// The tool call's title, or the question's message, for the block.
     title: String,
     body: Body,
-    /// Where the block starts and ends, the blank line after it not counted.
-    start: MarkerId,
-    end: MarkerId,
-    /// Its row's marker.
-    row: MarkerId,
 }
 
 /// What an `Ask` asks.
@@ -491,21 +462,16 @@ impl Body {
         }
     }
 
-    /// Draws its block, under `title`, at `start`.
-    fn render(&self, buffer: &mut Buffer, start: usize, title: &str) {
+    /// Its block's properties, under `title`.
+    fn props(&self, title: &str) -> Props {
         match self {
-            Body::Permission(_) => render_rows(buffer, start, &self.rows(title)),
-            Body::Question(question) => question.render(buffer, start),
+            Body::Permission(_) => rows_props(&self.rows(title)),
+            Body::Question(question) => question.props(),
         }
     }
 }
 
 impl Ask {
-    /// Its block's range in `buffer`.
-    fn range(&self, buffer: &Buffer) -> Range<usize> {
-        extent(buffer, self.start, self.end)
-    }
-
     fn question(&self) -> Option<&questions::Question> {
         match &self.body {
             Body::Question(q) => Some(q),
@@ -546,24 +512,22 @@ impl Ask {
 /// A closed question's line, `▸ <mark> <label>  <outcome>` and its time, with the rows of what
 /// it sent under it.
 struct Answered {
-    /// The question's own marker, at its group row's.
-    start: MarkerId,
+    /// The line and the rows.
+    text: String,
     /// Where the label and the outcome end, and the line's length, its time counted.
     label: usize,
     outcome: usize,
     line: usize,
-    /// Where the whole text ends, the rows counted.
-    end: MarkerId,
     /// The rows' name width.
     name: usize,
     mark: FaceName,
     open: bool,
 }
 
-/// What a block above the prompt line holds. A chunk joins a streamed block of its own kind, so
-/// a new `messageId` starts a block.
+/// What text put above the prompt line is. A chunk joins a streamed block of its own kind, so a
+/// new `messageId` starts a block.
 #[derive(Clone, Debug, PartialEq)]
-enum Block {
+enum Chunk {
     /// A line of the session's own, like a turn's end.
     Line,
     Message(Option<MessageId>),
@@ -571,35 +535,19 @@ enum Block {
     User(Option<MessageId>),
 }
 
-/// An agent or user message's block. Prompts sent live have no `id`.
+/// An agent or user message. Prompts sent live have no `id`.
 #[derive(Debug)]
 struct Message {
     id: Option<MessageId>,
     /// Whether it is the user's, which can't be a fork point.
     user: bool,
-    start: MarkerId,
-    /// Where it ends, the blank line after it not counted; `Stay`, so its time stays out.
-    end: MarkerId,
-}
-
-impl Message {
-    /// Its text's range in `buffer`.
-    fn range(&self, buffer: &Buffer) -> Range<usize> {
-        extent(buffer, self.start, self.end)
-    }
-}
-
-/// The range from marker `start` to marker `end` of a shown block.
-fn extent(buffer: &Buffer, start: MarkerId, end: MarkerId) -> Range<usize> {
-    let at = |m| buffer.marker(m).expect("live while shown");
-    at(start)..at(end)
 }
 
 /// A block being streamed.
 struct Stream {
     /// Where the block starts.
     start: MarkerId,
-    block: Block,
+    chunk: Chunk,
     /// Its markdown, which a message's drawn tables replace in the text.
     source: String,
     /// Chunks arrived since it was last rendered.
@@ -611,11 +559,9 @@ struct Stream {
     began: Option<(Instant, Option<String>)>,
 }
 
-/// A running turn.
+/// A running turn, its working line the last block.
 struct Turn {
     start: Instant,
-    /// Where the working line starts; `Advance`, so the blocks put before it move it on.
-    line: MarkerId,
 }
 
 impl Core {
@@ -629,7 +575,7 @@ impl Core {
     /// Puts `text` above session `id`'s prompt line: as a new block followed by a blank line, or,
     /// for a chunk of the kind streaming, at the end of the streamed block. A chunk's block is
     /// rendered as markdown by the next frame.
-    fn output(&mut self, id: AgentId, text: &str, block: Block) {
+    fn output(&mut self, id: AgentId, text: &str, chunk: Chunk) {
         let now = self.now();
         let clock = self.clock();
         let Some((session, buffer)) = self.session_buffer(id) else {
@@ -637,18 +583,18 @@ impl Core {
         };
         let end = session.end(buffer);
         if let Some(stream) = &mut session.stream
-            && stream.block == block
+            && stream.chunk == chunk
         {
             buffer.insert_output(end - "\n\n".len(), text);
             stream.source.push_str(text);
             stream.dirty = true;
-            if let Block::Thought(_) = block {
+            if let Chunk::Thought(_) = chunk {
                 session.thought_grew(buffer, text.chars().count());
                 return;
             }
-            if let (Block::Message(_), Some(message)) = (&block, session.messages.last()) {
+            if let (Chunk::Message(_), Some(message)) = (&chunk, session.last_message()) {
                 let to = end - "\n\n".len() + text.chars().count();
-                buffer.set_marker(message.end, to).expect("in the text");
+                (buffer.set_marker(session.block(message).end, to)).expect("in the text");
             }
             return;
         }
@@ -656,36 +602,32 @@ impl Core {
         let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
-        let end = session.end(buffer);
-        buffer.insert_output(end, &format!("{text}\n\n"));
-        let mut marker = |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
-        if let Block::Message(message) | Block::User(message) = &block {
-            session.messages.push(Message {
+        let row = matches!(chunk, Chunk::Thought(_));
+        let kind = match &chunk {
+            Chunk::Line => BlockKind::Line {
+                text: text.into(),
+                dim: false,
+            },
+            Chunk::Message(message) | Chunk::User(message) => BlockKind::Message(Message {
                 id: message.clone(),
-                user: matches!(block, Block::User(_)),
-                start: marker(end),
-                end: marker(end + text.chars().count()),
-            });
+                user: matches!(chunk, Chunk::User(_)),
+            }),
+            Chunk::Thought(_) => BlockKind::Thought(Thought::default()),
+        };
+        if !row {
+            session.end_run(buffer);
         }
-        let row = (matches!(block, Block::Thought(_))).then(|| marker(end));
-        if let Block::Message(_) | Block::Thought(_) = block {
+        let path = session.push(buffer, text, kind, row);
+        if let Chunk::Message(_) | Chunk::Thought(_) = chunk {
+            let start = session.range(buffer, path).start;
             session.stream = Some(Stream {
-                start: marker(end),
-                block,
+                start: (buffer.add_marker(start, InsertionType::Stay)).expect("in the text"),
+                chunk,
                 source: text.into(),
                 dirty: true,
                 stable: (0, 0),
                 began: session.live().then_some((now, clock)),
             });
-        }
-        match row {
-            Some(row) => {
-                let end = (buffer.add_marker(end + text.chars().count(), InsertionType::Stay))
-                    .expect("in the text");
-                let row = Row::Thought(Thought::new(row, end));
-                session.add_row(buffer, row);
-            }
-            None => session.end_run(buffer),
         }
     }
 
@@ -706,7 +648,10 @@ impl Core {
         // A chunk of the last block's user message joins it, as Claude's adapter replays each
         // of a message's blocks, a chip's link among them, as a chunk.
         let end = session.end(buffer).saturating_sub("\n\n".len());
-        let last = (session.messages.last_mut()).filter(|m| m.id.is_some() && m.id == message);
+        let last = session.last_message().map(|path| session.block(path));
+        let last = last.filter(
+            |b| matches!(&b.kind, BlockKind::Message(m) if m.id.is_some() && m.id == message),
+        );
         if let Some(last) = last
             && let Some(start) = buffer.marker(last.start)
             && buffer.marker(last.end) == Some(end)
@@ -724,7 +669,7 @@ impl Core {
             user_lines(buffer, start..to);
             return;
         }
-        self.output(id, &format!("{PROMPT}{text}"), Block::User(message));
+        self.output(id, &format!("{PROMPT}{text}"), Chunk::User(message));
         let clock = self.clock();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
@@ -777,7 +722,7 @@ impl Core {
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        let mut term = (session.tools.get_mut(&call.tool_call_id))
+        let term = (session.tools.get_mut(&call.tool_call_id))
             .and_then(|t| t.term.take())
             .or_else(|| {
                 terminal_id(&call).map(|id| Term {
@@ -792,8 +737,8 @@ impl Core {
         let known = session.tools.get(&call.tool_call_id);
         let arrived = known.map_or(session.live().then_some(now), |t| t.arrived);
         let waited = known.map_or(Duration::ZERO, |t| t.waited);
-        let asked = (session.asks.iter()).find(|a| a.tool.as_ref() == Some(&call.tool_call_id));
-        let waiting = asked.map(|a| now - a.since);
+        let asked = (session.asks()).find(|(_, a)| a.tool.as_ref() == Some(&call.tool_call_id));
+        let waiting = asked.map(|(_, a)| now - a.since);
         let done = finished(call.status);
         let ended = known.and_then(|t| t.ended).or(done.then_some(now));
         let group = known.map_or(session.group, |t| t.group);
@@ -808,24 +753,45 @@ impl Core {
             (None, None, Some(ran)) => short_duration(ran),
             (None, None, None) => String::new(),
         };
-        let open = known.is_some_and(|t| t.open);
-        let mut header = tool_header(&call, term.as_ref(), open, &session.root);
-        if group.is_some() {
-            header.insert_str(0, "  ");
-        }
-        if !time.is_empty() && group.is_some() {
-            header += &format!(" {time}");
-        }
         let content = tool_content(&call, term.as_ref());
-        let (output, faces) = (content.output, content.faces);
-        let text = match content.text.is_empty() {
-            true => header.clone(),
-            false => format!("{header}\n{}", content.text),
+        let index = self.index.get(&session.project);
+        let link = tool_path(&call, term.as_ref())
+            .and_then(|(path, line)| Some((index?.file(path)?, line.map(|l| l as usize))));
+        let call_id = call.tool_call_id.clone();
+        let tool = Tool {
+            call,
+            header: 0,
+            open: false,
+            arrived,
+            waited,
+            ran,
+            ended,
+            group,
+            time,
+            term,
+            dirty: false,
+            faces: content.faces,
+            output: content.output,
+            output_buffer: None,
+            link,
+            replaced: false,
         };
-        let (header, len) = (header.chars().count(), text.chars().count());
-        if let Some(term) = &mut term {
+        let mut tool = match session.tools.remove(&call_id) {
+            Some(old) => Tool {
+                open: old.open,
+                output_buffer: old.output_buffer,
+                replaced: old.replaced,
+                ..tool
+            },
+            None => tool,
+        };
+        let header = session.tool_header(&tool).chars().count();
+        let len = header + content.text.chars().count() + usize::from(!content.text.is_empty());
+        tool.header = header;
+        let call = &tool.call;
+        if let Some(term) = &mut tool.term {
             let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
-            let command = tool_command(&call, Some(&*term)).map_or(0, fence_len);
+            let command = tool_command(call, Some(&*term)).map_or(0, fence_len);
             let fence = (term.sgr.backticks.max(2) + 1).max(command);
             let chars = term.sgr.chars - usize::from(term.sgr.text.ends_with('\n'));
             term.rendered = (!term.sgr.text.is_empty()).then(|| TermRender {
@@ -836,55 +802,18 @@ impl Core {
                 fence,
             });
         }
-        let index = self.index.get(&session.project);
-        let link = tool_path(&call, term.as_ref())
-            .and_then(|(path, line)| Some((index?.file(path)?, line.map(|l| l as usize))));
-        let call_id = call.tool_call_id.clone();
-        match session.tools.get_mut(&call.tool_call_id) {
-            Some(tool) => {
-                take_tool_meta(buffer, tool);
-                let start = tool.range(buffer).start;
-                rewrite(buffer, tool.range(buffer), &text);
-                buffer
-                    .set_marker(tool.end, start + len)
-                    .expect("just rewritten");
-                (tool.call, tool.header) = (call, header);
-                (tool.term, tool.dirty, tool.faces, tool.output) = (term, false, faces, output);
-                (tool.ran, tool.ended, tool.time, tool.link) = (ran, ended, time, link);
-            }
-            None => {
-                let end = session.end(buffer);
-                buffer.insert_output(end, &format!("{text}\n\n"));
-                let mut marker =
-                    |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
-                let tool = Tool {
-                    start: marker(end),
-                    end: marker(end + len),
-                    call,
-                    header,
-                    open: false,
-                    arrived,
-                    waited,
-                    ran,
-                    ended,
-                    group,
-                    time,
-                    meta: 0,
-                    term,
-                    dirty: false,
-                    faces,
-                    output,
-                    output_buffer: None,
-                    link,
-                    replaced: false,
-                };
-                session.tools.insert(call_id.clone(), tool);
-                session.add_row(buffer, Row::Tool(call_id.clone()));
-            }
+        let rendered = session.render_tool(&tool, &content.text);
+        let replaced = tool.replaced;
+        session.tools.insert(call_id.clone(), tool);
+        let path = match new {
+            false => session.tool_path(&call_id),
+            true => session.push(buffer, "", BlockKind::Tool(call_id.clone()), true),
         };
-        put_tool_meta(buffer, session.tools.get_mut(&call_id).expect("just shown"));
-        if group.is_none_or(|g| session.group_open(g)) {
-            render_tool(buffer, &session.tools[&call_id]);
+        session.write(buffer, path, rendered, &Look::at(now));
+        if replaced && group.is_none_or(|g| session.group_open(g)) {
+            let block = session.block(path);
+            let range = block.range(buffer);
+            hide_replaced(buffer, &session.tools[&call_id], range, block.meta);
         }
         if let Some(g) = group {
             session.show_group(buffer, g);
@@ -937,34 +866,29 @@ impl Core {
     /// Puts `plan` above session `id`'s prompt line as its plan block, or rewrites that block in
     /// place.
     fn show_plan(&mut self, id: AgentId, plan: &Plan) {
-        if self.agents.get(&id).is_some_and(|s| s.plan.is_none()) {
+        if self
+            .agents
+            .get(&id)
+            .is_some_and(|s| s.plan_path().is_none())
+        {
             self.end_stream(id);
         }
+        let now = self.now();
         let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
-        if session.plan.is_none() {
-            session.end_run(buffer);
-        }
-        let text = plan_text(plan);
-        let len = text.chars().count();
-        let start = match &mut session.plan {
-            Some((start, end)) => {
-                let range = extent(buffer, *start, *end);
-                rewrite(buffer, range.clone(), &text);
-                (buffer.set_marker(*end, range.start + len)).expect("just rewritten");
-                range.start
+        let path = match session.plan_path() {
+            Some(path) => {
+                session.block_mut(path).kind = BlockKind::Plan(plan.clone());
+                path
             }
             None => {
-                let end = session.end(buffer);
-                buffer.insert_output(end, &format!("{text}\n\n"));
-                let mut marker =
-                    |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
-                session.plan = Some((marker(end), marker(end + len)));
-                end
+                session.end_run(buffer);
+                session.push(buffer, "", BlockKind::Plan(plan.clone()), false)
             }
         };
-        render_plan(buffer, start, plan);
+        let rendered = session.render(path, &Look::at(now));
+        session.write(buffer, path, rendered, &Look::at(now));
     }
 
     /// Puts permission request `ask` above session `id`'s prompt line as a block of its own,
@@ -995,7 +919,7 @@ impl Core {
         let Some(session) = self.agents.get(&id) else {
             return;
         };
-        let (buffer, ask) = (session.buffer, session.asks.last().expect("just shown"));
+        let (buffer, (ask, _)) = (session.buffer, session.asks().last().expect("just shown"));
         let b = self.buffers.get(buffer).expect("shown in it");
         if nonblocking || b.prompt_start() < b.len_chars() {
             if self.windows.window.buffer() == buffer {
@@ -1003,7 +927,7 @@ impl Core {
             }
             return;
         }
-        let start = b.marker(ask.start).expect("live while pending");
+        let start = session.range(b, ask).start;
         let at = b.text().line_to_char(b.text().char_to_line(start) + first) + 1;
         let b = self.buffers.get_mut(buffer).expect("shown in it");
         let end = b.len_chars();
@@ -1040,26 +964,17 @@ impl Core {
         if alone {
             session.end_run(buffer);
         }
-        let rows = body.rows(&title);
-        let text = rows_text(&rows);
-        let end = session.end(buffer);
-        buffer.insert_output(end, &format!("{text}\n\n"));
-        body.render(buffer, end, &title);
         let shown = (tool.as_ref()).and_then(|t| session.tools.get(t).map(|t| t.call.clone()));
-        let mut marker = |at| (buffer.add_marker(at, InsertionType::Stay)).expect("in the text");
-        let len = text.chars().count();
-        let (start, row, end) = (marker(end), marker(end), marker(end + len));
-        session.asks.push(Ask {
+        let ask = Ask {
             tool,
             since: now,
             request,
             title,
             body,
-            start,
-            end,
-            row,
-        });
-        session.add_row(buffer, Row::Ask { start: row, len });
+        };
+        let path = session.push(buffer, "", BlockKind::Ask(ask), true);
+        let rendered = session.render(path, &Look::at(now));
+        session.write(buffer, path, rendered, &Look::at(now));
         if alone {
             session.end_run(buffer);
         }
@@ -1072,16 +987,16 @@ impl Core {
     }
 
     /// Adds `ask`'s wait, just closed, to its tool call and shows the call without it, or not at
-    /// all for a question, its block now an answer of `len` chars.
+    /// all for a question, its block at `path` now an answer.
     // shortcut: overlapping asks on one call each add their wait, so the run time can read low;
     // both adapters ask once per call.
-    fn close_wait(&mut self, id: AgentId, ask: &Ask, len: Option<usize>) {
+    fn close_wait(&mut self, id: AgentId, ask: &Ask, path: Option<BlockPath>) {
         let now = self.now();
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
-        if let (Some(buffer), Some(len)) = (self.buffers.get_mut(session.buffer), len) {
-            session.settle_row(buffer, ask.row, len);
+        if let (Some(buffer), Some((g, Some(_)))) = (self.buffers.get_mut(session.buffer), path) {
+            session.show_group(buffer, g);
         }
         if let Some(tool) = ask.tool.as_ref().and_then(|t| session.tools.get_mut(t)) {
             tool.waited += now - ask.since;
@@ -1114,29 +1029,29 @@ impl Core {
         };
         if std::mem::take(&mut stream.dirty) {
             let start = buffer.marker(stream.start).expect("live while streaming");
-            let thought = matches!(stream.block, Block::Thought(_));
+            let thought = matches!(stream.chunk, Chunk::Thought(_));
             if !thought {
                 // shortcut: links are found as the block renders; a file indexed later isn't
                 // linked until it renders again, and RET on one since dropped sends the prompt.
-                let index = self.index.get(&session.project);
+                let look = Look {
+                    index: self.index.get(&session.project),
+                    table_width,
+                    now: self.now.expect("set by handle"),
+                };
+                let is_file = |word: &str| file_link(look.index, word).is_some();
                 let (byte, at) = stream.stable;
                 let tail = &stream.source[byte..];
-                let (len, (b, c)) =
-                    render_message(buffer, start + at..end, tail, index, table_width);
+                let (text, props, (b, c)) =
+                    markdown::render(tail, false, false, Some(table_width), is_file);
                 stream.stable = (byte + b, at + c);
-                #[cfg(debug_assertions)]
-                render::check_message(
-                    buffer,
-                    start..start + at + len,
-                    &stream.source,
-                    index,
-                    table_width,
-                );
-                if let Some(message) = session.messages.last() {
-                    buffer
-                        .set_marker(message.end, start + at + len)
-                        .expect("just rendered");
-                }
+                let path = session.last_message().expect("a message streams");
+                let rendered = Rendered {
+                    from: at,
+                    text,
+                    props,
+                    meta: None,
+                };
+                session.write(buffer, path, rendered, &look);
             } else if !session.fold_stream(buffer) {
                 render(buffer, start..end, thought, None);
             }
@@ -1158,11 +1073,11 @@ impl Core {
         };
         let start = buffer.marker(stream.start).expect("live while streaming");
         buffer.remove_marker(stream.start);
-        let thought = matches!(stream.block, Block::Thought(_));
+        let thought = matches!(stream.chunk, Chunk::Thought(_));
         let mut header = None;
         if let Some((began, clock)) = stream.began {
-            match (stream.block, clock, session.messages.last_mut()) {
-                (Block::Thought(_), ..) => {
+            match (stream.chunk, clock, session.last_message()) {
+                (Chunk::Thought(_), ..) => {
                     let elapsed = self.now.expect("set by handle") - began;
                     let text = format!("Thought for {}s", elapsed.as_secs());
                     buffer.insert_output(start, &format!("{text}\n"));
@@ -1170,10 +1085,8 @@ impl Core {
                     (buffer.add_property(start..end, dim())).expect("just inserted");
                     header = Some(end - start);
                 }
-                (Block::Message(_), Some(clock), Some(message)) => {
-                    let end = message.range(buffer).end;
-                    let time = [(clock.as_str(), FaceName::Annotation)];
-                    put_meta(buffer, end, META_INDENT, &time);
+                (Chunk::Message(_), Some(clock), Some(message)) => {
+                    session.set_meta(buffer, message, &[(clock, FaceName::Annotation)]);
                 }
                 _ => {}
             }
@@ -1191,7 +1104,7 @@ impl Core {
         };
         let Some(Stream {
             start,
-            block: Block::Message(_),
+            chunk: Chunk::Message(_),
             source,
             ..
         }) = &mut session.stream
@@ -1222,69 +1135,84 @@ impl Core {
         let Some(session) = self.agents.get_mut(&id) else {
             return;
         };
-        let (Some(turn), Some(buffer)) =
-            (session.turn.take(), self.buffers.get_mut(session.buffer))
+        let (Some(turn), Some(buffer)) = (&session.turn, self.buffers.get_mut(session.buffer))
         else {
             return;
         };
-        let end = session.end(buffer) - "\n\n".len();
-        let text = format!("Worked {}", long_duration(now - turn.start));
-        let start = buffer.marker(turn.line).expect("live while working");
-        buffer.remove_marker(turn.line);
-        let len = retime(buffer, start..end, &text, FaceName::Annotation);
+        let worked = format!("Worked {}", long_duration(now - turn.start));
+        let len = worked.chars().count();
+        let time = clock.map_or(String::new(), |c| format!(" {c}"));
+        let annotation = || Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
         // Frame 6's summary rule: two columns in, a line through the rest of the row.
-        for line in [
-            Decoration::Indent(2),
-            Decoration::HRule(FaceName::Separator),
-        ] {
-            (buffer.add_property(start..start + 1, Prop::Line(line))).expect("the working line");
+        let mut props = vec![
+            (0..len, annotation()),
+            (0..1, Prop::Line(Decoration::Indent(2))),
+            (0..1, Prop::Line(Decoration::HRule(FaceName::Separator))),
+        ];
+        if !time.is_empty() {
+            props.push((len..len + 1, Prop::AlignRight));
+            props.push((len + 1..len + time.chars().count(), annotation()));
         }
-        if let Some(clock) = clock {
-            put_time(buffer, start + len, &clock);
-        }
+        let rendered = Rendered {
+            from: 0,
+            text: worked + &time,
+            props,
+            meta: None,
+        };
+        // Its line stays as written; the block goes with the turn.
+        let path = (session.blocks.len() - 1, None);
+        session.put(buffer, path, rendered);
+        let working = session.blocks.pop().expect("the working line");
+        buffer.remove_marker(working.start);
+        buffer.remove_marker(working.end);
+        session.turn = None;
     }
 
     /// Brings session `id`'s working line and waiting counters up to the last `handle`.
     fn tick_session(&mut self, id: AgentId) {
-        let now = self.now();
+        let look = Look::at(self.now());
         let session = self.agents.get_mut(&id).expect("known session");
         let Some(buffer) = self.buffers.get_mut(session.buffer) else {
             return;
         };
-        if let Some(turn) = &mut session.turn {
-            let end = buffer.prompt_start() - PROMPT.len() - "\n\n".len();
-            let text = format!("Working for {}", long_duration(now - turn.start));
-            let start = buffer.marker(turn.line).expect("live while working");
-            retime(buffer, start..end, &text, FaceName::SessionThought);
-            // Text put at its start moved it on.
-            buffer.set_marker(turn.line, start).expect("just retimed");
+        if session.turn.is_some() {
+            let path = (session.blocks.len() - 1, None);
+            let rendered = session.render(path, &look);
+            let shown = buffer.text().slice(session.range(buffer, path)) == rendered.text.as_str();
+            if !shown {
+                session.write(buffer, path, rendered, &look);
+            }
         }
-        for (at, ask) in session.asks.iter().enumerate() {
+        let asks: Vec<_> = (session.asks())
+            .map(|(_, a)| (a.tool.clone(), a.since))
+            .collect();
+        for (at, (call, since)) in asks.iter().enumerate() {
             // Its tool's oldest ask counts.
-            let oldest = session.asks.iter().position(|a| a.tool == ask.tool);
-            let Some(tool) = (ask.tool.as_ref())
-                .and_then(|t| session.tools.get_mut(t))
-                .filter(|_| oldest == Some(at))
-            else {
+            let oldest = asks.iter().position(|(c, _)| c == call);
+            let Some(call) = call.as_ref().filter(|_| oldest == Some(at)) else {
                 continue;
             };
-            let text = waiting_text(now - ask.since);
-            if tool.group.is_none() {
-                if tool.time != text {
-                    tool.time = text;
-                    put_tool_meta(buffer, tool);
-                }
+            let Some(tool) = session.tools.get_mut(call) else {
+                continue;
+            };
+            let text = waiting_text(look.now - *since);
+            if tool.time == text {
                 continue;
             }
-            let (old, range) = (tool.time.chars().count(), tool.range(buffer));
-            let end = range.start + tool.header;
-            let len = retime(buffer, end - old..end, &text, FaceName::Annotation);
-            tool.header = tool.header - old + len;
-            // The time can end the block, where its `Stay` end doesn't follow an insertion.
-            buffer
-                .set_marker(tool.end, range.end - old + len)
-                .expect("retimed");
             tool.time = text;
+            let path = session.tool_path(call);
+            let tool = &session.tools[call];
+            if tool.group.is_none() {
+                let meta = [(tool.time.clone(), time_face(tool))];
+                session.set_meta(buffer, path, &meta);
+                continue;
+            }
+            let header = session.tool_header(tool).chars().count();
+            session.tools.get_mut(call).expect("shown").header = header;
+            let tool = &session.tools[call];
+            let content = tool_content(&tool.call, tool.term.as_ref());
+            let rendered = session.render_tool(tool, &content.text);
+            session.write(buffer, path, rendered, &look);
         }
     }
 
@@ -1293,7 +1221,7 @@ impl Core {
     pub(crate) fn sync_session_tick(&mut self, now: Instant) {
         let shown = self.shown_buffers();
         let ticking = (self.agents.values())
-            .any(|s| shown.contains(&s.buffer) && (s.turn.is_some() || !s.asks.is_empty()));
+            .any(|s| shown.contains(&s.buffer) && (s.turn.is_some() || s.asks().next().is_some()));
         match (ticking, self.session_tick) {
             (true, None) => {
                 let tick = self.timers.start(now, TICK, Some(TICK), Msg::Tick);
@@ -1377,7 +1305,14 @@ impl Core {
     /// Appends a command's new output to its block: a folded call's, or an open call's past the
     /// cut, into its hidden lines; false for the rest, which `show_tool` rebuilds.
     fn append_tool_output(&mut self, id: AgentId, call: &ToolCallId) -> bool {
+        let now = self.now();
         let session = self.agents.get_mut(&id).expect("known session");
+        let path = session.tool_path(call);
+        let buffer = self
+            .buffers
+            .get_mut(session.buffer)
+            .expect("session buffer");
+        let Range { start, end } = session.range(buffer, path);
         let tool = session.tools.get_mut(call).expect("dirty call");
         let Some(term) = &mut tool.term else {
             return false;
@@ -1391,11 +1326,7 @@ impl Core {
         let output = term.sgr.text.strip_suffix('\n').unwrap_or(&term.sgr.text);
         let tail = &output[rendered.bytes..];
         let chars = term.sgr.chars - usize::from(term.sgr.text.ends_with('\n'));
-        let buffer = self
-            .buffers
-            .get_mut(session.buffer)
-            .expect("session buffer");
-        let at = extent(buffer, tool.start, tool.end).end - rendered.fence - 1;
+        let at = end - rendered.fence - 1;
         // An open call's hidden lines end where its output does, under the `… N more lines` fold.
         let fold = match tool.open {
             true => match buffer.fold_ending_at(at) {
@@ -1404,13 +1335,14 @@ impl Core {
             },
             false => None,
         };
-        buffer.replace_output(at..at, tail);
-        if let Some((fold, from)) = fold {
-            let end = at + chars - rendered.chars;
-            let text = buffer.text();
-            let lines = text.char_to_line(end) - text.char_to_line(from) + 1;
-            buffer.extend_fold(fold, end, more_lines(lines));
-        }
+        // The closing lines keep their text and properties, past the new output.
+        let shift = tail.chars().count();
+        let closing = (buffer.properties_near(at..end).into_iter())
+            .filter(|(r, _)| r.start >= at && r.end <= end)
+            .map(|(r, p)| (r.start - at + shift..r.end - at + shift, p.clone()))
+            .collect();
+        let text = format!("{tail}{}", buffer.text().slice(at..end));
+        let grew = chars - rendered.chars;
         let keep = rendered.faces.saturating_sub(1);
         tool.faces
             .truncate(tool.faces.len() - rendered.faces + keep);
@@ -1422,6 +1354,22 @@ impl Core {
         (rendered.bytes, rendered.chars, rendered.faces) =
             (output.len(), chars, term.sgr.faces.len());
         tool.dirty = false;
+        let tail = Rendered {
+            from: at - start,
+            text,
+            props: closing,
+            meta: None,
+        };
+        session.put(buffer, path, tail);
+        if let Some((fold, from)) = fold {
+            let text = buffer.text();
+            let lines = text.char_to_line(at + grew) - text.char_to_line(from) + 1;
+            buffer.extend_fold(fold, at + grew, more_lines(lines));
+        }
+        #[cfg(debug_assertions)]
+        session.check(buffer, path, &Look::at(now));
+        #[cfg(not(debug_assertions))]
+        let _ = now;
         true
     }
 
@@ -1554,7 +1502,7 @@ impl Core {
             "[loading]"
         } else if s.session.is_none() {
             "[starting]"
-        } else if s.asks.iter().any(Ask::blocks) {
+        } else if s.asks().any(|(_, a)| a.blocks()) {
             "[waiting]"
         } else if s.turn.is_some() {
             "[working]"
@@ -1575,9 +1523,7 @@ impl Core {
         if point >= buffer.prompt_start() - PROMPT.len() {
             return Ok((session, source, None));
         }
-        let start = |m: &Message| buffer.marker(m.start).expect("live with its session");
-        let after = session.messages.partition_point(|m| start(m) <= point);
-        let message = after.checked_sub(1).map(|i| &session.messages[i]);
+        let message = session.message_at(buffer, point).map(|(_, m)| m);
         Ok((session, source, Some(message)))
     }
 
@@ -1634,7 +1580,7 @@ impl Core {
         let Some(session) = self.agents.remove(&id) else {
             return;
         };
-        for ask in &session.asks {
+        for (_, ask) in session.asks() {
             let (response, _) = ask.cancelled();
             self.released.push(Effect::Agent(AgentOp::Reply {
                 id,
@@ -1739,14 +1685,10 @@ impl Ctx<'_> {
             ended: false,
             turn: None,
             stream: None,
-            messages: Vec::new(),
+            blocks: Vec::new(),
             tools: HashMap::new(),
-            plan: None,
-            asks: Vec::new(),
-            answers: Vec::new(),
-            run: Vec::new(),
+            run: 0,
             group: None,
-            groups: Vec::new(),
             painted: 0,
             commands: Vec::new(),
             pastes: Vec::new(),
@@ -1886,12 +1828,12 @@ impl Ctx<'_> {
         match update.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(text) = chunk.content {
-                    core.output(id, &text.text, Block::Message(chunk.message_id));
+                    core.output(id, &text.text, Chunk::Message(chunk.message_id));
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let ContentBlock::Text(text) = chunk.content {
-                    core.output(id, &text.text, Block::Thought(chunk.message_id));
+                    core.output(id, &text.text, Chunk::Thought(chunk.message_id));
                 }
             }
             SessionUpdate::UserMessageChunk(chunk) => match chunk.content {
@@ -1981,23 +1923,28 @@ impl Ctx<'_> {
     /// Closes session `id`'s pending request `at`, leaving the dim `line` in place of its block,
     /// and sends `response` unless the agent withdrew it. Point in a question's block moves to
     /// the prompt's end.
-    fn close_ask(&mut self, id: AgentId, at: usize, line: &str, response: Option<ClientResponse>) {
+    fn close_ask(
+        &mut self,
+        id: AgentId,
+        at: BlockPath,
+        line: &str,
+        response: Option<ClientResponse>,
+    ) {
         let inside = self.ask_at_point().is_some_and(|(_, a, _)| a == at)
-            && self.core.agents[&id].asks[at].question().is_some();
+            && self.core.agents[&id].ask(at).question().is_some();
         if inside {
             let end = self.core.current().len_chars();
             _ = self.goto(end);
         }
         let core = &mut *self.core;
-        let clock = core.clock();
+        let (clock, look) = (core.clock(), Look::at(core.now()));
         let session = core
             .agents
             .get_mut(&id)
             .expect("a pending request's session");
-        let ask = session.asks.remove(at);
-        let len = (core.buffers.get_mut(session.buffer))
-            .map(|b| session.settle(b, &ask, line, clock.as_deref()));
-        core.close_wait(id, &ask, len);
+        let b = (core.buffers.get_mut(session.buffer)).expect("live with its session");
+        let ask = session.settle(b, at, line, clock.as_deref(), &look);
+        core.close_wait(id, &ask, Some(at));
         if let Some(response) = response {
             self.effects.push(Effect::Agent(AgentOp::Reply {
                 id,
@@ -2009,8 +1956,8 @@ impl Ctx<'_> {
 
     /// Answers session `id`'s pending permission request `at` with its option `option`, or
     /// `cancelled`, leaving its answer line in place of its block.
-    fn answer_ask(&mut self, id: AgentId, at: usize, option: Option<usize>) {
-        let ask = &self.core.agents[&id].asks[at];
+    fn answer_ask(&mut self, id: AgentId, at: BlockPath, option: Option<usize>) {
+        let ask = &self.core.agents[&id].ask(at);
         let Body::Permission(options) = &ask.body else {
             unreachable!("answered as a permission request");
         };
@@ -2029,13 +1976,13 @@ impl Ctx<'_> {
     }
 
     /// Answers session `id`'s pending question `at` with `answer`.
-    fn answer_question(&mut self, id: AgentId, at: usize, answer: questions::Answer) {
-        let ask = &self.core.agents[&id].asks[at];
+    fn answer_question(&mut self, id: AgentId, at: BlockPath, answer: questions::Answer) {
+        let ask = &self.core.agents[&id].ask(at);
         let question = ask.question().expect("answered as a question");
         let (content, shown, sent) = question.content(&answer);
         let line = format!("✓ {shown}");
         let accept = ElicitationAcceptAction::new().content(content);
-        let ask = self.core.agents.get_mut(&id).map(|s| &mut s.asks[at]);
+        let ask = self.core.agents.get_mut(&id).map(|s| s.ask_mut(at));
         if let Some(Ask {
             body: Body::Question(question),
             ..
@@ -2054,7 +2001,7 @@ impl Ctx<'_> {
     fn tick_question(
         &mut self,
         id: AgentId,
-        at: usize,
+        at: BlockPath,
         option: Option<usize>,
         own: Option<String>,
     ) {
@@ -2063,7 +2010,7 @@ impl Ctx<'_> {
             .agents
             .get_mut(&id)
             .expect("a pending question's session");
-        let Body::Question(question) = &mut session.asks[at].body else {
+        let Body::Question(question) = &mut session.ask_mut(at).body else {
             unreachable!("ticked as a question");
         };
         let field = question.field_mut().expect("ticked in the open field");
@@ -2077,7 +2024,7 @@ impl Ctx<'_> {
 
     /// Records `answer` for the open single-choice field of session `id`'s pending block of
     /// several questions `at`, and opens the next field.
-    fn record_answer(&mut self, id: AgentId, at: usize, answer: questions::Answer) {
+    fn record_answer(&mut self, id: AgentId, at: BlockPath, answer: questions::Answer) {
         self.open_question(id, at, |q| {
             let open = q.open.expect("answered in the open field");
             q.fields[open].chosen = Some(answer);
@@ -2091,7 +2038,7 @@ impl Ctx<'_> {
     fn open_question(
         &mut self,
         id: AgentId,
-        at: usize,
+        at: BlockPath,
         change: impl FnOnce(&mut questions::Question),
     ) {
         let session = self
@@ -2099,7 +2046,7 @@ impl Ctx<'_> {
             .agents
             .get_mut(&id)
             .expect("a pending question's session");
-        let Body::Question(question) = &mut session.asks[at].body else {
+        let Body::Question(question) = &mut session.ask_mut(at).body else {
             unreachable!("opened as a question");
         };
         change(question);
@@ -2114,47 +2061,35 @@ impl Ctx<'_> {
 
     /// Draws session `id`'s pending question `at` again after a change, returning where its
     /// block starts. A block of the same length changes char for char, so point stays.
-    fn redraw_question(&mut self, id: AgentId, at: usize) -> Option<usize> {
+    fn redraw_question(&mut self, id: AgentId, at: BlockPath) -> Option<usize> {
         let point = self.core.point();
         let selected = self.core.windows.window.buffer();
+        let look = Look::at(self.core.now());
         let session = self
             .core
             .agents
             .get_mut(&id)
             .expect("a pending question's session");
-        let ask = &mut session.asks[at];
         let buffer = self.core.buffers.get_mut(session.buffer)?;
-        let Range { start, end } = ask.range(buffer);
-        let new = rows_text(&ask.body.rows(&ask.title));
-        let len = new.chars().count();
+        let Range { start, end } = session.range(buffer, at);
+        let rendered = session.render(at, &look);
         let mut kept = None;
-        if len == end - start {
-            let old: Vec<_> = buffer.text().slice(start..start + len).chars().collect();
-            for (i, (o, n)) in old.into_iter().zip(new.chars()).enumerate() {
-                if o != n {
-                    buffer.replace_output(start + i..start + i + 1, &n.to_string());
-                }
-            }
-            buffer.remove_properties(start..start + len);
-        } else {
-            // Point's line and column in the block, kept as its lines change length.
-            let text = buffer.text();
-            if selected == session.buffer && (start..=end).contains(&point) {
-                let line = text.char_to_line(point);
-                kept = Some((
-                    line - text.char_to_line(start),
-                    point - text.line_to_char(line),
-                ));
-            }
-            rewrite(buffer, start..end, &new);
+        // Point's line and column in the block, kept as its lines change length.
+        let text = buffer.text();
+        if rendered.text.chars().count() != end - start
+            && selected == session.buffer
+            && (start..=end).contains(&point)
+        {
+            let line = text.char_to_line(point);
+            kept = Some((
+                line - text.char_to_line(start),
+                point - text.line_to_char(line),
+            ));
         }
-        // A changed last char takes the `Stay` end back to it.
-        buffer
-            .set_marker(ask.end, start + len)
-            .expect("just redrawn");
-        ask.body.render(buffer, start, &ask.title);
-        let row = ask.row;
-        session.settle_row(buffer, row, len);
+        session.write(buffer, at, rendered, &look);
+        if let (g, Some(_)) = at {
+            session.show_group(buffer, g);
+        }
         if let Some((line, column)) = kept {
             let text = self.core.current().text();
             let first = text.char_to_line(start) + line;
@@ -2165,17 +2100,20 @@ impl Ctx<'_> {
     }
 
     /// Answers session `id`'s pending request `at` with `cancelled` or `cancel`.
-    fn cancel_ask(&mut self, id: AgentId, at: usize) {
-        let (response, line) = self.core.agents[&id].asks[at].cancelled();
+    fn cancel_ask(&mut self, id: AgentId, at: BlockPath) {
+        let (response, line) = self.core.agents[&id].ask(at).cancelled();
         self.close_ask(id, at, &line, Some(response));
     }
 
     /// Closes the block of the request `request` that session `id`'s agent withdrew.
     pub(crate) fn agent_withdrawn(&mut self, id: AgentId, request: RequestId) {
-        let at = (self.core.agents.get(&id))
-            .and_then(|s| s.asks.iter().position(|a| a.request == request));
+        let at = (self.core.agents.get(&id)).and_then(|s| {
+            s.asks()
+                .find(|(_, a)| a.request == request)
+                .map(|(at, _)| at)
+        });
         if let Some(at) = at {
-            let question = self.core.agents[&id].asks[at].question().is_some();
+            let question = self.core.agents[&id].ask(at).question().is_some();
             let line = if question {
                 "○ Closed"
             } else {
@@ -2192,7 +2130,7 @@ impl Ctx<'_> {
             .ask_at_point()
             .filter(|&(id, at, _)| self.sendable(id, at))
         {
-            let question = self.core.agents[&id].asks[at].question();
+            let question = self.core.agents[&id].ask(at).question();
             if let Some(refusal) = question.and_then(|q| q.refusal()) {
                 return Err(refusal);
             }
@@ -2201,7 +2139,7 @@ impl Ctx<'_> {
         }
         let kind = PermissionOptionKind::AllowOnce;
         let (id, session) = self.core.current_session()?;
-        let (at, ask, options) = (session.asks.iter().enumerate())
+        let (at, ask, options) = (session.asks())
             .find_map(|(at, a)| match &a.body {
                 Body::Permission(options) => Some((at, a, options)),
                 Body::Question(_) => None,
@@ -2218,38 +2156,31 @@ impl Ctx<'_> {
     pub(crate) fn agent_reject_once(&mut self) -> Result<(), String> {
         let kind = PermissionOptionKind::RejectOnce;
         let (id, session) = self.core.current_session()?;
-        let ask = session
-            .asks
-            .first()
-            .ok_or("No permission request is pending")?;
+        let (at, ask) = (session.asks().next()).ok_or("No permission request is pending")?;
         let options = match &ask.body {
             Body::Permission(options) => options,
             Body::Question(_) => {
                 let response = ClientResponse::CreateElicitationResponse(
                     CreateElicitationResponse::new(ElicitationAction::Decline),
                 );
-                self.close_ask(id, 0, "– Skipped", Some(response));
+                self.close_ask(id, at, "– Skipped", Some(response));
                 return Ok(());
             }
         };
         let option = (options.iter().position(|o| o.kind == kind))
             .ok_or_else(|| format!("No {} option for {}", acp_name(kind), ask.title))?;
-        self.answer_ask(id, 0, Some(option));
+        self.answer_ask(id, at, Some(option));
         Ok(())
     }
 
     /// `agent-goto-question`: moves point to the oldest pending question's first option.
     pub(crate) fn agent_goto_question(&mut self) -> Result<(), String> {
         let (_, session) = self.core.current_session()?;
-        let (start, first) = (session.asks.iter())
-            .find_map(|a| Some((a.start, a.question()?.first())))
+        let (start, first) = (session.asks())
+            .find_map(|(at, a)| Some((session.block(at).start, a.question()?.first())))
             .ok_or("No question is pending")?;
         let text = self.core.current().text();
-        let start = self
-            .core
-            .current()
-            .marker(start)
-            .expect("live while pending");
+        let start = (self.core.current().marker(start)).expect("live while pending");
         let at = text.line_to_char(text.char_to_line(start) + first) + 1;
         // Scrolled to the header first, so coming from below shows it.
         let (window, buffers) = (&mut self.core.windows.window, &mut self.core.buffers);
@@ -2285,7 +2216,7 @@ impl Ctx<'_> {
             _ => return Err("agent-question-key must be run by a character key".into()),
         };
         let asked = self.ask_at_point().and_then(|(id, at, _)| {
-            let question = self.core.agents[&id].asks[at].question()?;
+            let question = self.core.agents[&id].ask(at).question()?;
             let field = question.field();
             Some((
                 id,
@@ -2313,15 +2244,22 @@ impl Ctx<'_> {
 
     /// Answers session `id`'s pending question `at` with option `option`, or ticks it in a
     /// multi-select.
-    fn pick(&mut self, id: AgentId, at: usize, option: usize) {
+    fn pick(&mut self, id: AgentId, at: BlockPath, option: usize) {
         self.choose(id, at, Some(option), questions::Answer::Option(option));
     }
 
     /// Ticks option `tick` (the own answer with `None`) of session `id`'s pending question
     /// `at` when its open field is a multi-select, records `answer` in a block of several, and
     /// otherwise answers with it.
-    fn choose(&mut self, id: AgentId, at: usize, tick: Option<usize>, answer: questions::Answer) {
-        let question = self.core.agents[&id].asks[at]
+    fn choose(
+        &mut self,
+        id: AgentId,
+        at: BlockPath,
+        tick: Option<usize>,
+        answer: questions::Answer,
+    ) {
+        let question = self.core.agents[&id]
+            .ask(at)
             .question()
             .expect("a question");
         if question.field().is_some_and(|f| f.multi.is_some()) {
@@ -2338,8 +2276,8 @@ impl Ctx<'_> {
     }
 
     /// Reads an own answer to session `id`'s pending question `at`, starting from the one it has.
-    fn own_answer(&mut self, id: AgentId, at: usize) {
-        let question = self.core.agents[&id].asks[at].question();
+    fn own_answer(&mut self, id: AgentId, at: BlockPath) {
+        let question = self.core.agents[&id].ask(at).question();
         let own = (question.and_then(|q| q.field()?.own_text())).map(str::to_owned);
         self.call("agent-answer-own", Args::default());
         if let Some(own) = own {
@@ -2349,8 +2287,8 @@ impl Ctx<'_> {
 
     /// Whether session `id`'s pending request `at` is a question `C-c C-y` sends: a multi-select
     /// or a block of several.
-    fn sendable(&self, id: AgentId, at: usize) -> bool {
-        (self.core.agents[&id].asks[at].question())
+    fn sendable(&self, id: AgentId, at: BlockPath) -> bool {
+        (self.core.agents[&id].ask(at).question())
             .is_some_and(|q| q.several() || q.field().is_some_and(|f| f.multi.is_some()))
     }
 
@@ -2359,21 +2297,27 @@ impl Ctx<'_> {
         let (id, at) = self
             .ask_at_point()
             .filter(|&(id, at, _)| {
-                (self.core.agents[&id].asks[at].question())
+                (self.core.agents[&id].ask(at).question())
                     .is_some_and(|q| q.field().is_some_and(|f| f.own.is_some()))
             })
             .map(|(id, at, _)| (id, at))
             .ok_or("No question here")?;
         if text.trim().is_empty() {
             // An empty answer clears one kept while the block waits; a lone question has none.
-            let question = self.core.agents[&id].asks[at]
+            let question = self.core.agents[&id]
+                .ask(at)
                 .question()
                 .expect("a question");
             if question.field().is_some_and(|f| f.multi.is_some()) {
                 self.tick_question(id, at, None, None);
             } else if question.several() {
-                let Body::Question(q) =
-                    &mut self.core.agents.get_mut(&id).expect("live").asks[at].body
+                let Body::Question(q) = &mut self
+                    .core
+                    .agents
+                    .get_mut(&id)
+                    .expect("live")
+                    .ask_mut(at)
+                    .body
                 else {
                     unreachable!("a question");
                 };
@@ -2389,14 +2333,14 @@ impl Ctx<'_> {
     }
 
     /// The session, pending request and line of its block point is on.
-    fn ask_at_point(&self) -> Option<(AgentId, usize, usize)> {
+    fn ask_at_point(&self) -> Option<(AgentId, BlockPath, usize)> {
         let core = &*self.core;
         let (point, buffer) = (core.point(), core.windows.window.buffer());
         let b = core.buffers.get(buffer)?;
         let (id, session) = core.session_of(buffer)?;
-        session.asks.iter().enumerate().find_map(|(at, ask)| {
-            let start = b.marker(ask.start)?;
-            if !(start..=ask.range(b).end).contains(&point) {
+        session.asks().find_map(|(at, _)| {
+            let Range { start, end } = session.range(b, at);
+            if !(start..=end).contains(&point) {
                 return None;
             }
             let line = b.text().slice(start..point).chars().filter(|&c| c == '\n');
@@ -2482,11 +2426,7 @@ impl Ctx<'_> {
         let buffer = core.windows.window.buffer();
         let b = core.buffers.get(buffer)?;
         let (id, session) = core.session_of(buffer)?;
-        let tool = (session.tools.iter()).find(|(_, t)| {
-            let shown = !session.hidden(t);
-            shown && (b.marker(t.start)).is_some_and(|s| (s..=s + t.header).contains(&point))
-        });
-        tool.map(|(call, _)| (id, call.clone()))
+        Some((id, session.tool_at(b, point)?.clone()))
     }
 
     /// Shows `call`'s full output in its own read-only buffer, refreshed from the call.
@@ -2525,7 +2465,7 @@ impl Ctx<'_> {
     /// new prompt line.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
         if let Some((id, at, line)) = self.ask_at_point() {
-            let ask = &self.core.agents[&id].asks[at];
+            let ask = &self.core.agents[&id].ask(at);
             match ask.question().map(|q| q.answer_at(line)) {
                 None if line > 0 => {
                     self.answer_ask(id, at, Some(line - 1));
@@ -2614,16 +2554,28 @@ impl Ctx<'_> {
         prompt_glyph(b, end - PROMPT.len());
         b.set_marker(b.prompt().expect("a session buffer has a prompt"), end)?;
         let line = start + input.chars().count() + "\n\n".len();
-        let working_line = b.add_marker(line, InsertionType::Advance)?;
-        (b.add_property(line..line + working.chars().count(), dim())).expect("just appended");
         let echo = start - PROMPT.len();
         let to = start + input.chars().count();
-        let message = Message {
-            id: None,
-            user: true,
+        session.blocks.push(Block {
             start: b.add_marker(echo, InsertionType::Stay)?,
             end: b.add_marker(to, InsertionType::Stay)?,
-        };
+            meta: 0,
+            kind: BlockKind::Message(Message {
+                id: None,
+                user: true,
+            }),
+        });
+        session.run = session.blocks.len();
+        session.blocks.push(Block {
+            start: b.add_marker(line, InsertionType::Advance)?,
+            end: b.add_marker(line + working.chars().count(), InsertionType::Stay)?,
+            meta: 0,
+            kind: BlockKind::Working,
+        });
+        session.turn = Some(Turn { start: self.now });
+        let (path, look) = ((session.blocks.len() - 1, None), Look::at(self.now));
+        let rendered = session.render(path, &look);
+        session.write(b, path, rendered, &look);
         // The old prompt area's edits would replay into read-only text.
         b.clear_undo();
         user_lines(b, echo..to);
@@ -2633,11 +2585,6 @@ impl Ctx<'_> {
         let end = b.len_chars();
         core.windows.window.follow = true;
         session.fold_pastes(b, start);
-        session.messages.push(message);
-        session.turn = Some(Turn {
-            start: self.now,
-            line: working_line,
-        });
         let request = PromptRequest::new(session_id, core.chips.blocks(&input));
         self.effects
             .push(Effect::Agent(AgentOp::Prompt { id, request }));
@@ -2651,8 +2598,8 @@ impl Ctx<'_> {
         let point = core.point();
         let (id, _) = core.current_session()?;
         let buffer = core.current();
-        let starts: Vec<usize> = (core.agents[&id].messages.iter())
-            .map(|m| buffer.marker(m.start).expect("live with its session"))
+        let starts: Vec<usize> = (core.agents[&id].messages())
+            .map(|(b, _)| buffer.marker(b.start).expect("live with its session"))
             .collect();
         let at = crate::motion::nth_mark(&starts, point, n).ok_or("No message found")?;
         self.goto(at)
@@ -2700,7 +2647,7 @@ impl Ctx<'_> {
     /// opens the next one.
     pub(crate) fn agent_toggle_tool_call(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
-        let point = core.point();
+        let (point, look) = (core.point(), Look::at(core.now()));
         let buffer = core.windows.window.buffer();
         let agent = core.buffers.get(buffer).and_then(Buffer::agent);
         let session = agent.and_then(|id| Some((id, core.agents.get_mut(&id)?)));
@@ -2719,24 +2666,23 @@ impl Ctx<'_> {
                 return Ok(());
             }
             At::Paste(i) => Some(session.toggle_paste(b, i)),
-            At::Answer(i) => back(session.toggle_answer(b, i)),
-            At::Thought(g, r) => back(session.toggle_thought(b, g, r)),
+            At::Answer(at) => back(session.toggle_answer(b, at, &look)),
+            At::Thought(at) => back(session.toggle_thought(b, at)),
             At::Group(g) => match session.toggle_group(b, g) {
                 (start, line, false) => back((start, line)),
                 _ => None,
             },
             At::Tool(call) => {
+                let path = session.tool_path(&call);
+                let range = session.range(b, path);
                 let tool = session.tools.get_mut(&call).expect("just found");
                 // Without content there is nothing to show, so it stays folded for when content
                 // comes.
-                let range = tool.range(b);
                 tool.open = !tool.open && range.len() > tool.header;
-                let start = range.start;
-                b.remove_properties(range);
-                let mark = start + if tool.group.is_some() { 2 } else { 0 };
-                b.replace_output(mark..mark + 1, if tool.open { "▾" } else { "▸" });
-                render_tool(b, tool);
-                back((start, start + tool.header))
+                let mut rendered = session.render(path, &look);
+                rendered.meta = None;
+                session.write(b, path, rendered, &look);
+                back((range.start, range.start + session.tools[&call].header))
             }
         };
         match to {
@@ -2750,11 +2696,12 @@ impl Ctx<'_> {
     pub(crate) fn agent_cancel(&mut self) -> Result<(), String> {
         let (id, session) = self.core.current_session()?;
         let ready = session.session.as_ref().filter(|_| session.turn.is_some());
-        let asks = session.asks.len();
+        // Settling a request leaves the others' places as they are.
+        let asks: Vec<_> = session.asks().map(|(at, _)| at).collect();
         let session = ready.ok_or("No turn is running")?.session_id.clone();
         (self.effects).push(Effect::Agent(AgentOp::Cancel { id, session }));
-        for _ in 0..asks {
-            self.cancel_ask(id, 0);
+        for at in asks {
+            self.cancel_ask(id, at);
         }
         Ok(())
     }
@@ -2909,13 +2856,14 @@ impl Ctx<'_> {
         let Some(session) = self.core.agents.get(&id).filter(|s| s.turn.is_some()) else {
             return;
         };
-        for _ in 0..session.asks.len() {
+        let asks: Vec<_> = session.asks().map(|(at, _)| at).collect();
+        for at in asks {
             // codex-acp withdraws a non-blocking question at its turn's end, maybe after this.
-            if self.core.agents[&id].asks[0].blocks() {
-                self.cancel_ask(id, 0);
+            if self.core.agents[&id].ask(at).blocks() {
+                self.cancel_ask(id, at);
             } else {
-                let (response, _) = self.core.agents[&id].asks[0].cancelled();
-                self.close_ask(id, 0, "○ Closed, the turn ended first", Some(response));
+                let (response, _) = self.core.agents[&id].ask(at).cancelled();
+                self.close_ask(id, at, "○ Closed, the turn ended first", Some(response));
             }
         }
         let core = &mut *self.core;
@@ -2929,7 +2877,7 @@ impl Ctx<'_> {
             Err(err) => Some(format!("Error: {err}")),
         };
         if let Some(line) = line {
-            core.output(id, &line, Block::Line);
+            core.output(id, &line, Chunk::Line);
         }
         core.settle_turn(id);
     }
@@ -2963,19 +2911,22 @@ impl Ctx<'_> {
     pub(crate) fn agent_exited(&mut self, id: AgentId, code: u32, signal: Option<String>) {
         let core = &mut *self.core;
         core.settle_turn(id);
-        let clock = core.clock();
+        let (clock, look) = (core.clock(), Look::at(core.now()));
         let Some(session) = core.agents.get_mut(&id) else {
             return;
         };
         // The agent is gone with its requests, so only the blocks change.
-        let asks = std::mem::take(&mut session.asks);
-        let lens: Vec<_> = (asks.iter())
-            .map(|ask| {
-                let b = core.buffers.get_mut(session.buffer)?;
-                Some(session.settle(b, ask, &ask.cancelled().1, clock.as_deref()))
+        let b = (core.buffers.get_mut(session.buffer)).expect("live with its session");
+        let paths: Vec<_> = session.asks().map(|(at, _)| at).collect();
+        let asks: Vec<_> = (paths.into_iter())
+            .map(|at| {
+                let line = session.ask(at).cancelled().1;
+                (at, session.settle(b, at, &line, clock.as_deref(), &look))
             })
             .collect();
-        (asks.iter().zip(lens)).for_each(|(ask, len)| core.close_wait(id, ask, len));
+        for (at, ask) in &asks {
+            core.close_wait(id, ask, Some(*at));
+        }
         if let Some(session) = core.agents.get_mut(&id)
             && !std::mem::replace(&mut session.ended, true)
         {
@@ -4176,9 +4127,9 @@ mod tests {
     fn message_list(h: &Harness) -> Vec<(Option<String>, String)> {
         let session = &h.core.agents[&AgentId(0)];
         let buffer = h.core.buffers.get(session.buffer).unwrap();
-        (session.messages.iter())
-            .map(|m| {
-                let text = buffer.text().slice(m.range(buffer)).to_string();
+        (session.messages())
+            .map(|(block, m)| {
+                let text = buffer.text().slice(block.range(buffer)).to_string();
                 (m.id.as_ref().map(|id| id.0.to_string()), text)
             })
             .collect()
@@ -6169,6 +6120,64 @@ mod tests {
     }
 
     #[test]
+    fn block_at_matches_a_scan_of_block_ranges_for_every_kind() {
+        use PlanEntryPriority::*;
+        use PlanEntryStatus::*;
+        let mut h = session();
+        h.keys("a RET");
+        agent_chunk(&mut h, "m", "Hello");
+        prompted(&mut h, Ok(StopReason::MaxTokens));
+        h.keys("b RET");
+        plan(&mut h, &[("Read the code", InProgress, High)]);
+        tool(&mut h, read("a", "a.rs"));
+        thought(&mut h, "hmm\nmore");
+        tool(&mut h, read("b", "b.rs"));
+        question(&mut h, 1, None);
+        on_line(&mut h, "Question");
+        h.keys("2");
+        ask(&mut h, 2, "a", None);
+        several(&mut h, 3);
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        on_line(&mut h, "▸ Thought");
+        h.keys("TAB");
+        h.core.frame();
+        let session = &h.core.agents[&AgentId(0)];
+        let b = h.core.buffers.get(session.buffer).unwrap();
+        let kinds: HashSet<_> = (session.all())
+            .map(|(_, block)| std::mem::discriminant(&block.kind))
+            .collect();
+        assert_eq!(kinds.len(), 9, "a block of every kind");
+        let mut found = HashSet::new();
+        for point in 0..=b.len_chars() {
+            // The innermost block holding `point`, a group's rows coming after it.
+            let scanned = (session.all())
+                .filter(|(_, block)| {
+                    let range = block.range(b);
+                    (range.start..=range.end).contains(&point)
+                })
+                .map(|(path, _)| path)
+                .last();
+            assert_eq!(session.path_at(b, point), scanned, "at {point}");
+            let want = scanned.and_then(|path| match path {
+                (g, None) if matches!(session.blocks[g].kind, BlockKind::Group(_)) => {
+                    Some(At::Group(g))
+                }
+                (g, Some(_)) => session.target(b, path, point).or(Some(At::Group(g))),
+                _ => session.target(b, path, point),
+            });
+            let at = session.block_at(b, point);
+            assert_eq!(at, want, "at {point}");
+            found.extend(at.map(|at| std::mem::discriminant(&at)));
+        }
+        assert_eq!(
+            found.len(),
+            5,
+            "an ask, an answer, a call, a thought and a group"
+        );
+    }
+
+    #[test]
     fn a_message_streamed_in_any_split_renders_as_a_whole() {
         let source = "# Title é\n\n- one\n- two\n  more\n- three\n\n```rust\nfn a() {}\n\nb\n```\n| k | v |\n|---|--:|\n| a | 1 |\n| bb | 22 |\n\nSetext\n===\n\nlast *words*";
         let chars: Vec<char> = source.chars().collect();
@@ -6183,7 +6192,7 @@ mod tests {
                     chunk(&mut h, &text);
                     sent.push_str(&text);
                     h.joined_frame(800., 600.);
-                    let message = &h.core.agents[&AgentId(0)].messages[0];
+                    let (message, _) = h.core.agents[&AgentId(0)].messages().next().unwrap();
                     let b = h.core.current();
                     check_message(b, message.range(b), &sent, None, 100);
                     from = to;
@@ -6220,7 +6229,7 @@ mod tests {
             "{:?}",
             h.core.text()
         );
-        let message = &h.core.agents[&AgentId(0)].messages[0];
+        let (message, _) = h.core.agents[&AgentId(0)].messages().next().unwrap();
         let b = h.core.current();
         let text = b.text().slice(message.range(b)).to_string();
         assert!(

@@ -24,28 +24,8 @@ pub(super) fn render(
     }
 }
 
-/// Replaces `range` of `buffer`, a streamed message or its tail, with `source` rendered as
-/// markdown with its tables drawn at most `table_width` wide, linking the files of `index`;
-/// returns the rendered length in chars and where its last top-level block starts.
-pub(super) fn render_message(
-    buffer: &mut Buffer,
-    range: Range<usize>,
-    source: &str,
-    index: Option<&FileIndex>,
-    table_width: usize,
-) -> (usize, markdown::Stable) {
-    let is_file = |word: &str| file_link(index, word).is_some();
-    let (text, props, stable) = markdown::render(source, false, false, Some(table_width), is_file);
-    rewrite(buffer, range.clone(), &text);
-    for (r, prop) in props {
-        (buffer.add_property(range.start + r.start..range.start + r.end, prop))
-            .expect("inside the rendered range");
-    }
-    (text.chars().count(), stable)
-}
-
 /// Checks that `range` of `buffer` shows `source` as a full render of the message would.
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub(super) fn check_message(
     buffer: &Buffer,
     range: Range<usize>,
@@ -166,16 +146,6 @@ pub(super) fn line_end(buffer: &Buffer, at: usize) -> usize {
     at + rest.unwrap_or(buffer.len_chars() - at)
 }
 
-/// Puts a right-aligned `time` in `annotation` at `at`, a line's end, returning the chars added.
-pub(super) fn put_time(buffer: &mut Buffer, at: usize, time: &str) -> usize {
-    buffer.insert_output(at, &format!(" {time}"));
-    let end = at + 1 + time.chars().count();
-    let face = Prop::Named(vec![FaceRef::Face(FaceName::Annotation)]);
-    (buffer.add_property(at..at + 1, Prop::AlignRight)).expect("just inserted");
-    (buffer.add_property(at + 1..end, face)).expect("just inserted");
-    end - at
-}
-
 /// How far in the line under a block puts its timings, the same under every block.
 pub(super) const META_INDENT: usize = 2;
 
@@ -208,30 +178,6 @@ pub(super) fn put_meta(
         (buffer.add_property(range, prop)).expect("just inserted");
     }
     text.chars().count()
-}
-
-/// Replaces the time at `range` with `text`, in `face`, returning its length in chars. Only the
-/// chars that differ change, so point on the line stays.
-pub(super) fn retime(
-    buffer: &mut Buffer,
-    range: Range<usize>,
-    text: &str,
-    face: FaceName,
-) -> usize {
-    let len = text.chars().count();
-    let old = buffer.text().slice(range.clone()).to_string();
-    if old == text {
-        return len;
-    }
-    let same = (old.chars().zip(text.chars()))
-        .take_while(|(a, b)| a == b)
-        .count();
-    buffer.remove_properties(range.clone());
-    let tail: String = text.chars().skip(same).collect();
-    buffer.replace_output(range.start + same..range.end, &tail);
-    let prop = Prop::Named(vec![FaceRef::Face(face)]);
-    (buffer.add_property(range.start..range.start + len, prop)).expect("just replaced");
-    len
 }
 
 /// The ACP name of an enum value, as `in_progress`.
@@ -482,9 +428,19 @@ pub(super) fn plan_text(plan: &Plan) -> String {
     lines.join("\n")
 }
 
-/// Renders the plan block at `start`, whose properties were removed: `Plan` and each finished or
-/// pending entry dim, an entry in progress with its mark in `status-waiting`.
-pub(super) fn render_plan(buffer: &mut Buffer, start: usize, plan: &Plan) {
+/// Properties on char ranges, from a block's start.
+pub(super) type Props = Vec<(Range<usize>, Prop)>;
+
+/// Puts `props`, from `at`, on `buffer`.
+pub(super) fn paint(buffer: &mut Buffer, at: usize, props: Props) {
+    for (r, prop) in props {
+        (buffer.add_property(at + r.start..at + r.end, prop)).expect("inside the block");
+    }
+}
+
+/// The plan block's properties: `Plan` and each finished or pending entry dim, an entry in
+/// progress with its mark in `status-waiting`.
+pub(super) fn plan_props(plan: &Plan) -> Props {
     let waiting = Prop::Named(vec![FaceRef::Face(FaceName::StatusWaiting)]);
     let mut props = vec![(0.."Plan".len(), dim())];
     let mut line = "Plan\n".len();
@@ -496,9 +452,7 @@ pub(super) fn render_plan(buffer: &mut Buffer, start: usize, plan: &Plan) {
         });
         line += len + 1;
     }
-    for (r, prop) in props {
-        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
-    }
+    props
 }
 
 /// A permission request's rows: `Permission: <title>`, then a numbered line per option,
@@ -520,9 +474,9 @@ pub(super) fn rows_text(rows: &[(String, usize)]) -> String {
     lines.join("\n")
 }
 
-/// Renders the block of `rows` at `start`, whose properties were removed: a rule beside each
-/// line and each row's text past its length before the suffix dim.
-pub(super) fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, usize)]) {
+/// The properties of the block of `rows`: a rule beside each line and each row's text past its
+/// length before the suffix dim.
+pub(super) fn rows_props(rows: &[(String, usize)]) -> Props {
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
     let dim = dim();
     let mut props = Vec::new();
@@ -535,9 +489,7 @@ pub(super) fn render_rows(buffer: &mut Buffer, start: usize, rows: &[(String, us
         }
         line += len + 1;
     }
-    for (r, prop) in props {
-        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
-    }
+    props
 }
 
 /// The line a permission request's block becomes when cancelled or dropped.
@@ -555,27 +507,13 @@ pub(super) fn answered(kind: PermissionOptionKind) -> &'static str {
     }
 }
 
-/// Replaces permission request `ask`'s block with the dim `line`.
-pub(super) fn settle(buffer: &mut Buffer, ask: &Ask, line: &str) {
-    let range = ask.range(buffer);
-    rewrite(buffer, range.clone(), line);
-    let end = range.start + line.chars().count();
-    (buffer.add_property(range.start..end, dim())).expect("inside the block");
-    buffer.remove_marker(ask.start);
-    buffer.remove_marker(ask.end);
-}
-
-/// Replaces question `ask`'s block with its answered line, from `line`'s `<mark> <outcome>`,
-/// `clock` at its right, and the rows of what it sent, folded.
-pub(super) fn settle_question(
-    buffer: &mut Buffer,
-    ask: &Ask,
+/// The answered line `question`'s block becomes, from `line`'s `<mark> <outcome>`, `clock` at
+/// its right, and the rows of what it sent, folded.
+pub(super) fn settled_question(
+    question: &questions::Question,
     line: &str,
     clock: Option<&str>,
 ) -> Answered {
-    let question = ask.question().expect("settled as a question");
-    let range = ask.range(buffer);
-    let start = range.start;
     let mut chars = line.chars();
     let mark = chars.next().expect("a mark");
     let label = question.label();
@@ -585,19 +523,13 @@ pub(super) fn settle_question(
     let rows: String = (question.sent.iter())
         .map(|(n, a)| format!("\n {n:<name$}  {a}"))
         .collect();
-    rewrite(buffer, range, &format!("{head}{rows}"));
     let outcome = head.chars().count();
     let time = clock.map_or(String::new(), |c| format!(" {c}"));
-    buffer.insert_output(start + outcome, &time);
-    let line = outcome + time.chars().count();
-    let end = start + line + rows.chars().count();
-    buffer.set_marker(ask.end, end).expect("just settled");
     Answered {
-        start: ask.start,
+        text: format!("{head}{time}{rows}"),
         label: 4 + label.chars().count(),
         outcome,
-        line,
-        end: ask.end,
+        line: outcome + time.chars().count(),
         name,
         mark: match mark {
             '✓' => FaceName::StatusRunning,
@@ -608,11 +540,10 @@ pub(super) fn settle_question(
     }
 }
 
-/// Renders answered line `a`, two columns in when `grouped`: its marks, its dim outcome and
-/// time, and its rows on `session-block` when open, else hidden.
-pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) {
-    let Range { start, end } = extent(buffer, a.start, a.end);
-    let len = end - start;
+/// Answered line `a`'s properties, two columns in when `grouped`: its marks, its dim outcome
+/// and time, and its rows on `session-block` when open, else hidden.
+pub(super) fn answered_props(a: &Answered, grouped: bool) -> Props {
+    let len = a.text.chars().count();
     let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
     let indent = if grouped { 2 } else { 0 };
     let mut props = vec![
@@ -628,7 +559,7 @@ pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) 
         props.push((a.outcome + 1..a.line, face(FaceName::Annotation)));
     }
     if a.open {
-        let rows = buffer.text().slice(start + a.line..end).to_string();
+        let rows: String = a.text.chars().skip(a.line).collect();
         let mut at = a.line + 1;
         for row in rows.split('\n').skip(1) {
             // Under the label, the row's leading space its padding.
@@ -643,9 +574,7 @@ pub(super) fn render_answered(buffer: &mut Buffer, a: &Answered, grouped: bool) 
     } else if len > a.line {
         props.push((a.line..len, Prop::Invisible(String::new())));
     }
-    for (r, prop) in props {
-        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the line");
-    }
+    props
 }
 
 /// A tool call's raw output as text.
@@ -932,42 +861,24 @@ pub(super) fn time_face(tool: &Tool) -> FaceName {
     }
 }
 
-/// Takes the line under a call that is not in a group off, returning where the block ends.
-pub(super) fn take_tool_meta(buffer: &mut Buffer, tool: &mut Tool) -> usize {
-    let end = tool.range(buffer).end;
-    let meta = std::mem::take(&mut tool.meta);
-    if meta > 0 {
-        buffer.remove_properties(end + 1..end + 1 + meta);
-        buffer.replace_output(end + 1..end + 1 + meta, "");
-    }
-    end
+/// Hides replaced call `tool`'s block at `range`, with what parts it from the row before in a
+/// group, else from the next block, its `meta` chars long line under it counted.
+pub(super) fn hide_replaced(buffer: &mut Buffer, tool: &Tool, range: Range<usize>, meta: usize) {
+    let span = match tool.group {
+        Some(_) => range.start - 1..range.end,
+        None => range.start..range.end + "\n\n".len() + meta,
+    };
+    buffer.remove_properties(span.clone());
+    let hide = Prop::Invisible(String::new());
+    (buffer.add_property(span, hide)).expect("inside the text");
 }
 
-/// Puts the time of a call that is not in a group on the line under its block.
-pub(super) fn put_tool_meta(buffer: &mut Buffer, tool: &mut Tool) {
-    let end = take_tool_meta(buffer, tool);
-    if tool.group.is_none() {
-        tool.meta = put_meta(buffer, end, META_INDENT, &[(&tool.time, time_face(tool))]);
-    }
-}
-
-/// Renders a tool call's block, whose properties were removed: its header with a rule beside it,
-/// then its content as markdown with a rule beside each line, or folded. An open command's
-/// hidden output gets no properties of its own, so no property contains another's end and starts
-/// and ends ascend.
-pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
-    let Range { start, end: last } = tool.range(buffer);
-    let len = last - start;
-    if tool.replaced {
-        // With what parts it from the row before in a group, else from the next block.
-        let span = match tool.group {
-            Some(_) => start - 1..last,
-            None => start..last + "\n\n".len() + tool.meta,
-        };
-        buffer.remove_properties(span.clone());
-        let hide = Prop::Invisible(String::new());
-        return (buffer.add_property(span, hide)).expect("inside the text");
-    }
+/// A tool call's block's properties, its `text` given: its header with a rule beside it, then
+/// its content as markdown with a rule beside each line, or folded. An open command's hidden
+/// output gets no properties of its own, so no property contains another's end and starts and
+/// ends ascend.
+pub(super) fn tool_props(tool: &Tool, text: &str) -> Props {
+    let len = text.chars().count();
     let rule = Prop::Line(Decoration::Rule(FaceName::SessionThought));
     let status = match tool.call.status {
         ToolCallStatus::Failed => FaceName::StatusFailed,
@@ -1018,10 +929,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
     }
     let body = tool.header + 1..len;
     if tool.open && !body.is_empty() {
-        let content = buffer
-            .text()
-            .slice(start + body.start..start + body.end)
-            .to_string();
+        let content: String = text.chars().skip(body.start).collect();
         let shifted = |(r, p): (Range<usize>, Prop)| (body.start + r.start..body.start + r.end, p);
         let cut = tool.output.and_then(|at| hidden_output(&content, at));
         let hidden = cut.as_ref().map(|(r, _)| r.clone());
@@ -1064,9 +972,7 @@ pub(super) fn render_tool(buffer: &mut Buffer, tool: &Tool) {
         props.push((tool.header..len, Prop::Invisible(String::new())));
     }
     props.sort_by_key(|(r, _)| (r.start, r.end));
-    for (r, prop) in props {
-        (buffer.add_property(start + r.start..start + r.end, prop)).expect("inside the block");
-    }
+    props
 }
 
 #[cfg(test)]
