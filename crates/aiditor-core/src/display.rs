@@ -864,7 +864,7 @@ pub fn build(
         lines,
         cursor,
         cursor_width,
-        mode_line: match (&buffer.file, buffer.terminal()) {
+        mode_line: match (buffer.path(), buffer.terminal()) {
             (Some(file), _) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
             (_, Some(terminal)) => terminal_mode_line(buffer, terminal, l + 1, c),
             _ => mode_line(buffer, l + 1, c),
@@ -974,14 +974,15 @@ pub(crate) fn file_mode_line(
     let base = file.file_name().map_or(file, Path::new);
     name.push((shown(base), FaceName::ModeLineBufferId));
     let mut left = vec![name];
-    let disk = match (buffer.deleted, buffer.conflict) {
+    let state = buffer.file.as_ref().expect("a file's mode line");
+    let disk = match (state.deleted, state.conflict) {
         (true, _) => Some("[deleted]"),
         (_, Some(_)) => Some("[conflict]"),
         _ => None,
     };
     left.extend(disk.map(|disk| segment(disk, FaceName::StatusFailed)));
     let mut language = buffer.language().to_string();
-    if let Some(version) = &buffer.language_version {
+    if let Some(version) = &state.language_version {
         language.push(' ');
         language.push_str(version);
     }
@@ -1000,11 +1001,11 @@ pub(crate) fn file_mode_line(
     if let Some(region) = region {
         right.push(segment(&region_size(buffer, region), FaceName::ModeLineDim));
     }
-    if buffer.crlf {
+    if state.crlf {
         // Other encodings join it with #155.
         right.push(segment("UTF-8 CRLF", FaceName::StatusWaiting));
     }
-    if let Some(head) = &buffer.head {
+    if let Some(head) = &state.head {
         let mut vcs = segment(&format!("⎇ {}", head.branch), FaceName::VcsBranch);
         if head.changed {
             vcs.push((" ±".to_string(), FaceName::StatusModified));
@@ -2788,7 +2789,7 @@ mod tests {
         assert_eq!(line.right[0], [("⎇ main".to_string(), FaceName::VcsBranch)]);
         assert_eq!(line.right[1][0].0, "1:0");
         head.changed = true;
-        h.core.current_mut().head = Some(head);
+        h.core.current_mut().file.as_mut().unwrap().head = Some(head);
         let line = h.display(5).mode_line;
         assert_eq!(line.right[0][1], (" ±".into(), FaceName::StatusModified));
         assert!(line.text().ends_with("⎇ main ± │ 1:0 │ All"));

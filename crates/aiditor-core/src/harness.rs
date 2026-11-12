@@ -466,7 +466,7 @@ impl Harness {
             .core
             .buffers
             .recent()
-            .filter(|(_, b)| b.file.as_ref() == Some(&path))
+            .filter(|(_, b)| b.path() == Some(path.as_path()))
         {
             self.reverts.insert(
                 id,
@@ -519,13 +519,27 @@ fn collected_saves_can_be_answered_in_reverse_order_across_workspaces() {
     assert_eq!(h.core.workspace().unwrap(), second);
     assert_eq!(h.text(), "second original\n");
     assert_eq!(
-        h.core.buffers.get(second_buffer).unwrap().disk,
+        h.core
+            .buffers
+            .get(second_buffer)
+            .unwrap()
+            .file
+            .as_ref()
+            .unwrap()
+            .disk,
         Some(hash(b"second original\n"))
     );
     h.core.switch_workspace(first).unwrap();
     assert_eq!(h.text(), "first original\n");
     assert_eq!(
-        h.core.buffers.get(first_buffer).unwrap().disk,
+        h.core
+            .buffers
+            .get(first_buffer)
+            .unwrap()
+            .file
+            .as_ref()
+            .unwrap()
+            .disk,
         Some(hash(b"first original\n"))
     );
 }

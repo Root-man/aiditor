@@ -5875,7 +5875,10 @@ mod tests {
         h.keys("RET");
         assert!(ops(&mut h).is_empty(), "nothing is sent");
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
-        assert_eq!(h.core.current().file, Some(a));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(a)
+        );
     }
 
     #[test]
@@ -5943,7 +5946,10 @@ mod tests {
         h.keys("RET");
         assert!(ops(&mut h).is_empty(), "nothing is sent");
         assert_eq!(h.core.windows.tree.leaves().len(), 2);
-        assert_eq!(h.core.current().file, Some(h.path("app/src/a.rs")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("app/src/a.rs"))
+        );
         assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
     }
 
@@ -5969,7 +5975,7 @@ mod tests {
             assert!(ops(&mut h).is_empty(), "{message}: nothing is sent");
             assert_eq!(h.core.windows.tree.leaves().len(), 2, "{message}");
             assert_eq!(
-                h.core.current().file,
+                h.core.current().path().map(std::path::PathBuf::from),
                 Some(h.path("app/src/a.rs")),
                 "{message}"
             );
@@ -6022,7 +6028,7 @@ mod tests {
         point_in(&mut h, "src/a.rs:3", 2);
         h.keys("RET");
         assert_eq!(
-            h.core.current().file,
+            h.core.current().path().map(std::path::PathBuf::from),
             Some(h.path("app/src/a.rs")),
             "files still visit"
         );
@@ -6389,7 +6395,10 @@ mod tests {
         assert_eq!(h.core.message.as_deref(), Some("No output"));
         point_in(&mut h, "src/a.rs", 1);
         h.keys("RET");
-        assert_eq!(h.core.current().file, Some(h.path("app/src/a.rs")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("app/src/a.rs"))
+        );
         assert_eq!(h.core.current().line_col(h.point()).unwrap(), (1, 0));
     }
 

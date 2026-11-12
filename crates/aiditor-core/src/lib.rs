@@ -879,10 +879,11 @@ impl Ctx<'_> {
                 request,
                 version,
             } => {
-                if let Some(buffer) = self.core.buffers.get_mut(buffer)
-                    && buffer.version_request == request
+                if let Some(file) =
+                    (self.core.buffers.get_mut(buffer)).and_then(|b| b.file.as_mut())
+                    && file.version_request == request
                 {
-                    buffer.language_version = version;
+                    file.language_version = version;
                 }
             }
             Msg::WatchStatus(message) => self.core.report(message),

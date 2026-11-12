@@ -21,18 +21,20 @@ impl Ctx<'_> {
         match (self.core.buffers.get_mut(id), result) {
             (None, _) => {}
             (Some(buffer), Ok(hash)) => {
-                (buffer.disk, buffer.deleted, buffer.conflict) = (Some(hash), false, None);
+                if let Some(file) = &mut buffer.file {
+                    (file.disk, file.deleted, file.conflict) = (Some(hash), false, None);
+                }
                 // Edits made while the write ran are still unsaved.
                 if buffer.tick() == tick {
                     buffer.set_saved();
                 }
-                let path = buffer.file.as_deref().unwrap_or(Path::new(""));
+                let path = buffer.path().unwrap_or(Path::new(""));
                 let msg = format!("Wrote {}", path.display());
                 self.core.echo(msg);
             }
             (Some(buffer), Err(err)) => {
                 // A change on disk the watcher missed becomes a conflict.
-                if let Some(path) = buffer.file.clone() {
+                if let Some(path) = buffer.path().map(Path::to_path_buf) {
                     self.effects.push(Effect::File(FileOp::Check(vec![path])));
                 }
                 self.core.echo(err)
@@ -114,8 +116,8 @@ impl Ctx<'_> {
     /// Reverts the current buffer from its file, asking first when it is modified.
     pub(crate) fn revert_buffer(&mut self, args: Args) -> Result<(), String> {
         let buffer = self.core.current();
-        let path =
-            (buffer.file.clone()).ok_or("Buffer does not seem to be associated with any file")?;
+        let path = (buffer.path().map(Path::to_path_buf))
+            .ok_or("Buffer does not seem to be associated with any file")?;
         if buffer.modified() {
             match args.strings.first() {
                 None => {
@@ -144,7 +146,8 @@ impl Ctx<'_> {
         let save = command == "save-buffer";
         let id = self.core.windows.window.buffer();
         let buffer = self.core.current_mut();
-        let (Some(path), Some(hash)) = (buffer.file.clone(), buffer.conflict) else {
+        let file = buffer.file.as_ref();
+        let Some((path, hash)) = file.and_then(|f| Some((f.path.clone(), f.conflict?))) else {
             // An answer arriving after the conflict ended does nothing more.
             return match (save, args.strings.is_empty()) {
                 (true, _) => self.save(id),
@@ -162,7 +165,8 @@ impl Ctx<'_> {
         match answer.to_ascii_lowercase().as_str() {
             "keep mine" => {
                 // The disk version becomes the save's base, so the save overwrites it.
-                (buffer.disk, buffer.conflict) = (Some(hash), None);
+                let file = buffer.file.as_mut().expect("a conflict is a file's");
+                (file.disk, file.conflict) = (Some(hash), None);
                 if save {
                     return self.save(id);
                 }
@@ -183,8 +187,8 @@ impl Ctx<'_> {
     /// Asks the file service to diff the current buffer against its file, for `on_diffed`.
     pub(crate) fn diff_buffer_with_file(&mut self) -> Result<(), String> {
         let buffer = self.core.current();
-        let path =
-            (buffer.file.clone()).ok_or("Buffer does not seem to be associated with any file")?;
+        let path = (buffer.path().map(Path::to_path_buf))
+            .ok_or("Buffer does not seem to be associated with any file")?;
         self.effects.push(Effect::File(FileOp::Diff {
             buffer: self.core.windows.window.buffer(),
             name: buffer.name.clone(),
@@ -327,7 +331,12 @@ impl Ctx<'_> {
         let asked = |name: &str| answers.as_chunks::<2>().0.iter().any(|p| p[0] == name);
         let next = (self.core.buffers.recent())
             .find(|(_, b)| of(b) && b.file.is_some() && b.modified() && !asked(&b.name))
-            .map(|(_, b)| (b.name.clone(), b.file.clone().expect("a file buffer")));
+            .map(|(_, b)| {
+                (
+                    b.name.clone(),
+                    b.path().expect("a file buffer").to_path_buf(),
+                )
+            });
         let paired = answers.len().is_multiple_of(2);
         if paired && let Some((name, path)) = next {
             args.strings.push(name);
@@ -361,12 +370,13 @@ impl Ctx<'_> {
 
     pub(crate) fn save(&mut self, id: BufferId) -> Result<(), String> {
         let buffer = self.core.buffers.get_mut(id).expect("saved buffer is live");
-        let Some(path) = buffer.file.clone() else {
+        let Some(file) = &buffer.file else {
             tracing::info!(name = buffer.name, "buffer visits no file");
             return Ok(());
         };
+        let (path, crlf, bom, hash) = (file.path.clone(), file.crlf, file.bom, file.disk);
         // A deleted file is written back even unmodified, since nothing on disk is lost.
-        if !buffer.modified() && !buffer.deleted {
+        if !buffer.modified() && !file.deleted {
             return Err("(No changes need to be saved)".into());
         }
         let len = buffer.text().len_chars();
@@ -378,9 +388,9 @@ impl Ctx<'_> {
             tick: buffer.tick(),
             path,
             text: buffer.text().clone(),
-            crlf: buffer.crlf,
-            bom: buffer.bom,
-            hash: buffer.disk,
+            crlf,
+            bom,
+            hash,
         }));
         Ok(())
     }
@@ -399,7 +409,7 @@ impl Core {
     /// The current buffer's file's directory, or its terminal's.
     pub(crate) fn buffer_directory(&self) -> Option<PathBuf> {
         let buffer = self.current();
-        (buffer.file.as_deref().and_then(Path::parent))
+        (buffer.path().and_then(Path::parent))
             .or_else(|| buffer.terminal()?.cwd())
             .map(Path::to_path_buf)
     }
@@ -436,8 +446,10 @@ impl Core {
         let after = point(self);
         let buffer = self.buffers.get_mut(id).expect("live");
         buffer.undo_boundary(after);
-        (buffer.disk, buffer.crlf, buffer.bom) = (Some(revert.hash), revert.crlf, revert.bom);
-        buffer.conflict = None;
+        if let Some(file) = &mut buffer.file {
+            (file.disk, file.crlf, file.bom) = (Some(revert.hash), revert.crlf, revert.bom);
+            file.conflict = None;
+        }
         buffer.set_saved();
     }
 
@@ -504,7 +516,8 @@ impl Core {
         }
         let id = self.buffers.create_for_file(path, &text);
         let buffer = self.buffers.get_mut(id).expect("just created");
-        (buffer.crlf, buffer.bom, buffer.disk) = (crlf, bom, disk);
+        let file = buffer.file.as_mut().expect("just created for a file");
+        (file.crlf, file.bom, file.disk) = (crlf, bom, disk);
         buffer.read_only = refused.is_some();
         self.switch_to(id);
     }
@@ -677,7 +690,10 @@ mod tests {
         let origin = h.core.windows.window.buffer();
         h.keys("editing");
         h.send(opened(intent, path.clone(), "visited"));
-        assert_eq!(h.core.current().file, Some(path));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(path)
+        );
         assert_eq!(h.core.current().workspace, intent.workspace);
         assert_eq!(h.text(), "visited");
         assert_eq!(
@@ -1025,12 +1041,18 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "hello")]);
         h.open("a.txt");
         assert_eq!(h.core.current().name, "a.txt");
-        assert_eq!(h.core.current().file, Some(h.path("a.txt")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("a.txt"))
+        );
         assert!(!h.core.current().modified());
         assert_eq!(h.point(), 0);
         h.keys("<right> X");
         assert!(h.core.current().modified());
-        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"hello")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(crate::buffer::hash(b"hello"))
+        );
         h.save_reply("hXello\n");
         h.keys("C-x C-s");
         assert_eq!(h.submitted("a.txt"), "hXello\n");
@@ -1052,7 +1074,10 @@ mod tests {
             h.path("a.txt").display()
         )));
         h.keys("x C-x C-s");
-        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"old\n")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(crate::buffer::hash(b"old\n"))
+        );
         assert!(h.core.current().modified());
         assert!(
             h.core
@@ -1068,7 +1093,7 @@ mod tests {
         )));
         h.keys("x C-x C-s");
         assert!(h.core.current().modified());
-        assert_eq!(h.core.current().disk, None);
+        assert_eq!(h.core.current().file.as_ref().unwrap().disk, None);
     }
 
     #[test]
@@ -1093,15 +1118,18 @@ mod tests {
         h.save_reply("\u{feff}xa\r\nb\r\n");
         h.keys("x C-x C-s");
         assert_eq!(
-            h.core.current().disk,
+            h.core.current().file.as_ref().unwrap().disk,
             Some(crate::buffer::hash("\u{feff}xa\r\nb\r\n".as_bytes()))
         );
-        assert!(h.core.current().crlf && h.core.current().bom);
+        assert!(
+            h.core.current().file.as_ref().unwrap().crlf
+                && h.core.current().file.as_ref().unwrap().bom
+        );
         // The saved hash is the next save's base.
         h.save_reply("\u{feff}xya\r\nb\r\n");
         h.keys("y C-x C-s");
         assert_eq!(
-            h.core.current().disk,
+            h.core.current().file.as_ref().unwrap().disk,
             Some(crate::buffer::hash("\u{feff}xya\r\nb\r\n".as_bytes()))
         );
     }
@@ -1149,7 +1177,7 @@ mod tests {
         let mut h = Harness::new(&[]);
         h.open("new.txt");
         assert_eq!(h.text(), "");
-        assert_eq!(h.core.current().disk, None);
+        assert_eq!(h.core.current().file.as_ref().unwrap().disk, None);
         h.save_reply("hi\n");
         h.keys("hi C-x C-s");
         assert_eq!(h.submitted("new.txt"), "hi\n");
@@ -1459,7 +1487,10 @@ mod tests {
         assert!(h.core.current().modified());
         h.keys("C-x C-c no RET yes RET");
         assert!(h.quit);
-        assert_eq!(h.core.current().disk, Some(crate::buffer::hash(b"2")));
+        assert_eq!(
+            h.core.current().file.as_ref().unwrap().disk,
+            Some(crate::buffer::hash(b"2"))
+        );
     }
 
     #[test]
@@ -1643,12 +1674,15 @@ mod tests {
         let mut h = in_dir();
         h.keys("C-x C-f b.txt RET");
         assert_eq!((name(&h), h.text().as_str()), ("b.txt", "hi"));
-        assert_eq!(h.core.current().file, Some(h.path("d/b.txt")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("d/b.txt"))
+        );
         assert!(!h.core.current().modified());
         // M-RET keeps a new name that fuzzy-matches b.txt.
         h.keys("C-x C-f bt M-RET");
         assert_eq!((name(&h), h.text().as_str()), ("bt", ""));
-        assert_eq!(h.core.current().disk, None);
+        assert_eq!(h.core.current().file.as_ref().unwrap().disk, None);
         h.save_reply("x\n");
         h.keys("x C-x C-s");
         assert_eq!(h.submitted("d/bt"), "x\n");
@@ -1821,7 +1855,10 @@ mod tests {
         h.keys("C-x C-f C-a C-k sub/");
         assert_eq!(listed(&mut h).0, ["c.txt"]);
         h.keys("C-n RET");
-        assert_eq!(h.core.current().file, Some(h.path("d/sub/c.txt")));
+        assert_eq!(
+            h.core.current().path().map(std::path::PathBuf::from),
+            Some(h.path("d/sub/c.txt"))
+        );
     }
 
     #[test]

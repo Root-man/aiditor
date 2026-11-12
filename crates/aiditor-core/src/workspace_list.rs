@@ -468,8 +468,7 @@ fn details(
         return (vec![(location, FaceName::Annotation)], state);
     }
     let location = buffer
-        .file
-        .as_ref()
+        .path()
         .map(|file| {
             crate::display::file_mode_line(buffer, file, roots, None, (1, 0), "All").left[0]
                 .iter()
@@ -478,13 +477,14 @@ fn details(
                 .collect()
         })
         .unwrap_or_default();
+    let deleted = buffer.file.as_ref().is_some_and(|f| f.deleted);
     let mut state = Vec::new();
     for (shown, text, face) in [
         (buffer.modified(), "● unsaved", FaceName::StatusModified),
         (buffer.read_only, "⊘ read-only", FaceName::StatusFailed),
-        (buffer.deleted, "[deleted]", FaceName::StatusFailed),
+        (deleted, "[deleted]", FaceName::StatusFailed),
         (
-            !buffer.deleted && buffer.conflict.is_some(),
+            !deleted && buffer.file.as_ref().is_some_and(|f| f.conflict.is_some()),
             "[conflict]",
             FaceName::StatusFailed,
         ),
@@ -1603,10 +1603,24 @@ mod tests {
             let locked = h.core.buffers.find_here("locked.rs").unwrap();
             h.core.buffers.get_mut(locked).unwrap().read_only = true;
             let gone = h.core.buffers.find_here("gone.rs").unwrap();
-            h.core.buffers.get_mut(gone).unwrap().deleted = true;
+            h.core
+                .buffers
+                .get_mut(gone)
+                .unwrap()
+                .file
+                .as_mut()
+                .unwrap()
+                .deleted = true;
             let conflict = h.core.buffers.find_here("conflict.rs").unwrap();
             h.core.switch_to(dirty);
-            h.core.buffers.get_mut(conflict).unwrap().conflict = Some(0);
+            h.core
+                .buffers
+                .get_mut(conflict)
+                .unwrap()
+                .file
+                .as_mut()
+                .unwrap()
+                .conflict = Some(0);
             let (running, _) = h.core.create_terminal("vterm1<task>", 2, 10);
             let (failed, _) = h.core.create_terminal("vterm2<task>", 2, 10);
             for (id, bytes) in [
@@ -1733,7 +1747,7 @@ mod tests {
             assert_eq!(h.text(), snapshot);
             let buffer = h.core.buffers.get_mut(dirty).unwrap();
             buffer.read_only = true;
-            buffer.conflict = Some(0);
+            buffer.file.as_mut().unwrap().conflict = Some(0);
             h.keys("C-x t l");
             assert_eq!(
                 contents(&h)[7],
@@ -1754,7 +1768,7 @@ mod tests {
             }
             let buffer = h.core.buffers.get_mut(dirty).unwrap();
             buffer.read_only = false;
-            buffer.conflict = None;
+            buffer.file.as_mut().unwrap().conflict = None;
             buffer.set_saved();
             h.keys("C-x t l");
             assert_eq!(contents(&h)[4], "▾ * task 7 buffers");
@@ -1819,7 +1833,7 @@ mod tests {
         assert_eq!(row(&h), Row::Workspace(h.core.workspace().unwrap()));
         assert!(h.core.current().read_only);
         assert_eq!(
-            (h.core.current().file.as_ref(), h.core.current().modified()),
+            (h.core.current().path(), h.core.current().modified()),
             (None, false)
         );
         let text = h.text();

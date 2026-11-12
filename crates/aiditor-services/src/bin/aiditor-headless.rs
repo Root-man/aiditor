@@ -147,7 +147,7 @@ mod tests {
         for key in parse_keys("RET").unwrap() {
             send(&mut core, &mut service, Msg::Key(key));
         }
-        assert_eq!(core.current().file.as_ref(), Some(&file));
+        assert_eq!(core.current().path(), Some(file.as_path()));
         assert_eq!(core.point(), 1);
         let (tx, thread) = service.take().unwrap();
         drop(tx);

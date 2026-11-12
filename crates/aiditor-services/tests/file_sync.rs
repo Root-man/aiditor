@@ -287,7 +287,10 @@ fn atomic_external_saves_revert_every_clean_copy_and_leave_other_buffers_alone()
     editor.wait_for("a write after the atomic replacement", |c| {
         c.text() == "later\nkeep\n"
     });
-    assert_eq!(editor.core.current().disk, Some(hash(b"later\nkeep\n")));
+    assert_eq!(
+        editor.core.current().file.as_ref().unwrap().disk,
+        Some(hash(b"later\nkeep\n"))
+    );
     editor.core.switch_workspace(second).unwrap();
     assert_eq!(editor.core.text(), "later\nkeep\n");
     assert!(!editor.core.current().modified());
@@ -310,7 +313,7 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
     let _native = native::lock();
     let mut editor = Editor::new(&[("a.txt", "original\n")], "");
     let dirty = editor.core.workspace().unwrap();
-    let base = editor.core.current().disk;
+    let base = editor.core.current().file.as_ref().unwrap().disk;
     editor.keys("mine SPC");
     let tick = editor.core.current().tick();
     editor
@@ -323,13 +326,19 @@ fn external_writes_conflict_dirty_copies_while_clean_copies_revert() {
         c.text() == "external\n"
     });
     assert!(!editor.core.current().modified());
-    assert_eq!(editor.core.current().disk, Some(hash(b"external\n")));
+    assert_eq!(
+        editor.core.current().file.as_ref().unwrap().disk,
+        Some(hash(b"external\n"))
+    );
     editor.core.switch_workspace(dirty).unwrap();
     assert_eq!(editor.core.text(), "mine original\n");
     assert!(editor.core.current().modified());
-    assert_eq!(editor.core.current().disk, base);
+    assert_eq!(editor.core.current().file.as_ref().unwrap().disk, base);
     assert_eq!(editor.core.current().tick(), tick);
-    assert_eq!(editor.core.current().conflict, Some(hash(b"external\n")));
+    assert_eq!(
+        editor.core.current().file.as_ref().unwrap().conflict,
+        Some(hash(b"external\n"))
+    );
     assert!(
         editor.core.frame().windows[0]
             .display
@@ -380,7 +389,10 @@ fn an_own_save_updates_the_other_workspace_and_preserves_its_own_undo() {
     editor.core.switch_workspace(saving).unwrap();
     assert_eq!(editor.core.current().tick(), tick);
     assert_eq!(editor.core.text(), "saved original\n");
-    assert_eq!(editor.core.current().disk, Some(hash(b"saved original\n")));
+    assert_eq!(
+        editor.core.current().file.as_ref().unwrap().disk,
+        Some(hash(b"saved original\n"))
+    );
     editor.keys("C-/");
     assert_eq!(editor.core.text(), "original\n");
 }
@@ -391,7 +403,8 @@ fn a_checkout_outside_the_editor_moves_the_branch_and_the_rest_of_git_stays_quie
     let head = (".git/HEAD", "ref: refs/heads/main\n");
     let mut editor = Editor::new(&[("a.txt", "a\n"), head], "");
     let git = editor.root.join(".git");
-    let branch = |core: &Core| (core.current().head.clone()).map(|head| head.branch);
+    let branch =
+        |core: &Core| (core.current().file.as_ref().unwrap().head.clone()).map(|head| head.branch);
     assert_eq!(branch(&editor.core).as_deref(), Some("main"));
     assert!(editor.core.watch_set().files.contains(&git.join("HEAD")));
     // Git replaces `HEAD` through a lock file.
@@ -418,7 +431,9 @@ fn a_commit_outside_the_editor_clears_the_marker_without_a_report_loop() {
     git(&["add", "."]);
     git(&["commit", "-q", "-m", "x"]);
     fs::write(editor.root.join("a.txt"), "edit\n").unwrap();
-    let changed = |core: &Core| (core.current().head.as_ref()).map(|head| head.changed);
+    let changed = |core: &Core| {
+        (core.current().file.as_ref().unwrap().head.as_ref()).map(|head| head.changed)
+    };
     editor.wait_for("the marker", |core| changed(core) == Some(true));
     // Reported after the watch on `.git` is in place, as the channel keeps the order.
     editor.ready("a.txt");
@@ -453,7 +468,10 @@ fn visited_files_still_follow_the_disk_without_project_root_watches() {
         fs::rename(editor.root.join("a.tmp"), editor.root.join("a.txt")).unwrap();
         editor.wait_for(settings, |c| c.text() == "external\n");
         assert!(!editor.core.current().modified());
-        assert_eq!(editor.core.current().disk, Some(hash(b"external\n")));
+        assert_eq!(
+            editor.core.current().file.as_ref().unwrap().disk,
+            Some(hash(b"external\n"))
+        );
     }
 }
 
@@ -608,7 +626,10 @@ fn overlapping_workspace_saves_deliver_reversed_replies_before_watch_recovery() 
         }
     );
     assert!(editor.core.current().modified());
-    assert_eq!(editor.core.current().conflict, Some(hash(b"later\n")));
+    assert_eq!(
+        editor.core.current().file.as_ref().unwrap().conflict,
+        Some(hash(b"later\n"))
+    );
 }
 
 #[test]

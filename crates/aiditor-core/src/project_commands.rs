@@ -1146,7 +1146,7 @@ mod tests {
     }
 
     fn visited(h: &Harness) -> Option<std::path::PathBuf> {
-        h.core.current().file.clone()
+        h.core.current().path().map(std::path::PathBuf::from)
     }
 
     fn annotation_requests(h: &mut Harness) -> Vec<(u64, Vec<(String, std::path::PathBuf)>)> {

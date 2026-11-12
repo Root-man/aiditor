@@ -1742,7 +1742,7 @@ mod tests {
         let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");
         cx.simulate_input("x");
-        let path = editor.read_with(cx, |e, _| e.core.current().file.clone().unwrap());
+        let path = editor.read_with(cx, |e, _| e.core.current().path().unwrap().to_path_buf());
         assert!(!cx.simulate_close(), "the window stays open");
         let prompt = editor.update(cx, |e, _| e.core.frame().minibuffer.map(|mb| mb.prompt));
         assert_eq!(prompt, Some(format!("Save file {}? ", path.display())));
@@ -1924,10 +1924,7 @@ mod tests {
         });
         cx.simulate_keystrokes("enter");
         wait(cx, "ordinary visit", |core| {
-            core.current()
-                .file
-                .as_ref()
-                .is_some_and(|p| p.ends_with("sub/c"))
+            core.current().path().is_some_and(|p| p.ends_with("sub/c"))
         });
         assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "needle c\n");
 
@@ -1974,11 +1971,7 @@ mod tests {
         }
         cx.simulate_keystrokes("enter");
         wait(cx, "accepted grep hit", |core| {
-            core.current()
-                .file
-                .as_ref()
-                .is_some_and(|p| p.ends_with("sub/c"))
-                && core.point() == 0
+            core.current().path().is_some_and(|p| p.ends_with("sub/c")) && core.point() == 0
         });
 
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -2018,7 +2011,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-x ctrl-s");
         release.send(()).unwrap();
         wait(cx, "conflicting save replies", |core| {
-            core.current().conflict.is_some()
+            core.current().file.as_ref().unwrap().conflict.is_some()
         });
         assert_eq!(
             std::fs::read_to_string(root.join("sub/c")).unwrap(),
@@ -2372,14 +2365,17 @@ mod tests {
         for _ in 0..1000 {
             cx.run_until_parked();
             if editor.read_with(cx, |e, _| {
-                e.core.current().file.as_ref() == Some(&base.join("docs/a"))
+                e.core.current().path() == Some(base.join("docs/a").as_path())
             }) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(
-            editor.read_with(cx, |e, _| (e.core.current().file.clone(), e.core.point())),
+            editor.read_with(cx, |e, _| (
+                e.core.current().path().map(PathBuf::from),
+                e.core.point()
+            )),
             (Some(base.join("docs/a")), 0)
         );
         cx.update(|window, _| window.remove_window());

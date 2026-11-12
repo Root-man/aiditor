@@ -116,17 +116,6 @@ impl Buffers {
             text: Rope::new(),
             kind: Kind::Text,
             file: None,
-            crlf: false,
-            bom: false,
-            disk: None,
-            deleted: false,
-            conflict: None,
-            conflict_asked: false,
-            head: None,
-            head_asked: false,
-            language_version: None,
-            version_asked: false,
-            version_request: 0,
             read_only: false,
             truncate_lines: false,
             line_numbers: None,
@@ -189,7 +178,10 @@ impl Buffers {
         let buffer = self.map.get_mut(&id).expect("just created");
         buffer.syntax = Syntax::for_file(path, &text);
         buffer.text = text;
-        buffer.file = Some(path.to_path_buf());
+        buffer.file = Some(FileState {
+            path: path.to_path_buf(),
+            ..FileState::default()
+        });
         id
     }
 
@@ -240,7 +232,7 @@ impl Buffers {
     pub fn visiting(&self, path: &Path) -> Option<BufferId> {
         self.map
             .iter()
-            .find(|(_, b)| b.workspace == self.workspace && b.file.as_deref() == Some(path))
+            .find(|(_, b)| b.workspace == self.workspace && b.path() == Some(path))
             .map(|(&id, _)| id)
     }
 
@@ -291,13 +283,10 @@ pub(crate) enum Kind {
 
 static EMPTY: LazyLock<Rope> = LazyLock::new(Rope::new);
 
-pub struct Buffer {
-    pub name: String,
-    /// The workspace that owns it; `None` only for the global `*Messages*`.
-    pub workspace: Option<WorkspaceId>,
-    text: Rope,
-    pub(crate) kind: Kind,
-    pub file: Option<PathBuf>,
+/// A visited file and what the buffer knows of it.
+#[derive(Default)]
+pub struct FileState {
+    pub path: PathBuf,
     /// The file's line breaks are CRLF, written back on save.
     pub crlf: bool,
     /// The file starts with a UTF-8 byte-order mark, written back on save.
@@ -317,6 +306,16 @@ pub struct Buffer {
     pub(crate) language_version: Option<String>,
     pub(crate) version_asked: bool,
     pub(crate) version_request: u64,
+}
+
+pub struct Buffer {
+    pub name: String,
+    /// The workspace that owns it; `None` only for the global `*Messages*`.
+    pub workspace: Option<WorkspaceId>,
+    text: Rope,
+    pub(crate) kind: Kind,
+    /// The file it visits.
+    pub file: Option<FileState>,
     pub read_only: bool,
     /// Long lines are cut at the window edge instead of wrapping, as Emacs's `truncate-lines`.
     pub truncate_lines: bool,
@@ -500,7 +499,7 @@ impl Buffer {
     /// The chars a visual row holds in a window `cols` wide and whether rows break at words, or
     /// `None` when long lines are cut instead; the last column is left for the `\` marker.
     pub(crate) fn wrap(&self, cols: usize) -> Option<(usize, bool)> {
-        let prose = (self.file.as_deref().and_then(Path::extension))
+        let prose = (self.path().and_then(Path::extension))
             .is_some_and(|e| ["md", "markdown", "txt"].iter().any(|p| e == *p));
         let word = prose || self.major_mode == crate::agents::MODE;
         // The minibuffer and fitted workspace-list rows each occupy one visual row.
@@ -523,6 +522,11 @@ impl Buffer {
             (_, Some(true), LineNumbers::Off) => LineNumbers::Absolute,
             _ => setting,
         }
+    }
+
+    /// The path of the file it visits.
+    pub fn path(&self) -> Option<&Path> {
+        self.file.as_ref().map(|f| f.path.as_path())
     }
 
     pub fn text(&self) -> &Rope {
@@ -1424,7 +1428,11 @@ mod tests {
         let mut wrap = |path: Option<&str>, mode| {
             let id = buffers.create("b");
             let b = buffers.get_mut(id).unwrap();
-            (b.file, b.major_mode) = (path.map(PathBuf::from), mode);
+            b.file = path.map(|path| FileState {
+                path: path.into(),
+                ..FileState::default()
+            });
+            b.major_mode = mode;
             b.wrap(5)
         };
         for path in ["/t/a.md", "/t/a.markdown", "/t/a.txt"] {
@@ -1473,7 +1481,7 @@ mod tests {
         let b = buffers.get(id).unwrap();
         assert_eq!(b.name, "notes");
         assert_eq!(b.text().len_chars(), 0);
-        assert_eq!(b.file, None);
+        assert_eq!(b.path(), None);
     }
 
     #[test]
@@ -1492,7 +1500,7 @@ mod tests {
         let path = Path::new("/tmp/proj/src/main.rs");
         let id = buffers.create_for_file(path, "fn main() {}");
         let b = buffers.get(id).unwrap();
-        assert_eq!(b.file.as_deref(), Some(path));
+        assert_eq!(b.path(), Some(path));
         assert_eq!(b.name, "main.rs");
         assert_eq!(b.text(), "fn main() {}");
         assert!(!b.modified());
@@ -1551,7 +1559,7 @@ mod tests {
 
         let (mut buffers, id) = with_text("a\nb\n");
         let b = buffers.get_mut(id).unwrap();
-        (b.crlf, b.bom) = (true, true);
+        (b.file.as_mut().unwrap().crlf, b.file.as_mut().unwrap().bom) = (true, true);
         assert_eq!(encode(b.text(), true, true), b"\xEF\xBB\xBFa\r\nb\r\n");
     }
 
