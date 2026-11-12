@@ -565,6 +565,7 @@ mod tests {
                 path: h.path(p),
                 ..FileState::default()
             });
+            h.core.watch.dirty = true;
             h.keys("C-x p g");
             let op = search(&mut h);
             assert_eq!(
@@ -585,6 +586,7 @@ mod tests {
             path: nested.join("a"),
             ..FileState::default()
         });
+        h.core.watch.dirty = true;
         h.keys("C-x p g");
         assert_eq!(
             search(&mut h).roots,

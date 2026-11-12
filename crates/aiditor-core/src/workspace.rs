@@ -79,6 +79,7 @@ impl Core {
         self.next_workspace += 1;
         let name = unique(name, |n| self.workspaces.iter().any(|w| w.name == n));
         self.workspaces.push(Workspace::new(id, &name, project));
+        self.watch.dirty = true;
         let scratch = self.buffers.create_scratch(&name);
         self.buffers
             .get_mut(scratch)
@@ -168,6 +169,7 @@ impl Core {
             }
         }
         let mut killed = self.workspaces.remove(at);
+        self.watch.dirty = true;
         let windows = killed
             .windows
             .as_mut()

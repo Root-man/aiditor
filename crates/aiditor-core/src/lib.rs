@@ -836,6 +836,7 @@ impl Ctx<'_> {
                         let old = &self.core.settings;
                         settings.zoom(old.font_size - old.default_font_size);
                         self.core.settings = settings;
+                        self.core.watch.dirty = true;
                     }
                     Err(err) => self.core.report(format!("settings: {err}")),
                 }
@@ -1173,7 +1174,10 @@ impl Default for Core {
             quitting: Vec::new(),
             then_kill: None,
             autosave: autosave::Autosave::default(),
-            watch: watching::Watch::default(),
+            watch: watching::Watch {
+                dirty: true,
+                ..Default::default()
+            },
             focused: list,
             terminals: BTreeMap::new(),
             next_terminal: 0,

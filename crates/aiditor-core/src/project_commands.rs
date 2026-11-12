@@ -31,6 +31,7 @@ impl Core {
         let id = ProjectId(self.next_project);
         self.next_project += 1;
         self.projects.push(Entry::new(id, loaded));
+        self.watch.dirty = true;
         id
     }
 
@@ -84,6 +85,7 @@ impl Core {
             entry.retained = true;
             self.projects.push(entry);
         }
+        self.watch.dirty = true;
         self.release_projects();
     }
 
@@ -308,6 +310,7 @@ impl Ctx<'_> {
             Some(i) => core.projects[i].replace(loaded),
             None => core.projects.push(Entry::new(intent.project, loaded)),
         }
+        core.watch.dirty = true;
         core.echo(format!("Wrote {}", path.display()));
     }
 
@@ -387,6 +390,7 @@ impl Ctx<'_> {
         let Some((path, old)) = &loaded.file else {
             loaded.project = project;
             loaded.revision += 1;
+            self.core.watch.dirty = true;
             return Ok(());
         };
         let mut doc: DocumentMut = old.parse().map_err(|err| format!("{err}"))?;

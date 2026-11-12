@@ -11,6 +11,9 @@ use crate::{Core, Ctx, Disk, Effect, Effects, FileOp, Head, WatchSet};
 pub(crate) struct Watch {
     pub(crate) watching: WatchSet,
     pub(crate) refresh: bool,
+    /// An input of `watch_set` changed since `watching` was made: a file buffer made or killed,
+    /// a head answered, a project, workspace, index or the settings changed.
+    pub(crate) dirty: bool,
     pub(crate) refusals: std::collections::BTreeMap<ProjectId, (usize, usize, usize)>,
 }
 
@@ -72,6 +75,15 @@ impl Core {
 
     /// Sends the watch set when it changed since last sent.
     pub(crate) fn watch(&mut self, effects: &mut Effects) {
+        let dirty =
+            std::mem::take(&mut self.watch.dirty) | std::mem::take(&mut self.buffers.files_changed);
+        if !dirty && !self.watch.refresh {
+            debug_assert!(
+                self.watch_set() == self.watch.watching,
+                "a watch_set input changed without raising `dirty`"
+            );
+            return;
+        }
         let refusals: std::collections::BTreeMap<_, _> = (self.projects.iter())
             .filter(|p| self.workspaces.iter().any(|w| w.project == p.id))
             .filter_map(|p| Some((p.id, self.watch_counts(p)?)))
@@ -164,6 +176,7 @@ impl Ctx<'_> {
             for file in visiting.filter_map(|(_, b)| b.file.as_mut()) {
                 if file.path == path {
                     file.head.clone_from(&head);
+                    self.core.watch.dirty = true;
                 }
             }
         }
@@ -947,6 +960,7 @@ mod tests {
             .unwrap()
             .project
             .max_watched_files = None;
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, []);
         let message =
@@ -1023,6 +1037,7 @@ mod tests {
                 .contains("files = 1, directories = 3")
         );
         h.core.settings.max_watched_files = 3;
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, [(h.path("a"), vec![])]);
         let b = h.path("b");
@@ -1033,6 +1048,7 @@ mod tests {
             .project
             .roots
             .push(Root { path: b });
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert_eq!(h.watched.roots, []);
         assert!(h.core.message().unwrap().contains("directories = 4"));
@@ -1088,6 +1104,7 @@ mod tests {
         }
         // An unchanged refusal is not reported again by a reload's re-walk.
         h.core.settings.max_watched_files = 0;
+        h.core.watch.dirty = true;
         h.send(Msg::Tick);
         assert!(h.core.message().unwrap().contains("max_watched_files = 0"));
         h.core.message = None;

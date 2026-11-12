@@ -177,6 +177,7 @@ impl Core {
     pub(crate) fn release_indexes(&mut self) {
         self.index
             .retain(|id, _| self.projects.iter().any(|p| p.id == *id));
+        self.watch.dirty = true;
     }
 
     #[cfg(test)]
@@ -194,6 +195,7 @@ impl Ctx<'_> {
             .entry(project)
             .or_default()
             .request(scope, quiet);
+        self.core.watch.dirty = true;
         if !quiet {
             self.core
                 .echo(format!("Indexing {}...", self.core.project_name(project)));
@@ -222,6 +224,7 @@ impl Ctx<'_> {
         let Some(index) = self.core.index.get_mut(&project) else {
             return;
         };
+        self.core.watch.dirty = true;
         match index.apply(walk, roots, directories) {
             Reply::Obsolete => {}
             Reply::Walk(walk, (roots, ignore)) => {

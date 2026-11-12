@@ -106,6 +106,8 @@ pub struct Buffers {
     recent: Vec<BufferId>,
     /// The current workspace, which owns every buffer made from now on; `None` in the lobby.
     pub(crate) workspace: Option<WorkspaceId>,
+    /// A buffer visiting a file was made or killed since the watch set last looked.
+    pub(crate) files_changed: bool,
 }
 
 impl Buffers {
@@ -182,6 +184,7 @@ impl Buffers {
             path: path.to_path_buf(),
             ..FileState::default()
         });
+        self.files_changed = true;
         id
     }
 
@@ -251,7 +254,9 @@ impl Buffers {
 
     pub fn kill(&mut self, id: BufferId) -> Result<Buffer, Error> {
         self.recent.retain(|&b| b != id);
-        self.map.remove(&id).ok_or(Error::NoSuchBuffer(id))
+        let buffer = self.map.remove(&id).ok_or(Error::NoSuchBuffer(id))?;
+        self.files_changed |= buffer.file.is_some();
+        Ok(buffer)
     }
 }
 
