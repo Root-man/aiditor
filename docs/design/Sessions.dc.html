@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent sessions</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 100px 120px 240px;column-gap:24px;white-space:pre;padding:0 12px;min-height:21px}
+.gap{min-height:21px}
+.mk{color:#928374}
+.grp{color:#83a598;font-weight:700}
+.pin{color:#d3869b;font-weight:700}
+.arc{color:#928374;font-weight:700}
+.cnt{color:#665c54}
+.claude{color:#fe8019}.codex{color:#8ec07c}
+.today{color:#8ec07c;text-align:right}
+.title{color:#ebdbb2}
+.an{color:#928374}
+.tm{color:#a89984;text-align:right}
+.st{text-align:right;color:#928374}
+.waiting{color:#fabd2f}.running{color:#b8bb26}.failed{color:#fb4934}.quiet{color:#a89984}
+.sel{background:#3c3836}
+.pt{background:#ebdbb2;color:#282828}
+.sp{color:#504945}
+.d{color:#a89984}
+.kh{color:#fabd2f;font-weight:700}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px; background: #282828; color: #ebdbb2">
+  <div style="height: 22px; line-height: 22px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #1d2021; color: #a89984; font-size: 13px; white-space: pre">
+    <span><span style="color: #ebdbb2; font-weight: 700">aiditor</span><span style="color: #665c54"> › </span><span style="color: #fabd2f">session-list</span> <span style="color: #fabd2f">●</span><span class="sp">  │  </span>aiditor › grep-progress <span style="color: #b8bb26">●</span><span class="sp">  │  </span>zed › tab-bar</span>
+    <span>16:12</span>
+  </div>
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding-top: 6px">
+    <sc-for list="{{rows}}" as="r" hint-placeholder-count="24">
+      <sc-if value="{{r.isGap}}" hint-placeholder-val="{{false}}">
+        <div class="gap"></div>
+      </sc-if>
+      <sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
+        <div class="row {{r.sel}}"><span><span class="mk">{{r.pre}}</span><span class="pt">{{r.first}}</span><span class="{{r.cls}}">{{r.name}}</span><span class="cnt">{{r.count}}</span></span><span class="{{r.agent}}">{{r.glyph}}{{r.agent}}</span><span class="{{r.tmCls}}">{{r.time}}</span><span class="st {{r.stCls}}">{{r.state}}</span></div>
+      </sc-if>
+    </sc-for>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; display: flex; justify-content: space-between; padding: 0 12px; background: #3c3836; white-space: pre">
+    <span><span style="font-weight: 700">*Sessions*</span><span class="sp">  │  </span><span class="d">aiditor · 30 sessions · </span><span style="color: #b8bb26">4 open</span></span>
+    <span>3/18</span>
+  </div>
+  <div style="height: 26px; line-height: 26px; flex: none; padding: 0 12px; color: #a89984; white-space: pre"><span class="kh">n/p</span> move   <span class="kh">RET</span> switch   <span class="kh">TAB</span> fold   <span class="kh">P</span> pin   <span class="kh">a</span> archive   <span class="kh">D</span> delete   <span class="kh">g</span> refresh   <span class="kh">q</span> quit</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const base = { isRow: true, pre: '', first: '', name: '', cls: '', count: '', agent: '', glyph: '', time: '', tmCls: 'tm', state: '', stCls: '', sel: '' };
+    const glyphs = { claude: '✻ ', codex: '◆ ' };
+    const groupCls = { Pinned: 'pin', Archived: 'arc' };
+    const gap = () => ({ isGap: true });
+    const group = (open, name, count) => ({ ...base, pre: open ? '▾ ' : '▸ ', name, cls: groupCls[name] || 'grp', count: '  ' + count });
+    let today = false;
+    const mark = (g) => { today = g === 'Today'; return g; };
+    const s = (name, agent, time, state, stCls, extra) => ({ ...base, pre: '    ', name, cls: 'title', agent, glyph: glyphs[agent], time, tmCls: today ? 'today' : 'tm', state: state || '', stCls: stCls || '', ...(extra || {}) });
+    const rows = [
+      group(true, mark('Pinned'), '2'),
+      s('Watcher rescan on rename', 'claude', 'Tue 14:02', '○ idle', 'quiet'),
+      s('M8 roadmap: session list rework', 'codex', '2026-11-04', ''),
+      gap(),
+      group(true, mark('Today'), '5'),
+      s('ession list grouping and pins', 'codex', '15:58', '● working', 'running', { first: 'S', name: 'ession list grouping and pins', sel: 'sel' }),
+      s('Fix grep count width', 'codex', '15:31', '● awaiting permission', 'waiting'),
+      s('Explore #468: archive through ACP', 'claude', '13:40', ''),
+      s('Bump claude-agent-acp to 0.106', 'claude', '11:05', '● exited', 'failed'),
+      s('Why does swiper skip folded rows?', 'codex', '09:12', ''),
+      gap(),
+      group(true, mark('Yesterday'), '3'),
+      s('Wrap session table cells at a width cap', 'codex', '18:22', ''),
+      s('Keep point off the prompt marker', 'claude', '16:47', ''),
+      s('Review architecture refactors', 'codex', '10:03', ''),
+      gap(),
+      group(true, 'This week', '4'),
+      s('Type in the prompt while reading', 'codex', 'Wed 17:30', ''),
+      s('Terminal exit status in the mode line', 'claude', 'Wed 11:14', ''),
+      s('Gruvbox light: annotation contrast', 'codex', 'Tue 19:55', ''),
+      s('Spike: sessions from the Codex app', 'codex', 'Mon 09:41', ''),
+      gap(),
+      group(true, 'Older', '4'),
+      s('Fork and roll back sessions', 'claude', '2026-11-02', ''),
+      s('Questions: forms and URL requests', 'codex', '2026-10-30', ''),
+      s('Design: workspace list in a split', 'claude', '2026-10-27', ''),
+      s('Spike: list sessions started outside', 'codex', '2026-10-21', ''),
+      gap(),
+      group(false, 'Archived', '12'),
+    ];
+    return { rows };
+  }
+}
+</script>
+</body>
+</html>

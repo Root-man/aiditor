@@ -18,6 +18,7 @@
     "SessionTurns.dc.html": {"h": 900, "title": "6g · Telling turns apart (options) and mode line colours", "w": 1440, "x": 12160, "y": 1020},
     "SessionPrompt.dc.html":{"h": 900, "title": "6b · Session prompt: @, /, attach, paste", "w": 1440, "x": 4560, "y": 1020},
     "SessionRich.dc.html": {"h": 900, "title": "7 · Agent session, rich (M7, open)", "w": 1440, "x": 0, "y": 2040},
+    "Sessions.dc.html": {"h": 900, "title": "14 · Agent sessions list", "w": 1440, "x": 0, "y": 5100},
     "Splits.dc.html": {"h": 900, "title": "2 · Splits", "w": 1440, "x": 1520, "y": 0},
     "Terminal.dc.html": {"h": 900, "title": "5 · Terminal", "w": 1440, "x": 1520, "y": 1020},
     "WorkspaceList.dc.html": {"h": 900, "title": "13 · Workspace list", "w": 1440, "x": 0, "y": 4080},
@@ -51,7 +52,8 @@
     "WorkspaceList.dc.html",
     "WorkspaceListStudy.dc.html",
     "WorkspaceListNarrow.dc.html",
-    "WorkspaceListLight.dc.html"
+    "WorkspaceListLight.dc.html",
+    "Sessions.dc.html"
   ],
   "pages": [],
   "title": "aiditor visual direction"

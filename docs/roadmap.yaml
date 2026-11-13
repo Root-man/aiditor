@@ -2274,21 +2274,88 @@ milestones:
               - "Spec updated in docs/editor.md"
             blocked_by: [m8-workspace-list-fold]
       - key: m8-session-rework
-        title: "Agent session buffer rework"
+        title: "Agent session list rework"
         labels: [frontend, acp]
-        design: "#subsystems"
+        design: "#acp-integration-and-session-management"
         body: |
-          Rework the agent session buffer, functionally and visually. The scope is decided when the epic starts. Break down after the decision below. Tasks are tracked as sub-issues.
+          Rework the sessions list (`agent-sessions`, `*Sessions*`), functionally and visually. The scope is decided when the epic starts. Break down after the decision below. Tasks are tracked as sub-issues.
         tasks:
           - key: m8-decide-session-rework
-            title: "Decide: agent session buffer rework"
+            title: "Decide: agent session list rework"
             labels: [decision]
-            design: "#open-questions"
+            design: "#acp-integration-and-session-management"
             body: |
-              What to change in the session buffer, functionally and visually, after using the monospace session. Record the answer in `docs/editor.md` and break the epic into tasks.
+              What to change in the sessions list (`agent-sessions`, `*Sessions*`), functionally and visually; not the session buffer. Candidates: archive and delete a session, pins kept in a state file, groups by activity (Pinned, Today, Yesterday, This week from Monday, Older, Archived) folded with `TAB`, a state indicator in place of `[idle]` and the rest, and a search over whole sessions beside `C-s`'s swiper over titles. Record the answer in `docs/editor.md` and break the epic into tasks.
             acceptance:
               - "Decision recorded in docs/editor.md"
               - "The epic is broken down into tasks"
+          - key: m8-sessions-groups
+            title: "Group the sessions list by activity and fold groups with TAB"
+            body: |
+              Rebuild `*Sessions*` as frame 14 lays it out: no header line, the keys in the echo line, and the mode line naming the project, the session count and how many are open. Rows go under Pinned, Today, Yesterday, This week (calendar week from Monday), Older and Archived headings with `▾`/`▸` and a count, empty groups left out. `TAB` on a heading folds it; all start unfolded but Archived, and folds reset on `g`. Times show as `HH:MM` today and yesterday, `Wed 17:30` this week and `YYYY-MM-DD` before. `n`/`p` move over session rows and headings; point keeps its session across rebuilds.
+            acceptance:
+              - "Sessions fall in the right group at day and week boundaries, the week starting Monday"
+              - "TAB folds and unfolds a group; Archived starts folded; g resets the folds"
+              - "Point stays on its session across answers and folds"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-decide-session-rework]
+          - key: m8-sessions-look
+            title: "Draw the sessions list as frame 14"
+            body: |
+              Faces for the list per frame 14: headings in blue (Pinned purple, Archived grey) with a dim count, agents as `✻ claude` and `◆ codex` in their own colours, today's times in aqua, and for open sessions the state as a dot with the workspace list's words and faces (`● working`, `● awaiting permission`, `● exited`, `○ idle`). Settle loading and starting with the design.
+            acceptance:
+              - "The list in a full frame matches frame 14"
+              - "Core tests cover each row piece's face"
+            blocked_by: [m8-sessions-groups]
+          - key: m8-sessions-pins
+            title: "Pin sessions in the sessions list"
+            body: |
+              `P` on a session row pins or unpins it; pinned sessions list in Pinned, at the top. Pins are kept per agent and session id in `sessions.toml` in the platform's local data directory (`directories`' `data_local_dir`), written on each change, so they survive a restart. A pin whose session no longer lists is dropped quietly.
+            acceptance:
+              - "A pinned session lists under Pinned after a restart"
+              - "Unpinning moves it back to its activity group"
+              - "A pin whose session is gone is dropped from the file"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-sessions-groups]
+          - key: m8-sessions-delete
+            title: "Delete a session from the sessions list"
+            body: |
+              `D` on a session row asks for confirmation, then sends `session/delete` through `AgentOp::Delete` and drops the row. A session open in the editor has its process stopped first, as rollback does, since Claude Code rewrites its transcript as it exits. codex-acp's `session/delete` archives, so a Codex session fails with `Not supported yet`, as does any agent that doesn't advertise `sessionCapabilities.delete`.
+            acceptance:
+              - "Declining the confirmation deletes nothing"
+              - "Deleting an open session stops its process before the delete and the session no longer lists"
+              - "A Codex session and an agent without delete fail with `Not supported yet`"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-sessions-groups]
+          - key: m8-sessions-archive
+            title: "Archive a session from the sessions list"
+            body: |
+              `a` on a session row archives it. Neither adapter advertises `session/archive`, so for now a Codex session is archived with `session/delete` (its `thread/archive`), marked with a `shortcut:` comment, and other agents fail with `Not supported yet`. A session open in the editor has its process stopped first. The row leaves the list; the Archived group stays empty until an agent lists archived sessions (#481).
+            acceptance:
+              - "Archiving a Codex session sends session/delete and the row leaves the list"
+              - "Archiving a Claude session fails with `Not supported yet`"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-sessions-groups]
+          - key: m8-sessions-search
+            title: "Search the text of every listed session"
+            body: |
+              A command beside `C-s` (which stays swiper over the list's titles) searches the whole text of the project's sessions by running the grep service over each agent's own files: Claude Code's `~/.claude/projects/<cwd>/*.jsonl` and Codex's `~/.codex/sessions/**/rollout-*.jsonl`, limited to the listed sessions. How the hits are shown (lines of JSON, or the message they fall in) is decided when the task starts; `RET` on a hit opens or loads its session.
+            acceptance:
+              - "A word said only inside one session finds that session"
+              - "Only the current project's listed sessions are searched"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-decide-session-rework]
+          - key: m8-session-archive-native
+            title: "Archive sessions with session/archive"
+            body: |
+              Follow-up to the temporary archive. codex-acp 2.6.0 doesn't advertise `session/archive`, its `session/list` ignores the `archived` filter, and its `session/delete` archives (`thread/archive`, moving the rollout to `~/.codex/archived_sessions/`); real archive, unarchive, delete and archived listing exist only behind JetBrains' `_meta.jetbrains.air.sessionIndex`. So the list archives a Codex session with `session/delete` (a `shortcut:` comment) and archiving a Claude session fails with `Not supported yet`. Once codex-acp separates `session/archive` from `session/delete`, archive and unarchive with `session/archive`/`session/unarchive` when the agent advertises them, list archived sessions with `archived: include`, and make delete delete; drop the shortcut. Add Claude's archive the same way: claude-agent-acp 0.106.0 archives only through the JetBrains extension (an `[archived] ` title record in the transcript), so use `session/archive` once it advertises it. Needs `agent-client-protocol` with the archive methods (3.5 has none; 5.2 is current) or raw requests.
+            acceptance:
+              - "Codex archive, unarchive and delete each use their own ACP method, and the shortcut is gone"
+              - "Archived sessions of both agents list in the Archived group"
+              - "Claude sessions archive and unarchive when claude-agent-acp advertises session/archive"
+              - "Agents that don't advertise archive still fail with `Not supported yet`"
+              - "Spec updated in docs/editor.md"
+            blocked_by: [m8-decide-session-rework, m8-sessions-archive]
       - key: m8-session-polish
         title: "Agent session buffer polish"
         labels: [frontend, acp]

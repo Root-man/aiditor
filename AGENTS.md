@@ -36,6 +36,7 @@ The approved designs are in [docs/design](docs/design), exported from the [aidit
 - **13b · Workspace list study** ([WorkspaceListStudy.dc.html](docs/design/WorkspaceListStudy.dc.html)): every row kind and state, where each piece comes from, keys and rules.
 - **13c · Workspace list in a split** ([WorkspaceListNarrow.dc.html](docs/design/WorkspaceListNarrow.dc.html)): the list in a narrow window, beside a file.
 - **13d · Workspace list, Gruvbox light** ([WorkspaceListLight.dc.html](docs/design/WorkspaceListLight.dc.html)): the folded list in the light theme, with point away from the current workspace.
+- **14 · Agent sessions list** ([Sessions.dc.html](docs/design/Sessions.dc.html)): `*Sessions*` grouped by activity (Pinned, Today, Yesterday, This week, Older, Archived) with `TAB` folding, agent glyphs, times by age, open sessions' state dots and key hints in the echo line.
 
 Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those. Frames 6d, 6e, 6f and 6g still draw a prompt's and a message's time at the right of its first line; frame 6 is the reference: small, on the blank line under the block.
 
