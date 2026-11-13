@@ -162,6 +162,7 @@
 "<down>" = "agent-sessions-next"
 "<up>" = "agent-sessions-previous"
 "RET" = "agent-sessions-visit"
+"TAB" = "agent-sessions-toggle"
 "g" = "agent-sessions"
 "q" = "agent-sessions-quit"
 

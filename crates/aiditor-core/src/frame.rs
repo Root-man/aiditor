@@ -272,16 +272,15 @@ impl Core {
         display::FrameDisplay {
             windows,
             message: self.message.clone(),
-            key_hints: if self.current().workspace_list().is_some()
-                && self.message.is_none()
-                && self.prompts.minibuffer.is_none()
+            key_hints: match (self.message.is_none() && self.prompts.minibuffer.is_none())
+                .then(|| self.current())
             {
-                self.key_hints(match self.workspace() {
+                Some(b) if b.workspace_list().is_some() => self.key_hints(match self.workspace() {
                     Some(_) => crate::workspace_list::HINTS,
                     None => crate::workspace_list::LOBBY_HINTS,
-                })
-            } else {
-                Vec::new()
+                }),
+                Some(b) if b.session_list().is_some() => self.key_hints(crate::sessions::HINTS),
+                _ => Vec::new(),
             },
             minibuffer: self.minibuffer(),
             hint: self.hint(),
@@ -374,6 +373,13 @@ pub(crate) fn window_display(
         let line = buffer.line_col(point).map_or(0, |(l, _)| l) + 1;
         snapshot.decorate(buffer, &mut display, line);
         snapshot.fit(&mut display.lines, cols, &settings.theme);
+    }
+    if let Some(list) = buffer.session_list() {
+        list.decorate(
+            buffer,
+            &mut display,
+            buffer.line_col(point).map_or(0, |(l, _)| l),
+        );
     }
     // The workspace modeline shows the workspace, so a fileless buffer's name drops its suffix.
     if let Some(workspace) = workspace.filter(|_| buffer.file.is_none()) {
