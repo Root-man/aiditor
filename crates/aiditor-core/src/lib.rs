@@ -1109,6 +1109,8 @@ pub struct Core {
     list_requests: u64,
     /// The zone sessions' times show in.
     time_zone: jiff::tz::TimeZone,
+    /// The date and time now, which sessions' groups are reckoned from.
+    wall_clock: fn() -> jiff::Timestamp,
 }
 
 impl Default for Core {
@@ -1190,6 +1192,7 @@ impl Default for Core {
             environment_requests: 0,
             list_requests: 0,
             time_zone: jiff::tz::TimeZone::system(),
+            wall_clock: jiff::Timestamp::now,
         };
         let (keymaps, errors) = core.parse_keymaps(None).expect("bundled keymap parses");
         assert!(errors.is_empty(), "bundled keymap: {errors:?}");

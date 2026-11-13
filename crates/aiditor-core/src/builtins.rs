@@ -754,6 +754,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.sessions_visit(),
         },
         Command {
+            name: "agent-sessions-toggle",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.sessions_toggle(),
+        },
+        Command {
             name: "agent-sessions-quit",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.sessions_quit(),

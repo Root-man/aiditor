@@ -2,27 +2,97 @@
 //! `session/list`.
 
 use agent_client_protocol_schema::v1::{SessionId, SessionInfo};
-use jiff::Timestamp;
-use jiff::tz::TimeZone;
+use jiff::{Span, Timestamp, Zoned};
 
-use crate::buffer::{BufferId, Kind};
+use crate::buffer::{Buffer, BufferId, Kind};
+use crate::display::{ModeLine, WindowDisplay};
 use crate::project::ProjectId;
+use crate::settings::FaceName;
 use crate::{AgentOp, Core, Ctx, Open};
 
 const MODE: &str = "agent-sessions-mode";
-const HEADER: &str = "Sessions — RET switch, g refresh, n/p move, q quit";
+/// The widest a title shows, cut to one less and `…` past it.
+const TITLE_WIDTH: usize = 60;
+
+/// The echo line's actions, as the workspace list's.
+pub(crate) const HINTS: &[(&[&str], &str)] = &[
+    (&["agent-sessions-next", "agent-sessions-previous"], "move"),
+    (&["agent-sessions-visit"], "switch"),
+    (&["agent-sessions-toggle"], "fold"),
+    (&["agent-sessions"], "refresh"),
+    (&["agent-sessions-quit"], "quit"),
+];
+
+/// A group of sessions by activity, in the list's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    // Nothing is pinned or archived until pins and archived listings exist.
+    #[allow(dead_code)]
+    Pinned,
+    Today,
+    Yesterday,
+    Week,
+    Older,
+    Archived,
+}
+
+impl Group {
+    fn name(self) -> &'static str {
+        match self {
+            Group::Pinned => "Pinned",
+            Group::Today => "Today",
+            Group::Yesterday => "Yesterday",
+            Group::Week => "This week",
+            Group::Older => "Older",
+            Group::Archived => "Archived",
+        }
+    }
+
+    /// The group of a session updated at `time`, reckoned from `now`, and its time as shown.
+    fn of(time: Option<Timestamp>, now: &Zoned) -> (Group, String) {
+        let Some(time) = time else {
+            return (Group::Older, String::new());
+        };
+        let time = time.to_zoned(now.time_zone().clone());
+        let (date, today) = (time.date(), now.date());
+        let offset = today.weekday().to_monday_zero_offset();
+        let monday = today.checked_sub(Span::new().days(offset)).ok();
+        let (group, format) = if date >= today {
+            (Group::Today, "%H:%M")
+        } else if today.yesterday().ok() == Some(date) {
+            (Group::Yesterday, "%H:%M")
+        } else if monday.is_some_and(|monday| date >= monday) {
+            (Group::Week, "%a %H:%M")
+        } else {
+            (Group::Older, "%Y-%m-%d")
+        };
+        (group, time.strftime(format).to_string())
+    }
+}
+
+/// A line point can be on: a group's heading or a session's row.
+#[derive(Clone, Debug, PartialEq)]
+enum Row {
+    Heading(Group),
+    /// The agent's index and the session.
+    Session(usize, SessionId),
+}
 
 /// A sessions buffer's state.
 pub(crate) struct SessionList {
     project: ProjectId,
     /// One per registered agent, in registry order.
     agents: Vec<Listing>,
-    /// Each session row's line, agent index and session.
-    rows: Vec<(usize, usize, SessionId)>,
-    /// Each row's state as rendered, to rebuild when one changes.
-    states: Vec<Option<&'static str>>,
-    /// The agent and session point was last on, kept while no rows are listed.
-    at: Option<(usize, SessionId)>,
+    /// Each heading's and shown session row's line, in order.
+    rows: Vec<(usize, Row)>,
+    /// Every listed session, folded or shown, with its state as rendered, to rebuild when one
+    /// changes.
+    listed: Vec<(usize, SessionId, Option<&'static str>)>,
+    folded: Vec<Group>,
+    /// The row point was last on, kept while no rows are listed.
+    at: Option<Row>,
+    /// The mode line's project, session count and open count.
+    summary: String,
 }
 
 struct Listing {
@@ -39,11 +109,32 @@ fn timestamp(updated: Option<&str>) -> Option<Timestamp> {
     updated?.parse().ok()
 }
 
-/// `time` in `zone` to the minute.
-fn local(time: Timestamp, zone: &TimeZone) -> String {
-    time.to_zoned(zone.clone())
-        .strftime("%Y-%m-%d %H:%M")
-        .to_string()
+impl SessionList {
+    /// Puts the list's mode line, with point on `line`, on `buffer`'s `display`.
+    pub(crate) fn decorate(&self, buffer: &Buffer, display: &mut WindowDisplay, line: usize) {
+        let sessions: Vec<_> = (self.rows.iter())
+            .filter(|(_, row)| matches!(row, Row::Session(..)))
+            .map(|(line, _)| *line)
+            .collect();
+        let position = sessions.partition_point(|l| *l <= line).max(1);
+        let segment = |text: &str, face| vec![(text.to_string(), face)];
+        display.mode_line = ModeLine {
+            left: vec![
+                segment(&buffer.name, FaceName::ModeLine),
+                segment(&self.summary, FaceName::ModeLineDim),
+            ],
+            right: (!sessions.is_empty())
+                .then(|| {
+                    segment(
+                        &format!("{position}/{}", sessions.len()),
+                        FaceName::ModeLine,
+                    )
+                })
+                .into_iter()
+                .collect(),
+            path: None,
+        };
+    }
 }
 
 impl Core {
@@ -69,15 +160,14 @@ impl Core {
         .collect()
     }
 
-    /// Rebuilds the live sessions buffers whose rows' states changed since they were rendered.
+    /// Rebuilds the live sessions buffers whose sessions' states changed since they were rendered.
     pub(crate) fn sync_session_lists(&mut self) {
         let stale: Vec<_> = (self.buffers.recent())
             .filter_map(|(id, b)| Some((id, b.session_list()?)))
             .filter(|(_, list)| {
-                let states = (list.rows.iter()).map(|(_, agent, session)| {
-                    self.session_state(&list.agents[*agent].name, session)
-                });
-                !states.eq(list.states.iter().copied())
+                (list.listed.iter()).any(|(agent, session, state)| {
+                    self.session_state(&list.agents[*agent].name, session) != *state
+                })
             })
             .map(|(id, _)| id)
             .collect();
@@ -106,7 +196,9 @@ impl Core {
         }
     }
 
-    /// Rebuilds sessions buffer `id`'s text from its answers, keeping point on its session.
+    /// Rebuilds sessions buffer `id`'s text from its answers and folds, keeping point on its row.
+    // shortcut: groups are reckoned at each rebuild, so a list left open past midnight keeps its
+    // old groups until an answer, a state change, a fold or `g`; rebuild on the clock if that bites.
     fn render_sessions(&mut self, id: BufferId) {
         let Some(buffer) = self.buffers.get(id) else {
             return;
@@ -124,12 +216,12 @@ impl Core {
                 |w| w.point(&self.buffers),
             );
         let line = buffer.line_col(point).map_or(0, |(line, _)| line);
-        let at = match list.rows.iter().find(|(l, ..)| *l == line) {
-            Some((_, agent, session)) => Some((*agent, session.clone())),
+        let at = match list.rows.iter().find(|(l, _)| *l == line) {
+            Some((_, row)) => Some(row.clone()),
             None if list.rows.is_empty() => list.at.clone(),
             None => None,
         };
-        let mut lines = vec![HEADER.to_string(), String::new()];
+        let mut lines = Vec::new();
         let mut sessions = Vec::new();
         for (index, listing) in list.agents.iter().enumerate() {
             match &listing.answer {
@@ -147,42 +239,91 @@ impl Core {
         }
         // Stable: equal times keep registry order, then the agent's.
         sessions.sort_by_key(|&(.., time)| std::cmp::Reverse(time));
-        let width = (sessions.iter())
-            .map(|&(agent, ..)| list.agents[agent].name.chars().count())
+        let now = (self.wall_clock)().to_zoned(self.time_zone.clone());
+        let mut entries: Vec<_> = (sessions.into_iter())
+            .map(|(agent, info, time)| {
+                let (group, time) = Group::of(time, &now);
+                let mut title = (info.title.as_deref())
+                    .and_then(|t| t.lines().next())
+                    .filter(|t| !t.is_empty())
+                    .map_or_else(|| info.session_id.to_string(), str::to_string);
+                if title.chars().count() > TITLE_WIDTH {
+                    title = title.chars().take(TITLE_WIDTH - 1).chain(['…']).collect();
+                }
+                let state = self.session_state(&list.agents[agent].name, &info.session_id);
+                (group, agent, info.session_id.clone(), title, time, state)
+            })
+            .collect();
+        // Stable: each group keeps the time order.
+        entries.sort_by_key(|e| e.0);
+        let titles = entries
+            .iter()
+            .map(|e| e.3.chars().count())
             .max()
             .unwrap_or(0);
-        let (mut rows, mut states) = (Vec::new(), Vec::new());
-        for (agent, info, time) in sessions {
-            let name = &list.agents[agent].name;
-            let time = time.map_or_else(String::new, |t| local(t, &self.time_zone));
-            let state = self.session_state(name, &info.session_id);
-            states.push(state);
-            let state = state.map_or_else(String::new, |s| format!("{s} "));
-            let title = (info.title.as_deref())
-                .and_then(|t| t.lines().next())
-                .filter(|t| !t.is_empty())
-                .map_or_else(|| info.session_id.to_string(), str::to_string);
-            rows.push((lines.len(), agent, info.session_id.clone()));
-            lines.push(format!("{name:<width$}  {time:<16}  {state}{title}"));
+        let agents = (entries.iter())
+            .map(|e| list.agents[e.1].name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut rows = Vec::new();
+        for members in entries.chunk_by(|a, b| a.0 == b.0) {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            let group = members[0].0;
+            let folded = list.folded.contains(&group);
+            let mark = if folded { "▸" } else { "▾" };
+            rows.push((lines.len(), Row::Heading(group)));
+            lines.push(format!("{mark} {} {}", group.name(), members.len()));
+            if folded {
+                continue;
+            }
+            for (_, agent, session, title, time, state) in members {
+                let name = &list.agents[*agent].name;
+                let state = state.map_or_else(String::new, |s| format!("  {s}"));
+                let row = format!("  {title:<titles$}  {name:<agents$}  {time:>10}{state}");
+                rows.push((lines.len(), Row::Session(*agent, session.clone())));
+                lines.push(row.trim_end().to_string());
+            }
         }
-        if rows.is_empty() && list.agents.iter().all(|a| a.answer.is_some()) {
+        let all_answered = list.agents.iter().all(|a| a.answer.is_some());
+        if entries.is_empty() && all_answered {
             lines.push("No sessions".into());
         }
+        let listed: Vec<_> = (entries.iter())
+            .map(|(_, agent, session, .., state)| (*agent, session.clone(), *state))
+            .collect();
+        let open = listed.iter().filter(|(.., state)| state.is_some()).count();
+        let project =
+            (self.project_at(list.project)).map_or("", |i| &self.projects[i].project.name);
+        let summary = format!("{project} · {} sessions · {open} open", listed.len());
+        let shown = |row: &Row| rows.iter().find(|(_, r)| r == row).map(|(l, _)| *l);
+        let first_session = (rows.iter())
+            .find(|(_, r)| matches!(r, Row::Session(..)))
+            .map(|(l, _)| *l);
         let target = (at.as_ref())
-            .and_then(|key| rows.iter().find(|(_, a, s)| (*a, s) == (key.0, &key.1)))
-            .or(rows.first())
-            .map(|row| row.0);
+            .and_then(|at| {
+                shown(at).or_else(|| match at {
+                    // Folded away: its group's heading.
+                    Row::Session(agent, session) => (entries.iter())
+                        .find(|e| (e.1, &e.2) == (*agent, session))
+                        .and_then(|e| shown(&Row::Heading(e.0))),
+                    Row::Heading(_) => None,
+                })
+            })
+            .or(first_session)
+            .or(rows.first().map(|(l, _)| *l));
         let at = match rows.is_empty() {
             true => at,
-            false => rows
-                .iter()
-                .find(|r| Some(r.0) == target)
-                .map(|r| (r.1, r.2.clone())),
+            false => (rows.iter())
+                .find(|(l, _)| Some(*l) == target)
+                .map(|(_, r)| r.clone()),
         };
-        let rows_first = rows.first().map(|row| row.0);
+        let first = target.is_some()
+            && (target == first_session || target == rows.first().map(|(l, _)| *l));
         let buffer = self.buffers.get_mut(id).expect("checked above");
         let list = buffer.session_list_mut().expect("checked above");
-        (list.rows, list.states, list.at) = (rows, states, at);
+        (list.rows, list.listed, list.at, list.summary) = (rows, listed, at, summary);
         buffer.set_text(&lines.join("\n"));
         let point = match target {
             Some(line) => buffer.char_idx(line, 0).expect("a row is a line"),
@@ -195,7 +336,6 @@ impl Core {
                 .flat_map(|w| w.windows.iter_mut())
                 .flat_map(|w| w.windows_mut()),
         );
-        let first = target.is_some() && target == rows_first;
         for window in windows.filter(|w| w.buffer() == id) {
             window
                 .set_point(&mut self.buffers, point)
@@ -260,8 +400,10 @@ impl Ctx<'_> {
             project,
             agents,
             rows: Vec::new(),
-            states: Vec::new(),
+            listed: Vec::new(),
+            folded: vec![Group::Archived],
             at,
+            summary: String::new(),
         });
         core.switch_to(id);
         core.render_sessions(id);
@@ -287,7 +429,7 @@ impl Ctx<'_> {
         (self.core.current().session_list()).ok_or_else(|| "Not in a sessions buffer".into())
     }
 
-    /// `agent-sessions-next` and `-previous`: to the next or previous session row.
+    /// `agent-sessions-next` and `-previous`: to the next or previous heading or session row.
     pub(crate) fn sessions_move(&mut self, forward: bool) -> Result<(), String> {
         let rows = &self.session_rows()?.rows;
         let (first, last) = (rows.first(), rows.last());
@@ -299,8 +441,10 @@ impl Ctx<'_> {
             true => rows.iter().find(|r| r.0 > line).unwrap_or(last),
             false => rows.iter().rev().find(|r| r.0 < line).unwrap_or(first),
         };
-        let (line, first) = (target.0, target.0 == first.0);
-        // The header above the first row is otherwise out of reach once scrolled past.
+        let first_session = rows.iter().find(|(_, r)| matches!(r, Row::Session(..)));
+        let line = target.0;
+        let first = line == first.0 || first_session.is_some_and(|r| r.0 == line);
+        // The lines above the first row are otherwise out of reach once scrolled past.
         if first {
             self.core.windows.window.set_top(0);
         }
@@ -312,8 +456,11 @@ impl Ctx<'_> {
     pub(crate) fn sessions_visit(&mut self) -> Result<(), String> {
         let list = self.session_rows()?;
         let line = self.core.current().line_col(self.core.point())?.0;
-        let (_, agent, session) = (list.rows.iter())
-            .find(|r| r.0 == line)
+        let (agent, session) = (list.rows.iter())
+            .find_map(|(l, row)| match row {
+                Row::Session(agent, session) if *l == line => Some((agent, session)),
+                _ => None,
+            })
             .ok_or("Select a session row")?;
         let listing = &list.agents[*agent];
         let Some(buffer) = self.core.open_session(&listing.name, session) else {
@@ -339,6 +486,23 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// `agent-sessions-toggle`: folds or unfolds the group whose heading point is on.
+    pub(crate) fn sessions_toggle(&mut self) -> Result<(), String> {
+        let rows = &self.session_rows()?.rows;
+        let line = self.core.current().line_col(self.core.point())?.0;
+        let Some(&(_, Row::Heading(group))) = rows.iter().find(|(l, _)| *l == line) else {
+            return Ok(());
+        };
+        let list = (self.core.current_mut().session_list_mut()).expect("checked above");
+        match list.folded.iter().position(|g| *g == group) {
+            Some(index) => _ = list.folded.remove(index),
+            None => list.folded.push(group),
+        }
+        let id = self.core.windows.window.buffer();
+        self.core.render_sessions(id);
+        Ok(())
+    }
+
     /// `agent-sessions-quit`: kills the sessions buffer.
     pub(crate) fn sessions_quit(&mut self) -> Result<(), String> {
         self.session_rows()?;
@@ -356,7 +520,7 @@ mod tests {
         SessionConfigSelectOption, SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
         ToolCallUpdateFields,
     };
-    use jiff::tz::Offset;
+    use jiff::tz::{Offset, TimeZone};
 
     use super::*;
     use crate::harness::Harness;
@@ -365,12 +529,13 @@ mod tests {
     use crate::{AgentId, Effect, Msg, Request};
 
     /// A harness in workspace `work` on a project at `app`, with agents `claude` (`env` `A=2`)
-    /// and `codex`, showing times in UTC.
+    /// and `codex`, showing times in UTC at noon on Wednesday 2026-10-28.
     fn work() -> Harness {
         let mut h = Harness::new(&[("app/main.rs", "")]);
         h.core.rename_workspace("work").unwrap();
         h.core.projects[0].project.primary.path = h.path("app");
         h.core.time_zone = TimeZone::UTC;
+        h.core.wall_clock = || "2026-10-28T12:00:00Z".parse().unwrap();
         let agent = |command: &str, env: &[(&str, &str)]| Agent {
             command: command.into(),
             args: Vec::new(),
@@ -412,11 +577,14 @@ mod tests {
         h.send(Msg::AgentListed { request, result });
     }
 
-    /// The text after the header and its blank line.
     fn body(h: &Harness) -> String {
         let id = h.core.buffers.find("*Sessions*<work>").expect("listed");
-        let text = h.core.buffers.get(id).unwrap().text().to_string();
-        text.strip_prefix(&format!("{HEADER}\n\n")).unwrap().into()
+        h.core.buffers.get(id).unwrap().text().to_string()
+    }
+
+    /// The last line, the only row of a one-session list.
+    fn last(h: &Harness) -> String {
+        body(h).lines().last().unwrap().into()
     }
 
     fn line(h: &Harness) -> String {
@@ -447,18 +615,43 @@ mod tests {
     #[test]
     fn times_show_in_the_given_zone_whatever_their_offset() {
         let zone = TimeZone::fixed(Offset::constant(2));
-        let shown = |s: &str| timestamp(Some(s)).map(|t| local(t, &zone));
-        assert_eq!(shown("2026-10-28T10:00:00Z").unwrap(), "2026-10-28 12:00");
-        assert_eq!(
-            shown("2026-10-28T12:30:00.123+02:00").unwrap(),
-            "2026-10-28 12:30"
-        );
-        assert_eq!(
-            shown("2026-10-28T05:15:00.5-04:00").unwrap(),
-            "2026-10-28 11:15"
-        );
-        assert_eq!(shown("yesterday"), None);
+        let now = timestamp(Some("2026-10-28T20:00:00+02:00")).unwrap();
+        let now = now.to_zoned(zone);
+        let shown = |s: &str| Group::of(timestamp(Some(s)), &now);
+        let today = |time: &str| (Group::Today, time.to_string());
+        assert_eq!(shown("2026-10-28T10:00:00Z"), today("12:00"));
+        assert_eq!(shown("2026-10-28T12:30:00.123+02:00"), today("12:30"));
+        assert_eq!(shown("2026-10-28T05:15:00.5-04:00"), today("11:15"));
+        assert_eq!(timestamp(Some("yesterday")), None);
         assert_eq!(timestamp(None), None);
+        assert_eq!(Group::of(None, &now), (Group::Older, String::new()));
+    }
+
+    #[test]
+    fn sessions_fall_in_their_group_at_day_and_week_boundaries() {
+        let at = |s: &str| timestamp(Some(s)).unwrap().to_zoned(TimeZone::UTC);
+        let of = |now: &Zoned, s: &str| Group::of(timestamp(Some(s)), now);
+        let wednesday = at("2026-10-28T00:30:00Z");
+        let cases = [
+            ("2026-10-28T00:10:00Z", Group::Today, "00:10"),
+            // Later than now, as a skewed clock reports it.
+            ("2026-10-29T08:00:00Z", Group::Today, "08:00"),
+            ("2026-10-27T23:50:00Z", Group::Yesterday, "23:50"),
+            ("2026-10-26T23:50:00Z", Group::Week, "Mon 23:50"),
+            ("2026-10-26T00:00:00Z", Group::Week, "Mon 00:00"),
+            ("2026-10-25T23:59:00Z", Group::Older, "2026-10-25"),
+        ];
+        for (time, group, shown) in cases {
+            assert_eq!(of(&wednesday, time), (group, shown.into()), "{time}");
+        }
+        let monday = at("2026-10-26T09:00:00Z");
+        assert_eq!(of(&monday, "2026-10-25T10:00:00Z").0, Group::Yesterday);
+        assert_eq!(of(&monday, "2026-10-24T10:00:00Z").0, Group::Older);
+        let sunday = at("2026-11-01T09:00:00Z");
+        assert_eq!(
+            of(&sunday, "2026-10-26T10:00:00Z"),
+            (Group::Week, "Mon 10:00".into())
+        );
     }
 
     #[test]
@@ -477,6 +670,10 @@ mod tests {
         assert_eq!(h.core.current().major_mode, MODE);
         assert!(h.core.current().read_only);
         assert_eq!(body(&h), "Listing claude...\nListing codex...");
+        assert_eq!(
+            h.core.current().session_list().unwrap().folded,
+            [Group::Archived]
+        );
         h.keys("x");
         assert_eq!(h.core.message(), Some("Buffer is read-only"));
     }
@@ -537,11 +734,12 @@ mod tests {
         let h = listed();
         assert_eq!(
             body(&h),
-            "claude  2026-10-28 10:00  Fix it\n\
-             codex   2026-10-28 09:00  Port\n\
-             claude  2026-10-28 08:00  Old"
+            "▾ Today 3\n\
+            \x20 Fix it  claude       10:00\n\
+            \x20 Port    codex        09:00\n\
+            \x20 Old     claude       08:00"
         );
-        assert_eq!(line(&h), "claude  2026-10-28 10:00  Fix it");
+        assert_eq!(line(&h), "  Fix it  claude       10:00");
     }
 
     #[test]
@@ -552,22 +750,24 @@ mod tests {
         let sessions = vec![
             info("none", None, None),
             info("bad", Some("Bad\nsecond line"), Some("yesterday")),
-            info("good", Some("Good"), Some("2026-10-28T10:00:00Z")),
+            info("good", Some("Good"), Some("2026-10-14T10:00:00Z")),
         ];
         answer(&mut h, requests[0].0, Ok(sessions));
         assert_eq!(
             body(&h),
             "Listing codex...\n\
-             claude  2026-10-28 10:00  Good\n\
-             claude                    none\n\
-             claude                    Bad"
+             \n\
+             ▾ Older 3\n\
+            \x20 Good  claude  2026-10-14\n\
+            \x20 none  claude\n\
+            \x20 Bad   claude"
         );
         answer(
             &mut h,
             requests[1].0,
             Err("closed: {\n  \"method\": \"initialize\"\n}"),
         );
-        assert!(body(&h).starts_with("codex: closed: { \"method\": \"initialize\" }\nclaude  "));
+        assert!(body(&h).starts_with("codex: closed: { \"method\": \"initialize\" }\n\n▾ Older"));
         h.keys("n RET");
         assert_eq!(
             h.core.session_state("claude", &"none".into()),
@@ -591,7 +791,7 @@ mod tests {
     fn point_stays_on_its_session_and_g_drops_late_answers() {
         let mut h = listed();
         h.keys("n");
-        assert!(line(&h).ends_with("Port"));
+        assert!(line(&h).contains("Port"));
         h.keys("g");
         let new = (3, 4);
         let requests = lists(&mut h);
@@ -606,18 +806,20 @@ mod tests {
         answer(&mut h, new.1, Ok(vec![x1]));
         let newer = info("c3", Some("New"), Some("2026-10-28T11:00:00Z"));
         answer(&mut h, new.0, Ok(vec![newer]));
-        assert!(body(&h).starts_with("claude  2026-10-28 11:00  New\ncodex "));
-        assert!(line(&h).ends_with("Port"));
+        assert!(body(&h).starts_with("▾ Today 2\n  New   claude  "));
+        assert!(line(&h).contains("Port"));
     }
 
     #[test]
     fn rows_are_moved_over_and_q_kills_the_list() {
         let mut h = listed();
         h.keys("n n n p");
-        assert!(line(&h).ends_with("Port"));
+        assert!(line(&h).contains("Port"));
+        h.keys("p");
+        assert!(line(&h).contains("Fix it"));
         h.keys("p p");
-        assert!(line(&h).ends_with("Fix it"));
-        h.keys("M-<").keys("RET");
+        assert_eq!(line(&h), "▾ Today 3");
+        h.keys("RET");
         assert_eq!(h.core.message(), Some("Select a session row"));
         h.keys("q");
         assert!(h.core.buffers.find("*Sessions*<work>").is_none());
@@ -650,7 +852,7 @@ mod tests {
             h.keys("p");
             h.display(5);
         }
-        assert_eq!(line(&h), "claude                    c0");
+        assert_eq!(line(&h), "▾ Older 20");
         assert_eq!(h.display(5).lines[0].number, 0);
         for _ in 0..20 {
             h.keys("n");
@@ -684,9 +886,10 @@ mod tests {
         answer(&mut h, requests[1].0, Ok(sessions[..1].to_vec()));
         assert_eq!(
             body(&h),
-            "claude  2026-10-28 10:00  [idle] Mine\n\
-             codex   2026-10-28 10:00  Mine\n\
-             claude  2026-10-28 09:00  Other"
+            "▾ Today 3\n\
+            \x20 Mine   claude       10:00  [idle]\n\
+            \x20 Mine   codex        10:00\n\
+            \x20 Other  claude       09:00"
         );
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
@@ -721,7 +924,7 @@ mod tests {
             result: Ok(NewSessionResponse::new("f")),
         });
         // Codex's session of the same id is another session.
-        assert_eq!(body(&h), "codex  2026-10-28 10:00  Mine");
+        assert_eq!(body(&h), "▾ Today 1\n  Mine  codex       10:00");
     }
 
     #[test]
@@ -756,7 +959,7 @@ mod tests {
         assert_eq!(h.core.message(), Some("Loading claude session..."));
         // The list stays shown while the history loads.
         assert_eq!(h.core.windows.window.buffer(), list);
-        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [loading] Fix it\n"));
+        assert!(body(&h).starts_with("▾ Today 3\n  Fix it  claude       10:00  [loading]\n"));
         let session = h.core.buffers.find("*claude: Fix it*<work>").unwrap();
         let user = SessionUpdate::UserMessageChunk(ContentChunk::new("hi".into()));
         let reply = SessionUpdate::AgentMessageChunk(ContentChunk::new("hello".into()));
@@ -785,7 +988,7 @@ mod tests {
         );
         assert_eq!(h.core.windows.window.buffer(), session);
         h.core.switch_to(list);
-        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
+        assert!(body(&h).starts_with("▾ Today 3\n  Fix it  claude       10:00  [idle]\n"));
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
         h.keys("x RET");
@@ -819,7 +1022,7 @@ mod tests {
         assert_eq!(h.core.windows.window.buffer(), other);
         assert_eq!(h.core.message(), Some("claude session ready (modes: none)"));
         h.core.switch_to(list);
-        assert!(body(&h).starts_with("claude  2026-10-28 10:00  [idle] Fix it\n"));
+        assert!(body(&h).starts_with("▾ Today 3\n  Fix it  claude       10:00  [idle]\n"));
     }
 
     #[test]
@@ -837,7 +1040,7 @@ mod tests {
         h.keys("M-x agent-sessions RET");
         let requests = lists(&mut h);
         answer(&mut h, requests[0].0, Ok(vec![info("c1", None, None)]));
-        assert_eq!(line(&h), "claude                    [idle] c1");
+        assert_eq!(line(&h), "  c1  claude              [idle]");
         h.keys("RET");
         assert_eq!(
             (h.core.workspace().unwrap(), h.core.windows.window.buffer()),
@@ -858,10 +1061,10 @@ mod tests {
         let requests = lists(&mut h);
         answer(&mut h, requests[0].0, Ok(vec![info("c1", None, None)]));
         answer(&mut h, requests[1].0, Ok(Vec::new()));
-        assert_eq!(body(&h), "claude                    [idle] c1");
+        assert_eq!(last(&h), "  c1  claude              [idle]");
         h.core.switch_to(session);
         h.keys("a RET");
-        assert_eq!(body(&h), "claude                    [working] c1");
+        assert_eq!(last(&h), "  c1  claude              [working]");
         let option = PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce);
         let call = ToolCallUpdate::new("t", ToolCallUpdateFields::new());
         let ask = RequestPermissionRequest::new("c1", call, vec![option]);
@@ -870,23 +1073,200 @@ mod tests {
             request: RequestId::Number(1),
             body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
         });
-        assert_eq!(body(&h), "claude                    [waiting] c1");
+        assert_eq!(last(&h), "  c1  claude              [waiting]");
         h.keys("C-c C-y");
-        assert_eq!(body(&h), "claude                    [working] c1");
+        assert_eq!(last(&h), "  c1  claude              [working]");
         h.send(Msg::AgentPrompted {
             id: AgentId(0),
             result: Ok(StopReason::EndTurn),
         });
-        assert_eq!(body(&h), "claude                    [idle] c1");
+        assert_eq!(last(&h), "  c1  claude              [idle]");
         h.send(Msg::AgentExited {
             id: AgentId(0),
             code: 1,
             signal: None,
         });
-        assert_eq!(body(&h), "claude                    [ended] c1");
+        assert_eq!(last(&h), "  c1  claude              [ended]");
         h.core.switch_to(session);
         h.keys("C-x k RET");
         assert!(h.core.buffers.get(session).is_none());
-        assert_eq!(body(&h), "claude                    c1");
+        assert_eq!(last(&h), "  c1  claude");
+    }
+
+    /// `listed`, plus claude's `y1` yesterday and `o1` two weeks ago.
+    fn grouped() -> Harness {
+        let mut h = listed();
+        h.keys("g");
+        let requests = lists(&mut h);
+        let claude = vec![
+            info("c1", Some("Fix it"), Some("2026-10-28T10:00:00Z")),
+            info("c2", Some("Old"), Some("2026-10-28T08:00:00Z")),
+            info("y1", Some("Late"), Some("2026-10-27T23:00:00Z")),
+            info("o1", Some("Ancient"), Some("2026-10-14T09:00:00Z")),
+        ];
+        answer(&mut h, requests[0].0, Ok(claude));
+        let codex = vec![info("x1", Some("Port"), Some("2026-10-28T09:00:00Z"))];
+        answer(&mut h, requests[1].0, Ok(codex));
+        h
+    }
+
+    #[test]
+    fn groups_show_headings_with_counts_and_moves_cross_them() {
+        let mut h = grouped();
+        assert_eq!(
+            body(&h),
+            "▾ Today 3\n\
+            \x20 Fix it   claude       10:00\n\
+            \x20 Port     codex        09:00\n\
+            \x20 Old      claude       08:00\n\
+            \n\
+            ▾ Yesterday 1\n\
+            \x20 Late     claude       23:00\n\
+            \n\
+            ▾ Older 1\n\
+            \x20 Ancient  claude  2026-10-14"
+        );
+        h.keys("n n n");
+        assert_eq!(line(&h), "▾ Yesterday 1");
+        h.keys("n n n n");
+        assert!(line(&h).contains("Ancient"));
+        h.keys("p");
+        assert_eq!(line(&h), "▾ Older 1");
+    }
+
+    #[test]
+    fn tab_folds_a_group_and_g_resets_the_folds() {
+        let mut h = grouped();
+        h.keys("TAB");
+        // Only headings fold.
+        assert!(line(&h).contains("Fix it"));
+        h.keys("p TAB");
+        assert_eq!(line(&h), "▸ Today 3");
+        assert!(body(&h).starts_with("▸ Today 3\n\n▾ Yesterday 1\n"));
+        h.keys("TAB");
+        assert_eq!(line(&h), "▾ Today 3");
+        assert!(body(&h).starts_with("▾ Today 3\n  Fix it "));
+        h.keys("TAB g");
+        let requests = lists(&mut h);
+        for (request, ..) in requests {
+            let x1 = info("x1", Some("Port"), Some("2026-10-28T09:00:00Z"));
+            answer(&mut h, request, Ok(vec![x1]));
+        }
+        assert!(body(&h).starts_with("▾ Today 2\n"));
+    }
+
+    #[test]
+    fn point_keeps_its_heading_and_a_folded_session_goes_to_its_heading() {
+        let mut h = grouped();
+        h.keys("n n n");
+        assert_eq!(line(&h), "▾ Yesterday 1");
+        let mut sessions = vec![info("c0", Some("New"), Some("2026-10-28T11:00:00Z"))];
+        sessions.extend([
+            info("c1", Some("Fix it"), Some("2026-10-28T10:00:00Z")),
+            info("y1", Some("Late"), Some("2026-10-27T23:00:00Z")),
+        ]);
+        answer(&mut h, 3, Ok(sessions.clone()));
+        assert_eq!(line(&h), "▾ Yesterday 1");
+        h.keys("M-< n");
+        assert!(line(&h).contains("New"));
+        // Folded from its heading, an answer keeps point there.
+        h.keys("p TAB");
+        answer(&mut h, 3, Ok(sessions));
+        assert_eq!(line(&h), "▸ Today 3");
+    }
+
+    #[test]
+    fn a_session_folded_away_puts_point_on_its_heading() {
+        let mut h = grouped();
+        let list = h.core.windows.window.buffer();
+        h.keys("n");
+        assert!(line(&h).contains("Port"));
+        let buffer = h.core.buffers.get_mut(list).unwrap();
+        buffer.session_list_mut().unwrap().folded.push(Group::Today);
+        h.core.render_sessions(list);
+        assert_eq!(line(&h), "▸ Today 3");
+    }
+
+    #[test]
+    fn a_long_title_is_cut() {
+        let mut h = work();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let long = "x".repeat(80);
+        let at = Some("2026-10-28T10:00:00Z");
+        answer(&mut h, requests[0].0, Ok(vec![info("c1", Some(&long), at)]));
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        let row = last(&h);
+        assert_eq!(row, format!("  {}…  claude       10:00", "x".repeat(59)));
+        assert_eq!(row.chars().position(|c| c == 'c'), Some(64));
+    }
+
+    #[test]
+    fn the_mode_line_counts_sessions_and_the_echo_line_shows_keys() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("c1")),
+        });
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let at = |hour| Some(format!("2026-10-28T{hour}:00:00Z"));
+        let claude = vec![
+            info("c1", Some("Mine"), at("10").as_deref()),
+            info("c2", Some("Other"), at("09").as_deref()),
+            info("c3", Some("Third"), at("08").as_deref()),
+        ];
+        answer(&mut h, requests[0].0, Ok(claude));
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        h.keys("n");
+        let frame = h.frame(1440., 900.);
+        let mode_line = &frame.windows[0].display.mode_line;
+        let segment = |s: &crate::display::Segment| s.iter().map(|(t, _)| t.as_str()).collect();
+        let left: Vec<String> = mode_line.left.iter().map(segment).collect();
+        assert_eq!(left, ["*Sessions*", "home · 3 sessions · 1 open"]);
+        let right: Vec<String> = mode_line.right.iter().map(segment).collect();
+        assert_eq!(right, ["2/3"]);
+        let hints: Vec<_> = (frame.key_hints.iter())
+            .map(|(k, a)| (k.as_str(), *a))
+            .collect();
+        assert_eq!(
+            hints,
+            [
+                ("n/p", "move"),
+                ("RET", "switch"),
+                ("TAB", "fold"),
+                ("g", "refresh"),
+                ("q", "quit")
+            ]
+        );
+    }
+
+    #[test]
+    fn on_a_monday_two_days_back_is_older_and_an_empty_list_has_no_position() {
+        let mut h = work();
+        h.core.wall_clock = || "2026-10-26T09:00:00Z".parse().unwrap();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let sessions = vec![
+            info("s1", Some("Sun"), Some("2026-10-25T10:00:00Z")),
+            info("s2", Some("Sat"), Some("2026-10-24T10:00:00Z")),
+        ];
+        answer(&mut h, requests[0].0, Ok(sessions));
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        assert_eq!(
+            body(&h),
+            "▾ Yesterday 1\n\
+            \x20 Sun  claude       10:00\n\
+            \n\
+            ▾ Older 1\n\
+            \x20 Sat  claude  2026-10-24"
+        );
+        h.keys("g");
+        for (request, ..) in lists(&mut h) {
+            answer(&mut h, request, Ok(Vec::new()));
+        }
+        let frame = h.frame(1440., 900.);
+        assert!(frame.windows[0].display.mode_line.right.is_empty());
     }
 }
