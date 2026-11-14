@@ -467,6 +467,9 @@ impl Editor {
         if let Some(benchmark) = &mut self.benchmark {
             benchmark.output(&msg, start);
         }
+        if !matches!(msg, Msg::Tick) {
+            tracing::debug!(?msg, "debug-watch: handle");
+        }
         let effects = self.core.handle(start, msg);
         if let Some(debug) = &mut self.debug {
             debug.handle = start.elapsed();
@@ -681,6 +684,11 @@ mod tests {
 
     impl NativeTest {
         fn new(cx: &TestAppContext) -> Self {
+            _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .try_init();
             Self {
                 cx: cx.clone(),
                 _lock: crate::native::lock(),

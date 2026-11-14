@@ -97,7 +97,10 @@ fn run(mut state: State, rx: Receiver<In>, send: impl Fn(Msg)) {
                 state.set(set);
                 continue;
             }
-            In::Event(Ok(event)) => event,
+            In::Event(Ok(event)) => {
+                tracing::debug!(?event, "debug-watch: event");
+                event
+            }
             In::Event(Err(err)) => {
                 tracing::info!(%err, "watch error, rescanning");
                 rescan = true;
@@ -367,6 +370,7 @@ impl State {
             }
         } else {
             let error = errors.join("; ");
+            tracing::debug!(%error, "debug-watch: sync failed");
             if self.failure.as_ref() != Some(&error) {
                 self.messages
                     .push(format!("File watching failed: {error}; retrying"));
@@ -554,6 +558,7 @@ impl State {
                 (path, disk)
             })
             .collect();
+        tracing::debug!(?paths, rescan, "debug-watch: flush");
         Some(Msg::FilesChanged { paths, rescan })
     }
 }

@@ -1,0 +1,55 @@
+# Temporary: reproduces main's macOS panic after #490 with watcher tracing. Not for merging.
+name: Debug macOS watch rescan
+
+on:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_LOG: aiditor_services::watcher=debug,aiditor::editor=debug
+
+jobs:
+  repro:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "RUST_VERSION=$(awk '$1 == "rust" {print $2}' .tool-versions)" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/*/Cargo.toml') }}
+          restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
+      - run: cargo test -p aiditor --bin aiditor --no-run
+      - name: Run the editor tests repeatedly
+        run: |
+          mkdir -p logs
+          fails=0
+          for i in $(seq 1 8); do
+            if ! cargo test -p aiditor --bin aiditor -- --nocapture --test-threads=1 > "logs/suite-$i.log" 2>&1; then
+              fails=$((fails + 1))
+              echo "::warning::suite run $i failed"
+              grep -n -B40 "panicked" "logs/suite-$i.log" | grep -E "debug-watch|panicked|^--" | tail -60
+            fi
+          done
+          for i in $(seq 1 30); do
+            if ! cargo test -p aiditor --bin aiditor -- --nocapture --exact editor::tests::a_full_channel_lets_other_ui_work_run > "logs/single-$i.log" 2>&1; then
+              fails=$((fails + 1))
+              echo "::warning::single run $i failed"
+              grep -E "debug-watch|panicked" "logs/single-$i.log" | tail -40
+            fi
+          done
+          echo "failed runs: $fails"
+          grep -h "debug-watch: sync failed\|watch error" logs/*.log | sort | uniq -c | head -40
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: watch-logs
+          path: logs/
