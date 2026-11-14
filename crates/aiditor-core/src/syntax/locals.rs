@@ -40,6 +40,7 @@ impl Fragment {
                 .all(|(at, c)| c.ready(start + at, bytes))
     }
 
+    #[cfg(debug_assertions)]
     fn index(self: &Arc<Self>, index: &mut HashMap<usize, Arc<Self>>) {
         index.insert(self.id, self.clone());
         for (_, child) in &self.children {

@@ -5,13 +5,14 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     CancelNotification, InitializeRequest, ListSessionsRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, StopReason,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client};
 use tempfile::TempDir;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
@@ -61,7 +62,7 @@ async fn fake(script: &str) -> Fake {
     let cwd = dir.path().to_owned();
     tokio::spawn(
         Client
-            .builder()
+            .v1()
             .on_receive_request(
                 async move |ask: RequestPermissionRequest,
                             responder,

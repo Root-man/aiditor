@@ -1340,14 +1340,18 @@ pub fn unified_diff(
 // shortcut: a marker inside a changed line goes to the hunk's start; diff hunks by chars if that grates.
 pub fn diff(old: &str, new: &str) -> Vec<(Range<usize>, String)> {
     let diff = similar::TextDiff::from_lines(old, new);
-    let (olds, news) = (diff.old_slices(), diff.new_slices());
     let mut at = 0;
     let mut edits = Vec::new();
     for op in diff.ops() {
         let (tag, old_lines, new_lines) = op.as_tag_tuple();
-        let len: usize = olds[old_lines].iter().map(|s| s.chars().count()).sum();
+        let len: usize = (old_lines.filter_map(|i| diff.old_slice(i)))
+            .map(|s| s.chars().count())
+            .sum();
         if tag != similar::DiffTag::Equal {
-            edits.push((at..at + len, news[new_lines].concat()));
+            edits.push((
+                at..at + len,
+                new_lines.filter_map(|i| diff.new_slice(i)).collect(),
+            ));
         }
         at += len;
     }

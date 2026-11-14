@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::{AgentRequest, Error, PromptRequest, SessionUpdate};
+use agent_client_protocol::v1::schema::{AgentRequest, Error, PromptRequest, SessionUpdate};
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::settings::FaceName;
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg, Open};

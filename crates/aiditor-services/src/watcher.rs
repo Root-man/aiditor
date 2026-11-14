@@ -443,7 +443,6 @@ impl State {
                 Err(err) => errors.push(format!("add {}: {err}", path.display())),
             }
         }
-        // shortcut: notify 8.2.0 hides some macOS startup failures; revisit when its API reports them.
         match paths.commit() {
             Ok(()) => {
                 self.watched = next;
