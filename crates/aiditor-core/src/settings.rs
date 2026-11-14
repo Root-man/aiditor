@@ -170,6 +170,12 @@ pub enum FaceName {
     QualityEpic,
     QualityLegendary,
     QualityArtifact,
+    SessionListGroup,
+    SessionListPinned,
+    SessionListCount,
+    SessionListToday,
+    AgentClaude,
+    AgentCodex,
 }
 
 /// A resolved theme: `themes.default` with the selected one merged over it.
@@ -545,6 +551,12 @@ mod tests {
             "quality-epic",
             "quality-legendary",
             "quality-artifact",
+            "session-list-group",
+            "session-list-pinned",
+            "session-list-count",
+            "session-list-today",
+            "agent-claude",
+            "agent-codex",
         ];
         let theme = Settings::default().theme;
         assert_eq!(theme.faces.len(), names.len());
@@ -553,7 +565,11 @@ mod tests {
         for name in names {
             let parsed = toml::Value::String(name.into()).try_into().unwrap();
             assert!(theme.faces.contains_key(&parsed), "{name}");
-            if name.starts_with("quality-") || name == "session-user-rule" {
+            if name.starts_with("quality-")
+                || name.starts_with("session-list-")
+                || name.starts_with("agent-")
+                || name == "session-user-rule"
+            {
                 assert!(theme.face(parsed).fg.is_some(), "{name}");
             }
         }

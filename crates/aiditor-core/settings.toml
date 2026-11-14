@@ -105,6 +105,13 @@ quality-rare = { fg = 0x83a598 }
 quality-epic = { fg = 0xd3869b }
 quality-legendary = { fg = 0xfe8019 }
 quality-artifact = { fg = 0xe6cc80 }
+# `*Sessions*`' headings, counts, today's times and agents (frame 14).
+session-list-group = { fg = 0x83a598, bold = true }
+session-list-pinned = { fg = 0xd3869b, bold = true }
+session-list-count = { fg = 0x665c54 }
+session-list-today = { fg = 0x8ec07c }
+agent-claude = { fg = 0xfe8019 }
+agent-codex = { fg = 0x8ec07c }
 
 # Code's faces by tree-sitter capture name; one without an entry takes its longest dotted
 # prefix's (`function.method` falls back to `function`), and none means the default face.
