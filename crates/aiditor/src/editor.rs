@@ -677,13 +677,19 @@ mod tests {
     struct NativeTest {
         cx: TestAppContext,
         _lock: Option<std::sync::MutexGuard<'static, ()>>,
+        _runtime: tokio::runtime::EnterGuard<'static>,
     }
+
+    /// Lets a watcher report's file checks reach Tokio's blocking pool in any native test.
+    static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
+        std::sync::LazyLock::new(|| tokio::runtime::Runtime::new().unwrap());
 
     impl NativeTest {
         fn new(cx: &TestAppContext) -> Self {
             Self {
                 cx: cx.clone(),
                 _lock: crate::native::lock(),
+                _runtime: RUNTIME.enter(),
             }
         }
     }
@@ -717,7 +723,7 @@ mod tests {
             let mut core = Core::default();
             core.launch(&path, path.parent().unwrap());
             core.open(&path, files::read(&path).unwrap());
-            // The fixture has no Tokio runtime for the file's repository lookup.
+            // Takes the launch's asks here, so the fixture never runs the repository lookup.
             core.handle(Instant::now(), Msg::Tick);
             Editor::new(
                 core,
