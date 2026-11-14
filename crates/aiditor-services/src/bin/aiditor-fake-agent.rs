@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ConfigOptionUpdate, CreateElicitationRequest,
     DeleteSessionRequest, DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
@@ -26,7 +27,7 @@ use agent_client_protocol::schema::v1::{
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     ToolCallUpdate,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -339,7 +340,7 @@ async fn main() -> agent_client_protocol::Result<()> {
         tokio::io::stdin().compat(),
     );
     let result = Agent
-        .builder()
+        .v1()
         .on_receive_request(
             async move |request: InitializeRequest, responder, _| {
                 let caps = &request.client_capabilities;

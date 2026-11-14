@@ -12,13 +12,14 @@ use std::thread;
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, DeleteSessionRequest,
     ElicitationCapabilities, ElicitationFormCapabilities, ForkSessionRequest, Implementation,
     InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
     NewSessionResponse, PromptRequest, RequestId, SessionInfo, SessionNotification,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
+use agent_client_protocol::v1::{ConnectionTo, Responder};
+use agent_client_protocol::{Agent, ByteStreams, Client};
 use aiditor_core::{AgentId, AgentOp, Msg, Open, Request};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -164,7 +165,7 @@ impl Agents {
                 let responder = (self.handles.get(&id))
                     .and_then(|agent| agent.pending.lock().unwrap().remove(&request))
                     .map(|(responder, _)| responder);
-                let result = result.map(|response| {
+                let result = (result.map_err(Into::into)).map(|response| {
                     serde_json::to_value(response).expect("a ClientResponse serializes")
                 });
                 if let Some(responder) = responder
@@ -445,7 +446,7 @@ async fn list_sessions(
 ) -> Result<Vec<SessionInfo>, String> {
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
     let listed = Client
-        .builder()
+        .v1()
         .connect_with(transport, async |agent: ConnectionTo<Agent>| {
             let initialize = InitializeRequest::new(ProtocolVersion::V1)
                 .client_info(Implementation::new("aiditor", env!("CARGO_PKG_VERSION")));
@@ -507,7 +508,7 @@ async fn connect(
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
     let mut started = false;
     let result = Client
-        .builder()
+        .v1()
         .on_receive_request(
             async move |body: AgentRequest, responder: Responder, _| {
                 let request = responder.id().clone();
@@ -668,7 +669,7 @@ fn exit(id: AgentId, status: ExitStatus) -> Msg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::ImageContent;
+    use agent_client_protocol::v1::schema::ImageContent;
 
     #[test]
     fn base64_pads_each_tail() {

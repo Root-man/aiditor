@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     ClientResponse, PromptRequest, SessionConfigKind, SetSessionConfigOptionRequest, StopReason,
 };
 use aiditor_core::key::{Key, KeyCode, parse_keys};
@@ -1106,7 +1106,7 @@ async fn list(
     assert_eq!(*request, 7);
     let ids = |sessions: &Vec<_>| {
         (sessions.iter())
-            .map(|s: &agent_client_protocol::schema::v1::SessionInfo| s.session_id.to_string())
+            .map(|s: &agent_client_protocol::v1::schema::SessionInfo| s.session_id.to_string())
             .collect()
     };
     result.as_ref().map(ids).map_err(Clone::clone)

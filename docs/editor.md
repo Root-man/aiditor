@@ -550,7 +550,7 @@ All MVP choices are settled. Check each crate's current version and maintenance 
 
 | Area | Choice | Alternatives | Notes |
 | --- | --- | --- | --- |
-| ACP | `agent-client-protocol` 3.x | Hand-rolled JSON-RPC | Official Rust crate, `Send` and runtime-agnostic; also used to build the fake agent for tests |
+| ACP | `agent-client-protocol` 5.x (v1 connections) | Hand-rolled JSON-RPC | Official Rust crate, `Send` and runtime-agnostic; also used to build the fake agent for tests |
 | Async runtime | `tokio` | — | For the services; GPUI runs its own executors |
 | GUI | GPUI | `iced`, `floem`, custom `wgpu` + `cosmic-text` | Decided; Zed's framework, strong on macOS, also runs on Linux |
 | Text storage | `ropey` | `crop` | Rope with line/char indexing; undo built on top |
