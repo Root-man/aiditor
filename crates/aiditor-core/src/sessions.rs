@@ -4,8 +4,8 @@
 use agent_client_protocol_schema::v1::{SessionId, SessionInfo};
 use jiff::{Span, Timestamp, Zoned};
 
-use crate::buffer::{Buffer, BufferId, Kind};
-use crate::display::{ModeLine, WindowDisplay};
+use crate::buffer::{Buffer, BufferId, Decoration, FaceRef, Kind, Prop};
+use crate::display::{ModeLine, Segment, WindowDisplay};
 use crate::project::ProjectId;
 use crate::settings::FaceName;
 use crate::{AgentOp, Core, Ctx, Open};
@@ -68,7 +68,27 @@ impl Group {
         };
         (group, time.strftime(format).to_string())
     }
+
+    fn face(self) -> Vec<FaceRef> {
+        match self {
+            Group::Pinned => vec![FaceRef::Face(FaceName::SessionListPinned)],
+            Group::Archived => vec![FaceRef::Face(FaceName::Annotation), FaceRef::Bold],
+            _ => vec![FaceRef::Face(FaceName::SessionListGroup)],
+        }
+    }
 }
+
+/// An agent's glyph and face; other agents get neither, the glyph's columns kept.
+fn agent_look(name: &str) -> (&'static str, Option<FaceName>) {
+    match name {
+        "claude" => ("✻ ", Some(FaceName::AgentClaude)),
+        "codex" => ("◆ ", Some(FaceName::AgentCodex)),
+        _ => ("  ", None),
+    }
+}
+
+/// An open session's state: its words and face.
+type State = (&'static str, FaceName);
 
 /// A line point can be on: a group's heading or a session's row.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +96,16 @@ enum Row {
     Heading(Group),
     /// The agent's index and the session.
     Session(usize, SessionId),
+}
+
+impl Row {
+    /// Point's column on it: a heading's name, a row's title.
+    fn column(&self) -> usize {
+        match self {
+            Row::Heading(_) => 2,
+            Row::Session(..) => 4,
+        }
+    }
 }
 
 /// A sessions buffer's state.
@@ -87,12 +117,12 @@ pub(crate) struct SessionList {
     rows: Vec<(usize, Row)>,
     /// Every listed session, folded or shown, with its state as rendered, to rebuild when one
     /// changes.
-    listed: Vec<(usize, SessionId, Option<&'static str>)>,
+    listed: Vec<(usize, SessionId, Option<State>)>,
     folded: Vec<Group>,
     /// The row point was last on, kept while no rows are listed.
     at: Option<Row>,
     /// The mode line's project, session count and open count.
-    summary: String,
+    summary: Segment,
 }
 
 struct Listing {
@@ -110,8 +140,18 @@ fn timestamp(updated: Option<&str>) -> Option<Timestamp> {
 }
 
 impl SessionList {
-    /// Puts the list's mode line, with point on `line`, on `buffer`'s `display`.
+    /// Puts the selected row's background and the list's mode line, with point on `line` (from
+    /// 1), on `buffer`'s `display`.
     pub(crate) fn decorate(&self, buffer: &Buffer, display: &mut WindowDisplay, line: usize) {
+        let lines = &mut display.lines;
+        if let Some(number) = (display.cursor)
+            .map(|(l, _)| lines[l].number)
+            .filter(|n| self.rows.iter().any(|(line, _)| line == n))
+        {
+            for line in lines.iter_mut().filter(|l| l.number == number) {
+                (line.decorations).push(Decoration::Background(FaceName::CompletionSelected));
+            }
+        }
         let sessions: Vec<_> = (self.rows.iter())
             .filter(|(_, row)| matches!(row, Row::Session(..)))
             .map(|(line, _)| *line)
@@ -121,7 +161,7 @@ impl SessionList {
         display.mode_line = ModeLine {
             left: vec![
                 segment(&buffer.name, FaceName::ModeLine),
-                segment(&self.summary, FaceName::ModeLineDim),
+                self.summary.clone(),
             ],
             right: (!sessions.is_empty())
                 .then(|| {
@@ -221,15 +261,18 @@ impl Core {
             None if list.rows.is_empty() => list.at.clone(),
             None => None,
         };
-        let mut lines = Vec::new();
+        // Each line's pieces of text, each with the property it carries.
+        let mut lines: Vec<Vec<(String, Option<Prop>)>> = Vec::new();
+        let plain = |text: String| vec![(text, None)];
+        let face = |face| Some(Prop::Named(vec![FaceRef::Face(face)]));
         let mut sessions = Vec::new();
         for (index, listing) in list.agents.iter().enumerate() {
             match &listing.answer {
-                None => lines.push(format!("Listing {}...", listing.name)),
+                None => lines.push(plain(format!("Listing {}...", listing.name))),
                 // On one line, so each row's line number holds.
                 Some(Err(err)) => {
                     let err = err.split_whitespace().collect::<Vec<_>>().join(" ");
-                    lines.push(format!("{}: {err}", listing.name));
+                    lines.push(plain(format!("{}: {err}", listing.name)));
                 }
                 Some(Ok(infos)) => sessions.extend(infos.iter().map(|info| {
                     let time = timestamp(info.updated_at.as_deref());
@@ -256,11 +299,9 @@ impl Core {
             .collect();
         // Stable: each group keeps the time order.
         entries.sort_by_key(|e| e.0);
-        let titles = entries
-            .iter()
-            .map(|e| e.3.chars().count())
-            .max()
-            .unwrap_or(0);
+        let states = (entries.iter())
+            .filter_map(|e| e.5.map(|(state, _)| state.chars().count()))
+            .max();
         let agents = (entries.iter())
             .map(|e| list.agents[e.1].name.chars().count())
             .max()
@@ -268,27 +309,52 @@ impl Core {
         let mut rows = Vec::new();
         for members in entries.chunk_by(|a, b| a.0 == b.0) {
             if !lines.is_empty() {
-                lines.push(String::new());
+                lines.push(Vec::new());
             }
             let group = members[0].0;
             let folded = list.folded.contains(&group);
-            let mark = if folded { "▸" } else { "▾" };
+            let mark = if folded { "▸ " } else { "▾ " };
             rows.push((lines.len(), Row::Heading(group)));
-            lines.push(format!("{mark} {} {}", group.name(), members.len()));
+            lines.push(vec![
+                (mark.into(), face(FaceName::Annotation)),
+                (group.name().into(), Some(Prop::Named(group.face()))),
+                ("  ".into(), None),
+                (members.len().to_string(), face(FaceName::SessionListCount)),
+            ]);
             if folded {
                 continue;
             }
+            let time_face = match group {
+                Group::Today => FaceName::SessionListToday,
+                _ => FaceName::ModeLineDim,
+            };
             for (_, agent, session, title, time, state) in members {
                 let name = &list.agents[*agent].name;
-                let state = state.map_or_else(String::new, |s| format!("  {s}"));
-                let row = format!("  {title:<titles$}  {name:<agents$}  {time:>10}{state}");
+                let (glyph, agent_face) = agent_look(name);
+                let pad = |text: &str, width: usize| {
+                    " ".repeat(width.saturating_sub(text.chars().count()))
+                };
+                // The space after the title puts the rest at the window's right edge, as frame
+                // 14's columns; the padding after a shorter agent or state keeps them lined up.
+                let mut row = vec![
+                    (format!("    {title}"), None),
+                    (" ".into(), Some(Prop::AlignRight)),
+                    (format!("{glyph}{name}"), agent_face.and_then(face)),
+                    (format!("{}  {}", pad(name, agents), pad(time, 10)), None),
+                    (time.clone(), face(time_face)),
+                ];
+                if let Some(states) = states {
+                    let (text, state_face) = state.unwrap_or(("", FaceName::Default));
+                    row.push((format!("  {}", pad(text, states)), None));
+                    row.push((text.into(), face(state_face)));
+                }
                 rows.push((lines.len(), Row::Session(*agent, session.clone())));
-                lines.push(row.trim_end().to_string());
+                lines.push(row);
             }
         }
         let all_answered = list.agents.iter().all(|a| a.answer.is_some());
         if entries.is_empty() && all_answered {
-            lines.push("No sessions".into());
+            lines.push(plain("No sessions".into()));
         }
         let listed: Vec<_> = (entries.iter())
             .map(|(_, agent, session, .., state)| (*agent, session.clone(), *state))
@@ -296,7 +362,17 @@ impl Core {
         let open = listed.iter().filter(|(.., state)| state.is_some()).count();
         let project =
             (self.project_at(list.project)).map_or("", |i| &self.projects[i].project.name);
-        let summary = format!("{project} · {} sessions · {open} open", listed.len());
+        let open_face = match open {
+            0 => FaceName::ModeLineDim,
+            _ => FaceName::StatusRunning,
+        };
+        let summary = vec![
+            (
+                format!("{project} · {} sessions · ", listed.len()),
+                FaceName::ModeLineDim,
+            ),
+            (format!("{open} open"), open_face),
+        ];
         let shown = |row: &Row| rows.iter().find(|(_, r)| r == row).map(|(l, _)| *l);
         let first_session = (rows.iter())
             .find(|(_, r)| matches!(r, Row::Session(..)))
@@ -313,20 +389,35 @@ impl Core {
             })
             .or(first_session)
             .or(rows.first().map(|(l, _)| *l));
+        let target_row = (rows.iter()).find(|(l, _)| Some(*l) == target);
+        let column = target_row.map_or(0, |(_, r)| r.column());
         let at = match rows.is_empty() {
             true => at,
-            false => (rows.iter())
-                .find(|(l, _)| Some(*l) == target)
-                .map(|(_, r)| r.clone()),
+            false => target_row.map(|(_, r)| r.clone()),
         };
         let first = target.is_some()
             && (target == first_session || target == rows.first().map(|(l, _)| *l));
         let buffer = self.buffers.get_mut(id).expect("checked above");
         let list = buffer.session_list_mut().expect("checked above");
         (list.rows, list.listed, list.at, list.summary) = (rows, listed, at, summary);
-        buffer.set_text(&lines.join("\n"));
+        let text: Vec<String> = (lines.iter())
+            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
+            .collect();
+        buffer.remove_properties(0..buffer.len_chars());
+        buffer.set_text(&text.join("\n"));
+        let mut at = 0;
+        for line in lines {
+            for (text, prop) in line {
+                let end = at + text.chars().count();
+                if let Some(prop) = prop.filter(|_| end > at) {
+                    (buffer.add_property(at..end, prop)).expect("in the text");
+                }
+                at = end;
+            }
+            at += 1;
+        }
         let point = match target {
-            Some(line) => buffer.char_idx(line, 0).expect("a row is a line"),
+            Some(line) => buffer.char_idx(line, column).expect("a row is that wide"),
             None => buffer.len_chars(),
         };
         buffer.set_marker(buffer.point, point).expect("in the text");
@@ -403,7 +494,7 @@ impl Ctx<'_> {
             listed: Vec::new(),
             folded: vec![Group::Archived],
             at,
-            summary: String::new(),
+            summary: Vec::new(),
         });
         core.switch_to(id);
         core.render_sessions(id);
@@ -442,13 +533,13 @@ impl Ctx<'_> {
             false => rows.iter().rev().find(|r| r.0 < line).unwrap_or(first),
         };
         let first_session = rows.iter().find(|(_, r)| matches!(r, Row::Session(..)));
-        let line = target.0;
+        let (line, column) = (target.0, target.1.column());
         let first = line == first.0 || first_session.is_some_and(|r| r.0 == line);
         // The lines above the first row are otherwise out of reach once scrolled past.
         if first {
             self.core.windows.window.set_top(0);
         }
-        self.goto(self.core.current().char_idx(line, 0)?)
+        self.goto(self.core.current().char_idx(line, column)?)
     }
 
     /// `agent-sessions-visit`: shows the session on point's row, loading it in the current
@@ -473,7 +564,8 @@ impl Ctx<'_> {
             let (name, session) = (listing.name.clone(), session.clone());
             return self.start_session(&name, Open::Load(session), title.as_deref());
         };
-        if self.core.session_state(&listing.name, session) == Some("[loading]") {
+        let state = self.core.session_state(&listing.name, session);
+        if state.is_some_and(|(state, _)| state == "○ loading") {
             let echo = format!("Loading {} session...", listing.name);
             self.core.echo(echo);
             return Ok(());
@@ -577,9 +669,35 @@ mod tests {
         h.send(Msg::AgentListed { request, result });
     }
 
+    /// The text, without the spaces that line up the columns at the end of a line.
     fn body(h: &Harness) -> String {
         let id = h.core.buffers.find("*Sessions*<work>").expect("listed");
-        h.core.buffers.get(id).unwrap().text().to_string()
+        let text = h.core.buffers.get(id).unwrap().text().to_string();
+        text.lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Each face over the text, with the text it covers, in order; `Bold` added as a face.
+    fn faces(h: &Harness) -> Vec<(String, Vec<FaceRef>)> {
+        let id = h.core.buffers.find("*Sessions*<work>").expect("listed");
+        let b = h.core.buffers.get(id).unwrap();
+        (b.properties())
+            .filter_map(|(r, p)| match p {
+                Prop::Named(refs) => Some((b.text().slice(r).to_string(), refs.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The last face over the text and the text it covers, a row's state when it has one.
+    fn last_face(h: &Harness) -> (String, FaceName) {
+        let (text, refs) = faces(h).pop().unwrap();
+        match refs[..] {
+            [FaceRef::Face(face)] => (text, face),
+            _ => panic!("{refs:?}"),
+        }
     }
 
     /// The last line, the only row of a one-session list.
@@ -589,7 +707,12 @@ mod tests {
 
     fn line(h: &Harness) -> String {
         let (line, _) = h.core.current().line_col(h.point()).unwrap();
-        h.text().lines().nth(line).unwrap_or_default().into()
+        h.text()
+            .lines()
+            .nth(line)
+            .unwrap_or_default()
+            .trim_end()
+            .into()
     }
 
     /// `agent-sessions` answered: claude with `c1` at 10:00 and `c2` at 08:00, codex with `x1`
@@ -734,12 +857,12 @@ mod tests {
         let h = listed();
         assert_eq!(
             body(&h),
-            "▾ Today 3\n\
-            \x20 Fix it  claude       10:00\n\
-            \x20 Port    codex        09:00\n\
-            \x20 Old     claude       08:00"
+            "▾ Today  3\n\
+            \x20   Fix it ✻ claude       10:00\n\
+            \x20   Port ◆ codex        09:00\n\
+            \x20   Old ✻ claude       08:00"
         );
-        assert_eq!(line(&h), "  Fix it  claude       10:00");
+        assert_eq!(line(&h), "    Fix it ✻ claude       10:00");
     }
 
     #[test]
@@ -757,10 +880,10 @@ mod tests {
             body(&h),
             "Listing codex...\n\
              \n\
-             ▾ Older 3\n\
-            \x20 Good  claude  2026-10-14\n\
-            \x20 none  claude\n\
-            \x20 Bad   claude"
+             ▾ Older  3\n\
+            \x20   Good ✻ claude  2026-10-14\n\
+            \x20   none ✻ claude\n\
+            \x20   Bad ✻ claude"
         );
         answer(
             &mut h,
@@ -771,7 +894,7 @@ mod tests {
         h.keys("n RET");
         assert_eq!(
             h.core.session_state("claude", &"none".into()),
-            Some("[loading]")
+            Some(("○ loading", FaceName::ModeLineDim))
         );
     }
 
@@ -806,7 +929,7 @@ mod tests {
         answer(&mut h, new.1, Ok(vec![x1]));
         let newer = info("c3", Some("New"), Some("2026-10-28T11:00:00Z"));
         answer(&mut h, new.0, Ok(vec![newer]));
-        assert!(body(&h).starts_with("▾ Today 2\n  New   claude  "));
+        assert!(body(&h).starts_with("▾ Today  2\n    New ✻ claude  "));
         assert!(line(&h).contains("Port"));
     }
 
@@ -817,8 +940,11 @@ mod tests {
         assert!(line(&h).contains("Port"));
         h.keys("p");
         assert!(line(&h).contains("Fix it"));
+        // On the title, and on a heading's name.
+        assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 4);
         h.keys("p p");
-        assert_eq!(line(&h), "▾ Today 3");
+        assert_eq!(line(&h), "▾ Today  3");
+        assert_eq!(h.core.current().line_col(h.point()).unwrap().1, 2);
         h.keys("RET");
         assert_eq!(h.core.message(), Some("Select a session row"));
         h.keys("q");
@@ -852,7 +978,7 @@ mod tests {
             h.keys("p");
             h.display(5);
         }
-        assert_eq!(line(&h), "▾ Older 20");
+        assert_eq!(line(&h), "▾ Older  20");
         assert_eq!(h.display(5).lines[0].number, 0);
         for _ in 0..20 {
             h.keys("n");
@@ -886,10 +1012,10 @@ mod tests {
         answer(&mut h, requests[1].0, Ok(sessions[..1].to_vec()));
         assert_eq!(
             body(&h),
-            "▾ Today 3\n\
-            \x20 Mine   claude       10:00  [idle]\n\
-            \x20 Mine   codex        10:00\n\
-            \x20 Other  claude       09:00"
+            "▾ Today  3\n\
+            \x20   Mine ✻ claude       10:00  ○ idle\n\
+            \x20   Mine ◆ codex        10:00\n\
+            \x20   Other ✻ claude       09:00"
         );
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
@@ -924,7 +1050,7 @@ mod tests {
             result: Ok(NewSessionResponse::new("f")),
         });
         // Codex's session of the same id is another session.
-        assert_eq!(body(&h), "▾ Today 1\n  Mine  codex       10:00");
+        assert_eq!(body(&h), "▾ Today  1\n    Mine ◆ codex       10:00");
     }
 
     #[test]
@@ -959,7 +1085,7 @@ mod tests {
         assert_eq!(h.core.message(), Some("Loading claude session..."));
         // The list stays shown while the history loads.
         assert_eq!(h.core.windows.window.buffer(), list);
-        assert!(body(&h).starts_with("▾ Today 3\n  Fix it  claude       10:00  [loading]\n"));
+        assert!(body(&h).starts_with("▾ Today  3\n    Fix it ✻ claude       10:00  ○ loading\n"));
         let session = h.core.buffers.find("*claude: Fix it*<work>").unwrap();
         let user = SessionUpdate::UserMessageChunk(ContentChunk::new("hi".into()));
         let reply = SessionUpdate::AgentMessageChunk(ContentChunk::new("hello".into()));
@@ -988,7 +1114,7 @@ mod tests {
         );
         assert_eq!(h.core.windows.window.buffer(), session);
         h.core.switch_to(list);
-        assert!(body(&h).starts_with("▾ Today 3\n  Fix it  claude       10:00  [idle]\n"));
+        assert!(body(&h).starts_with("▾ Today  3\n    Fix it ✻ claude       10:00  ○ idle\n"));
         h.keys("RET");
         assert_eq!(h.core.windows.window.buffer(), session);
         h.keys("x RET");
@@ -1022,7 +1148,7 @@ mod tests {
         assert_eq!(h.core.windows.window.buffer(), other);
         assert_eq!(h.core.message(), Some("claude session ready (modes: none)"));
         h.core.switch_to(list);
-        assert!(body(&h).starts_with("▾ Today 3\n  Fix it  claude       10:00  [idle]\n"));
+        assert!(body(&h).starts_with("▾ Today  3\n    Fix it ✻ claude       10:00  ○ idle\n"));
     }
 
     #[test]
@@ -1040,7 +1166,7 @@ mod tests {
         h.keys("M-x agent-sessions RET");
         let requests = lists(&mut h);
         answer(&mut h, requests[0].0, Ok(vec![info("c1", None, None)]));
-        assert_eq!(line(&h), "  c1  claude              [idle]");
+        assert_eq!(line(&h), "    c1 ✻ claude              ○ idle");
         h.keys("RET");
         assert_eq!(
             (h.core.workspace().unwrap(), h.core.windows.window.buffer()),
@@ -1061,10 +1187,11 @@ mod tests {
         let requests = lists(&mut h);
         answer(&mut h, requests[0].0, Ok(vec![info("c1", None, None)]));
         answer(&mut h, requests[1].0, Ok(Vec::new()));
-        assert_eq!(last(&h), "  c1  claude              [idle]");
+        assert_eq!(last(&h), "    c1 ✻ claude              ○ idle");
         h.core.switch_to(session);
         h.keys("a RET");
-        assert_eq!(last(&h), "  c1  claude              [working]");
+        assert_eq!(last(&h), "    c1 ✻ claude              ● working");
+        assert_eq!(last_face(&h), ("● working".into(), FaceName::StatusRunning));
         let option = PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce);
         let call = ToolCallUpdate::new("t", ToolCallUpdateFields::new());
         let ask = RequestPermissionRequest::new("c1", call, vec![option]);
@@ -1073,24 +1200,30 @@ mod tests {
             request: RequestId::Number(1),
             body: Request(Box::new(AgentRequest::RequestPermissionRequest(ask))),
         });
-        assert_eq!(last(&h), "  c1  claude              [waiting]");
+        assert_eq!(
+            last(&h),
+            "    c1 ✻ claude              ● awaiting permission"
+        );
+        let waiting = ("● awaiting permission".into(), FaceName::StatusWaiting);
+        assert_eq!(last_face(&h), waiting);
         h.keys("C-c C-y");
-        assert_eq!(last(&h), "  c1  claude              [working]");
+        assert_eq!(last(&h), "    c1 ✻ claude              ● working");
         h.send(Msg::AgentPrompted {
             id: AgentId(0),
             result: Ok(StopReason::EndTurn),
         });
-        assert_eq!(last(&h), "  c1  claude              [idle]");
+        assert_eq!(last(&h), "    c1 ✻ claude              ○ idle");
         h.send(Msg::AgentExited {
             id: AgentId(0),
             code: 1,
             signal: None,
         });
-        assert_eq!(last(&h), "  c1  claude              [ended]");
+        assert_eq!(last(&h), "    c1 ✻ claude              ● exited");
+        assert_eq!(last_face(&h), ("● exited".into(), FaceName::StatusFailed));
         h.core.switch_to(session);
         h.keys("C-x k RET");
         assert!(h.core.buffers.get(session).is_none());
-        assert_eq!(last(&h), "  c1  claude");
+        assert_eq!(last(&h), "    c1 ✻ claude");
     }
 
     /// `listed`, plus claude's `y1` yesterday and `o1` two weeks ago.
@@ -1115,23 +1248,23 @@ mod tests {
         let mut h = grouped();
         assert_eq!(
             body(&h),
-            "▾ Today 3\n\
-            \x20 Fix it   claude       10:00\n\
-            \x20 Port     codex        09:00\n\
-            \x20 Old      claude       08:00\n\
+            "▾ Today  3\n\
+            \x20   Fix it ✻ claude       10:00\n\
+            \x20   Port ◆ codex        09:00\n\
+            \x20   Old ✻ claude       08:00\n\
             \n\
-            ▾ Yesterday 1\n\
-            \x20 Late     claude       23:00\n\
+            ▾ Yesterday  1\n\
+            \x20   Late ✻ claude       23:00\n\
             \n\
-            ▾ Older 1\n\
-            \x20 Ancient  claude  2026-10-14"
+            ▾ Older  1\n\
+            \x20   Ancient ✻ claude  2026-10-14"
         );
         h.keys("n n n");
-        assert_eq!(line(&h), "▾ Yesterday 1");
+        assert_eq!(line(&h), "▾ Yesterday  1");
         h.keys("n n n n");
         assert!(line(&h).contains("Ancient"));
         h.keys("p");
-        assert_eq!(line(&h), "▾ Older 1");
+        assert_eq!(line(&h), "▾ Older  1");
     }
 
     #[test]
@@ -1141,38 +1274,38 @@ mod tests {
         // Only headings fold.
         assert!(line(&h).contains("Fix it"));
         h.keys("p TAB");
-        assert_eq!(line(&h), "▸ Today 3");
-        assert!(body(&h).starts_with("▸ Today 3\n\n▾ Yesterday 1\n"));
+        assert_eq!(line(&h), "▸ Today  3");
+        assert!(body(&h).starts_with("▸ Today  3\n\n▾ Yesterday  1\n"));
         h.keys("TAB");
-        assert_eq!(line(&h), "▾ Today 3");
-        assert!(body(&h).starts_with("▾ Today 3\n  Fix it "));
+        assert_eq!(line(&h), "▾ Today  3");
+        assert!(body(&h).starts_with("▾ Today  3\n    Fix it "));
         h.keys("TAB g");
         let requests = lists(&mut h);
         for (request, ..) in requests {
             let x1 = info("x1", Some("Port"), Some("2026-10-28T09:00:00Z"));
             answer(&mut h, request, Ok(vec![x1]));
         }
-        assert!(body(&h).starts_with("▾ Today 2\n"));
+        assert!(body(&h).starts_with("▾ Today  2\n"));
     }
 
     #[test]
     fn point_keeps_its_heading_and_a_folded_session_goes_to_its_heading() {
         let mut h = grouped();
         h.keys("n n n");
-        assert_eq!(line(&h), "▾ Yesterday 1");
+        assert_eq!(line(&h), "▾ Yesterday  1");
         let mut sessions = vec![info("c0", Some("New"), Some("2026-10-28T11:00:00Z"))];
         sessions.extend([
             info("c1", Some("Fix it"), Some("2026-10-28T10:00:00Z")),
             info("y1", Some("Late"), Some("2026-10-27T23:00:00Z")),
         ]);
         answer(&mut h, 3, Ok(sessions.clone()));
-        assert_eq!(line(&h), "▾ Yesterday 1");
+        assert_eq!(line(&h), "▾ Yesterday  1");
         h.keys("M-< n");
         assert!(line(&h).contains("New"));
         // Folded from its heading, an answer keeps point there.
         h.keys("p TAB");
         answer(&mut h, 3, Ok(sessions));
-        assert_eq!(line(&h), "▸ Today 3");
+        assert_eq!(line(&h), "▸ Today  3");
     }
 
     #[test]
@@ -1184,7 +1317,46 @@ mod tests {
         let buffer = h.core.buffers.get_mut(list).unwrap();
         buffer.session_list_mut().unwrap().folded.push(Group::Today);
         h.core.render_sessions(list);
-        assert_eq!(line(&h), "▸ Today 3");
+        assert_eq!(line(&h), "▸ Today  3");
+    }
+
+    #[test]
+    fn each_piece_of_a_heading_and_a_row_has_its_face() {
+        let mut h = work();
+        h.keys("M-x agent-start RET claude RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("s1")),
+        });
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let mine = info("s1", Some("Mine"), Some("2026-10-28T10:00:00Z"));
+        let port = info("c1", Some("Port"), Some("2026-10-26T09:00:00Z"));
+        answer(&mut h, requests[0].0, Ok(vec![mine]));
+        answer(&mut h, requests[1].0, Ok(vec![port]));
+        let face = |text: &str, face| (text.to_string(), vec![FaceRef::Face(face)]);
+        use FaceName::*;
+        // The titles and the spaces between columns have none.
+        assert_eq!(
+            faces(&h),
+            [
+                face("▾ ", Annotation),
+                face("Today", SessionListGroup),
+                face("1", SessionListCount),
+                face("✻ claude", AgentClaude),
+                face("10:00", SessionListToday),
+                face("○ idle", ModeLineDim),
+                face("▾ ", Annotation),
+                face("This week", SessionListGroup),
+                face("1", SessionListCount),
+                face("◆ codex", AgentCodex),
+                face("Mon 09:00", ModeLineDim),
+            ]
+        );
+        assert_eq!(Group::Pinned.face(), [FaceRef::Face(SessionListPinned)]);
+        let archived = [FaceRef::Face(Annotation), FaceRef::Bold];
+        assert_eq!(Group::Archived.face(), archived);
+        assert_eq!(agent_look("gemini"), ("  ", None));
     }
 
     #[test]
@@ -1197,8 +1369,8 @@ mod tests {
         answer(&mut h, requests[0].0, Ok(vec![info("c1", Some(&long), at)]));
         answer(&mut h, requests[1].0, Ok(Vec::new()));
         let row = last(&h);
-        assert_eq!(row, format!("  {}…  claude       10:00", "x".repeat(59)));
-        assert_eq!(row.chars().position(|c| c == 'c'), Some(64));
+        assert_eq!(row, format!("    {}… ✻ claude       10:00", "x".repeat(59)));
+        assert_eq!(row.chars().position(|c| c == '✻'), Some(65));
     }
 
     #[test]
@@ -1225,8 +1397,34 @@ mod tests {
         let segment = |s: &crate::display::Segment| s.iter().map(|(t, _)| t.as_str()).collect();
         let left: Vec<String> = mode_line.left.iter().map(segment).collect();
         assert_eq!(left, ["*Sessions*", "home · 3 sessions · 1 open"]);
+        let open = ("1 open".to_string(), FaceName::StatusRunning);
+        assert_eq!(mode_line.left[1].last(), Some(&open));
+        // The rows end at the window's last column, so times and states line up.
+        let display = &frame.windows[0].display;
+        let rows: Vec<String> = (display.lines.iter())
+            .filter(|l| (1..=3).contains(&l.number))
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert!(rows[0].ends_with("10:00  ○ idle") && rows[1].ends_with("09:00        "));
+        let width = rows[0].chars().count();
+        assert!(width > 100 && rows.iter().all(|r| r.chars().count() == width));
+        let selected = Decoration::Background(FaceName::CompletionSelected);
+        let selected: Vec<_> = (display.lines.iter())
+            .filter(|l| l.decorations.contains(&selected))
+            .map(|l| l.number)
+            .collect();
+        assert_eq!(selected, [2]);
         let right: Vec<String> = mode_line.right.iter().map(segment).collect();
         assert_eq!(right, ["2/3"]);
+        h.keys("p p");
+        let frame = h.frame(1440., 900.);
+        let display = &frame.windows[0].display;
+        let selected = Decoration::Background(FaceName::CompletionSelected);
+        let selected: Vec<_> = (display.lines.iter())
+            .filter(|l| l.decorations.contains(&selected))
+            .map(|l| l.number)
+            .collect();
+        assert_eq!(selected, [0]);
         let hints: Vec<_> = (frame.key_hints.iter())
             .map(|(k, a)| (k.as_str(), *a))
             .collect();
@@ -1256,17 +1454,20 @@ mod tests {
         answer(&mut h, requests[1].0, Ok(Vec::new()));
         assert_eq!(
             body(&h),
-            "▾ Yesterday 1\n\
-            \x20 Sun  claude       10:00\n\
+            "▾ Yesterday  1\n\
+            \x20   Sun ✻ claude       10:00\n\
             \n\
-            ▾ Older 1\n\
-            \x20 Sat  claude  2026-10-24"
+            ▾ Older  1\n\
+            \x20   Sat ✻ claude  2026-10-24"
         );
         h.keys("g");
         for (request, ..) in lists(&mut h) {
             answer(&mut h, request, Ok(Vec::new()));
         }
         let frame = h.frame(1440., 900.);
-        assert!(frame.windows[0].display.mode_line.right.is_empty());
+        let mode_line = &frame.windows[0].display.mode_line;
+        assert!(mode_line.right.is_empty());
+        let none = ("0 open".to_string(), FaceName::ModeLineDim);
+        assert_eq!(mode_line.left[1].last(), Some(&none));
     }
 }

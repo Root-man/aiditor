@@ -1492,22 +1492,26 @@ impl Core {
             .filter(|&b| self.buffers.get(b).is_some())
     }
 
-    /// The state label of the session `agent` started or answered as `id`, while it is open.
-    pub(crate) fn session_state(&self, agent: &str, id: &SessionId) -> Option<&'static str> {
+    /// The state of the session `agent` started or answered as `id`, while it is open, in the
+    /// workspace list's words and faces.
+    pub(crate) fn session_state(
+        &self,
+        agent: &str,
+        id: &SessionId,
+    ) -> Option<(&'static str, FaceName)> {
         let buffer = self.open_session(agent, id)?;
         let (_, s) = self.session_of(buffer)?;
-        Some(if s.ended {
-            "[ended]"
-        } else if s.session.is_none() && s.load.is_some() {
-            "[loading]"
-        } else if s.session.is_none() {
-            "[starting]"
-        } else if s.asks().any(|(_, a)| a.blocks()) {
-            "[waiting]"
-        } else if s.turn.is_some() {
-            "[working]"
+        let quiet = |text| (text, FaceName::ModeLineDim);
+        Some(if s.session.is_none() && !s.ended {
+            quiet(if s.load.is_some() {
+                "○ loading"
+            } else {
+                "○ starting"
+            })
+        } else if let Some(activity) = s.activity() {
+            (activity.text(), activity.face())
         } else {
-            "[idle]"
+            quiet("○ idle")
         })
     }
 
@@ -9222,7 +9226,7 @@ mod tests {
         );
         assert_eq!(
             h.core.session_state("claude", &"s".into()),
-            Some("[working]")
+            Some(("● working", FaceName::StatusRunning))
         );
         for t in ["t1", "t2", "t3"] {
             tool(&mut h, ToolCall::new(t, "Read"));
