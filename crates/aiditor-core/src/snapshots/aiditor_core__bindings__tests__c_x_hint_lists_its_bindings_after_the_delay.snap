@@ -55,6 +55,10 @@ Some(
                 "exchange-point-and-mark",
             ),
             (
+                "a",
+                "+agent-prefix",
+            ),
+            (
                 "b",
                 "switch-to-buffer",
             ),
@@ -68,11 +72,11 @@ Some(
             ),
             (
                 "p",
-                "+prefix",
+                "+project-prefix",
             ),
             (
                 "t",
-                "+prefix",
+                "+workspace-prefix",
             ),
             (
                 "u",
