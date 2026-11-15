@@ -100,6 +100,8 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+        // Waiting clients see their connection close and exit 1.
+        self.pending.lock().unwrap().clear();
         if let Err(err) = fs::remove_file(&self.path) {
             tracing::warn!("removing {}: {err}", self.path.display());
         }
@@ -124,7 +126,8 @@ async fn accept(listener: UnixListener, tx: Sender<Msg>, pending: Pending) {
 }
 
 /// Reads one request line, hands it to the core and writes back the core's reply. A client that
-/// goes away first is forgotten. shortcut: no read timeout; add one if idle connections pile up.
+/// goes away first is forgotten, and the core told.
+/// shortcut: no read timeout; add one if idle connections pile up.
 async fn serve(stream: UnixStream, request: u64, tx: Sender<Msg>, pending: Pending) {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read.take(LIMIT));
@@ -157,6 +160,7 @@ async fn serve(stream: UnixStream, request: u64, tx: Sender<Msg>, pending: Pendi
                 // The client only waits, so anything readable means it hung up.
                 _ = read.get_mut().get_mut().read(&mut byte) => {
                     pending.lock().unwrap().remove(&request);
+                    _ = tx.send(Msg::EditGone { request }).await;
                     return;
                 }
             }
@@ -338,6 +342,30 @@ mod tests {
         };
         server.reply(request, Ok(()));
         assert_eq!(exit.await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_hangs_up_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, mut rx) = server(dir.path());
+        let mut stream = UnixStream::connect(&server.path).await.unwrap();
+        let line = "{\"cwd\":\"/w\",\"terminal\":1,\"args\":[\"a\"]}\n";
+        stream.write_all(line.as_bytes()).await.unwrap();
+        let Some(Msg::EditRequest { request, .. }) = rx.recv().await else {
+            panic!("no request");
+        };
+        drop(stream);
+        assert!(matches!(rx.recv().await, Some(Msg::EditGone { request: r }) if r == request));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn waiting_clients_exit_1_when_the_server_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, mut rx) = server(dir.path());
+        let exit = spawn_client(&server, &["a"]);
+        assert!(matches!(rx.recv().await, Some(Msg::EditRequest { .. })));
+        drop(server);
+        assert_eq!(exit.await.unwrap(), 1);
     }
 
     #[tokio::test]

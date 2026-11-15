@@ -961,6 +961,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.vterm_copy_mode_done(),
         },
         Command {
+            name: "server-edit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.server_edit(),
+        },
+        Command {
+            name: "server-edit-abort",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.server_edit_abort(),
+        },
+        Command {
             name: "revert-buffer",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.revert_buffer(args),

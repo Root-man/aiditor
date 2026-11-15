@@ -143,6 +143,12 @@
 "C-c C-n" = "vterm-next-prompt"
 "C-c C-r" = "vterm-mark-output"
 
+# A buffer an `aiditor --wait` client in a terminal, such as git, waits on.
+[server-edit]
+"C-c C-c" = "server-edit"
+"C-x #" = "server-edit"
+"C-c C-k" = "server-edit-abort"
+
 # Agent session buffers: the read-only transcript above a prompt area. C-j inserts a newline as
 # everywhere.
 [agent-session-mode]
