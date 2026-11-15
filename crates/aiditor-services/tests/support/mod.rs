@@ -52,6 +52,7 @@ impl Driver {
                 Effect::Grep(GrepOp::Cancel) => {}
                 Effect::Watch(set) => self.watched = set,
                 Effect::Recovery(_)
+                | Effect::WritePins(_)
                 | Effect::SetClipboard(_)
                 | Effect::OpenWithSystem(_)
                 | Effect::OpenUrl(_) => {}

@@ -102,6 +102,7 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
             | Effect::OpenWithSystem(_)
             | Effect::OpenUrl(_)
             | Effect::LoadConfiguration { .. }
+            | Effect::WritePins(_)
             | Effect::Watch(_)
             | Effect::CaptureEnvironment { .. } => continue,
         };

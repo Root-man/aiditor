@@ -42,6 +42,8 @@ struct Args {
     recovery_dir: Option<PathBuf>,
     /// `shell/zsh` in the platform data dir, for zsh's shell integration.
     zsh_dir: Option<PathBuf>,
+    /// `sessions.toml` in the platform local data dir, for pinned sessions.
+    pins: Option<PathBuf>,
     debug: bool,
     benchmark: Option<PathBuf>,
 }
@@ -70,6 +72,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
     parsed.config_dir =
         (parsed.config_dir).or_else(|| dirs.as_ref().map(|d| d.config_dir().to_owned()));
     parsed.recovery_dir = dirs.as_ref().map(|d| d.data_dir().join("recovery"));
+    parsed.pins = (dirs.as_ref()).map(|d| d.data_local_dir().join("sessions.toml"));
     parsed.zsh_dir = dirs.map(|d| d.data_dir().join("shell/zsh"));
     Ok(parsed)
 }
@@ -141,6 +144,10 @@ fn main() {
         Msg::KeymapLoaded(read_config(dir, "keymap.toml")),
     );
     core.handle(Instant::now(), read_projects(dir));
+    if let Some(pins) = &args.pins {
+        let text = read_config(pins.parent(), "sessions.toml");
+        core.handle(Instant::now(), Msg::PinsLoaded(text));
+    }
     if let Some(arg) = args.file.take() {
         let path = std::path::absolute(&arg).unwrap_or(arg);
         if path.is_dir() {

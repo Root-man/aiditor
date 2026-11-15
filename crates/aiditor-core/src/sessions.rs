@@ -1,14 +1,17 @@
 //! `*Sessions*`: every registered agent's past sessions in the current project, from
 //! `session/list`.
 
+use std::path::{Path, PathBuf};
+
 use agent_client_protocol_schema::v1::{SessionId, SessionInfo};
 use jiff::{Span, Timestamp, Zoned};
+use serde::{Deserialize, Serialize};
 
 use crate::buffer::{Buffer, BufferId, Decoration, FaceRef, Kind, Prop};
 use crate::display::{ModeLine, Segment, WindowDisplay};
 use crate::project::ProjectId;
 use crate::settings::FaceName;
-use crate::{AgentOp, Core, Ctx, Open};
+use crate::{AgentOp, Core, Ctx, Effect, Open};
 
 const MODE: &str = "agent-sessions-mode";
 /// The widest a title shows, cut to one less and `…` past it.
@@ -19,6 +22,7 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["agent-sessions-next", "agent-sessions-previous"], "move"),
     (&["agent-sessions-visit"], "switch"),
     (&["agent-sessions-toggle"], "fold"),
+    (&["agent-sessions-pin"], "pin/unpin"),
     (&["agent-sessions"], "refresh"),
     (&["agent-sessions-quit"], "quit"),
 ];
@@ -26,13 +30,13 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
 /// A group of sessions by activity, in the list's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Group {
-    // Nothing is pinned or archived until pins and archived listings exist.
-    #[allow(dead_code)]
     Pinned,
     Today,
     Yesterday,
     Week,
     Older,
+    // Nothing is archived until archived listings exist.
+    #[allow(dead_code)]
     Archived,
 }
 
@@ -78,6 +82,27 @@ impl Group {
     }
 }
 
+/// A pinned session: an agent's session id in the project whose primary root is `cwd`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Pin {
+    agent: String,
+    cwd: PathBuf,
+    session: String,
+}
+
+/// `sessions.toml`.
+#[derive(Serialize, Deserialize)]
+struct PinFile {
+    #[serde(default)]
+    pin: Vec<Pin>,
+}
+
+/// The pins in `sessions.toml`'s text, none without a file.
+pub(crate) fn parse_pins(text: Option<&str>) -> Result<Vec<Pin>, String> {
+    let file = toml::from_str::<PinFile>(text.unwrap_or_default());
+    file.map(|f| f.pin).map_err(|e| e.message().to_string())
+}
+
 /// An agent's glyph and face; other agents get neither, the glyph's columns kept.
 fn agent_look(name: &str) -> (&'static str, Option<FaceName>) {
     match name {
@@ -111,6 +136,8 @@ impl Row {
 /// A sessions buffer's state.
 pub(crate) struct SessionList {
     project: ProjectId,
+    /// The primary root the agents were asked in, which pins are kept under.
+    cwd: PathBuf,
     /// One per registered agent, in registry order.
     agents: Vec<Listing>,
     /// Each heading's and shown session row's line, in order.
@@ -178,6 +205,27 @@ impl SessionList {
 }
 
 impl Core {
+    fn pinned(&self, agent: &str, cwd: &Path, session: &SessionId) -> bool {
+        (self.pins.iter()).any(|p| p.agent == agent && p.cwd == cwd && *p.session == *session.0)
+    }
+
+    /// Writes the pins and rebuilds the live sessions buffers listed in `cwd`.
+    fn pins_changed(&mut self, cwd: &Path, effects: &mut Vec<Effect>) {
+        match toml::to_string(&PinFile {
+            pin: self.pins.clone(),
+        }) {
+            Ok(text) => effects.push(Effect::WritePins(text)),
+            Err(err) => self.report(format!("sessions.toml: {err}")),
+        }
+        let lists: Vec<_> = (self.buffers.recent())
+            .filter(|(_, b)| b.session_list().is_some_and(|l| l.cwd == cwd))
+            .map(|(id, _)| id)
+            .collect();
+        for id in lists {
+            self.render_sessions(id);
+        }
+    }
+
     /// Takes the held list requests of `project`'s live sessions buffers, `vars` first in each
     /// environment.
     pub(crate) fn release_lists(
@@ -285,7 +333,10 @@ impl Core {
         let now = (self.wall_clock)().to_zoned(self.time_zone.clone());
         let mut entries: Vec<_> = (sessions.into_iter())
             .map(|(agent, info, time)| {
-                let (group, time) = Group::of(time, &now);
+                let (mut group, time) = Group::of(time, &now);
+                if self.pinned(&list.agents[agent].name, &list.cwd, &info.session_id) {
+                    group = Group::Pinned;
+                }
                 let mut title = (info.title.as_deref())
                     .and_then(|t| t.lines().next())
                     .filter(|t| !t.is_empty())
@@ -489,6 +540,7 @@ impl Ctx<'_> {
         let at = buffer.session_list_mut().and_then(|l| l.at.take());
         buffer.kind = Kind::SessionList(SessionList {
             project,
+            cwd,
             agents,
             rows: Vec::new(),
             listed: Vec::new(),
@@ -508,11 +560,32 @@ impl Ctx<'_> {
         let found = (core.buffers.iter_mut()).find_map(|(id, b)| {
             let list = b.session_list_mut()?;
             let listing = list.agents.iter_mut().find(|a| a.request == request)?;
-            Some((id, listing))
+            let (name, cwd) = (listing.name.clone(), list.cwd.clone());
+            Some((id, listing, name, cwd))
         });
-        if let Some((id, listing)) = found {
-            listing.answer = Some(result);
-            core.render_sessions(id);
+        let Some((id, listing, agent, cwd)) = found else {
+            return;
+        };
+        let listed = match &result {
+            Ok(infos) => Some(
+                infos
+                    .iter()
+                    .map(|i| i.session_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            Err(_) => None,
+        };
+        listing.answer = Some(result);
+        let pins = core.pins.len();
+        // shortcut: an agent past the 50-page cap drops pins on the cut pages; key off the cap if one comes close.
+        if let Some(listed) = listed {
+            core.pins.retain(|p| {
+                (p.agent != agent || p.cwd != cwd) || listed.iter().any(|s| *s.0 == *p.session)
+            });
+        }
+        match core.pins.len() == pins {
+            true => core.render_sessions(id),
+            false => core.pins_changed(&cwd, &mut self.effects),
         }
     }
 
@@ -542,18 +615,40 @@ impl Ctx<'_> {
         self.goto(self.core.current().char_idx(line, column)?)
     }
 
+    /// The sessions buffer and the agent's index and session on point's row.
+    fn session_row(&self) -> Result<(&SessionList, usize, &SessionId), String> {
+        let list = self.session_rows()?;
+        let line = self.core.current().line_col(self.core.point())?.0;
+        (list.rows.iter())
+            .find_map(|(l, row)| match row {
+                Row::Session(agent, session) if *l == line => Some((list, *agent, session)),
+                _ => None,
+            })
+            .ok_or_else(|| "Select a session row".into())
+    }
+
+    /// `agent-sessions-pin`: pins the session on point's row, or unpins it.
+    pub(crate) fn sessions_pin(&mut self) -> Result<(), String> {
+        let (list, agent, session) = self.session_row()?;
+        let pin = Pin {
+            agent: list.agents[agent].name.clone(),
+            cwd: list.cwd.clone(),
+            session: session.to_string(),
+        };
+        let core = &mut *self.core;
+        match core.pins.iter().position(|p| *p == pin) {
+            Some(index) => _ = core.pins.remove(index),
+            None => core.pins.push(pin.clone()),
+        }
+        core.pins_changed(&pin.cwd, &mut self.effects);
+        Ok(())
+    }
+
     /// `agent-sessions-visit`: shows the session on point's row, loading it in the current
     /// workspace unless it is open.
     pub(crate) fn sessions_visit(&mut self) -> Result<(), String> {
-        let list = self.session_rows()?;
-        let line = self.core.current().line_col(self.core.point())?.0;
-        let (agent, session) = (list.rows.iter())
-            .find_map(|(l, row)| match row {
-                Row::Session(agent, session) if *l == line => Some((agent, session)),
-                _ => None,
-            })
-            .ok_or("Select a session row")?;
-        let listing = &list.agents[*agent];
+        let (list, agent, session) = self.session_row()?;
+        let listing = &list.agents[agent];
         let Some(buffer) = self.core.open_session(&listing.name, session) else {
             let title = match &listing.answer {
                 Some(Ok(infos)) => (infos.iter())
@@ -1434,6 +1529,7 @@ mod tests {
                 ("n/p", "move"),
                 ("RET", "switch"),
                 ("TAB", "fold"),
+                ("P", "pin/unpin"),
                 ("g", "refresh"),
                 ("q", "quit")
             ]
@@ -1469,5 +1565,130 @@ mod tests {
         assert!(mode_line.right.is_empty());
         let none = ("0 open".to_string(), FaceName::ModeLineDim);
         assert_eq!(mode_line.left[1].last(), Some(&none));
+    }
+
+    /// A `sessions.toml` pinning each (agent, session) in project `app`.
+    fn pins_file(h: &Harness, pins: &[(&str, &str)]) -> String {
+        let app = h.path("app").display().to_string();
+        (pins.iter())
+            .map(|(agent, session)| {
+                format!("[[pin]]\nagent = \"{agent}\"\ncwd = \"{app}\"\nsession = \"{session}\"\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The pins `sessions.toml`'s last write holds, as (agent, session).
+    fn written(h: &Harness) -> Vec<(String, String)> {
+        let pins = parse_pins(h.pins.last().map(String::as_str)).unwrap();
+        pins.into_iter().map(|p| (p.agent, p.session)).collect()
+    }
+
+    #[test]
+    fn p_pins_and_unpins_and_point_follows_the_session() {
+        let mut h = listed();
+        h.keys("n P");
+        assert_eq!(
+            body(&h),
+            "▾ Pinned  1\n\
+            \x20   Port ◆ codex        09:00\n\
+            \n\
+            ▾ Today  2\n\
+            \x20   Fix it ✻ claude       10:00\n\
+            \x20   Old ✻ claude       08:00"
+        );
+        assert!(line(&h).contains("Port"));
+        assert_eq!(written(&h), [("codex".into(), "x1".into())]);
+        let app = h.path("app");
+        assert_eq!(h.core.pins[0].cwd, app);
+        // After a restart, the file as written pins it again.
+        let mut fresh = work();
+        fresh.send(Msg::PinsLoaded(Ok(h.pins.last().cloned())));
+        fresh.keys("M-x agent-sessions RET");
+        let requests = lists(&mut fresh);
+        let x1 = info("x1", Some("Port"), Some("2026-10-28T09:00:00Z"));
+        answer(&mut fresh, requests[1].0, Ok(vec![x1]));
+        assert!(body(&fresh).ends_with("▾ Pinned  1\n    Port ◆ codex       09:00"));
+        h.keys("P");
+        assert!(body(&h).starts_with("▾ Today  3\n    Fix it "));
+        assert!(line(&h).contains("Port"));
+        assert_eq!(written(&h), []);
+        h.keys("M-< P");
+        assert_eq!(h.core.message(), Some("Select a session row"));
+        assert_eq!(h.pins.len(), 2);
+    }
+
+    #[test]
+    fn the_same_id_from_another_agent_is_not_pinned() {
+        let mut h = work();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let s1 = vec![info("s1", Some("Same"), Some("2026-10-28T10:00:00Z"))];
+        answer(&mut h, requests[0].0, Ok(s1.clone()));
+        answer(&mut h, requests[1].0, Ok(s1));
+        h.keys("P");
+        assert_eq!(
+            body(&h),
+            "▾ Pinned  1\n\
+            \x20   Same ✻ claude       10:00\n\
+            \n\
+            ▾ Today  1\n\
+            \x20   Same ◆ codex        10:00"
+        );
+    }
+
+    #[test]
+    fn loaded_pins_list_under_pinned_with_their_time() {
+        let mut h = work();
+        let text = pins_file(&h, &[("claude", "o1")]);
+        h.send(Msg::PinsLoaded(Ok(Some(text))));
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        let old = info("o1", Some("Ancient"), Some("2026-10-14T09:00:00Z"));
+        let new = info("c1", Some("Fix it"), Some("2026-10-28T10:00:00Z"));
+        answer(&mut h, requests[0].0, Ok(vec![new, old]));
+        answer(&mut h, requests[1].0, Ok(Vec::new()));
+        assert_eq!(
+            body(&h),
+            "▾ Pinned  1\n\
+            \x20   Ancient ✻ claude  2026-10-14\n\
+            \n\
+            ▾ Today  1\n\
+            \x20   Fix it ✻ claude       10:00"
+        );
+        let date = faces(&h).into_iter().find(|(t, _)| t == "2026-10-14");
+        assert_eq!(date.unwrap().1, [FaceRef::Face(FaceName::ModeLineDim)]);
+        // Nothing went, so nothing is written.
+        assert!(h.pins.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_file_is_reported_and_pins_nothing() {
+        let mut h = work();
+        h.send(Msg::PinsLoaded(Ok(Some("[[pin]]\nagent = 1".into()))));
+        assert!(h.core.message().unwrap().starts_with("sessions.toml: "));
+        assert!(h.core.pins.is_empty());
+        h.send(Msg::PinsLoaded(Ok(None)));
+        assert!(h.core.pins.is_empty());
+    }
+
+    #[test]
+    fn a_gone_sessions_pin_is_dropped_and_others_are_kept() {
+        let mut h = work();
+        let mut text = pins_file(&h, &[("claude", "c9"), ("claude", "c1"), ("codex", "x9")]);
+        text.push_str("\n[[pin]]\nagent = \"claude\"\ncwd = \"/lib\"\nsession = \"l1\"\n");
+        h.send(Msg::PinsLoaded(Ok(Some(text))));
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        // An error keeps codex's pins.
+        answer(&mut h, requests[1].0, Err("closed"));
+        assert!(h.pins.is_empty());
+        let c1 = info("c1", Some("Fix it"), Some("2026-10-28T10:00:00Z"));
+        answer(&mut h, requests[0].0, Ok(vec![c1]));
+        assert_eq!(h.core.message(), None);
+        let kept = [("claude", "c1"), ("codex", "x9"), ("claude", "l1")];
+        let kept: Vec<_> = kept.map(|(a, s)| (a.to_string(), s.to_string())).into();
+        assert_eq!(written(&h), kept);
+        assert!(body(&h).ends_with("▾ Pinned  1\n    Fix it ✻ claude       10:00"));
     }
 }

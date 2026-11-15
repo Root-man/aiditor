@@ -107,7 +107,7 @@ After every message the core handles, each live sessions buffer whose listed ses
 - **THEN** its row shows `● exited`, and once its session buffer is killed, no state
 
 ### Requirement: Groups by activity
-Listed sessions SHALL be grouped, in this order, as Pinned, Today, Yesterday, This week, Older and Archived, each group shown as a heading line `▾ <name>  <count>` (`▸` when folded), `<count>` being the number of its sessions, followed by its rows unless folded, with one blank line between groups. A group with no session SHALL be left out. By the local date of `updatedAt` against the local date now: the same date or later SHALL be Today; the day before Yesterday; any earlier date from the Monday of the current calendar week (whatever the locale) This week; anything earlier, or a missing or unreadable time, Older. Pinned and Archived SHALL hold no session until pins and archived listings exist. The groups SHALL reflect the date at the latest rebuild.
+Listed sessions SHALL be grouped, in this order, as Pinned, Today, Yesterday, This week, Older and Archived, each group shown as a heading line `▾ <name>  <count>` (`▸` when folded), `<count>` being the number of its sessions, followed by its rows unless folded, with one blank line between groups. A group with no session SHALL be left out. Pinned SHALL hold the pinned sessions, most recent first, each row's time shown as its activity group would show it. Other sessions SHALL be grouped by the local date of `updatedAt` against the local date now: the same date or later SHALL be Today; the day before Yesterday; any earlier date from the Monday of the current calendar week (whatever the locale) This week; anything earlier, or a missing or unreadable time, Older. Archived SHALL hold no session until archived listings exist. The groups SHALL reflect the date at the latest rebuild.
 
 #### Scenario: Day boundaries
 - **WHEN** it is 00:30 on Wednesday 2026-10-28 and sessions were updated at 00:10 that day, 23:50 on Tuesday 2026-10-27 and 23:50 on Monday 2026-10-26
@@ -125,6 +125,10 @@ Listed sessions SHALL be grouped, in this order, as Pinned, Today, Yesterday, Th
 - **WHEN** three sessions are in Today and one in Older
 - **THEN** the buffer shows `▾ Today  3`, three rows, a blank line, `▾ Older  1` and one row
 
+#### Scenario: A pinned row keeps its time
+- **WHEN** a session updated two weeks ago on 2026-10-14 is pinned
+- **THEN** it lists under Pinned with the time `2026-10-14` in `mode-line-dim`
+
 ### Requirement: Folding groups
 `TAB` (`agent-sessions-toggle`) on a heading SHALL fold its group, hiding its rows and showing `▸`, or unfold it, keeping point on the heading; elsewhere it SHALL do nothing. Every group SHALL start unfolded but Archived, which starts folded. Folds SHALL be kept across answers and state changes, and reset to the defaults by `g` and by a new `agent-sessions`.
 
@@ -141,7 +145,7 @@ Listed sessions SHALL be grouped, in this order, as Pinned, Today, Yesterday, Th
 - **THEN** point is on the Today heading
 
 ### Requirement: Mode line and key hints
-The sessions buffer's mode line SHALL read the buffer's name, then the project's name, `<n> sessions` and `<m> open` joined by ` · `, `<n>` counting every listed session and `<m>` those open in the editor, `<m> open` in `status-running` when `<m>` is above 0 and the rest in `mode-line-dim`, and on the right `<position>/<rows>`, `<rows>` being the shown session rows and `<position>` the number of shown session rows up to point's line, at least 1; with no shown session row the right side SHALL be empty. While the sessions buffer is current and neither a message nor a minibuffer prompt shows, the echo line SHALL show the keys bound to move (`agent-sessions-next`/`-previous`), switch (`agent-sessions-visit`), fold (`agent-sessions-toggle`), refresh (`agent-sessions`) and quit (`agent-sessions-quit`), as the workspace list shows its own.
+The sessions buffer's mode line SHALL read the buffer's name, then the project's name, `<n> sessions` and `<m> open` joined by ` · `, `<n>` counting every listed session and `<m>` those open in the editor, `<m> open` in `status-running` when `<m>` is above 0 and the rest in `mode-line-dim`, and on the right `<position>/<rows>`, `<rows>` being the shown session rows and `<position>` the number of shown session rows up to point's line, at least 1; with no shown session row the right side SHALL be empty. While the sessions buffer is current and neither a message nor a minibuffer prompt shows, the echo line SHALL show the keys bound to move (`agent-sessions-next`/`-previous`), switch (`agent-sessions-visit`), fold (`agent-sessions-toggle`), pin/unpin (`agent-sessions-pin`), refresh (`agent-sessions`) and quit (`agent-sessions-quit`), as the workspace list shows its own.
 
 #### Scenario: Counts and position
 - **WHEN** project `app` lists three sessions, one open in the editor, and point is on the second shown row
@@ -149,7 +153,7 @@ The sessions buffer's mode line SHALL read the buffer's name, then the project's
 
 #### Scenario: Keys in the echo line
 - **WHEN** the sessions buffer is current with no message
-- **THEN** the echo line shows `n/p` move, `RET` switch, `TAB` fold, `g` refresh and `q` quit
+- **THEN** the echo line shows `n/p` move, `RET` switch, `TAB` fold, `P` pin/unpin, `g` refresh and `q` quit
 
 ### Requirement: Faces of the list
 The sessions buffer SHALL draw, as frame 14 does: a heading's `▾` or `▸` in `annotation`; its name in `session-list-group`, but Pinned's in `session-list-pinned` and Archived's in `annotation` bold; its count in `session-list-count`; a row's title in the default face; a known agent's glyph and name in its own face, `agent-claude` for `claude` and `agent-codex` for `codex`, and any other agent's name in the default face; a Today row's time in `session-list-today` and any other time in `mode-line-dim`; a state in its own face, `status-running` for `● working`, `status-waiting` for `● awaiting permission` and `● awaiting answer`, `status-failed` for `● exited`, and `mode-line-dim` for `○ idle`, `○ loading` and `○ starting`. The `Listing <agent>...` and `<agent>: <error>` lines, `No sessions` and the spaces between columns SHALL keep the default face. While point is on a heading or session row, that row SHALL be drawn on the `completion-selected` background, as the workspace list draws its selected row. The bundled theme SHALL define the new faces with Gruvbox dark's colours: `session-list-group` `#83a598` bold, `session-list-pinned` `#d3869b` bold, `session-list-count` `#665c54`, `session-list-today` `#8ec07c`, `agent-claude` `#fe8019` and `agent-codex` `#8ec07c`.
@@ -165,3 +169,40 @@ The sessions buffer SHALL draw, as frame 14 does: a heading's `▾` or `▸` in 
 #### Scenario: Point's row is selected
 - **WHEN** point is on a session row
 - **THEN** that row, and no other, is drawn on the `completion-selected` background
+
+### Requirement: Pinning sessions
+`P` (`agent-sessions-pin`) on a session row SHALL pin the session when it isn't pinned and unpin it when it is, rebuild every live sessions buffer of the same project, and keep point on the session's row; elsewhere, headings included, it SHALL fail with `Select a session row`. A pin SHALL be one agent's session id in one project, known by its primary root.
+
+#### Scenario: The same id from another agent isn't pinned
+- **WHEN** `claude` and `codex` both list a session `s1` and `P` pins `claude`'s
+- **THEN** only `claude`'s `s1` lists under Pinned
+
+#### Scenario: P pins and unpins
+- **WHEN** point is on the `codex` session `x1` row in Today and `P` is pressed, then `P` again
+- **THEN** the buffer first shows `▾ Pinned  1` with the `x1` row, a blank line and Today without it, point on the `x1` row; then Today with `x1` again and no Pinned heading
+
+#### Scenario: P on a heading
+- **WHEN** point is on a heading and `P` is pressed
+- **THEN** it fails with `Select a session row`
+
+### Requirement: Pins survive a restart
+Pins SHALL be kept in `sessions.toml` in the platform's local data directory, written in full, atomically, on each change, and read at launch, so a session pinned before a restart lists under Pinned after it. The latest change SHALL be what the file holds once writes finish. A file that can't be read or parsed SHALL be reported in `*Messages*`, and the editor SHALL start with no pins; a missing file SHALL mean no pins.
+
+#### Scenario: A pin is kept
+- **WHEN** a session is pinned, the editor restarts with the file as written, and its agent lists it again
+- **THEN** it lists under Pinned
+
+#### Scenario: An unreadable file
+- **WHEN** `sessions.toml` doesn't parse at launch
+- **THEN** `*Messages*` names the file and the error, and nothing is pinned
+
+### Requirement: Pins of gone sessions are dropped
+When an agent's list for a project answers without error and without a session that agent has pinned in that project, the pin SHALL be removed and the file rewritten, with no message. Pins of other agents and other projects, and pins of an agent whose answer is an error, SHALL be kept.
+
+#### Scenario: A gone session's pin is dropped
+- **WHEN** `claude`'s session `c9` is pinned in the project and `claude`'s list answers without `c9`
+- **THEN** the file no longer holds the `c9` pin and no message is shown
+
+#### Scenario: Another project's pin stays
+- **WHEN** a session is pinned in project `lib` and the list for project `app` answers
+- **THEN** its pin stays in the file

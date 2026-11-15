@@ -54,6 +54,8 @@ impl App {
                 watcher: Watcher::spawn(move |msg| _ = tx.send(msg)),
                 recovery: None,
                 config_dir: None,
+                pins: None,
+                pin_writes: Default::default(),
             },
             agent: None,
             pid: None,
