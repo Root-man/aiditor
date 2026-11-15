@@ -53,6 +53,7 @@ impl Driver {
                 Effect::Watch(set) => self.watched = set,
                 Effect::Recovery(_)
                 | Effect::WritePins(_)
+                | Effect::EditReply { .. }
                 | Effect::SetClipboard(_)
                 | Effect::OpenWithSystem(_)
                 | Effect::OpenUrl(_) => {}

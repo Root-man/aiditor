@@ -64,7 +64,7 @@ fn main() {
 fn send(core: &mut Core, service: &mut Service, msg: Msg) {
     for effect in core.handle(Instant::now(), msg) {
         let reply = match effect {
-            Effect::Terminal(_) | Effect::Agent(_) => continue,
+            Effect::Terminal(_) | Effect::Agent(_) | Effect::EditReply { .. } => continue,
             Effect::File(op) => files::run(op),
             Effect::Parse { buffer, parse } => parse.run(buffer),
             // Runs to the end before the next key, so nothing is left to cancel.

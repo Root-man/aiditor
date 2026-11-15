@@ -56,6 +56,7 @@ impl App {
                 config_dir: None,
                 pins: None,
                 pin_writes: Default::default(),
+                server: None,
             },
             agent: None,
             pid: None,

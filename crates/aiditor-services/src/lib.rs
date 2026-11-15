@@ -9,6 +9,7 @@ pub mod grep;
 pub mod projects;
 pub mod recovery;
 pub mod runner;
+pub mod server;
 pub mod terminal;
 pub mod watcher;
 

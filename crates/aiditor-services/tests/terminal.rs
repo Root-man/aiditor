@@ -171,13 +171,36 @@ async fn exit_does_not_wait_for_a_background_job_holding_the_pty() {
 }
 
 #[tokio::test]
+async fn the_edit_client_overrides_editor_variables() {
+    let _native = native_lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut terminals = Terminals::default();
+    terminals.client = vec![
+        ("AIDITOR_SOCKET".into(), "/s.sock".into()),
+        ("GIT_EDITOR".into(), "'/x' --wait".into()),
+    ];
+    // The spawn's variables already win over inherited ones, so this covers an inherited one too.
+    let env = vec![("GIT_EDITOR".into(), "true".into())];
+    let mut rx = spawn(&mut terminals, dir.path(), sh("env"), env);
+    started(&mut rx).await;
+    let output = String::from_utf8(output_until_exit(&mut rx, 0).await).unwrap();
+    for line in [
+        "AIDITOR_SOCKET=/s.sock",
+        "AIDITOR_TERMINAL=7",
+        "GIT_EDITOR='/x' --wait",
+    ] {
+        assert!(output.lines().any(|s| s == line), "{output}");
+    }
+}
+
+#[tokio::test]
 async fn terminal_environment_and_utf8_flag_reach_the_child() {
     let _native = native_lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut rx = start(
         dir.path(),
         Some(vec!["/bin/sh".into(), "-c".into(), "env; stty -a".into()]),
-        vec![("FOO".into(), "bar".into())],
+        vec![("FOO".into(), "bar".into()), ("EDITOR".into(), "ed".into())],
     );
     started(&mut rx).await;
     let output = String::from_utf8(output_until_exit(&mut rx, 0).await).unwrap();
@@ -187,9 +210,15 @@ async fn terminal_environment_and_utf8_flag_reach_the_child() {
         "TERM_PROGRAM=aiditor".into(),
         format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION")),
         "FOO=bar".into(),
+        "EDITOR=ed".into(),
     ] {
         assert!(output.lines().any(|s| s == line), "{output}");
     }
+    // Without an edit server, the terminal gets none of its variables.
+    assert!(
+        !output.lines().any(|s| s == "AIDITOR_TERMINAL=7"),
+        "{output}"
+    );
     assert!(
         output
             .split_whitespace()

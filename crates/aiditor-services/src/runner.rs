@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use aiditor_core::{Effect, Msg, RecoveryOp};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::{agents, configuration, environment, files, grep, terminal, watcher};
+use crate::{agents, configuration, environment, files, grep, server, terminal, watcher};
 
 /// The services an effect can need. The caller builds the parts, so it can keep its own watcher.
 pub struct Runner {
@@ -26,6 +26,8 @@ pub struct Runner {
     pub pins: Option<PathBuf>,
     /// The number of the latest pins write, so an older one never lands after it.
     pub pin_writes: Arc<Mutex<u64>>,
+    /// The edit server, when it could listen.
+    pub server: Option<server::Server>,
 }
 
 /// What the caller must do after `Runner::run`.
@@ -115,6 +117,12 @@ impl Runner {
                 });
                 Run::Done
             }
+            Effect::EditReply { request, result } => {
+                if let Some(server) = &self.server {
+                    server.reply(request, result);
+                }
+                Run::Done
+            }
             Effect::LoadConfiguration { request } => {
                 let dir = self.config_dir.clone();
                 Run::Blocking(Box::new(move || {
@@ -128,8 +136,10 @@ impl Runner {
         }
     }
 
-    /// Before the process exits: lets queued recovery deletes finish, then kills terminals and agents.
+    /// Before the process exits: removes the edit socket, lets queued recovery deletes finish, then
+    /// kills terminals and agents.
     pub fn shutdown(&mut self) {
+        self.server = None;
         if let Some((tx, thread)) = self.recovery.take() {
             drop(tx);
             _ = thread.join();
@@ -157,6 +167,7 @@ mod tests {
             config_dir: None,
             pins: None,
             pin_writes: Default::default(),
+            server: None,
         }
     }
 
@@ -218,6 +229,19 @@ mod tests {
         };
         assert_eq!(request, 1);
         assert_eq!(result, Err("Recovery service unavailable".into()));
+    }
+
+    #[test]
+    fn shutdown_removes_the_edit_socket() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aiditor/1.sock");
+        let mut runner = runner();
+        runner.server = Some(server::Server::listen(path.clone(), runner.tx.clone()).unwrap());
+        assert!(path.exists());
+        runner.shutdown();
+        assert!(!path.exists());
     }
 
     #[test]

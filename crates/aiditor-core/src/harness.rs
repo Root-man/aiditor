@@ -41,6 +41,8 @@ pub struct Harness {
     pub writes: Vec<(PathBuf, String)>,
     /// Each `sessions.toml` text the core asked to write, in order.
     pub pins: Vec<String>,
+    /// Each edit client reply, by request.
+    pub edit_replies: Vec<(u64, Result<(), String>)>,
     pub reverts: HashMap<BufferId, Result<crate::buffer::Revert, String>>,
     pub diffs: HashMap<PathBuf, Result<String, String>>,
     pub hits: std::collections::VecDeque<Result<Vec<Hit>, String>>,
@@ -87,6 +89,7 @@ impl Harness {
             saves: std::collections::VecDeque::new(),
             writes: Vec::new(),
             pins: Vec::new(),
+            edit_replies: Vec::new(),
             reverts: HashMap::new(),
             diffs: HashMap::new(),
             hits: std::collections::VecDeque::new(),
@@ -440,6 +443,7 @@ impl Harness {
                 Effect::Grep(GrepOp::Cancel) => self.greps.push(None),
                 Effect::Parse { buffer, parse } => self.parses.push((buffer, parse)),
                 Effect::WritePins(text) => self.pins.push(text),
+                Effect::EditReply { request, result } => self.edit_replies.push((request, result)),
                 Effect::LoadConfiguration { request } => {
                     let settings = self.fixture_text("settings.toml");
                     let keymap = self.fixture_text("keymap.toml");

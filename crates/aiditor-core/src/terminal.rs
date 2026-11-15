@@ -771,6 +771,16 @@ impl Ctx<'_> {
             }
         }
     }
+
+    /// Answers an edit client. shortcut: refuses every request; #255 opens the files.
+    pub(crate) fn edit_request(&mut self, request: u64, terminal: TerminalId) {
+        let result = Err(if self.core.terminals.contains_key(&terminal) {
+            "Editing from terminals isn't built yet".into()
+        } else {
+            format!("No terminal {}", terminal.0)
+        });
+        self.effects.push(Effect::EditReply { request, result });
+    }
 }
 
 /// Whether `key` stays with the editor in char mode, as #89 and #233 decided.
@@ -1881,6 +1891,31 @@ mod tests {
             assert_eq!(h.core.message(), Some("/x: not a directory"));
             assert_eq!(ops(&mut h), ["kill 1"]);
             assert_eq!(name(&h), "*scratch*<work>");
+        }
+
+        #[test]
+        fn edit_requests_are_refused_for_now() {
+            let mut h = work();
+            h.keys("M-x vterm RET");
+            let files = vec![crate::ClientFile {
+                path: "/w/COMMIT_EDITMSG".into(),
+                line: None,
+                col: None,
+            }];
+            for (request, id) in [(1, 0), (2, 9)] {
+                h.send(Msg::EditRequest {
+                    request,
+                    terminal: TerminalId(id),
+                    files: files.clone(),
+                });
+            }
+            assert_eq!(
+                h.edit_replies,
+                [
+                    (1, Err("Editing from terminals isn't built yet".into())),
+                    (2, Err("No terminal 9".into())),
+                ]
+            );
         }
 
         #[test]

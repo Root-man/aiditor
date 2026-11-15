@@ -8,7 +8,7 @@ use aiditor_core::display::TEXT_INSET;
 use aiditor_core::settings::FaceName;
 use aiditor_core::{Core, Effect, Msg};
 use aiditor_services::runner::{Run, Runner};
-use aiditor_services::{agents, clock, grep, recovery, terminal, watcher};
+use aiditor_services::{agents, clock, grep, recovery, server, terminal, watcher};
 use gpui::{
     ClipboardItem, Context, FocusHandle, Font, FontFeatures, KeyDownEvent, Pixels, StyledText,
     Task, Window, div, font, prelude::*, px, rgb,
@@ -97,6 +97,13 @@ impl Editor {
                 });
             })
         });
+        let server = args.socket.and_then(|path| {
+            (server::Server::listen(path.clone(), tx.clone()))
+                .inspect_err(|err| tracing::warn!("edit server at {}: {err}", path.display()))
+                .ok()
+        });
+        let mut terminals = terminal::Terminals::new(args.zsh_dir);
+        terminals.client = server.as_ref().map(server::Server::env).unwrap_or_default();
         Editor {
             core,
             benchmark: None,
@@ -104,13 +111,14 @@ impl Editor {
             runner: Runner {
                 tx,
                 grep: grep::Grep::default(),
-                terminals: terminal::Terminals::new(args.zsh_dir),
+                terminals,
                 agents: agents::Agents::default(),
                 watcher,
                 recovery,
                 config_dir: args.config_dir,
                 pins: args.pins,
                 pin_writes: Default::default(),
+                server,
             },
             timer: None,
             clock: clock::minute_text(time),
