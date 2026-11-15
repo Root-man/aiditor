@@ -104,7 +104,7 @@ impl Core {
             .map(|(key, binding)| {
                 let what = match binding {
                     Binding::Command(name) => name.to_string(),
-                    Binding::Prefix(_) => "+prefix".into(),
+                    Binding::Prefix(map) => format!("+{}", map.name().unwrap_or("prefix")),
                 };
                 (key.to_string(), what)
             })
@@ -132,7 +132,7 @@ mod tests {
     fn c_x_then_another_key_does_nothing() {
         let mut h = Harness::new(&[("a.txt", "")]);
         h.open("a.txt");
-        h.keys("C-x a C-x C-x b");
+        h.keys("C-x q C-x C-x b");
         assert_eq!(h.text(), "b");
         assert_eq!(
             h.core.current().file.as_ref().unwrap().disk,
@@ -435,5 +435,67 @@ mod tests {
             keys,
             [crate::key::Key::plain(crate::key::KeyCode::Char('z'))]
         );
+    }
+
+    #[test]
+    fn project_prefix_moves_to_c_c_p_in_one_entry() {
+        let user = "[global]\n\"C-c p\" = \"project-prefix\"\n\"C-x p\" = false";
+        let mut h = Harness::new(&[("keymap.toml", user)]);
+        h.keys("C-x C-r");
+        assert_eq!(h.core.message(), Some("Configuration reloaded"));
+        let (bundled, _) = h.core.parse_keymaps(None).unwrap();
+        let moved: Vec<_> = bundled["project-prefix"].bindings().collect();
+        assert!(moved.len() > 10, "{moved:?}");
+        for (key, binding) in moved {
+            let keys = |prefix| crate::key::parse_keys(&format!("{prefix} {key}")).unwrap();
+            assert_eq!(h.core.lookup(&keys("C-c p")), Some(binding), "{key}");
+            assert_eq!(h.core.lookup(&keys("C-x p")), None, "{key}");
+        }
+        h.keys("C-x p");
+        assert_eq!(h.core.message(), Some("C-x p is undefined"));
+        h.keys("C-c p f");
+        assert!(h.core.minibuffer().is_some());
+        h.keys("C-g");
+        h.keys("C-c").advance(1000 * MS);
+        let p = ("p".to_string(), "+project-prefix".to_string());
+        assert!(h.core.hint().unwrap().entries.contains(&p));
+    }
+
+    #[test]
+    fn a_prefix_bound_twice_works_under_both() {
+        let user = "[global]\n\"C-c p\" = \"project-prefix\"";
+        let mut h = Harness::new(&[("keymap.toml", user)]);
+        h.keys("C-x C-r");
+        for keys in ["C-c p f", "C-x p f"] {
+            h.keys(keys);
+            assert!(h.core.minibuffer().is_some(), "{keys}");
+            h.keys("C-g");
+        }
+    }
+
+    #[test]
+    fn c_x_a_hint_lists_the_agent_commands() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x a").advance(1000 * MS);
+        let entries = h.core.hint().unwrap().entries;
+        for entry in [("a", "agent-start"), ("l", "agent-sessions")] {
+            let entry = (entry.0.to_string(), entry.1.to_string());
+            assert!(entries.contains(&entry), "{entry:?}: {entries:?}");
+        }
+    }
+
+    #[test]
+    fn bad_prefixes_are_reported_and_false_unbinds() {
+        let user = "[global]\n\"C-c q\" = \"no-such-prefix\"\n\"C-c l\" = \"loop\"\n\"C-x u\" = false\n[loop]\n\"l\" = \"loop\"";
+        let mut h = Harness::new(&[("keymap.toml", user)]);
+        h.keys("C-x C-r");
+        let msg = h.core.message().unwrap().to_owned();
+        for needle in ["no-such-prefix", "loop: prefix cycle"] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
+        h.keys("a C-x u");
+        assert_eq!(h.core.message(), Some("C-x u is undefined"));
+        h.keys("C-/");
+        assert_eq!(h.text(), "");
     }
 }

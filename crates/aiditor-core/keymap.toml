@@ -13,26 +13,11 @@
 "C-x C-f" = "find-file"
 "C-x C-c" = "save-buffers-kill-terminal"
 "C-x C-r" = "reload-settings"
-"C-x p c" = "project-create"
-"C-x p a" = "project-add-root"
-"C-x p r" = "project-remove-root"
-"C-x p d" = "project-set-default-agent"
-"C-x p w" = "project-set-watch"
-"C-x p o" = "project-open-file"
-"C-x p s" = "project-save"
-"C-x p p" = "project-switch"
-"C-x p i" = "project-index"
-"C-x p f" = "project-find-file"
-"C-x p g" = "project-grep"
-# Workspaces, on Emacs's tab-bar prefix.
-"C-x t 2" = "workspace-new"
-"C-x t RET" = "workspace-switch"
-"C-x t o" = "workspace-next"
-"C-x t O" = "workspace-previous"
-"C-x t r" = "workspace-rename"
-"C-x t 0" = "workspace-kill-current"
-"C-x t k" = "workspace-kill"
-"C-x t l" = "workspace-list"
+# Named prefixes, defined in their own tables below; bind one to other keys, or unbind it with
+# `false`, in one entry.
+"C-x p" = "project-prefix"
+"C-x t" = "workspace-prefix"
+"C-x a" = "agent-prefix"
 "C-g" = "keyboard-quit"
 "M-x" = "execute-extended-command"
 "C-u" = "universal-argument"
@@ -99,6 +84,38 @@
 "s-z" = "undo"
 "s-s" = "save-buffer"
 # Copy, cut and paste are in keymap-macos.toml and keymap-linux.toml.
+
+[project-prefix]
+"c" = "project-create"
+"a" = "project-add-root"
+"r" = "project-remove-root"
+"d" = "project-set-default-agent"
+"w" = "project-set-watch"
+"o" = "project-open-file"
+"s" = "project-save"
+"p" = "project-switch"
+"i" = "project-index"
+"f" = "project-find-file"
+"g" = "project-grep"
+
+# Workspaces, on Emacs's tab-bar prefix.
+[workspace-prefix]
+"2" = "workspace-new"
+"RET" = "workspace-switch"
+"o" = "workspace-next"
+"O" = "workspace-previous"
+"r" = "workspace-rename"
+"0" = "workspace-kill-current"
+"k" = "workspace-kill"
+"l" = "workspace-list"
+
+[agent-prefix]
+"a" = "agent-start"
+"l" = "agent-sessions"
+"f" = "agent-fork-session"
+"r" = "agent-rollback-session"
+"m" = "agent-select-model"
+"e" = "agent-select-effort"
 
 [workspace-list-mode]
 "g" = "workspace-list"
