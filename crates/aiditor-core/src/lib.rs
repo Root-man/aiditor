@@ -268,6 +268,8 @@ pub enum Msg {
     },
     /// The user's keymap file, the same way.
     KeymapLoaded(Result<Option<String>, String>),
+    /// `sessions.toml`, the pinned sessions, the same way.
+    PinsLoaded(Result<Option<String>, String>),
     /// Every project file in the projects directory `dir`, parsed and checked, or why it was
     /// rejected; `dir` is `None` without a config dir.
     ProjectsLoaded {
@@ -413,6 +415,8 @@ pub enum Effect {
     },
     /// Read one configuration bundle and send `Msg::ConfigurationLoaded`.
     LoadConfiguration { request: u64 },
+    /// Replace `sessions.toml` with this text, with no answer.
+    WritePins(String),
     /// Put this text on the system clipboard.
     SetClipboard(String),
     /// Open this file in the system's default app for it.
@@ -852,6 +856,10 @@ impl Ctx<'_> {
                     Err(err) => self.core.report(format!("keymap: {err}")),
                 }
             }
+            Msg::PinsLoaded(text) => match text.and_then(|t| sessions::parse_pins(t.as_deref())) {
+                Ok(pins) => self.core.pins = pins,
+                Err(err) => self.core.report(format!("sessions.toml: {err}")),
+            },
             Msg::ProjectsLoaded { dir, projects } => {
                 self.core.projects_dir = dir;
                 self.core.reconcile_projects(projects);
@@ -1107,6 +1115,8 @@ pub struct Core {
     /// Each sessions buffer's state, until its buffer is killed.
     /// The number of the last list request, so each answer names its request.
     list_requests: u64,
+    /// The pinned sessions, as `sessions.toml` holds them.
+    pins: Vec<sessions::Pin>,
     /// The zone sessions' times show in.
     time_zone: jiff::tz::TimeZone,
     /// The date and time now, which sessions' groups are reckoned from.
@@ -1191,6 +1201,7 @@ impl Default for Core {
             environments: HashMap::new(),
             environment_requests: 0,
             list_requests: 0,
+            pins: Vec::new(),
             time_zone: jiff::tz::TimeZone::system(),
             wall_clock: jiff::Timestamp::now,
         };

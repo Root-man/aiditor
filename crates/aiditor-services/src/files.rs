@@ -511,6 +511,8 @@ impl Patterns {
 pub enum WriteExpectation {
     Create,
     Update(Option<u64>),
+    /// Whatever the file holds, for the editor's own files.
+    Overwrite,
 }
 
 #[derive(Debug)]
@@ -572,6 +574,7 @@ pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u6
                 return Err(WriteFailure::Conflict);
             }
         }
+        WriteExpectation::Overwrite => {}
     }
     // A missing file or a dangling symlink: nothing to keep; create it through the link.
     let Ok(target) = fs::canonicalize(path) else {

@@ -109,6 +109,8 @@ impl Editor {
                 watcher,
                 recovery,
                 config_dir: args.config_dir,
+                pins: args.pins,
+                pin_writes: Default::default(),
             },
             timer: None,
             clock: clock::minute_text(time),

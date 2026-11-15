@@ -1,7 +1,8 @@
 //! Carries out the core's effects on the services, handing back what only the caller can schedule or do.
 
 use std::path::PathBuf;
-use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::thread::JoinHandle;
 
 use aiditor_core::{Effect, Msg, RecoveryOp};
@@ -21,6 +22,10 @@ pub struct Runner {
     pub recovery: Option<(std_mpsc::Sender<RecoveryOp>, JoinHandle<()>)>,
     /// Where the user's settings and keymap files are, if known.
     pub config_dir: Option<PathBuf>,
+    /// `sessions.toml`, when there is a data dir.
+    pub pins: Option<PathBuf>,
+    /// The number of the latest pins write, so an older one never lands after it.
+    pub pin_writes: Arc<Mutex<u64>>,
 }
 
 /// What the caller must do after `Runner::run`.
@@ -85,6 +90,31 @@ impl Runner {
                 });
                 Run::Done
             }
+            Effect::WritePins(text) => {
+                let Some(path) = self.pins.clone() else {
+                    return Run::Done;
+                };
+                static NEXT: AtomicU64 = AtomicU64::new(1);
+                let (number, latest) = (
+                    NEXT.fetch_add(1, Ordering::Relaxed),
+                    self.pin_writes.clone(),
+                );
+                tokio::task::spawn_blocking(move || {
+                    let mut latest = latest.lock().unwrap_or_else(|e| e.into_inner());
+                    if *latest > number {
+                        return;
+                    }
+                    *latest = number;
+                    let dir = path.parent().map(std::fs::create_dir_all).transpose();
+                    let written = dir.map_err(files::WriteFailure::Io).and_then(|_| {
+                        files::write(&path, text.as_bytes(), files::WriteExpectation::Overwrite)
+                    });
+                    if let Err(err) = written {
+                        tracing::warn!("pins not saved: {}", err.describe(&path, "not saved"));
+                    }
+                });
+                Run::Done
+            }
             Effect::LoadConfiguration { request } => {
                 let dir = self.config_dir.clone();
                 Run::Blocking(Box::new(move || {
@@ -125,6 +155,8 @@ mod tests {
             watcher: watcher::Watcher::spawn(|_| {}),
             recovery: None,
             config_dir: None,
+            pins: None,
+            pin_writes: Default::default(),
         }
     }
 
@@ -141,6 +173,29 @@ mod tests {
             panic!("a check answers with Checked");
         };
         assert_eq!(files, [(path, Some(aiditor_core::buffer::hash(b"a")))]);
+    }
+
+    #[test]
+    fn the_latest_pins_write_wins_and_makes_the_directory() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data/sessions.toml");
+        let mut runner = runner();
+        runner.pins = Some(path.clone());
+        // Both wait on the lock, so either may write first once it is free.
+        let lock = runner.pin_writes.clone();
+        let held = lock.lock().unwrap();
+        for text in ["old", "new"] {
+            assert!(matches!(
+                runner.run(Effect::WritePins(text.into())),
+                Run::Done
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(held);
+        runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
     #[test]
