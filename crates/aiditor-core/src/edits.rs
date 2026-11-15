@@ -292,15 +292,24 @@ impl Core {
         self.show_instead(id, shell);
     }
 
-    /// Client `request` went away: its buffers stay, without `server-edit`.
+    /// Client `request` went away: its buffers lose `server-edit`, and those it opened are
+    /// killed, showing the terminal, unless they hold unsaved edits.
     pub(crate) fn edit_gone(&mut self, request: u64) {
         let Some(at) = self.clients.iter().position(|c| c.request == request) else {
             return;
         };
-        for edit in self.clients.remove(at).edits {
-            if let Some(id) = edit.buffer {
-                self.leave(id, None, false);
+        let client = self.clients.remove(at);
+        let shell = self.terminals.get(&client.terminal).copied();
+        for edit in client.edits {
+            let Some(id) = edit.buffer else { continue };
+            let modified = self.buffers.get(id).is_some_and(|b| b.modified());
+            if edit.opened && modified {
+                let name = self.buffers.get(id).expect("live").name.clone();
+                self.echo(format!(
+                    "{name}: its client went away; the edits are unsaved"
+                ));
             }
+            self.leave(id, shell.filter(|_| !modified), edit.opened && !modified);
         }
     }
 
@@ -540,9 +549,21 @@ mod tests {
     }
 
     #[test]
-    fn a_client_that_goes_away_leaves_its_buffer() {
+    fn a_client_that_goes_away_kills_the_buffer_it_opened() {
+        let mut h = git();
+        let shell = name(&h).to_string();
+        edit(&mut h, 1, &["a"]);
+        h.send(Msg::EditGone { request: 1 });
+        assert_eq!(name(&h), shell);
+        assert!(!exists(&h, "a"));
+        assert!(h.edit_replies.is_empty());
+    }
+
+    #[test]
+    fn a_client_that_goes_away_leaves_unsaved_edits() {
         let mut h = git();
         edit(&mut h, 1, &["a"]);
+        h.keys("x");
         h.send(Msg::EditGone { request: 1 });
         assert_eq!(name(&h), "a");
         assert!(!editing(&h));

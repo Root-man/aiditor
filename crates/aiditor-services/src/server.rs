@@ -76,9 +76,7 @@ impl Server {
                 return Vec::new();
             }
         };
-        // git runs `$GIT_EDITOR` through `sh -c`, so the path is quoted for sh.
-        let quoted = exe.to_string_lossy().replace('\'', r"'\''");
-        let command = format!("'{quoted}' --wait");
+        let command = format!("{} --wait", quote(&exe.to_string_lossy()));
         let mut env = vec![(
             "AIDITOR_SOCKET".to_string(),
             self.path.to_string_lossy().into_owned(),
@@ -94,6 +92,16 @@ impl Server {
         if let Some(client) = self.pending.lock().unwrap().remove(&request) {
             _ = client.send(result);
         }
+    }
+}
+
+/// `path` quoted for sh, as git runs `$GIT_EDITOR` through `sh -c`; bare when it is safe, as
+/// git quotes the command again in its errors.
+fn quote(path: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/._-+".contains(c);
+    match !path.is_empty() && path.chars().all(safe) {
+        true => path.into(),
+        false => format!("'{}'", path.replace('\'', r"'\''")),
     }
 }
 
@@ -405,6 +413,13 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_quoted_only_when_they_need_it() {
+        assert_eq!(quote("/a/b-1/aiditor"), "/a/b-1/aiditor");
+        assert_eq!(quote("/My Apps/it's"), r"'/My Apps/it'\''s'");
+        assert_eq!(quote(""), "''");
+    }
+
+    #[test]
     fn the_env_runs_the_client_quoted() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
@@ -412,7 +427,7 @@ mod tests {
         let (server, _rx) = server(dir.path());
         let env: HashMap<_, _> = server.env().into_iter().collect();
         let exe = std::env::current_exe().unwrap();
-        let command = format!("'{}' --wait", exe.display());
+        let command = format!("{} --wait", quote(&exe.to_string_lossy()));
         assert_eq!(env["EDITOR"], command);
         assert_eq!(env["GIT_EDITOR"], command);
         assert_eq!(env["VISUAL"], command);

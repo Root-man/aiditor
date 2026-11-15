@@ -72,11 +72,15 @@ After a buffer's edit is finished or aborted, the window that showed it SHALL sh
 - **THEN** the window shows the terminal and the buffer is still there, without `server-edit`
 
 ### Requirement: A client that goes away
-When a client's connection closes before its reply, the server SHALL tell the core. The core SHALL drop the client. Its buffers SHALL stay but lose `server-edit`.
+When a client's connection closes before its reply, the server SHALL tell the core. The core SHALL drop the client, and its buffers SHALL lose `server-edit`. A buffer opened for the edit SHALL be killed, its windows showing the terminal, unless it has unsaved edits. A buffer with unsaved edits stays, and the echo area says its client went away.
 
 #### Scenario: ^C in the terminal
-- **WHEN** the client is interrupted while its file is open
-- **THEN** the buffer stays and `server-edit` is off
+- **WHEN** the client is interrupted while its unmodified file is open
+- **THEN** the buffer is killed and the window shows the terminal
+
+#### Scenario: ^C with unsaved edits
+- **WHEN** the client is interrupted after the user typed in its file
+- **THEN** the buffer stays, with `server-edit` off
 
 ## REMOVED Requirements
 

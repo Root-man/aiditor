@@ -11,7 +11,7 @@
 - `C-c C-k` (`server-edit-abort`) aborts the client without saving and replies code 1 with `Edit aborted`.
 - Killing an edit buffer or its terminal aborts the client. So do killing the workspace and quitting: quitting drops the socket, and the client exits 1. A file that can't be read or decoded aborts it too, with the reason.
 - After finishing or aborting, the window shows the client's next file, or else the terminal. A buffer opened for the edit is killed; one that was already open stays.
-- If the client goes away first (`^C`), its buffers stay and lose `server-edit`. To support that, the server tells the core when a client hangs up.
+- If the client goes away first (`^C`), its buffers lose `server-edit`. Those opened for the edit are killed, unless they have unsaved edits. The client's path in `$EDITOR` is quoted only when it needs to be, so git's error doesn't show it quoted twice. To support that, the server tells the core when a client hangs up.
 - Defaults picked here:
   - A request for a terminal in another workspace opens its files in that workspace's saved windows, and the echo area says so.
   - With several files, finishing one shows the next.
