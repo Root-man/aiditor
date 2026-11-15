@@ -172,7 +172,7 @@ impl Editor {
             .bg
             .unwrap_or(theme.background());
         let (c, note) = (&mb.candidates[i], &mb.annotations[i]);
-        let runs = if !mb.groups.is_empty() {
+        let runs = if !mb.groups.is_empty() && mb.numbered {
             grep_runs(c, font, theme)
         } else {
             let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();

@@ -769,6 +769,20 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.sessions_archive(),
         },
         Command {
+            name: "agent-sessions-search",
+            // Asks its own question, which names the project; the hits are matched already.
+            spec: ArgSpec {
+                workspace: true,
+                grep_hits: true,
+                filter: Some(crate::command::Filter::Items(|_, items| {
+                    (0..items.len()).collect()
+                })),
+                preview: Some(crate::sessions::search_preview),
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.sessions_search(args),
+        },
+        Command {
             name: "agent-sessions-quit",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.sessions_quit(),

@@ -788,7 +788,10 @@ impl Core {
                                     let hit = self.grep.hit_at(i).expect("listed grep hit");
                                     let width = self.grep.line_number_width();
                                     let text: String = hit.text.chars().take(columns).collect();
-                                    format!("{:>width$}: {text}", hit.line + 1)
+                                    match self.grep.sessions.is_empty() {
+                                        true => format!("{:>width$}: {text}", hit.line + 1),
+                                        false => text,
+                                    }
                                 } else {
                                     f.swiper.as_ref().map_or_else(
                                         || f.candidate(i),
@@ -915,6 +918,7 @@ impl Core {
             highlights,
             syntax,
             annotations,
+            numbered: grep && self.grep.sessions.is_empty(),
             groups,
             selected,
             rows: shown,

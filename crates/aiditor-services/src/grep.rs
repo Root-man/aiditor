@@ -98,7 +98,12 @@ fn search_with_hook(
                         let Ok(entry) = entry else {
                             return WalkState::Continue;
                         };
-                        if crate::files::searchable_file(&entry) {
+                        let named = || {
+                            let name = entry.file_name().to_string_lossy();
+                            op.names.iter().any(|n| name.contains(n.as_str()))
+                        };
+                        if crate::files::searchable_file(&entry) && (op.names.is_empty() || named())
+                        {
                             hook(entry.path(), 0);
                             search_file(&mut searcher, matcher, root, &entry, &tx, halted, hook);
                         }
@@ -220,6 +225,7 @@ mod tests {
             id: 7,
             roots: roots.iter().map(|r| r.to_path_buf()).collect(),
             ignore: Vec::new(),
+            names: Vec::new(),
             pattern: pattern.into(),
             limit,
             workers: NonZeroUsize::MIN,
@@ -280,6 +286,23 @@ mod tests {
             ..op(&[dir.path()], "needle", 100)
         };
         assert_eq!(hits(&op), ["notes/n.md:0:0:needle"]);
+    }
+
+    #[test]
+    fn searches_only_the_named_files_when_some_are_named() {
+        let files = [
+            ("a/x1.jsonl", "x\n"),
+            ("b/rollout-x2.jsonl", "x\n"),
+            ("c3.jsonl", "x\n"),
+        ];
+        let dir = tree(&files);
+        let op = GrepSearch {
+            names: vec!["x1".into(), "x2".into()],
+            ..op(&[dir.path()], "x", 100)
+        };
+        let mut found = hits(&op);
+        found.sort();
+        assert_eq!(found, ["a/x1.jsonl:0:0:x", "b/rollout-x2.jsonl:0:0:x"]);
     }
 
     #[test]

@@ -8,7 +8,9 @@ use jiff::{Span, Timestamp, Zoned};
 use serde::{Deserialize, Serialize};
 
 use crate::buffer::{Buffer, BufferId, Decoration, FaceRef, Kind, Prop};
+use crate::command::{Args, Preview};
 use crate::display::{ModeLine, Segment, WindowDisplay};
+use crate::grep::Searched;
 use crate::project::{Project, ProjectId};
 use crate::settings::{Agent, FaceName};
 use crate::{AgentId, AgentOp, Core, Ctx, Effect, Open};
@@ -22,6 +24,7 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["agent-sessions-next", "agent-sessions-previous"], "move"),
     (&["agent-sessions-visit"], "switch"),
     (&["agent-sessions-toggle"], "fold"),
+    (&["agent-sessions-search"], "search"),
     (&["agent-sessions-pin"], "pin/unpin"),
     (&["agent-sessions-archive"], "archive"),
     (&["agent-sessions"], "refresh"),
@@ -180,6 +183,18 @@ fn list_op(
             .collect(),
         delete,
     }
+}
+
+/// The selected session hit's row in the sessions buffer the prompt was opened from, if shown.
+pub(crate) fn search_preview(core: &Core, _label: &str) -> Option<Preview> {
+    let hit = core.grep.hit_at(core.prompts.selected_index()?)?;
+    let session = core.grep.session_of(hit)?;
+    let buffer = core.buffers.get(core.origin()?.buffer())?;
+    let row = Row::Session(session.agent, session.id.clone());
+    let line = (buffer.session_list()?.rows.iter())
+        .find(|(_, r)| *r == row)?
+        .0;
+    buffer.char_idx(line, row.column()).ok().map(Preview::Point)
 }
 
 /// `updated` read as RFC 3339, whatever its offset or fraction.
@@ -691,8 +706,14 @@ impl Ctx<'_> {
     /// `agent-sessions-visit`: shows the session on point's row, loading it in the current
     /// workspace unless it is open.
     pub(crate) fn sessions_visit(&mut self) -> Result<(), String> {
-        let (list, agent, session) = self.session_row()?;
-        let listing = &list.agents[agent];
+        let (_, agent, session) = self.session_row()?;
+        let session = session.clone();
+        self.visit_listed(agent, &session)
+    }
+
+    /// Shows the agent's listed session, loading it in the current workspace unless it is open.
+    fn visit_listed(&mut self, agent: usize, session: &SessionId) -> Result<(), String> {
+        let listing = &self.session_rows()?.agents[agent];
         let Some(buffer) = self.core.open_session(&listing.name, session) else {
             let title = match &listing.answer {
                 Some(Ok(infos)) => (infos.iter())
@@ -715,6 +736,52 @@ impl Ctx<'_> {
         }
         self.core.switch_to(buffer);
         Ok(())
+    }
+
+    /// `agent-sessions-search`: asks for a regexp and lists its hits in the listed sessions' own
+    /// files as it is typed, as `project-grep`; given a listed hit, shows its session.
+    pub(crate) fn sessions_search(&mut self, args: Args) -> Result<(), String> {
+        if let Some(label) = args.strings.first() {
+            let hit = self.core.grep.hit(label).ok_or("No match")?;
+            let session = self.core.grep.session_of(hit).ok_or("No match")?;
+            let (agent, id) = (session.agent, session.id.clone());
+            return self.visit_listed(agent, &id);
+        }
+        let list = self.session_rows()?;
+        let home = std::env::home_dir().ok_or("No home directory")?;
+        // As Claude Code names a project's directory.
+        let cwd: String = (list.cwd.to_string_lossy().chars())
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let (mut roots, mut sessions) = (Vec::new(), Vec::new());
+        for (agent, listing) in list.agents.iter().enumerate() {
+            // shortcut: ignores `CLAUDE_CONFIG_DIR` and `CODEX_HOME`; read them from the agent's
+            // environment once someone sets them.
+            let root = match listing.name.as_str() {
+                "claude" => home.join(".claude/projects").join(&cwd),
+                "codex" => home.join(".codex/sessions"),
+                _ => continue,
+            };
+            let Some(Ok(infos)) = &listing.answer else {
+                continue;
+            };
+            let glyph = agent_look(&listing.name).0;
+            sessions.extend(infos.iter().map(|info| Searched {
+                agent,
+                id: info.session_id.clone(),
+                header: format!("{glyph}{}", info.title.as_deref().unwrap_or("(untitled)")),
+            }));
+            roots.push((root, listing.name.clone()));
+        }
+        if sessions.is_empty() {
+            return Err("No sessions to search".into());
+        }
+        let project = &self.core.projects[self.core.project_at(list.project)?].project;
+        let prompt = format!("Search sessions in {}: ", project.name);
+        let grep = &self.core.grep;
+        self.core.grep = grep.fresh("agent-sessions-search", roots, sessions);
+        let command = self.core.commands["agent-sessions-search"];
+        self.read_string(command, args, prompt, None)
     }
 
     /// `agent-sessions-toggle`: folds or unfolds the group whose heading point is on.
@@ -1262,6 +1329,120 @@ mod tests {
         assert_eq!(body(&h), "▾ Today  1\n    Mine ◆ codex       10:00");
     }
 
+    /// The listed sessions' search for `needle`, started with `s`.
+    fn session_search(h: &mut Harness) -> crate::GrepSearch {
+        h.collect_effects = true;
+        h.keys("s needle")
+            .advance(std::time::Duration::from_millis(200));
+        (std::mem::take(&mut h.effects).into_iter())
+            .find_map(|e| match e {
+                Effect::Grep(crate::GrepOp::Search(op)) => Some(op),
+                _ => None,
+            })
+            .expect("a search starts")
+    }
+
+    /// The title on the line point is on in the sessions window under the minibuffer.
+    fn previewed(h: &Harness) -> String {
+        let window = &h.core.windows.others[&h.core.windows.tree.leaves()[0]];
+        let buffer = h.core.buffers.get(window.buffer()).unwrap();
+        let line = buffer.line_col(window.point(&h.core.buffers)).unwrap().0;
+        let text = buffer.text().line(line).to_string();
+        text.split(['✻', '◆']).next().unwrap().trim().into()
+    }
+
+    #[test]
+    fn s_searches_only_the_listed_sessions_and_lists_their_text_by_session() {
+        let mut h = listed();
+        let op = session_search(&mut h);
+        let mb = h.core.frame().minibuffer.unwrap();
+        assert_eq!(mb.prompt, "Search sessions in home: ");
+        let home = std::env::home_dir().unwrap();
+        let cwd: String = (h.path("app").to_string_lossy().chars())
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let claude = home.join(".claude/projects").join(&cwd);
+        let codex = home.join(".codex/sessions");
+        assert_eq!(op.roots, [claude.clone(), codex.clone()]);
+        assert_eq!(op.names, ["c1", "c2", "x1"]);
+        let hit = |root: &PathBuf, path: &str, text: &str| crate::Hit {
+            root: root.clone(),
+            path: path.into(),
+            line: 3,
+            col: 0,
+            text: text.into(),
+        };
+        let long = format!(r#"{{"message":{{"content":"{} needle"}}}}"#, "x".repeat(30));
+        let hits = vec![
+            hit(
+                &claude,
+                "c2.jsonl",
+                r#"{"cwd":"/needle","message":{"content":"hi"}}"#,
+            ),
+            hit(
+                &codex,
+                "2026/10/28/rollout-2026-10-28T09-00-00-x1.jsonl",
+                r#"{"payload":{"content":[{"type":"input_text","text":"the needle\nnow"}]}}"#,
+            ),
+            hit(&claude, "c1.jsonl", &long),
+        ];
+        h.send(Msg::Grepped {
+            search: op.id,
+            hits: Ok(hits),
+            done: true,
+        });
+        let mb = h.frame(800., 600.).minibuffer.unwrap();
+        let cut = format!("…{} needle", "x".repeat(19));
+        assert_eq!(mb.candidates, ["the needle now", cut.as_str()]);
+        assert_eq!(mb.groups, [(0, "◆ Port".into()), (1, "✻ Fix it".into())]);
+        assert!(!mb.numbered, "no line numbers");
+        assert_eq!(previewed(&h), "Port");
+        h.keys("C-n");
+        assert_eq!(previewed(&h), "Fix it");
+        h.collect_effects = false;
+        h.keys("RET");
+        let loads: Vec<_> = (h.agent_ops.drain(..))
+            .filter_map(|op| match op {
+                AgentOp::Spawn { session, .. } => Some(session),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loads, [Open::Load("c1".into())]);
+    }
+
+    #[test]
+    fn a_hit_in_a_folded_session_previews_nothing() {
+        let mut h = listed();
+        h.keys("p TAB");
+        let op = session_search(&mut h);
+        h.send(Msg::Grepped {
+            search: op.id,
+            hits: Ok(vec![crate::Hit {
+                root: op.roots[0].clone(),
+                path: "c1.jsonl".into(),
+                line: 0,
+                col: 0,
+                text: r#"{"text":"a needle"}"#.into(),
+            }]),
+            done: true,
+        });
+        assert_eq!(
+            h.frame(800., 600.).minibuffer.unwrap().candidates,
+            ["a needle"]
+        );
+        assert!(previewed(&h).starts_with("▸ Today"), "{}", previewed(&h));
+    }
+
+    #[test]
+    fn s_needs_a_sessions_buffer_with_searchable_sessions() {
+        let mut h = work();
+        h.keys("M-x agent-sessions-search RET");
+        assert_eq!(h.core.message(), Some("Not in a sessions buffer"));
+        h.keys("M-x agent-sessions RET");
+        h.keys("s");
+        assert_eq!(h.core.message(), Some("No sessions to search"));
+    }
+
     #[test]
     fn ret_loads_a_session_not_open_and_then_shows_it() {
         let mut h = listed();
@@ -1643,6 +1824,7 @@ mod tests {
                 ("n/p", "move"),
                 ("RET", "switch"),
                 ("TAB", "fold"),
+                ("s", "search"),
                 ("P", "pin/unpin"),
                 ("a", "archive"),
                 ("g", "refresh"),
