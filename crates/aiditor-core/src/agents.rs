@@ -1482,14 +1482,19 @@ impl Core {
 
     /// The session buffer of `agent`'s session `id`, if one is open or loading.
     pub(crate) fn open_session(&self, agent: &str, id: &SessionId) -> Option<BufferId> {
-        (self.agents.values())
-            .find(|s| {
+        let session = &self.agents[&self.open_agent(agent, id)?];
+        Some(session.buffer).filter(|&b| self.buffers.get(b).is_some())
+    }
+
+    /// The agent running `agent`'s session `id`, if it is open or loading.
+    pub(crate) fn open_agent(&self, agent: &str, id: &SessionId) -> Option<AgentId> {
+        (self.agents.iter())
+            .find(|(_, s)| {
                 let answered = s.session.as_ref().map(|r| &r.session_id);
                 let loading = s.load.as_ref().and_then(|(id, _)| id.as_ref());
                 s.agent == agent && answered.or(loading) == Some(id)
             })
-            .map(|s| s.buffer)
-            .filter(|&b| self.buffers.get(b).is_some())
+            .map(|(&id, _)| id)
     }
 
     /// The state of the session `agent` started or answered as `id`, while it is open, in the
@@ -3039,7 +3044,17 @@ mod tests {
                     source,
                     session,
                 } => format!("delete {} {} {session}", id.0, source.0),
-                AgentOp::List { request, .. } => format!("list {request}"),
+                AgentOp::List {
+                    request, delete, ..
+                } => match delete {
+                    Some((session, stop)) => {
+                        format!(
+                            "list {request} delete {session} stop {:?}",
+                            stop.map(|s| s.0)
+                        )
+                    }
+                    None => format!("list {request}"),
+                },
             })
             .collect()
     }

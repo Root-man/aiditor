@@ -2,7 +2,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::v1::schema::{
-    ClientResponse, PromptRequest, SessionConfigKind, SetSessionConfigOptionRequest, StopReason,
+    ClientResponse, PromptRequest, SessionConfigKind, SessionId, SetSessionConfigOptionRequest,
+    StopReason,
 };
 use aiditor_core::key::{Key, KeyCode, parse_keys};
 use aiditor_core::{AgentId, AgentOp, Core, Effect, Msg, Open};
@@ -1090,13 +1091,24 @@ async fn list(
     cwd: &Path,
     env: &[(&str, &str)],
 ) -> Result<Vec<String>, String> {
-    let mut agents = Agents::default();
+    list_deleting(&mut Agents::default(), (command, args), cwd, env, None).await
+}
+
+/// Lists as `list` does through `agents`, deleting `delete` first.
+async fn list_deleting(
+    agents: &mut Agents,
+    (command, args): (&str, &[&str]),
+    cwd: &Path,
+    env: &[(&str, &str)],
+    delete: Option<(SessionId, Option<AgentId>)>,
+) -> Result<Vec<String>, String> {
     let mut rx = (agents.run(AgentOp::List {
         request: 7,
         command: command.into(),
         args: args.iter().map(|&a| a.into()).collect(),
         cwd: cwd.into(),
         env: (env.iter()).map(|&(k, v)| (k.into(), v.into())).collect(),
+        delete,
     }))
     .expect("a list returns a receiver");
     let msgs = rest(&mut rx).await;
@@ -1140,6 +1152,59 @@ async fn a_list_answers_every_page_in_cwd_and_its_process_exits() {
     assert_eq!(listed.unwrap(), ["a", "b"]);
     let pid = std::fs::read_to_string(&pid_file).unwrap();
     assert!(gone(pid.trim().parse().unwrap()).await);
+}
+
+/// A script listing sessions `a` and `b` in `/`, deleting them if `delete`.
+fn two_sessions(dir: &Path, delete: bool) -> (&'static str, String) {
+    let sessions = r#"[[{"sessionId": "a", "cwd": "/"}, {"sessionId": "b", "cwd": "/"}]]"#;
+    script(
+        dir,
+        &format!(r#"{{"sessions": {sessions}, "delete": {delete}}}"#),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_session_no_longer_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    let (key, path) = two_sessions(dir.path(), true);
+    let delete = Some(("a".into(), None));
+    let env = [(key, path.as_str())];
+    let mut agents = Agents::default();
+    let listed = list_deleting(&mut agents, (AGENT, &[]), "/".as_ref(), &env, delete);
+    assert_eq!(listed.await.unwrap(), ["b"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_without_the_capability_fails_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let (key, path) = two_sessions(dir.path(), false);
+    let delete = Some(("a".into(), None));
+    let env = [(key, path.as_str())];
+    let mut agents = Agents::default();
+    let listed = list_deleting(&mut agents, (AGENT, &[]), "/".as_ref(), &env, delete);
+    let err = listed.await.unwrap_err();
+    assert!(
+        err.contains("archiving a") && err.contains("can't delete"),
+        "{err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_open_session_stops_its_agent_first() {
+    let mut agents = Agents::default();
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = open(&mut agents, dir.path(), "{}", Open::New);
+    started(&mut source).await.1.expect("the source starts");
+    let (key, path) = two_sessions(dir.path(), true);
+    let delete = Some(("a".into(), Some(ID)));
+    let env = [(key, path.as_str())];
+    let listed = list_deleting(&mut agents, (AGENT, &[]), "/".as_ref(), &env, delete);
+    assert_eq!(listed.await.unwrap(), ["b"]);
+    let msgs = rest(&mut source).await;
+    assert!(
+        msgs.iter().any(|m| matches!(m, Msg::AgentExited { .. })),
+        "{msgs:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1188,6 +1253,7 @@ async fn quitting_kills_a_running_list() {
             .to_vec(),
         cwd: "/".into(),
         env: Vec::new(),
+        delete: None,
     }))
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);

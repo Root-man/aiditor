@@ -16,7 +16,7 @@ use agent_client_protocol::v1::schema::{
     AgentRequest, CancelNotification, ClientCapabilities, ContentBlock, DeleteSessionRequest,
     ElicitationCapabilities, ElicitationFormCapabilities, ForkSessionRequest, Implementation,
     InitializeRequest, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-    NewSessionResponse, PromptRequest, RequestId, SessionInfo, SessionNotification,
+    NewSessionResponse, PromptRequest, RequestId, SessionId, SessionInfo, SessionNotification,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, ByteStreams, Client};
@@ -235,6 +235,9 @@ impl Agents {
                 session,
             } => {
                 let group = self.handles.remove(&source).and_then(Handle::terminate);
+                if let Some(group) = group {
+                    kill_after_grace(group);
+                }
                 let connection = self.handles.get(&id).and_then(|handle| {
                     (handle.connection.lock().unwrap().clone())
                         .filter(|_| handle.deletable.load(Ordering::SeqCst))
@@ -242,16 +245,7 @@ impl Agents {
                 // Claude Code writes its transcript as it exits, so the delete waits until the
                 // source's whole group is gone.
                 tokio::spawn(async move {
-                    if let Some(group) = group {
-                        tokio::time::sleep(GRACE).await;
-                        unsafe { libc::killpg(group, libc::SIGKILL) };
-                        for _ in 0..100 {
-                            if unsafe { libc::killpg(group, 0) } != 0 {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    }
+                    wait_gone(group).await;
                     let Some((connection, _)) = connection else {
                         return;
                     };
@@ -270,7 +264,8 @@ impl Agents {
                 args,
                 cwd,
                 env,
-            } => Some(self.list(request, command, args, cwd, env)),
+                delete,
+            } => Some(self.list(request, command, args, cwd, env, delete)),
         }
     }
 
@@ -395,7 +390,14 @@ impl Agents {
         args: Vec<String>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
+        delete: Option<(SessionId, Option<AgentId>)>,
     ) -> Receiver<Msg> {
+        let stop = delete.as_ref().and_then(|(_, stop)| stop.as_ref());
+        let group = stop.and_then(|id| self.handles.remove(id)?.terminate());
+        if let Some(group) = group {
+            kill_after_grace(group);
+        }
+        let delete = delete.map(|(session, _)| (session, group));
         let (tx, rx) = channel(1);
         let fail = |err: String| {
             _ = tx.try_send(Msg::AgentListed {
@@ -423,7 +425,7 @@ impl Agents {
         tokio::spawn(async move {
             // shortcut: an agent that never answers keeps its process until quit; time this out
             // if one ever hangs.
-            let result = list_sessions(cwd, stdin, stdout).await;
+            let result = list_sessions(cwd, stdin, stdout, delete).await;
             _ = tx.send(Msg::AgentListed { request, result }).await;
             // A quit that drained it terminates it instead.
             if lists.lock().unwrap().remove(&request).is_some()
@@ -438,11 +440,13 @@ impl Agents {
     }
 }
 
-/// Initializes the agent and asks for its sessions in `cwd`, following `nextCursor`.
+/// Initializes the agent, deletes `delete`'s session once its group is gone, and asks for its
+/// sessions in `cwd`, following `nextCursor`.
 async fn list_sessions(
     cwd: PathBuf,
     stdin: ChildStdin,
     stdout: ChildStdout,
+    delete: Option<(SessionId, Option<libc::pid_t>)>,
 ) -> Result<Vec<SessionInfo>, String> {
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
     let listed = Client
@@ -454,6 +458,18 @@ async fn list_sessions(
             let capabilities = initialized.agent_capabilities.session_capabilities;
             if capabilities.list.is_none() {
                 return Ok(Err("the agent can't list sessions".to_owned()));
+            }
+            if let Some((session, group)) = delete {
+                if capabilities.delete.is_none() {
+                    return Ok(Err(format!(
+                        "archiving {session}: the agent can't delete sessions"
+                    )));
+                }
+                wait_gone(group).await;
+                let deleted = agent.send_request(DeleteSessionRequest::new(session.clone()));
+                if let Err(err) = deleted.block_task().await {
+                    return Ok(Err(format!("archiving {session}: {err}")));
+                }
             }
             let (mut sessions, mut cursor) = (Vec::new(), None);
             for _ in 0..LIST_PAGES {
@@ -469,6 +485,20 @@ async fn list_sessions(
         })
         .await;
     listed.map_err(|err| err.to_string())?
+}
+
+/// Waits up to a second past the grace for process group `group`, killed after it, to be gone.
+async fn wait_gone(group: Option<libc::pid_t>) {
+    let Some(group) = group else {
+        return;
+    };
+    tokio::time::sleep(GRACE).await;
+    for _ in 0..100 {
+        if unsafe { libc::killpg(group, 0) } != 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Starts `command` in `cwd` leading its own process group, with piped stdin and stdout.
