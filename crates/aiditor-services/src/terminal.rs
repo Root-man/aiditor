@@ -39,6 +39,8 @@ pub struct Terminals {
     handles: HashMap<TerminalId, Handle>,
     /// The folder zsh starts with as `ZDOTDIR`, for its shell integration; `None` skips it.
     zsh_dir: Option<PathBuf>,
+    /// The edit server's variables, each terminal adding its `AIDITOR_TERMINAL`; empty without one.
+    pub client: Vec<(String, String)>,
 }
 
 struct Handle {
@@ -102,6 +104,7 @@ impl Terminals {
         Terminals {
             handles: HashMap::new(),
             zsh_dir,
+            client: Vec::new(),
         }
     }
 
@@ -173,6 +176,12 @@ impl Terminals {
         size: PtySize,
     ) -> Receiver<Msg> {
         let (tx, rx) = channel(4);
+        let mut env = env;
+        // After the spawn's variables, so a project's `EDITOR` doesn't bypass the client.
+        if !self.client.is_empty() {
+            env.extend(self.client.iter().cloned());
+            env.push(("AIDITOR_TERMINAL".into(), id.0.to_string()));
+        }
         let open = || {
             let pair = native_pty_system()
                 .openpty(size)

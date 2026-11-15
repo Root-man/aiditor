@@ -260,6 +260,13 @@ pub enum Msg {
         request: u64,
         result: Result<Vec<SessionInfo>, String>,
     },
+    /// An `aiditor --wait` client in terminal `terminal` asks to edit `files`; answered with
+    /// `Effect::EditReply` carrying `request`.
+    EditRequest {
+        request: u64,
+        terminal: TerminalId,
+        files: Vec<ClientFile>,
+    },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
     ConfigurationLoaded {
@@ -417,6 +424,11 @@ pub enum Effect {
     LoadConfiguration { request: u64 },
     /// Replace `sessions.toml` with this text, with no answer.
     WritePins(String),
+    /// The answer to `Msg::EditRequest` `request`: its client exits 0, or 1 printing the error.
+    EditReply {
+        request: u64,
+        result: Result<(), String>,
+    },
     /// Put this text on the system clipboard.
     SetClipboard(String),
     /// Open this file in the system's default app for it.
@@ -503,6 +515,14 @@ pub enum FileOp {
         old: Option<String>,
         text: String,
     },
+}
+
+/// A file an edit client asks for: an absolute path, at a 1-based line and column if given.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClientFile {
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    pub col: Option<usize>,
 }
 
 /// A terminal identity chosen by the core.
@@ -782,6 +802,9 @@ impl Ctx<'_> {
             Msg::AgentConfigured { id, result } => self.agent_configured(id, result),
             Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
             Msg::AgentListed { request, result } => self.agent_listed(request, result),
+            Msg::EditRequest {
+                request, terminal, ..
+            } => self.edit_request(request, terminal),
             Msg::Key(key) => {
                 self.key(key);
                 self.core.echo_chip();

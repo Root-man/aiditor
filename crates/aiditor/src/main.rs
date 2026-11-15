@@ -31,7 +31,8 @@ const FONT: &str = if cfg!(target_os = "macos") {
 };
 
 const USAGE: &str =
-    "usage: aiditor [--config-dir DIR] [--debug] [FILE | FOLDER] | --bench-ui OUTPUT";
+    "usage: aiditor [--config-dir DIR] [--debug] [FILE | FOLDER] | --bench-ui OUTPUT
+       aiditor --wait [+LINE[:COL]] FILE...   (as $EDITOR in an aiditor terminal)";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -44,6 +45,8 @@ struct Args {
     zsh_dir: Option<PathBuf>,
     /// `sessions.toml` in the platform local data dir, for pinned sessions.
     pins: Option<PathBuf>,
+    /// The edit server's socket, if there is a per-user runtime dir for it.
+    socket: Option<PathBuf>,
     debug: bool,
     benchmark: Option<PathBuf>,
 }
@@ -74,6 +77,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
     parsed.recovery_dir = dirs.as_ref().map(|d| d.data_dir().join("recovery"));
     parsed.pins = (dirs.as_ref()).map(|d| d.data_local_dir().join("sessions.toml"));
     parsed.zsh_dir = dirs.map(|d| d.data_dir().join("shell/zsh"));
+    parsed.socket = aiditor_services::server::socket_path();
     Ok(parsed)
 }
 
@@ -106,6 +110,18 @@ where
 }
 
 fn main() {
+    let mut argv = std::env::args_os().skip(1).peekable();
+    // The `$EDITOR` client runs before anything else, so it starts fast and opens no window.
+    if argv.next_if(|arg| arg == "--wait").is_some() {
+        let args = argv.map(OsString::into_string).collect::<Result<_, _>>();
+        let Ok(args) = args else {
+            eprintln!("aiditor: --wait needs UTF-8 file names");
+            std::process::exit(2);
+        };
+        let terminal = std::env::var("AIDITOR_TERMINAL").ok();
+        let socket = std::env::var_os("AIDITOR_SOCKET");
+        std::process::exit(aiditor_services::server::client(socket, terminal, args));
+    }
     let channel = aiditor_services::channel();
     tracing_subscriber::registry()
         .with(
@@ -117,7 +133,7 @@ fn main() {
         .with(messages_layer(channel.0.clone()))
         .init();
 
-    let mut args = parse_args(std::env::args_os().skip(1)).unwrap_or_else(|err| {
+    let mut args = parse_args(argv).unwrap_or_else(|err| {
         if err == USAGE {
             println!("{USAGE}");
             std::process::exit(0);
@@ -128,6 +144,11 @@ fn main() {
     if let Some(output) = args.benchmark.take() {
         editor::benchmark::run(output);
         return;
+    }
+    if args.socket.is_none() {
+        tracing::warn!(
+            "no edit socket (it needs an absolute $XDG_RUNTIME_DIR), so terminals keep their own $EDITOR"
+        );
     }
     let mut core = Core::default();
     // A Dock or desktop-launcher start has no terminal and only a minimal environment.
