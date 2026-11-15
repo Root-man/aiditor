@@ -15,3 +15,7 @@
 ## 3. Docs
 
 - [x] 3.1 Record in `docs/editor.md` how the hits are shown (#487)
+
+## 4. Review
+
+- [x] 4.1 Swiper, project grep and session search rows highlight their matches in `completion-match`

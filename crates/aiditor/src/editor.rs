@@ -16,7 +16,7 @@ use gpui::{
 use tokio::sync::mpsc;
 
 use crate::element::{
-    FrameElement, Painted, block, completion_runs, echo_line, grep_runs, text_run,
+    FrameElement, Painted, block, candidate_faces, completion_runs, echo_line, text_run,
 };
 use crate::input::to_key;
 use crate::{Args, FONT};
@@ -172,28 +172,18 @@ impl Editor {
             .bg
             .unwrap_or(theme.background());
         let (c, note) = (&mb.candidates[i], &mb.annotations[i]);
-        let runs = if !mb.groups.is_empty() && mb.numbered {
-            grep_runs(c, font, theme)
-        } else {
-            let mut faces = mb.syntax.get(i).cloned().unwrap_or_default();
-            faces.extend(
-                mb.highlights[i]
-                    .iter()
-                    .map(|range| (range.clone(), theme.face(FaceName::CompletionMatch))),
-            );
-            completion_runs(
-                c.len(),
-                &faces,
-                if mb.files && c.ends_with('/') {
-                    theme.face(FaceName::Directory)
-                } else {
-                    Face::default()
-                },
-                (Some(i) == mb.selected).then_some(selected),
-                font,
-                theme,
-            )
-        };
+        let runs = completion_runs(
+            c.len(),
+            &candidate_faces(mb, i, theme),
+            if mb.files && c.ends_with('/') {
+                theme.face(FaceName::Directory)
+            } else {
+                Face::default()
+            },
+            (Some(i) == mb.selected).then_some(selected),
+            font,
+            theme,
+        );
         let text = div()
             .debug_selector(|| format!("completion-name-{i}"))
             .min_w_0()
@@ -2296,13 +2286,29 @@ mod tests {
             assert_eq!((mb.rows, mb.count.trim()), (6, "1/3"));
             let font = e.font(window).0;
             let theme = &e.core.settings().theme;
-            let runs = grep_runs(&mb.candidates[0], &font, theme);
-            assert_eq!(runs[0].len, 3);
+            let faces = candidate_faces(&mb, 0, theme);
+            let runs = completion_runs(
+                mb.candidates[0].len(),
+                &faces,
+                Face::default(),
+                None,
+                &font,
+                theme,
+            );
+            assert_eq!(
+                runs.iter().map(|r| r.len).collect::<Vec<_>>(),
+                [3, 2, 6, 4],
+                "`  1`, `: `, `needle`, ` lib`"
+            );
             assert_eq!(
                 runs[0].color,
                 rgb(theme.face(FaceName::GrepLineNumber).fg.unwrap()).into()
             );
             assert_eq!(runs[1].color, rgb(theme.foreground()).into());
+            assert_eq!(
+                runs[2].color,
+                rgb(theme.face(FaceName::CompletionMatch).fg.unwrap()).into()
+            );
             assert_eq!(
                 runs.iter().map(|r| r.len).sum::<usize>(),
                 mb.candidates[0].len()

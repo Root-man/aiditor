@@ -14,6 +14,7 @@
 - The selected hit is previewed by moving point to its session's row in `*Sessions*`. `RET` opens or loads the session as `RET` on its row does.
 - The grep service's search gains file names: when some are given, a file is searched only if its name contains one of them.
 - The echo line hints gain `s search`, after fold.
+- Review: Swiper, project grep and session search rows draw their matches in `completion-match`, as fuzzy lists do; until now only the previewed buffer marked them.
 
 ## Capabilities
 
@@ -23,6 +24,7 @@
 ### Modified Capabilities
 - `project-grep`: a search can be limited to files whose names contain given strings.
 - `sessions-list`: the `s search` key hint.
+- `minibuffer`: search rows highlight their matches.
 
 ## Impact
 

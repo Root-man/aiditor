@@ -98,6 +98,11 @@ impl Search {
             .map_or(range.end, |(at, _)| range.start + at)
     }
 
+    /// The bytes of a listed line's number and its padding.
+    pub(crate) fn prefix_len(&self) -> usize {
+        self.lines.len().to_string().len() + 1
+    }
+
     pub(crate) fn presentation(&self, line: usize, columns: usize) -> String {
         let width = self.lines.len().to_string().len();
         let mut text: String = format!("{:<width$} ", line + 1)
@@ -558,6 +563,20 @@ mod tests {
         assert_eq!(result_face(&mut h, 2, "3 "), Face::default());
         let keyword = h.core.settings().theme.syntax["keyword"];
         assert_eq!(result_face(&mut h, 1, "const"), keyword);
+    }
+
+    #[test]
+    fn listed_lines_mark_the_match_past_the_line_number() {
+        let mut h = Harness::new(&[("a.txt", "1 one\nnone of it one\n")]);
+        h.frame(800., 600.);
+        h.open("a.txt").keys("C-s one SPC it");
+        let mb = h.core.frame().minibuffer.unwrap();
+        assert_eq!(mb.candidates, ["2 none of it one"]);
+        assert_eq!(
+            mb.highlights,
+            [vec![3..12]],
+            "`one of it`, as the preview marks it"
+        );
     }
 
     #[test]

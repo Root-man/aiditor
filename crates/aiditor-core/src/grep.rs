@@ -1105,6 +1105,9 @@ mod tests {
             let mb = h.core.minibuffer().unwrap();
             let row = mb.candidates[0].strip_prefix("  1: ").unwrap();
             assert_eq!(row, text.chars().take(80).collect::<String>());
+            if prefix == "short" {
+                assert_eq!(mb.highlights, [vec![10..16]], "past `  1: `, not in it");
+            }
             h.keys("RET");
             assert_eq!(h.core.point(), col);
         }

@@ -698,18 +698,35 @@ pub(crate) fn key_hint_runs(
     ]
 }
 
-pub(crate) fn grep_runs(text: &str, font: &Font, theme: &Theme) -> Vec<TextRun> {
-    let number = text.find(':').expect("grep line number");
-    vec![
-        text_run(
-            number,
-            theme.face(FaceName::GrepLineNumber),
-            false,
-            font,
-            theme,
-        ),
-        text_run(text.len() - number, Face::default(), false, font, theme),
-    ]
+/// A completion row's faces: a grep hit's line number or a Swiper line's syntax, with the
+/// matches drawn over them in `completion-match`.
+pub(crate) fn candidate_faces(
+    mb: &aiditor_core::display::Minibuffer,
+    i: usize,
+    theme: &Theme,
+) -> Vec<(Range<usize>, Face)> {
+    let under = match mb.numbered {
+        true => {
+            let number = mb.candidates[i].find(':').expect("grep line number");
+            vec![(0..number, theme.face(FaceName::GrepLineNumber))]
+        }
+        false => mb.syntax.get(i).cloned().unwrap_or_default(),
+    };
+    let matched = &mb.highlights[i];
+    let mut cuts: Vec<usize> = (under.iter().map(|(r, _)| r))
+        .chain(matched)
+        .flat_map(|r| [r.start, r.end])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let within =
+        |piece: &Range<usize>, r: &Range<usize>| r.start <= piece.start && piece.end <= r.end;
+    (cuts.windows(2).map(|w| w[0]..w[1]))
+        .filter_map(|piece| match matched.iter().any(|r| within(&piece, r)) {
+            true => Some((piece, theme.face(FaceName::CompletionMatch))),
+            false => (under.iter().find(|(r, _)| within(&piece, r))).map(|(_, f)| (piece, *f)),
+        })
+        .collect()
 }
 
 /// The echo line at a prompt: the match count, the prompt, the minibuffer's line and any `message` in brackets,

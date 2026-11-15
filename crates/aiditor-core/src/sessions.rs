@@ -1396,6 +1396,7 @@ mod tests {
         assert_eq!(mb.candidates, ["the needle now", cut.as_str()]);
         assert_eq!(mb.groups, [(0, "◆ Port".into()), (1, "✻ Fix it".into())]);
         assert!(!mb.numbered, "no line numbers");
+        assert_eq!(mb.highlights, [vec![4..10], vec![23..29]]);
         assert_eq!(previewed(&h), "Port");
         h.keys("C-n");
         assert_eq!(previewed(&h), "Fix it");
