@@ -275,6 +275,8 @@ pub struct Minibuffer {
     pub annotations: Vec<String>,
     /// Project grep file headers, each before the candidate at its index.
     pub groups: Vec<(usize, String)>,
+    /// Whether the grouped candidates start with a line number and `: `.
+    pub numbered: bool,
     /// Which of `candidates` is selected.
     pub selected: Option<usize>,
     /// How many rows the completion list takes, the most shown since the minibuffer opened;

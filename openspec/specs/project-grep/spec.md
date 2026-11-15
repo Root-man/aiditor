@@ -7,7 +7,7 @@ Searches the files under a project's roots for a pattern off the core thread, st
 ## Requirements
 
 ### Requirement: What a search covers
-A search SHALL look in the same files the file index lists for each root, with the project's `ignore` patterns applied relative to each root. Roots SHALL be searched sequentially in the supplied order, finishing one root before starting the next. Cross-file discovery order within a root SHALL be unspecified; hits from any one file SHALL retain line order. A search SHALL treat a file as binary at its first NUL byte and stop searching it there, as ripgrep does, so a small binary file gives no hits. It SHALL skip files it cannot read and a root it cannot read.
+A search SHALL look in the same files the file index lists for each root, with the project's `ignore` patterns applied relative to each root, and, when it names files, only in files whose names contain one of them. Roots SHALL be searched in the supplied order, one at a time. Cross-file order within a root SHALL be unspecified; one file's hits SHALL keep line order. A file SHALL be binary at its first NUL byte and stop there, as ripgrep does. Unreadable files and roots SHALL be skipped.
 
 #### Scenario: Ignored and binary files
 - **GIVEN** a root has `.gitignore` with `target/`, and `target/out`, `src/a.rs` and a file `blob` with a NUL byte all hold `needle`
@@ -23,6 +23,11 @@ A search SHALL look in the same files the file index lists for each root, with t
 - **GIVEN** the project's `ignore` is `["*", "!notes/"]` and each root has matching `notes/n.md` and `src/a.rs`
 - **WHEN** all roots are searched
 - **THEN** the search finds the matching lines in each root's `notes/n.md` only
+
+#### Scenario: Named files
+- **GIVEN** a root holds matching `a/x1.jsonl`, `b/rollout-x2.jsonl` and `c3.jsonl`
+- **WHEN** it is searched naming `x1` and `x2`
+- **THEN** the search finds the lines in `a/x1.jsonl` and `b/rollout-x2.jsonl` only
 
 ### Requirement: The pattern
 The pattern SHALL be one regular expression in ripgrep's syntax, matched case-insensitively while it has no upper-case letter. An invalid pattern SHALL end the search with its error and no hits.

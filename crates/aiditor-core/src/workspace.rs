@@ -1243,6 +1243,7 @@ mod tests {
             "vterm",
             "agent-start",
             "agent-sessions",
+            "agent-sessions-search",
             "workspace-switch",
             "workspace-next",
             "workspace-previous",

@@ -788,7 +788,10 @@ impl Core {
                                     let hit = self.grep.hit_at(i).expect("listed grep hit");
                                     let width = self.grep.line_number_width();
                                     let text: String = hit.text.chars().take(columns).collect();
-                                    format!("{:>width$}: {text}", hit.line + 1)
+                                    match self.grep.sessions.is_empty() {
+                                        true => format!("{:>width$}: {text}", hit.line + 1),
+                                        false => text,
+                                    }
                                 } else {
                                     f.swiper.as_ref().map_or_else(
                                         || f.candidate(i),
@@ -810,7 +813,38 @@ impl Core {
                             previous = Some(file);
                         }
                     }
-                    highlights.resize_with(candidates.len(), Vec::new);
+                    // A grep hit's and a Swiper line's matches, past its line number.
+                    let search: Option<&dyn display::Search> = match &f.swiper {
+                        _ if grep => Some(&self.grep),
+                        swiper => swiper.as_ref().map(|s| s as _),
+                    };
+                    let at = |c: &str| match &f.swiper {
+                        _ if grep && !self.grep.sessions.is_empty() => 0,
+                        _ if grep => c.find(": ").map_or(0, |i| i + 2),
+                        Some(swiper) => swiper.prefix_len().min(c.len()),
+                        None => 0,
+                    };
+                    highlights = (candidates.iter())
+                        .map(|c| {
+                            let (Some(search), at) = (search, at(c)) else {
+                                return Vec::new();
+                            };
+                            let mut ranges: Vec<_> = (search.matches(&c[at..], &[0..c.len() - at]))
+                                .into_iter()
+                                .map(|m| m.range.start + at..m.range.end + at)
+                                .collect();
+                            // Swiper's words match apart, so their ranges can cross.
+                            ranges.sort_by_key(|r| r.start);
+                            ranges.dedup_by(|next, kept| {
+                                if next.start > kept.end {
+                                    return false;
+                                }
+                                kept.end = kept.end.max(next.end);
+                                true
+                            });
+                            ranges
+                        })
+                        .collect();
                     if let Some(search) = &f.swiper {
                         syntax = search.highlights(
                             &f.matched[rows.clone()],
@@ -915,6 +949,7 @@ impl Core {
             highlights,
             syntax,
             annotations,
+            numbered: grep && self.grep.sessions.is_empty(),
             groups,
             selected,
             rows: shown,

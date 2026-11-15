@@ -627,11 +627,12 @@ pub enum GrepOp {
 
 /// Search the files the index lists under `roots`, with the project's `ignore` patterns, for the
 /// regexp `pattern`, smart case, until `limit` hits, roots in order and up to `workers` files at once;
-/// numbered `id`, from 1.
+/// numbered `id`, from 1; with `names`, only in files whose names contain one of them.
 pub struct GrepSearch {
     pub id: u64,
     pub roots: Vec<PathBuf>,
     pub ignore: Vec<String>,
+    pub names: Vec<String>,
     pub pattern: String,
     pub limit: usize,
     pub workers: std::num::NonZeroUsize,

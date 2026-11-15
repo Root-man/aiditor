@@ -299,7 +299,7 @@ The editor SHALL keep at most one preview file read active and one latest pendin
 - **THEN** the origin is restored, the hidden preview is released, and the ordinary visit reads the selected file according to file-visiting rules
 
 ### Requirement: Fuzzy completion lists highlight matched characters
-Every fuzzy completing prompt SHALL draw the matched characters of each visible candidate in the theme's `completion-match` face. Highlights SHALL reflect the pattern that produced the displayed matches, including smart case, normalization and multi-atom patterns, and follow query changes and scrolling. Unicode matches SHALL highlight complete grapheme clusters. An empty pattern SHALL show candidates in their normal face. Selected rows SHALL retain their selection background, and annotations SHALL retain their dimmed appearance separately from candidate highlights. Swiper and project grep retain their existing filtering and rendering.
+Every fuzzy completing prompt SHALL draw the matched characters of each visible candidate in the theme's `completion-match` face. Highlights SHALL reflect the pattern that produced the displayed matches, including smart case, normalization and multi-atom patterns, and follow query changes and scrolling. Unicode matches SHALL highlight complete grapheme clusters. An empty pattern SHALL show candidates in their normal face. Selected rows SHALL retain their selection background, and annotations SHALL retain their dimmed appearance separately from candidate highlights. Swiper, project grep and session search rows SHALL draw their pattern's matches in `completion-match` too, past a row's line number, the matches the preview marks.
 
 #### Scenario: Command initials
 - **GIVEN** the `M-x` prompt is open
@@ -320,6 +320,11 @@ Every fuzzy completing prompt SHALL draw the matched characters of each visible 
 - **GIVEN** a fuzzy completion list has more than ten matching candidates
 - **WHEN** the query changes, the selection scrolls the list or the query is cleared
 - **THEN** each visible candidate's highlights reflect its displayed match pattern, with normal faces for the cleared query
+
+#### Scenario: Search rows
+- **GIVEN** `C-s`, `project-grep` or `agent-sessions-search` lists rows for `needle`
+- **WHEN** a row shows `needle`
+- **THEN** that `needle` uses `completion-match`, and a line number before it keeps its own face
 
 ### Requirement: Filesystem completion uses directory faces and aligned annotations
 Filesystem completion SHALL draw directory names in the theme's `directory` face and ordinary filenames in the default face, with matched characters still in `completion-match`. Metadata SHALL use the `annotation` face in right-aligned mode, size and age columns ending at the frame's right inset. It SHALL never participate in fuzzy matching or match highlighting. Long names SHALL truncate before annotations rather than displacing their columns; in a narrow frame annotations SHALL remain clipped to the row.
