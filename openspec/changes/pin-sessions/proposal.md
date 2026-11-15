@@ -7,7 +7,7 @@ Frame 14 puts pinned sessions at the top of `*Sessions*`, but nothing feeds the 
 - `P` (`agent-sessions-pin`) on a session row pins or unpins it. Pinned sessions list under Pinned, at the top, most recent first; unpinned they go back to their activity group. Point stays on the session.
 - Pins are kept in `sessions.toml` in the platform's local data directory, one entry per agent, project primary root and session id, rewritten on each change and read at launch.
 - When an agent's list answers for a project without a pinned session of that agent and project, the pin is dropped from the file without a message.
-- The echo line hints gain `P pin`, between fold and refresh, as frame 14 shows.
+- The echo line hints gain `P pin/unpin`, between fold and refresh (frame 14 reads `P pin`; changed in review, as `P` toggles).
 - A `sessions.toml` that can't be read or parsed is reported in `*Messages*`, and the editor starts with no pins.
 
 ## Capabilities

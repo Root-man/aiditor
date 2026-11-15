@@ -2,7 +2,7 @@
 
 - [x] 1.1 `Pin { agent, cwd, session }` and `Core::pins`; `Msg::PinsLoaded` parses the file, logging a failure; `Effect::WritePins` with the serialized pins
 - [x] 1.2 `SessionList::cwd`; `render_sessions` groups pinned sessions under Pinned, keeping their time
-- [x] 1.3 `agent-sessions-pin` (`P`): toggles the pin on point's row, writes, rebuilds the project's lists; `Select a session row` elsewhere; hint `P pin`
+- [x] 1.3 `agent-sessions-pin` (`P`): toggles the pin on point's row, writes, rebuilds the project's lists; `Select a session row` elsewhere; hint `P pin/unpin`
 - [x] 1.4 `agent_listed` drops the agent's pins in the list's `cwd` that the answer lacks, writing and rebuilding when any went
 
 ## 2. Services and app

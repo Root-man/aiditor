@@ -22,7 +22,7 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["agent-sessions-next", "agent-sessions-previous"], "move"),
     (&["agent-sessions-visit"], "switch"),
     (&["agent-sessions-toggle"], "fold"),
-    (&["agent-sessions-pin"], "pin"),
+    (&["agent-sessions-pin"], "pin/unpin"),
     (&["agent-sessions"], "refresh"),
     (&["agent-sessions-quit"], "quit"),
 ];
@@ -1529,7 +1529,7 @@ mod tests {
                 ("n/p", "move"),
                 ("RET", "switch"),
                 ("TAB", "fold"),
-                ("P", "pin"),
+                ("P", "pin/unpin"),
                 ("g", "refresh"),
                 ("q", "quit")
             ]
