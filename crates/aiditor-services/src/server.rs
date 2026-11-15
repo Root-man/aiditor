@@ -76,9 +76,7 @@ impl Server {
                 return Vec::new();
             }
         };
-        // git runs `$GIT_EDITOR` through `sh -c`, so the path is quoted for sh.
-        let quoted = exe.to_string_lossy().replace('\'', r"'\''");
-        let command = format!("'{quoted}' --wait");
+        let command = format!("{} --wait", quote(&exe.to_string_lossy()));
         let mut env = vec![(
             "AIDITOR_SOCKET".to_string(),
             self.path.to_string_lossy().into_owned(),
@@ -97,9 +95,21 @@ impl Server {
     }
 }
 
+/// `path` quoted for sh, as git runs `$GIT_EDITOR` through `sh -c`; bare when it is safe, as
+/// git quotes the command again in its errors.
+fn quote(path: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/._-+".contains(c);
+    match !path.is_empty() && path.chars().all(safe) {
+        true => path.into(),
+        false => format!("'{}'", path.replace('\'', r"'\''")),
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+        // Waiting clients see their connection close and exit 1.
+        self.pending.lock().unwrap().clear();
         if let Err(err) = fs::remove_file(&self.path) {
             tracing::warn!("removing {}: {err}", self.path.display());
         }
@@ -124,7 +134,8 @@ async fn accept(listener: UnixListener, tx: Sender<Msg>, pending: Pending) {
 }
 
 /// Reads one request line, hands it to the core and writes back the core's reply. A client that
-/// goes away first is forgotten. shortcut: no read timeout; add one if idle connections pile up.
+/// goes away first is forgotten, and the core told.
+/// shortcut: no read timeout; add one if idle connections pile up.
 async fn serve(stream: UnixStream, request: u64, tx: Sender<Msg>, pending: Pending) {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read.take(LIMIT));
@@ -157,6 +168,7 @@ async fn serve(stream: UnixStream, request: u64, tx: Sender<Msg>, pending: Pendi
                 // The client only waits, so anything readable means it hung up.
                 _ = read.get_mut().get_mut().read(&mut byte) => {
                     pending.lock().unwrap().remove(&request);
+                    _ = tx.send(Msg::EditGone { request }).await;
                     return;
                 }
             }
@@ -340,6 +352,30 @@ mod tests {
         assert_eq!(exit.await.unwrap(), 0);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_hangs_up_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, mut rx) = server(dir.path());
+        let mut stream = UnixStream::connect(&server.path).await.unwrap();
+        let line = "{\"cwd\":\"/w\",\"terminal\":1,\"args\":[\"a\"]}\n";
+        stream.write_all(line.as_bytes()).await.unwrap();
+        let Some(Msg::EditRequest { request, .. }) = rx.recv().await else {
+            panic!("no request");
+        };
+        drop(stream);
+        assert!(matches!(rx.recv().await, Some(Msg::EditGone { request: r }) if r == request));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn waiting_clients_exit_1_when_the_server_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, mut rx) = server(dir.path());
+        let exit = spawn_client(&server, &["a"]);
+        assert!(matches!(rx.recv().await, Some(Msg::EditRequest { .. })));
+        drop(server);
+        assert_eq!(exit.await.unwrap(), 1);
+    }
+
     #[tokio::test]
     async fn the_socket_replaces_a_stale_one_is_private_and_gone_after_drop() {
         let dir = tempfile::tempdir().unwrap();
@@ -377,6 +413,13 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_quoted_only_when_they_need_it() {
+        assert_eq!(quote("/a/b-1/aiditor"), "/a/b-1/aiditor");
+        assert_eq!(quote("/My Apps/it's"), r"'/My Apps/it'\''s'");
+        assert_eq!(quote(""), "''");
+    }
+
+    #[test]
     fn the_env_runs_the_client_quoted() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _guard = runtime.enter();
@@ -384,7 +427,7 @@ mod tests {
         let (server, _rx) = server(dir.path());
         let env: HashMap<_, _> = server.env().into_iter().collect();
         let exe = std::env::current_exe().unwrap();
-        let command = format!("'{}' --wait", exe.display());
+        let command = format!("{} --wait", quote(&exe.to_string_lossy()));
         assert_eq!(env["EDITOR"], command);
         assert_eq!(env["GIT_EDITOR"], command);
         assert_eq!(env["VISUAL"], command);

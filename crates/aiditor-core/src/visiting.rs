@@ -40,6 +40,7 @@ impl Ctx<'_> {
                 self.core.echo(err)
             }
         }
+        self.core.edit_saved(id, ok);
         let core = &mut *self.core;
         if let Some(at) = core.quitting.iter().position(|&b| b == id) {
             // A failed save, or edits made while it ran, cancel the quit.
@@ -460,6 +461,9 @@ impl Core {
         result: Result<Option<(Vec<u8>, u64)>, String>,
         root: Option<PathBuf>,
     ) {
+        let Some(result) = self.client_read(intent.request, &path, result) else {
+            return;
+        };
         let valid = self.pending_visit.as_ref().is_some_and(|pending| {
             pending.intent == intent
                 && pending.path == path
@@ -501,6 +505,19 @@ impl Core {
         if let Some(id) = self.buffers.visiting(path) {
             return self.switch_to(id);
         }
+        if let Ok(id) = self.file_buffer(path, file, refuse) {
+            self.switch_to(id);
+        }
+    }
+
+    /// A new buffer visiting `path`, as `visit` makes it, not shown; `Err` with the echoed reason
+    /// when `refuse` turns the file down.
+    pub(crate) fn file_buffer(
+        &mut self,
+        path: &Path,
+        file: Option<(Vec<u8>, u64)>,
+        refuse: bool,
+    ) -> Result<BufferId, String> {
         let disk = file.as_ref().map(|(_, hash)| *hash);
         let (text, crlf, bom, refused) = match file.map(|(bytes, _)| buffer::decode(&bytes)) {
             None => (String::new(), false, false, None),
@@ -509,9 +526,10 @@ impl Core {
         };
         if let Some(reason) = refused {
             let opened = if refuse { "" } else { ", opened read-only" };
-            self.echo(format!("{}: {reason}{opened}", path.display()));
+            let msg = format!("{}: {reason}{opened}", path.display());
+            self.echo(msg.clone());
             if refuse {
-                return;
+                return Err(msg);
             }
         }
         let id = self.buffers.create_for_file(path, &text);
@@ -519,7 +537,7 @@ impl Core {
         let file = buffer.file.as_mut().expect("just created for a file");
         (file.crlf, file.bom, file.disk) = (crlf, bom, disk);
         buffer.read_only = refused.is_some();
-        self.switch_to(id);
+        Ok(id)
     }
 
     /// Shows buffer `id` in the selected window, as a jump, and makes it the most recent.
@@ -566,6 +584,7 @@ impl Core {
     /// listed buffer left of their workspace or `*Messages*`, or a new scratch in the current
     /// workspace.
     pub(crate) fn kill_buffer(&mut self, id: BufferId) {
+        self.abort_for_kill(id);
         if self.windows.window.buffer() == id {
             self.pending_visit = None;
         }

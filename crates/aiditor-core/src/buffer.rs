@@ -233,9 +233,14 @@ impl Buffers {
 
     /// The current workspace's buffer visiting `path`.
     pub fn visiting(&self, path: &Path) -> Option<BufferId> {
+        self.visiting_in(path, self.workspace)
+    }
+
+    /// Workspace `workspace`'s buffer visiting `path`.
+    pub fn visiting_in(&self, path: &Path, workspace: Option<WorkspaceId>) -> Option<BufferId> {
         self.map
             .iter()
-            .find(|(_, b)| b.workspace == self.workspace && b.path() == Some(path))
+            .find(|(_, b)| b.workspace == workspace && b.path() == Some(path))
             .map(|(&id, _)| id)
     }
 

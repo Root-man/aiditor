@@ -16,6 +16,7 @@ pub mod command;
 pub mod configuration;
 pub mod display;
 mod editing;
+mod edits;
 mod environment;
 mod file_index;
 mod frame;
@@ -266,6 +267,10 @@ pub enum Msg {
         request: u64,
         terminal: TerminalId,
         files: Vec<ClientFile>,
+    },
+    /// The connection of `Msg::EditRequest` `request` closed before its reply.
+    EditGone {
+        request: u64,
     },
     /// The user's settings file: its text, `None` if it doesn't exist, or why it couldn't be read.
     SettingsLoaded(Result<Option<String>, String>),
@@ -803,8 +808,11 @@ impl Ctx<'_> {
             Msg::AgentExited { id, code, signal } => self.agent_exited(id, code, signal),
             Msg::AgentListed { request, result } => self.agent_listed(request, result),
             Msg::EditRequest {
-                request, terminal, ..
-            } => self.edit_request(request, terminal),
+                request,
+                terminal,
+                files,
+            } => self.core.edit_request(request, terminal, files),
+            Msg::EditGone { request } => self.core.edit_gone(request),
             Msg::Key(key) => {
                 self.key(key);
                 self.core.echo_chip();
@@ -1129,8 +1137,11 @@ pub struct Core {
     next_terminal: u64,
     /// Each agent session, until its session buffer is killed.
     agents: BTreeMap<AgentId, agents::Session>,
-    /// What killing buffers releases, such as their terminals' and agents' kills, for `handle`.
+    /// Effects of work done without a `Ctx`, such as killed buffers' terminal and agent kills
+    /// and edit replies, for `handle`.
     released: Effects,
+    /// The `aiditor --wait` clients waiting on their files.
+    clients: Vec<edits::Client>,
     /// Every file chip seen, shared by all sessions.
     chips: agents::Chips,
     next_agent: u64,
@@ -1221,6 +1232,7 @@ impl Default for Core {
             next_terminal: 0,
             agents: BTreeMap::new(),
             released: Vec::new(),
+            clients: Vec::new(),
             chips: agents::Chips::default(),
             next_agent: 0,
             capture: false,
