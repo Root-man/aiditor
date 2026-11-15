@@ -145,7 +145,7 @@ Listed sessions SHALL be grouped, in this order, as Pinned, Today, Yesterday, Th
 - **THEN** point is on the Today heading
 
 ### Requirement: Mode line and key hints
-The sessions buffer's mode line SHALL read the buffer's name, then the project's name, `<n> sessions` and `<m> open` joined by ` · `, `<n>` counting every listed session and `<m>` those open in the editor, `<m> open` in `status-running` when `<m>` is above 0 and the rest in `mode-line-dim`, and on the right `<position>/<rows>`, `<rows>` being the shown session rows and `<position>` the number of shown session rows up to point's line, at least 1; with no shown session row the right side SHALL be empty. While the sessions buffer is current and neither a message nor a minibuffer prompt shows, the echo line SHALL show the keys bound to move (`agent-sessions-next`/`-previous`), switch (`agent-sessions-visit`), fold (`agent-sessions-toggle`), pin/unpin (`agent-sessions-pin`), refresh (`agent-sessions`) and quit (`agent-sessions-quit`), as the workspace list shows its own.
+The sessions buffer's mode line SHALL read the buffer's name, then the project's name, `<n> sessions` and `<m> open` joined by ` · `, `<n>` counting every listed session and `<m>` those open in the editor, `<m> open` in `status-running` when `<m>` is above 0 and the rest in `mode-line-dim`, and on the right `<position>/<rows>`, `<rows>` being the shown session rows and `<position>` the number of shown session rows up to point's line, at least 1; with no shown session row the right side SHALL be empty. While the sessions buffer is current and neither a message nor a minibuffer prompt shows, the echo line SHALL show the keys bound to move (`agent-sessions-next`/`-previous`), switch (`agent-sessions-visit`), fold (`agent-sessions-toggle`), pin/unpin (`agent-sessions-pin`), archive (`agent-sessions-archive`), refresh (`agent-sessions`) and quit (`agent-sessions-quit`), as the workspace list shows its own.
 
 #### Scenario: Counts and position
 - **WHEN** project `app` lists three sessions, one open in the editor, and point is on the second shown row
@@ -153,7 +153,7 @@ The sessions buffer's mode line SHALL read the buffer's name, then the project's
 
 #### Scenario: Keys in the echo line
 - **WHEN** the sessions buffer is current with no message
-- **THEN** the echo line shows `n/p` move, `RET` switch, `TAB` fold, `P` pin/unpin, `g` refresh and `q` quit
+- **THEN** the echo line shows `n/p` move, `RET` switch, `TAB` fold, `P` pin/unpin, `a` archive, `g` refresh and `q` quit
 
 ### Requirement: Faces of the list
 The sessions buffer SHALL draw, as frame 14 does: a heading's `▾` or `▸` in `annotation`; its name in `session-list-group`, but Pinned's in `session-list-pinned` and Archived's in `annotation` bold; its count in `session-list-count`; a row's title in the default face; a known agent's glyph and name in its own face, `agent-claude` for `claude` and `agent-codex` for `codex`, and any other agent's name in the default face; a Today row's time in `session-list-today` and any other time in `mode-line-dim`; a state in its own face, `status-running` for `● working`, `status-waiting` for `● awaiting permission` and `● awaiting answer`, `status-failed` for `● exited`, and `mode-line-dim` for `○ idle`, `○ loading` and `○ starting`. The `Listing <agent>...` and `<agent>: <error>` lines, `No sessions` and the spaces between columns SHALL keep the default face. While point is on a heading or session row, that row SHALL be drawn on the `completion-selected` background, as the workspace list draws its selected row. The bundled theme SHALL define the new faces with Gruvbox dark's colours: `session-list-group` `#83a598` bold, `session-list-pinned` `#d3869b` bold, `session-list-count` `#665c54`, `session-list-today` `#8ec07c`, `agent-claude` `#fe8019` and `agent-codex` `#8ec07c`.
@@ -206,3 +206,18 @@ When an agent's list for a project answers without error and without a session t
 #### Scenario: Another project's pin stays
 - **WHEN** a session is pinned in project `lib` and the list for project `app` answers
 - **THEN** its pin stays in the file
+
+### Requirement: Archiving sessions
+`a` (`agent-sessions-archive`) on a row of an agent registered as `codex` SHALL send that agent a new list request that deletes the session first, drop the row from every live sessions buffer at once, and take only that request's answer for the agent. Other agents SHALL fail with `Not supported yet`; elsewhere it SHALL fail with `Select a session row`. An open session's agent SHALL be named to stop first; its buffer SHALL stay.
+
+#### Scenario: Archiving a Codex session
+- **WHEN** point is on the `codex` session `x1` row and `a` is pressed
+- **THEN** a list request for `codex` that deletes `x1` is sent, the `x1` row is gone from the buffer, and the answer to it rebuilds the `codex` rows
+
+#### Scenario: Archiving a Claude session
+- **WHEN** point is on a `claude` session row and `a` is pressed
+- **THEN** it fails with `Not supported yet` and no request is sent
+
+#### Scenario: Archiving an open session
+- **WHEN** the `codex` session `x1` is open in the editor and `a` is pressed on its row
+- **THEN** the list request names its agent to stop, and its session buffer is still live
