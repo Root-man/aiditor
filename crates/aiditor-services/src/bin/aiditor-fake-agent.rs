@@ -123,6 +123,8 @@ struct State {
     turns: usize,
     turn: CancellationToken,
     fork_at: Option<String>,
+    /// The sessions `session/delete` removed, left out of later lists.
+    deleted: Vec<String>,
 }
 
 fn dirs(paths: &[PathBuf]) -> String {
@@ -335,6 +337,7 @@ async fn main() -> agent_client_protocol::Result<()> {
         script.clone(),
     );
     let (load_state, fork_state) = (session_state.clone(), session_state.clone());
+    let (delete_state, list_state) = (session_state.clone(), session_state.clone());
     let transport = ByteStreams::new(
         tokio::io::stdout().compat_write(),
         tokio::io::stdin().compat(),
@@ -451,8 +454,9 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |request: DeleteSessionRequest, responder, _| {
+            async move |request: DeleteSessionRequest, responder, _| {
                 eprintln!("delete={}", request.session_id);
+                (delete_state.lock().unwrap().deleted).push(request.session_id.to_string());
                 responder.respond(DeleteSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
@@ -503,8 +507,10 @@ async fn main() -> agent_client_protocol::Result<()> {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::invalid_params());
                 };
+                let deleted = list_state.lock().unwrap().deleted.clone();
                 let sessions = (page.iter())
                     .filter(|s| request.cwd.as_ref().is_none_or(|cwd| &s.cwd == cwd))
+                    .filter(|s| !deleted.contains(&s.session_id.to_string()))
                     .cloned()
                     .collect();
                 let next = (n + 1 < pages.len()).then(|| (n + 1).to_string());

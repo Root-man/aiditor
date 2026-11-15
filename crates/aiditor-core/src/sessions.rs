@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::buffer::{Buffer, BufferId, Decoration, FaceRef, Kind, Prop};
 use crate::display::{ModeLine, Segment, WindowDisplay};
-use crate::project::ProjectId;
-use crate::settings::FaceName;
-use crate::{AgentOp, Core, Ctx, Effect, Open};
+use crate::project::{Project, ProjectId};
+use crate::settings::{Agent, FaceName};
+use crate::{AgentId, AgentOp, Core, Ctx, Effect, Open};
 
 const MODE: &str = "agent-sessions-mode";
 /// The widest a title shows, cut to one less and `…` past it.
@@ -23,6 +23,7 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["agent-sessions-visit"], "switch"),
     (&["agent-sessions-toggle"], "fold"),
     (&["agent-sessions-pin"], "pin/unpin"),
+    (&["agent-sessions-archive"], "archive"),
     (&["agent-sessions"], "refresh"),
     (&["agent-sessions-quit"], "quit"),
 ];
@@ -159,6 +160,26 @@ struct Listing {
     /// The list request, held while the project's environment is being captured.
     held: Option<AgentOp>,
     answer: Option<Result<Vec<SessionInfo>, String>>,
+}
+
+/// A list request of `agent` in `project`'s primary root, deleting `delete` first.
+fn list_op(
+    agent: &Agent,
+    request: u64,
+    project: &Project,
+    delete: Option<(SessionId, Option<AgentId>)>,
+) -> AgentOp {
+    AgentOp::List {
+        request,
+        command: agent.command.clone(),
+        args: agent.args.clone(),
+        cwd: project.primary.path.clone(),
+        // Under the captured environment, which `release_agents` puts first.
+        env: (agent.env.clone().into_iter())
+            .chain(project.env.clone())
+            .collect(),
+        delete,
+    }
 }
 
 /// `updated` read as RFC 3339, whatever its offset or fraction.
@@ -506,17 +527,7 @@ impl Ctx<'_> {
         for (name, agent) in &core.settings.agents {
             core.list_requests += 1;
             let request = core.list_requests;
-            // Under the captured environment, which `release_agents` puts first.
-            let env = (agent.env.clone().into_iter())
-                .chain(loaded.env.clone())
-                .collect();
-            let op = AgentOp::List {
-                request,
-                command: agent.command.clone(),
-                args: agent.args.clone(),
-                cwd: cwd.clone(),
-                env,
-            };
+            let op = list_op(agent, request, loaded, None);
             agents.push(Listing {
                 name: name.clone(),
                 request,
@@ -641,6 +652,39 @@ impl Ctx<'_> {
             None => core.pins.push(pin.clone()),
         }
         core.pins_changed(&pin.cwd, &mut self.effects);
+        Ok(())
+    }
+
+    /// `agent-sessions-archive`: archives the session on point's row, stopping its agent first
+    /// if it is open; its row leaves at once and the agent's fresh list replaces its rows.
+    pub(crate) fn sessions_archive(&mut self) -> Result<(), String> {
+        let (list, agent, session) = self.session_row()?;
+        let (project, name) = (list.project, list.agents[agent].name.clone());
+        // shortcut: no adapter advertises `session/archive` and codex-acp's `session/delete`
+        // archives (`thread/archive`), so only `codex` archives, by deleting; #481 moves to
+        // `session/archive`.
+        if name != "codex" {
+            return Err("Not supported yet".into());
+        }
+        let session = session.clone();
+        let core = &mut *self.core;
+        let settings =
+            (core.settings.agents.get(&name)).ok_or(format!("{name} is not registered"))?;
+        let loaded = &core.projects[core.project_at(project)?].project;
+        core.list_requests += 1;
+        let stop = core.open_agent(&name, &session);
+        let op = list_op(
+            settings,
+            core.list_requests,
+            loaded,
+            Some((session.clone(), stop)),
+        );
+        let request = core.list_requests;
+        let list = (core.current_mut().session_list_mut()).expect("checked above");
+        let listing = &mut list.agents[agent];
+        (listing.request, listing.held) = (request, Some(op));
+        core.forget_listed(&name, &session);
+        self.release_agents(project);
         Ok(())
     }
 
@@ -1116,6 +1160,76 @@ mod tests {
         assert_eq!(h.core.windows.window.buffer(), session);
     }
 
+    /// The list requests that delete since the last call: number, command, session and agent
+    /// to stop.
+    fn archives(h: &mut Harness) -> Vec<(u64, String, String, Option<AgentId>)> {
+        (h.agent_ops.drain(..))
+            .filter_map(|op| match op {
+                AgentOp::List {
+                    request,
+                    command,
+                    delete: Some((session, stop)),
+                    ..
+                } => Some((request, command, session.to_string(), stop)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_archives_a_codex_session_and_its_fresh_list_lands() {
+        let mut h = listed();
+        h.keys("n a");
+        let sent = archives(&mut h);
+        let [(request, command, session, None)] = &sent[..] else {
+            panic!("{sent:?}");
+        };
+        assert_eq!((command.as_str(), session.as_str()), ("codex-acp", "x1"));
+        let rows = "▾ Today  2
+    Fix it ✻ claude       10:00
+    Old ✻ claude       08:00";
+        assert_eq!(body(&h), rows);
+        // The answer to the earlier request is dropped, the new one taken.
+        let stale = vec![info("x1", Some("Port"), Some("2026-10-28T09:00:00Z"))];
+        answer(&mut h, request - 1, Ok(stale));
+        assert_eq!(body(&h), rows);
+        let fresh = vec![info("x2", Some("New"), Some("2026-10-28T11:00:00Z"))];
+        answer(&mut h, *request, Ok(fresh));
+        assert!(body(&h).contains("New ◆ codex"), "{}", body(&h));
+    }
+
+    #[test]
+    fn a_fails_on_claude_sessions_and_headings() {
+        let mut h = listed();
+        h.keys("a");
+        assert_eq!(h.core.message(), Some("Not supported yet"));
+        h.keys("p a");
+        assert_eq!(h.core.message(), Some("Select a session row"));
+        assert!(archives(&mut h).is_empty());
+        assert!(body(&h).contains("Port ◆ codex"));
+    }
+
+    #[test]
+    fn archiving_an_open_session_stops_its_agent_and_keeps_its_buffer() {
+        let mut h = work();
+        h.keys("M-x agent-start RET codex RET");
+        h.send(Msg::AgentStarted {
+            id: AgentId(0),
+            result: Ok(NewSessionResponse::new("x1")),
+        });
+        let session = h.core.windows.window.buffer();
+        h.keys("M-x agent-sessions RET");
+        let requests = lists(&mut h);
+        answer(&mut h, requests[0].0, Ok(Vec::new()));
+        let mine = vec![info("x1", Some("Mine"), Some("2026-10-28T10:00:00Z"))];
+        answer(&mut h, requests[1].0, Ok(mine));
+        h.keys("a");
+        let sent = archives(&mut h);
+        assert!(matches!(&sent[..], [(.., Some(AgentId(0)))]), "{sent:?}");
+        assert!(h.core.buffers.get(session).is_some());
+        assert_eq!(body(&h), "No sessions");
+    }
+
     #[test]
     fn a_rolled_back_session_leaves_the_list() {
         let mut h = work();
@@ -1530,6 +1644,7 @@ mod tests {
                 ("RET", "switch"),
                 ("TAB", "fold"),
                 ("P", "pin/unpin"),
+                ("a", "archive"),
                 ("g", "refresh"),
                 ("q", "quit")
             ]

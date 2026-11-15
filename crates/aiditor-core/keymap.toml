@@ -181,6 +181,7 @@
 "RET" = "agent-sessions-visit"
 "TAB" = "agent-sessions-toggle"
 "P" = "agent-sessions-pin"
+"a" = "agent-sessions-archive"
 "g" = "agent-sessions"
 "q" = "agent-sessions-quit"
 

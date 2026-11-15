@@ -591,13 +591,15 @@ pub enum AgentOp {
     },
     /// Start `command` as `Spawn` does in a throwaway process, then `initialize` and
     /// `session/list` in `cwd` through every page, then terminate it; answered with
-    /// `Msg::AgentListed` carrying `request`.
+    /// `Msg::AgentListed` carrying `request`. With `delete`, it first stops the named agent as
+    /// `Kill` does and, once its group is gone, sends `session/delete` of the session.
     List {
         request: u64,
         command: String,
         args: Vec<String>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
+        delete: Option<(SessionId, Option<AgentId>)>,
     },
 }
 
