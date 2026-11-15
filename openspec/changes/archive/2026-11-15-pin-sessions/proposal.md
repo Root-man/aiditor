@@ -15,7 +15,7 @@ Frame 14 puts pinned sessions at the top of `*Sessions*`, but nothing feeds the 
 ### New Capabilities
 
 ### Modified Capabilities
-- `sessions-list`: pinning with `P`, the Pinned group, pins kept across restarts and dropped when gone, and the `P pin` key hint.
+- `sessions-list`: pinning with `P`, the Pinned group, pins kept across restarts and dropped when gone, and the `P pin/unpin` key hint.
 
 ## Impact
 
