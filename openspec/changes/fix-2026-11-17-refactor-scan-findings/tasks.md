@@ -13,12 +13,13 @@ Each finding keeps its scan row number. Every task lands its own test.
 - [x] 2.1 #5 (D3): `agent_reject_once` takes the sendable ask at point first, else the oldest. Verify with the spec scenarios "Rejecting the request at point" (session-buffers) and "Skipping the question at point" (agent-questions), and that the existing `C-c C-k` tests pass. Update the command's doc comment.
 - [x] 2.2 #20: in `take_place`, when the source session is pinned, rewrite its pin to the fork's session id and emit `WritePins`. Verify with the "A pinned session stays pinned" scenario as a core test that checks the written pins.
 
-## 3. Files and saving (#6, #7, #12, #19)
+## 3. Files and saving (#6, #7, #9, #12, #19)
 
 - [x] 3.1 #6: `revert-buffer`'s choices become `["No", "Yes"]`. Verify with the "RET keeps the edits" scenario.
 - [x] 3.2 #7 (D4): add `VISIT_LIMIT = 256 MiB` in `aiditor-services/src/files.rs`; `FileOp::Open` checks the size before reading and fails with `<path>: file too large (<n> MiB)`. Verify with a services test on a sparse 300 MiB file (`set_len`, as the preview test does) that nothing is read and the error is returned, and record the limit in `docs/editor.md` beside the 10 MiB preview note.
 - [x] 3.3 #12 (D5): in the `Update` arm of the write, return `Ok(hash)` when the disk already holds `bytes`. Verify with a services test saving the same bytes twice with the old expectation (both succeed) and a different-bytes case that still conflicts.
 - [x] 3.4 #19: `edits.rs` `prepare` sets point on every window of the terminal's workspace showing the buffer when the request has a position. Verify with a test: the selected window already shows the file at line 1, a request with `+3` arrives, and point is on line 3.
+- [x] 3.5 #9 (D10): `project_file_prompt` opens with `Some(&[])` and passes the project's files to `add_candidates`. Verify with the existing test that a second `C-x p f` lists the files.
 
 ## 4. Grep (#4, #8, #15, #18)
 

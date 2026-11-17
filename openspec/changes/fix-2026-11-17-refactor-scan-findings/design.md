@@ -39,7 +39,7 @@ See proposal.md for the findings. The state these fixes build on:
 
 ### D4 · 256 MiB visit limit in the service (#7)
 
-`FileOp::Open` checks `checked_metadata(path)?.len()` before `fs::read`, as `preview` does with `PREVIEW_LIMIT`. Over `VISIT_LIMIT = 256 MiB` it fails with `<path>: file too large (<n> MiB)`, shown as other read errors are. 256 MiB is far above any source or log file the user edits and well below what a rope plus undo can hold. The command-line visit uses the same read, so it refuses too, as an unreadable file does today.
+`files::read` checks `checked_metadata(path)?.len()` before `fs::read`, as `preview` does with `PREVIEW_LIMIT`. Every read goes through it, so revert, diff, the change check and the save's disk check refuse such a file too. Over `VISIT_LIMIT = 256 MiB` it fails with `<path>: file too large (<n> MiB)`, shown as other read errors are. 256 MiB is far above any source or log file the user edits and well below what a rope plus undo can hold. The command-line visit uses the same read, so it refuses too, as an unreadable file does today.
 
 ### D5 · Unchanged bytes count as written (#12)
 
@@ -55,7 +55,7 @@ One `fn language(name: &str) -> Option<(&'static str, &'static Grammar)>` in `sy
 
 ### D8 · Visual-row layout for wrapped windows (#14)
 
-`display::build` counts rows as each line finishes: `max(1, ceil(chars / width))` for wrapped text, 1 for aligned and table lines. It stops when the count reaches `rows`. Under word wrap this is a lower bound, so the build may lay out a line more than needed but never fewer; `truncate(rows)` stays.
+`display::build` counts rows as each line finishes: `max(1, ceil(chars / (width + word)))` for wrapped text, where `word` is 1 under word wrap, as a row there can hold one more char in the marker's column,, 1 for aligned and table lines. It stops when the count reaches `rows`. Under word wrap this is a lower bound, so the build may lay out a line more than needed but never fewer; `truncate(rows)` stays.
 
 ### D9 · `agents.rs` split (#13)
 

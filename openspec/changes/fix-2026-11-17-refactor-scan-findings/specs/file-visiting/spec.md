@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Files too large to visit are refused
-A regular file larger than 256 MiB SHALL NOT be read for visiting. `find-file`, and every other visit that reads the file, SHALL fail with `<path>: file too large (<n> MiB)` in the echo area, leaving the current buffer as it was; a file named on the command line SHALL be refused as an unreadable file is. File previews keep their own smaller limit.
+A regular file larger than 256 MiB SHALL NOT be read for visiting. `find-file`, every other visit, and every other read of the file (revert, diff, the change check and a save's disk check), SHALL fail with `<path>: file too large (<n> MiB)` in the echo area, leaving the current buffer as it was; a file named on the command line SHALL be refused as an unreadable file is. File previews keep their own smaller limit.
 
 #### Scenario: A huge log
 - **WHEN** `find-file` names a 300 MiB file

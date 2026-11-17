@@ -489,26 +489,25 @@ impl Ctx<'_> {
         }
         let mut finder = self.core.finder(project)?;
         finder.references = references;
-        let files = if finder.waiting {
-            Vec::new()
-        } else {
-            self.core.project_files(project, references)
-        };
-        let choices: Vec<&str> = files.iter().map(String::as_str).collect();
-        let (command, verb) = if references {
+        let waiting = finder.waiting;
+        let (name, verb) = if references {
             ("agent-reference", "Reference")
         } else {
             ("project-find-file", "Find file")
         };
-        let command = self.core.commands[command];
+        let command = self.core.commands[name];
         let prompt = format!("{verb} in {}: ", self.core.project_name(project));
-        self.read_string(command, args, prompt, Some(&choices))?;
+        self.read_string(command, args, prompt, Some(&[]))?;
         self.core
             .prompts
             .minibuffer
             .as_mut()
             .expect("opened finder")
             .finder = Some(finder);
+        if !waiting {
+            let files = self.core.project_files(project, references);
+            self.core.add_candidates(name, files);
+        }
         Ok(())
     }
 

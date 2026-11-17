@@ -179,7 +179,7 @@ A scan of the whole repo found 20 problems, fixed as the `fix-2026-11-17-refacto
 | 6 | `revert-buffer`'s `RET` means Yes. | Done: `No` first. |
 | 7 | `find-file` reads any file, however big. | Done: over 256 MiB, `files::read` fails with `<path>: file too large (<n> MiB)`. The check is in `files::read`, so revert, diff, the change check and the save's disk check refuse such files too. |
 | 8 | A grep hit's label repeats its line's text. | Done: `<root>/<path>:<line>`. |
-| 9 | The project file prompt builds its candidates twice. | Open: no task covered it. |
+| 9 | The project file prompt builds its candidates twice. | Done: opened empty, its files passed to `add_candidates` once. |
 | 10 | Two language tables: files and Markdown fences. | Done: one `syntax::language`; fences take full names and every extension. |
 | 11 | After a resize the modeline keeps the old width until the next message. | Coded: `request_animation_frame` after `Msg::Resize`. Not yet checked in a running window. |
 | 12 | Saving the same bytes twice before the first reply conflicts. | Done: bytes already on disk count as written. |

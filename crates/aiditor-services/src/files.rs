@@ -1471,6 +1471,10 @@ mod tests {
         };
         let too_large = format!("{}: file too large (300 MiB)", path.display());
         assert_eq!(result, Err(too_large));
+        // A save over it fails on the disk check and leaves the file alone.
+        let err = write(&path, b"x", WriteExpectation::Update(None)).unwrap_err();
+        assert!(matches!(&err, WriteFailure::Io(e) if e.to_string().contains("too large")));
+        assert_eq!(fs::metadata(&path).unwrap().len(), 300 * 1024 * 1024);
     }
 
     #[test]
