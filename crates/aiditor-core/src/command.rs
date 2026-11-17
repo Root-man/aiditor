@@ -54,6 +54,8 @@ pub struct ArgSpec {
     pub filter: Option<Filter>,
     /// The index of the candidate selected when the list opens, ivy's `:preselect`.
     pub preselect: Option<fn(&Core, &Args) -> usize>,
+    /// A declared prompt whose completion has exactly one candidate takes it without asking.
+    pub single: bool,
 }
 
 /// What a preview shows for a candidate.

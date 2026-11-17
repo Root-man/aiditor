@@ -32,6 +32,9 @@ pub struct Project {
     /// Variables set on top of the project's environment for the processes it starts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Replaces the settings' `enabled_agents`; checked and reported as `default_agent` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_agents: Option<Vec<String>>,
     pub primary: Root,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<Root>,
@@ -109,6 +112,7 @@ impl Loaded {
             default_agent: None,
             ignore: Vec::new(),
             env: BTreeMap::new(),
+            enabled_agents: None,
             primary,
             roots: Vec::new(),
         };
@@ -307,6 +311,21 @@ path = "/r/notes"
                 .unwrap_err()
                 .contains("max_watched_files")
         );
+    }
+
+    #[test]
+    fn enabled_agents_round_trip_and_survive_project_commands() {
+        let text = "name = \"x\"\nenabled_agents = [\"codex\"]\n[primary]\npath = \"/r/x\"\n";
+        let mut p = Project::parse(text).unwrap();
+        assert_eq!(p.enabled_agents, Some(vec!["codex".into()]));
+        assert_eq!(Project::parse(&toml::to_string(&p).unwrap()).unwrap(), p);
+        let mut doc: DocumentMut = text.parse().unwrap();
+        p.roots.push(Root {
+            path: "/r/y".into(),
+        });
+        sync(&mut doc, &p);
+        assert!(doc.to_string().contains("enabled_agents = [\"codex\"]"));
+        assert_eq!(Project::parse(&doc.to_string()).unwrap(), p);
     }
 
     #[test]

@@ -18,7 +18,8 @@ fn projects_then_free(core: &Core, args: &Args) -> Vec<String> {
 fn projects_then_agents(core: &Core, args: &Args) -> Vec<String> {
     match args.strings.len() {
         0 => core.project_names(false),
-        _ => core.settings.agents.keys().cloned().collect(),
+        _ => (core.project_arg(args).ok())
+            .map_or_else(Vec::new, |i| core.enabled_agents(&core.projects[i].project)),
     }
 }
 
@@ -726,6 +727,7 @@ pub(crate) fn builtins() -> Vec<Command> {
                 prompts: &["Agent: "],
                 completion: Some(|core, _| core.agent_names()),
                 preselect: Some(|core, _| core.default_agent_index()),
+                single: true,
                 ..ArgSpec::default()
             },
             handler: |ctx, args| ctx.agent_start(args),

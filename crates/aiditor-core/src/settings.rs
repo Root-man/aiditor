@@ -83,6 +83,8 @@ pub struct Settings {
     pub theme: Theme,
     /// The agents sessions can start, by name.
     pub agents: BTreeMap<String, Agent>,
+    /// The agents offered in every project whose file has no list of its own; `None` is all.
+    pub enabled_agents: Option<Vec<String>>,
 }
 
 /// How a window numbers its lines, as Emacs's `display-line-numbers`.
@@ -276,6 +278,13 @@ impl Settings {
                 return Err(format!("agents.{name}: command is empty"));
             }
             check_env(&agent.env).map_err(|err| format!("agents.{name}: {err}"))?;
+        }
+        if let Some(name) = (settings.enabled_agents.iter().flatten())
+            .find(|name| !settings.agents.contains_key(*name))
+        {
+            return Err(format!(
+                "enabled_agents: {name:?} is not a registered agent"
+            ));
         }
         let default = settings.themes.get("default").cloned().unwrap_or_default();
         for (name, theme) in &settings.themes {
@@ -615,6 +624,17 @@ mod tests {
         assert_eq!(s.agents["claude"].default_mode.as_deref(), Some("auto"));
         assert_eq!(s.agents["codex"].args, ["-v"]);
         assert_eq!(s.agents["codex"].default_mode, None);
+    }
+
+    #[test]
+    fn enabled_agents_must_be_registered() {
+        assert_eq!(Settings::default().enabled_agents, None);
+        let s = Settings::parse(Some("enabled_agents = [\"claude\"]")).unwrap();
+        assert_eq!(s.enabled_agents, Some(vec!["claude".into()]));
+        let err = Settings::parse(Some("enabled_agents = [\"codex\"]")).unwrap_err();
+        assert_eq!(err, "enabled_agents: \"codex\" is not a registered agent");
+        let err = Settings::parse(Some("enabled_agents = \"claude\"")).unwrap_err();
+        assert!(err.contains("enabled_agents"), "{err}");
     }
 
     #[test]

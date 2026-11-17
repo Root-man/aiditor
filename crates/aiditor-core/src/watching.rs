@@ -897,6 +897,7 @@ mod tests {
             default_agent: None,
             ignore: vec!["*.log".into()],
             env: Default::default(),
+            enabled_agents: None,
             primary: Root { path: h.path("a") },
             roots: Vec::new(),
         };
