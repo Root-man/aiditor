@@ -164,7 +164,7 @@ impl Element for FrameElement {
                     cell_width,
                 };
                 editor.handle(msg, cx);
-                self.windows = editor.core.frame().windows;
+                self.windows = editor.frame().windows;
             }
             let start = Instant::now();
             let settings = editor.core.settings();

@@ -774,7 +774,8 @@ async fn setting_a_config_option_returns_the_answer() {
         let result = loop {
             match next(&mut rx).await {
                 Some(Msg::AgentConfigured { id, result }) => break (assert_eq!(id, ID), result).1,
-                Some(Msg::AgentUpdate { .. }) => {}
+                // Stderr written before the start answer can still arrive now.
+                Some(Msg::AgentUpdate { .. } | Msg::AgentStderr { .. }) => {}
                 msg => panic!("expected configured, got {msg:?}"),
             }
         };
