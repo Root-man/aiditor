@@ -507,8 +507,8 @@ pub(super) fn answered(kind: PermissionOptionKind) -> &'static str {
     }
 }
 
-/// The answered line `question`'s block becomes, from `line`'s `<mark> <outcome>`, `clock` at
-/// its right, and the rows of what it sent, folded.
+/// The answered line `question`'s block becomes, from `line`'s `<mark> <outcome>`, `clock` its
+/// time, and the rows of what it sent, folded.
 pub(super) fn settled_question(
     question: &questions::Question,
     line: &str,
@@ -523,13 +523,11 @@ pub(super) fn settled_question(
     let rows: String = (question.sent.iter())
         .map(|(n, a)| format!("\n {n:<name$}  {a}"))
         .collect();
-    let outcome = head.chars().count();
-    let time = clock.map_or(String::new(), |c| format!(" {c}"));
     Answered {
-        text: format!("{head}{time}{rows}"),
+        text: format!("{head}{rows}"),
         label: 4 + label.chars().count(),
-        outcome,
-        line: outcome + time.chars().count(),
+        outcome: head.chars().count(),
+        time: clock.map(String::from),
         name,
         mark: match mark {
             '✓' => FaceName::StatusRunning,
@@ -540,10 +538,40 @@ pub(super) fn settled_question(
     }
 }
 
+impl Answered {
+    /// Its time at the right of the line, as a group's row shows it.
+    pub(super) fn right_time(&self, grouped: bool) -> String {
+        (self.time.as_ref().filter(|_| grouped)).map_or(String::new(), |t| format!(" {t}"))
+    }
+
+    /// Its text: the line, with its time when `grouped`, then the rows.
+    pub(super) fn shown(&self, grouped: bool) -> String {
+        let mut text = self.text.clone();
+        let at = text
+            .char_indices()
+            .nth(self.outcome)
+            .map_or(text.len(), |(i, _)| i);
+        text.insert_str(at, &self.right_time(grouped));
+        text
+    }
+
+    /// The line's length, its time counted when `grouped`.
+    pub(super) fn line(&self, grouped: bool) -> usize {
+        self.outcome + self.right_time(grouped).chars().count()
+    }
+
+    /// The line under its block, holding its time unless `grouped`.
+    pub(super) fn meta(&self, grouped: bool) -> Option<Vec<(String, FaceName)>> {
+        let time = self.time.clone().filter(|_| !grouped)?;
+        Some(vec![(time, FaceName::Annotation)])
+    }
+}
+
 /// Answered line `a`'s properties, two columns in when `grouped`: its marks, its dim outcome
 /// and time, and its rows on `session-block` when open, else hidden.
 pub(super) fn answered_props(a: &Answered, grouped: bool) -> Props {
-    let len = a.text.chars().count();
+    let (text, line) = (a.shown(grouped), a.line(grouped));
+    let len = text.chars().count();
     let face = |name| Prop::Named(vec![FaceRef::Face(name)]);
     let indent = if grouped { 2 } else { 0 };
     let mut props = vec![
@@ -554,13 +582,13 @@ pub(super) fn answered_props(a: &Answered, grouped: bool) -> Props {
     if grouped {
         props.push((0..1, Prop::Line(Decoration::Indent(indent))));
     }
-    if a.line > a.outcome {
+    if line > a.outcome {
         props.push((a.outcome..a.outcome + 1, Prop::AlignRight));
-        props.push((a.outcome + 1..a.line, face(FaceName::Annotation)));
+        props.push((a.outcome + 1..line, face(FaceName::Annotation)));
     }
     if a.open {
-        let rows: String = a.text.chars().skip(a.line).collect();
-        let mut at = a.line + 1;
+        let rows: String = text.chars().skip(line).collect();
+        let mut at = line + 1;
         for row in rows.split('\n').skip(1) {
             // Under the label, the row's leading space its padding.
             props.push((at..at + 1, Prop::Line(Decoration::Indent(indent + 3))));
@@ -571,8 +599,8 @@ pub(super) fn answered_props(a: &Answered, grouped: bool) -> Props {
             props.push((at + 1..at + 1 + a.name, dim()));
             at += row.chars().count() + 1;
         }
-    } else if len > a.line {
-        props.push((a.line..len, Prop::Invisible(String::new())));
+    } else if len > line {
+        props.push((line..len, Prop::Invisible(String::new())));
     }
     props
 }

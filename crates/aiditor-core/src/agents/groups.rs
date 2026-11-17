@@ -134,7 +134,7 @@ impl Session {
         a.open = !a.open;
         let mark = if a.open { "▾" } else { "▸" };
         a.text.replace_range(..'▸'.len_utf8(), mark);
-        let line = a.line;
+        let line = a.line(path.1.is_some());
         let rendered = self.render(path, look);
         self.write(buffer, path, rendered, look);
         let start = self.range(buffer, path).start;
@@ -283,10 +283,18 @@ impl Session {
     /// as rows. Its calls still need showing indented.
     pub(super) fn form_group(&mut self, buffer: &mut Buffer) {
         let g = self.run;
-        // Its calls' times go back into their headers when they are shown as rows.
+        // Its calls' and answered lines' times go back into their lines when they are shown as
+        // rows.
         for at in g..self.tail() {
-            if let BlockKind::Tool(_) = self.blocks[at].kind {
-                self.set_meta(buffer, (at, None), &[]);
+            match &self.blocks[at].kind {
+                BlockKind::Tool(_) => self.set_meta(buffer, (at, None), &[]),
+                BlockKind::Answered(a) => {
+                    let (outcome, time) = (a.outcome, a.right_time(true));
+                    self.set_meta(buffer, (at, None), &[]);
+                    let start = self.range(buffer, (at, None)).start;
+                    buffer.insert_output(start + outcome, &time);
+                }
+                _ => {}
             }
         }
         let tail = self.tail();
