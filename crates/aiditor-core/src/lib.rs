@@ -403,6 +403,22 @@ thread_local! {
     static PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+/// Runs `f` under `catch_unwind`; a panic comes back as its report and backtrace.
+fn caught<R>(f: impl FnOnce() -> R) -> Result<R, String> {
+    PANIC_HOOK.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let report = format!("{info}\n{}", Backtrace::force_capture());
+            PANIC.with(|p| *p.borrow_mut() = Some(report));
+            previous(info);
+        }));
+    });
+    panic::catch_unwind(AssertUnwindSafe(f)).map_err(|_| {
+        (PANIC.with(|p| p.borrow_mut().take()))
+            .unwrap_or_else(|| "No report: another panic hook replaced the core's".into())
+    })
+}
+
 /// Work the app carries out for the core.
 pub enum Effect {
     /// A visited file's read, write or listing, answered with a message.
@@ -763,23 +779,8 @@ impl Ctx<'_> {
             }
             return self.read_string(command, args, prompt.into(), None);
         }
-        PANIC_HOOK.call_once(|| {
-            let previous = panic::take_hook();
-            panic::set_hook(Box::new(move |info| {
-                let report = format!("{info}\n{}", Backtrace::force_capture());
-                PANIC.with(|p| *p.borrow_mut() = Some(report));
-                previous(info);
-            }));
-        });
-        let result = panic::catch_unwind(AssertUnwindSafe(|| (command.handler)(self, args)));
-        result.unwrap_or_else(|_| {
-            let report = (PANIC.with(|p| p.borrow_mut().take()))
-                .unwrap_or_else(|| "No report: another panic hook replaced the core's".into());
-            let core = &mut *self.core;
-            core.echo(format!(
-                "{name} panicked; its state may be inconsistent (see *Messages*)"
-            ));
-            core.log(&report);
+        caught(|| (command.handler)(self, args)).unwrap_or_else(|report| {
+            self.core.panicked(name, &report);
             Ok(())
         })
     }
@@ -1291,6 +1292,21 @@ impl Core {
         });
     }
 
+    /// Runs `f` on the core, containing a panic: it is reported as a command's is, and `None`
+    /// comes back. The frontend calls into the core through this.
+    pub fn contain<R>(&mut self, what: &str, f: impl FnOnce(&mut Core) -> R) -> Option<R> {
+        caught(|| f(self))
+            .map_err(|report| self.panicked(what, &report))
+            .ok()
+    }
+
+    fn panicked(&mut self, what: &str, report: &str) {
+        self.echo(format!(
+            "{what} panicked; its state may be inconsistent (see *Messages*)"
+        ));
+        self.log(report);
+    }
+
     /// Handles `msg` at `now`, then fires the timers due by then.
     pub fn handle(&mut self, now: Instant, msg: Msg) -> Effects {
         self.now = Some(now);
@@ -1523,6 +1539,24 @@ mod tests {
         assert!(log.contains(msg) && log.contains("boom"), "{log}");
         assert!(log.contains("harness.rs:"), "no location: {log}");
         assert!(log.contains("try_call"), "no backtrace: {log}");
+        h.keys("a");
+        assert_eq!(h.text(), "a");
+    }
+
+    #[test]
+    fn a_contained_panic_is_logged_and_the_core_keeps_running() {
+        let mut h = on("");
+        assert_eq!(
+            h.core.contain("Redisplay", |_| -> () { panic!("boom") }),
+            None
+        );
+        let msg = "Redisplay panicked; its state may be inconsistent (see *Messages*)";
+        assert_eq!(h.core.message(), Some(msg));
+        let log = messages(&h).unwrap();
+        assert!(log.contains(msg) && log.contains("boom"), "{log}");
+        assert!(log.contains("lib.rs:"), "no location: {log}");
+        assert!(log.contains("contain"), "no backtrace: {log}");
+        assert_eq!(h.core.contain("Redisplay", |_| 1), Some(1));
         h.keys("a");
         assert_eq!(h.text(), "a");
     }

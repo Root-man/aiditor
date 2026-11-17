@@ -237,7 +237,7 @@ pub struct Rect {
 }
 
 /// Every window of the frame, laid out by the split tree.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct FrameDisplay {
     pub windows: Vec<FrameWindow>,
     /// The echo area's text, if a message is shown.

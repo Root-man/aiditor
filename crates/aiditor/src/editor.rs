@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use aiditor_core::buffer::Face;
-use aiditor_core::display::TEXT_INSET;
+use aiditor_core::display::{FrameDisplay, TEXT_INSET};
 use aiditor_core::settings::FaceName;
 use aiditor_core::{Core, Effect, Msg};
 use aiditor_services::runner::{Run, Runner};
@@ -467,7 +467,13 @@ impl Editor {
         if let Some(benchmark) = &mut self.benchmark {
             benchmark.output(&msg, start);
         }
-        let effects = self.core.handle(start, msg);
+        let effects = (self.core)
+            .contain("The core", |core| {
+                #[cfg(test)]
+                tests::boom("The core");
+                core.handle(start, msg)
+            })
+            .unwrap_or_default();
         if let Some(debug) = &mut self.debug {
             debug.handle = start.elapsed();
         }
@@ -517,6 +523,19 @@ impl Editor {
             }
             self.handle(Msg::Key(key), cx);
         }
+    }
+
+    /// The core's frame, or one with only the echo line if building it panicked.
+    pub(crate) fn frame(&mut self) -> FrameDisplay {
+        let frame = self.core.contain("Redisplay", |core| {
+            #[cfg(test)]
+            tests::boom("Redisplay");
+            core.frame()
+        });
+        frame.unwrap_or_else(|| FrameDisplay {
+            message: self.core.message().map(Into::into),
+            ..Default::default()
+        })
     }
 
     /// The buffer font and the width of one of its cells.
@@ -581,7 +600,7 @@ impl Render for Editor {
             )
         });
         let (font, cell) = self.font(window);
-        let frame = self.core.frame();
+        let frame = self.frame();
         let settings = self.core.settings();
         let theme = &settings.theme;
         let line_height = px(settings.line_height());
@@ -666,6 +685,47 @@ mod tests {
         let dir = std::sync::Arc::new(tempfile::tempdir().unwrap());
         DIRECTORIES.with(|dirs| dirs.borrow_mut().push(dir.clone()));
         dir
+    }
+
+    thread_local! {
+        static BOOM: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Panics once `arm` has armed `what`, standing in for a bug in the core.
+    pub(super) fn boom(what: &str) {
+        if BOOM.with(|b| b.get() == Some(what) && b.take().is_some()) {
+            panic!("boom in {what}");
+        }
+    }
+
+    fn arm(what: &'static str) {
+        BOOM.with(|b| b.set(Some(what)));
+    }
+
+    #[gpui::test]
+    fn panics_outside_commands_leave_the_editor_running(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "");
+        let message = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |e, _| e.core.message().map(str::to_string))
+        };
+        let report = |what: &str| {
+            Some(format!(
+                "{what} panicked; its state may be inconsistent (see *Messages*)"
+            ))
+        };
+        arm("The core");
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(message(cx), report("The core"), "a key");
+        arm("The core");
+        editor.update(cx, |e, cx| e.handle(Msg::Tick, cx));
+        assert_eq!(message(cx), report("The core"), "a timer's wake-up");
+        arm("Redisplay");
+        editor.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(message(cx), report("Redisplay"), "a redisplay");
+        cx.simulate_input("a");
+        assert_eq!(editor.read_with(cx, |e, _| e.core.text()), "a");
     }
 
     pub(super) fn watcher_lifetime() -> std::sync::mpsc::Sender<()> {
