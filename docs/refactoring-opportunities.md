@@ -164,3 +164,36 @@ The 2026-11-11 architectural review of the core, carried out as the `architectur
 | 5 | The 13 passes at the end of `Core::handle` run after every message. | Done: the watch set cost 1.05 ms per message with 200 file buffers, over the 20 µs threshold; it is now kept behind a `dirty` flag, 11.6 µs. |
 
 Correction: the review said #1 would retire the `buffer.rs` marker shortcut. It does not reduce the marker count: properties, not block bookkeeping, hold most markers. Typing in a 5,000-line transcript's prompt meets **21,010 markers** before and after #1 (52.8 µs per keystroke), the input for a later decision on a faster marker store.
+
+## Refactor scan, 2026-11-17
+
+A scan of the whole repo found 20 problems, fixed as the `fix-2026-11-17-refactor-scan-findings` change. Timings are `hot_paths` medians on one macOS host, before and after each change.
+
+| # | Problem | Outcome |
+| ---: | --- | --- |
+| 1 | Sending a big paste freezes: `user_lines` counts the text's chars once per line. | Done: counted once. |
+| 2 | A stale `top_row` past the top line's wrapped rows panics redisplay every frame. | Done: clamped in `window_rows` and `Window::shown`. |
+| 3 | Each prompt repaint removes properties over the transcript. | Done: removed only when the prompt holds some. The frame after a keystroke in the 5,000-line session 509 → 217–245 µs. |
+| 4 | Session search sends whole JSONL lines to the core, which cuts them. | Done: `said` runs in the grep worker; hits arrive at most 500 chars, and lines without said text no longer count toward the limit. |
+| 5 | `C-c C-k` answers the oldest request, not the one at point. | Done: the request at point first, as `C-c C-y`. |
+| 6 | `revert-buffer`'s `RET` means Yes. | Done: `No` first. |
+| 7 | `find-file` reads any file, however big. | Done: over 256 MiB, `files::read` fails with `<path>: file too large (<n> MiB)`. The check is in `files::read`, so revert, diff, the change check and the save's disk check refuse such files too. |
+| 8 | A grep hit's label repeats its line's text. | Done: `<root>/<path>:<line>`. |
+| 9 | The project file prompt builds its candidates twice. | Open: no task covered it. |
+| 10 | Two language tables: files and Markdown fences. | Done: one `syntax::language`; fences take full names and every extension. |
+| 11 | After a resize the modeline keeps the old width until the next message. | Coded: `request_animation_frame` after `Msg::Resize`. Not yet checked in a running window. |
+| 12 | Saving the same bytes twice before the first reply conflicts. | Done: bytes already on disk count as written. |
+| 13 | `agents.rs` is 10,105 lines. | Done: moves only, into `agents/tests.rs`, `asks.rs`, `tools.rs` and `config.rs`; `agents.rs` is 1,718 lines. |
+| 14 | A wrapped window lays out `rows` lines, not rows. | Done: `display::build` counts at least the visual rows each line takes. 600-char paragraphs in a 50-row window 1.38 ms → 224 µs. |
+| 15 | The frontend re-parses the grep label for its line number. | Done: the core puts the range in `Minibuffer::syntax`; `numbered` is gone. |
+| 16 | Grammars without locals record edited nodes. | Done: guarded by `grammar.locals`. |
+| 17 | `*Messages*` grows without bound. | Done: it keeps its last 1,000 lines, without undo. |
+| 18 | A grep match starting inside a char panics the worker. | Done: column 0. |
+| 19 | `aiditor --wait +LINE` leaves point where it was in a window already showing the file. | Done: every window of the terminal's workspace showing it moves. |
+| 20 | Rolling back a pinned session loses the pin. | Done: the pin moves to the fork. |
+
+#14: under word wrap a row can hold one more char, in the marker's column, so the count uses `width + 1` there to stay a lower bound; the design's `ceil(chars / width)` could leave the last row blank.
+
+Run: `cargo test --workspace` (core 1,052, services 121), `cargo clippy --workspace` clean, and `hot_paths` with the new `hot-display/wrapped-600-char-paragraphs-50-rows` case.
+
+Not checked: #11 in a running window, Linux, and a 200 MiB file opening (#7's "just under the limit").
