@@ -398,12 +398,19 @@ impl Ctx<'_> {
 }
 
 impl Core {
-    /// The current buffer's directory: its file's, its terminal's, else the working directory, or
-    /// the home directory in the lobby.
+    /// The current buffer's directory: its file's, its terminal's, else the home directory in the
+    /// lobby, or its project's primary root.
     pub(crate) fn directory(&self) -> PathBuf {
         let home = || std::env::home_dir().filter(|_| self.workspace().is_none());
+        // A GUI app's working directory is `/`, so a buffer with none takes its project's root.
+        let primary = || {
+            let workspace = self.current_workspace().ok()?;
+            let at = self.project_at(workspace.project).ok()?;
+            Some(self.projects[at].project.primary.path.clone())
+        };
         (self.buffer_directory())
             .or_else(home)
+            .or_else(primary)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
     }
 
@@ -1660,10 +1667,10 @@ mod tests {
         h.keys("DEL sub/");
         assert_eq!(listed(&mut h).0, ["c.txt"]);
         h.keys("C-g");
-        // A buffer without a file starts at the working directory.
+        // A buffer without a file starts at its project's primary root.
         h.keys("C-x b *scratch* RET C-x C-f");
-        let cwd = std::env::current_dir().unwrap().join("");
-        assert_eq!(h.text(), cwd.to_string_lossy());
+        let primary = h.core.projects[0].project.primary.path.join("");
+        assert_eq!(h.text(), primary.to_string_lossy());
     }
 
     #[test]

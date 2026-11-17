@@ -314,7 +314,14 @@ impl Session {
                 let text = rows_text(&ask.body.rows(&ask.title));
                 (text, ask.body.props(&ask.title), None)
             }
-            BlockKind::Answered(a) => (a.text.clone(), answered_props(a, path.1.is_some()), None),
+            BlockKind::Answered(a) => {
+                let grouped = path.1.is_some();
+                (
+                    a.shown(grouped),
+                    answered_props(a, grouped),
+                    a.meta(grouped),
+                )
+            }
             BlockKind::Working => {
                 let turn = self.turn.as_ref().expect("a running turn");
                 let text = format!("Working for {}", long_duration(look.now - turn.start));
@@ -486,8 +493,9 @@ impl Session {
                 Some(At::Ask(path))
             }
             BlockKind::Answered(a) => {
-                let end = if a.open { all } else { start + a.line };
-                (all - start > a.line && open && on(end)).then_some(At::Answer(path))
+                let line = a.line(path.1.is_some());
+                let end = if a.open { all } else { start + line };
+                (all - start > line && open && on(end)).then_some(At::Answer(path))
             }
             BlockKind::Tool(call) => {
                 let t = &self.tools[call];

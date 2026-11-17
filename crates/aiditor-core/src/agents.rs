@@ -512,12 +512,13 @@ impl Ask {
 /// A closed question's line, `▸ <mark> <label>  <outcome>` and its time, with the rows of what
 /// it sent under it.
 struct Answered {
-    /// The line and the rows.
+    /// The line and the rows, without its time.
     text: String,
-    /// Where the label and the outcome end, and the line's length, its time counted.
+    /// Where the label and the outcome end.
     label: usize,
     outcome: usize,
-    line: usize,
+    /// Its clock time: at the right of the line in a group, else on the line under its block.
+    time: Option<String>,
     /// The rows' name width.
     name: usize,
     mark: FaceName,
@@ -596,6 +597,14 @@ impl Core {
                 let to = end - "\n\n".len() + text.chars().count();
                 (buffer.set_marker(session.block(message).end, to)).expect("in the text");
             }
+            return;
+        }
+        // codex-acp starts each reasoning summary part, the first too, with a blank line.
+        let text = match chunk {
+            Chunk::Thought(_) => text.trim_start_matches('\n'),
+            _ => text,
+        };
+        if text.is_empty() && matches!(chunk, Chunk::Thought(_)) {
             return;
         }
         self.end_stream(id);
@@ -1096,15 +1105,16 @@ impl Core {
         }
     }
 
-    /// Drops the newlines a streamed message ends with, as Claude's does before a tool call, so
-    /// one blank line still separates it from the next block.
+    /// Drops the newlines a streamed message or thought ends with, as Claude's message does before
+    /// a tool call and Codex's thought at each summary part, so one blank line still separates it
+    /// from the next block.
     fn trim_message(&mut self, id: AgentId) {
         let Some((session, buffer)) = self.session_buffer(id) else {
             return;
         };
         let Some(Stream {
             start,
-            chunk: Chunk::Message(_),
+            chunk: Chunk::Message(_) | Chunk::Thought(_),
             source,
             ..
         }) = &mut session.stream
@@ -2470,8 +2480,8 @@ impl Ctx<'_> {
 
     /// `agent-send-input`: on a pending permission request's option line, answers it with that
     /// option; on a web link, opens it in the browser; on a file link, visits the file in another window; on a tool call's header, shows
-    /// its full output; elsewhere sends the prompt area's text as a `session/prompt`, leaving it above a
-    /// new prompt line.
+    /// its full output; in the prompt area sends its text as a `session/prompt`, leaving it above a
+    /// new prompt line; elsewhere does nothing.
     pub(crate) fn agent_send_input(&mut self) -> Result<(), String> {
         if let Some((id, at, line)) = self.ask_at_point() {
             let ask = &self.core.agents[&id].ask(at);
@@ -2526,6 +2536,9 @@ impl Ctx<'_> {
         }
         if let Some((id, call)) = self.tool_at_point() {
             return self.show_tool_output(id, &call);
+        }
+        if self.core.point() < self.core.current().prompt_start() {
+            return Ok(());
         }
         let core = &mut *self.core;
         let buffer = core.windows.window.buffer();
@@ -7857,6 +7870,20 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_thought_drops_the_blank_lines_around_its_summary_parts() {
+        let mut h = session();
+        h.keys("a RET");
+        for part in ["\n\n", "**One**", "\n\n", "**Two**", "\n\n"] {
+            thought(&mut h, part);
+        }
+        chunk(&mut h, "So.");
+        assert_eq!(
+            h.core.text(),
+            "> a\n\nThought for 0s\n**One**\n\n**Two**\n\nSo.\n\nWorking for 0s\n\n> "
+        );
+    }
+
+    #[test]
     fn a_tool_call_shows_how_long_it_ran_without_its_permission_wait() {
         let mut h = session();
         h.keys("a RET");
@@ -8455,7 +8482,8 @@ mod tests {
         let mut h = grouped();
         on_line(&mut h, "▸ ✓    Read a.rs");
         h.keys("RET");
-        assert_eq!(h.core.message(), Some("claude is busy"));
+        assert_eq!(h.core.message(), None);
+        assert!(ops(&mut h).is_empty());
     }
 
     #[test]
@@ -8541,6 +8569,9 @@ mod tests {
         assert!(ops(&mut h).is_empty());
         assert_eq!(h.core.text(), "> x\n\nWorking for 0s\n\n> y");
         prompted(&mut h, Ok(StopReason::EndTurn));
+        // Only from the prompt area.
+        h.keys("M-< RET M->");
+        assert!(ops(&mut h).is_empty());
         h.keys("DEL SPC C-j RET");
         assert!(ops(&mut h).is_empty());
         exited(&mut h, 0, 1);
@@ -8863,7 +8894,8 @@ mod tests {
         assert_eq!(ops(&mut h), ["reply 0 2 always"]);
         assert!(h.core.text().contains("✓ allowed always\n"));
         h.keys("M-< C-n C-n RET");
-        assert_eq!(h.core.message(), Some("claude is busy"));
+        assert_eq!(h.core.message(), None);
+        assert!(ops(&mut h).is_empty());
         h.keys("C-n C-n C-n RET");
         assert_eq!(ops(&mut h), ["reply 0 1 reject"]);
         assert_eq!(
@@ -9407,6 +9439,32 @@ mod tests {
     }
 
     #[test]
+    fn an_answered_line_s_time_goes_under_it_and_into_its_row_in_a_group() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        h.clock("14:03:00");
+        tool(&mut h, read("a", "a.rs"));
+        question(&mut h, 1, None);
+        h.keys("1");
+        ops(&mut h);
+        assert_eq!(visible(&mut h)[3..5], ["▸ ✓ Which?  A", "14:03:00"]);
+        tool(&mut h, read("b", "b.rs"));
+        on_line(&mut h, "▸    Read");
+        h.keys("TAB");
+        assert_eq!(visible(&mut h)[3], "▸ ✓ Which?  A 14:03:00");
+        assert!(!h.core.text().contains("\n14:03:00\n"));
+        let line = "▸ ✓ Which?  A 14:03:00";
+        assert_eq!(faces_on(&h, line, "14:03:00"), [FaceName::Annotation]);
+        on_line(&mut h, "▸ ✓ Which?");
+        h.keys("TAB");
+        assert_eq!(
+            visible(&mut h)[3..5],
+            ["▾ ✓ Which?  A 14:03:00", " question_0  A"]
+        );
+    }
+
+    #[test]
     fn each_outcome_shrinks_to_its_line_and_tab_opens_what_was_sent() {
         let mut h = session();
         h.keys("a RET");
@@ -9418,15 +9476,15 @@ mod tests {
         question(&mut h, 1, Some(fields));
         h.keys("1 1 C-c C-y");
         ops(&mut h);
-        let line = "▸ ✓ 2 questions  Both · One 14:03:00";
+        let line = "▸ ✓ 2 questions  Both · One";
         assert!(
             h.core
                 .text()
-                .contains(&format!("{line}\n Status  Both\n Commit  One\n\n"))
+                .contains(&format!("{line}\n Status  Both\n Commit  One\n14:03:00\n"))
         );
         assert_eq!(faces_on(&h, line, "✓"), [FaceName::StatusRunning]);
         assert_eq!(faces_on(&h, line, "Both · One"), [FaceName::SessionThought]);
-        assert_eq!(faces_on(&h, line, "14:03:00"), [FaceName::Annotation]);
+        assert_eq!(faces_on(&h, "14:03:00", "14:03:00"), [FaceName::Annotation]);
         assert_eq!(faces_on(&h, line, "▸"), [FaceName::SessionThought]);
         assert!(
             faces_on(&h, line, "2 questions").is_empty(),
@@ -9438,7 +9496,7 @@ mod tests {
         assert_eq!(
             visible(&mut h)[1..4],
             [
-                "▾ ✓ 2 questions  Both · One 14:03:00",
+                "▾ ✓ 2 questions  Both · One",
                 " Status  Both",
                 " Commit  One"
             ]
@@ -9456,13 +9514,13 @@ mod tests {
         );
         h.keys("C-n C-e TAB");
         assert_eq!(visible(&mut h)[1], line);
-        assert_eq!(visible(&mut h)[2], "Working for 0s");
+        assert_eq!(visible(&mut h)[2..4], ["14:03:00", "Working for 0s"]);
         assert_eq!(h.point(), on_chip(&h, line) - 1, "back on the line");
         question(&mut h, 2, None);
         h.keys("C-c C-k");
         question(&mut h, 3, None);
         h.keys("C-c C-c");
-        let skipped = "▸ – Which?  Skipped 14:03:00";
+        let skipped = "▸ – Which?  Skipped";
         assert_eq!(faces_on(&h, skipped, "–"), [FaceName::SessionThought]);
         assert_eq!(
             faces_on(&h, "▸ ✗ Which?  Cancelled", "✗"),
