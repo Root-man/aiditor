@@ -269,14 +269,13 @@ pub struct Minibuffer {
     pub candidates: Vec<String>,
     /// Matched graphemes' UTF-8 byte ranges in each candidate; empty for custom filters.
     pub highlights: Vec<Vec<Range<usize>>>,
-    /// Syntax faces in each Swiper candidate's UTF-8 byte ranges, including its prefix offset.
+    /// Syntax faces in each Swiper candidate's UTF-8 byte ranges, including its prefix offset, or
+    /// a numbered grep hit's line number in `grep-line-number`.
     pub syntax: Vec<Vec<(Range<usize>, Face)>>,
     /// Each of `candidates`' annotation, empty for none.
     pub annotations: Vec<String>,
     /// Project grep file headers, each before the candidate at its index.
     pub groups: Vec<(usize, String)>,
-    /// Whether the grouped candidates start with a line number and `: `.
-    pub numbered: bool,
     /// Which of `candidates` is selected.
     pub selected: Option<usize>,
     /// How many rows the completion list takes, the most shown since the minibuffer opened;
@@ -684,7 +683,25 @@ pub fn build(
     let mut next_icon = 0;
     let mut positions = search.map(|_| Vec::new());
     let mut source_positions = Vec::new();
-    while lines.len() < rows {
+    // The visual rows the finished lines take at least, so a wrapped window lays out about
+    // `rows` rows, not `rows` lines: a word-wrapped row can hold one more char, in the marker's column.
+    let (mut counted, mut visual) = (0, 0);
+    let mut short = |lines: &[Line]| {
+        for line in &lines[counted..] {
+            let table = (line.decorations.iter()).any(|d| matches!(d, Decoration::Table { .. }));
+            visual += match wrap {
+                Some(w) if !line.aligned && !table => {
+                    let per = w.width.saturating_sub(line.indent()).max(1) + usize::from(w.word);
+                    let chars: usize = line.spans.iter().map(|s| s.text.chars().count()).sum();
+                    chars.div_ceil(per).max(1)
+                }
+                _ => 1,
+            };
+        }
+        counted = lines.len();
+        visual < rows
+    };
+    while short(&lines) {
         let range = columns(line.number);
         let fold = props.iter().find_map(|(range, prop)| match prop {
             // Placeholders stand for hidden text (line counts, a folded call's ` …`), which frame 6 draws dim.

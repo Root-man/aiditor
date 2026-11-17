@@ -71,7 +71,6 @@ Some(
         syntax: [],
         annotations: [],
         groups: [],
-        numbered: false,
         selected: None,
         rows: 0,
     },

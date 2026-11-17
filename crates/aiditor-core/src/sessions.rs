@@ -245,6 +245,22 @@ impl Core {
         (self.pins.iter()).any(|p| p.agent == agent && p.cwd == cwd && *p.session == *session.0)
     }
 
+    /// Moves `agent`'s pin of session `from` in `cwd`, if it has one, to session `to`.
+    pub(crate) fn move_pin(
+        &mut self,
+        agent: &str,
+        cwd: &Path,
+        (from, to): (&SessionId, &SessionId),
+        effects: &mut Vec<Effect>,
+    ) {
+        let pinned = (self.pins.iter_mut())
+            .find(|p| p.agent == agent && p.cwd == cwd && *p.session == *from.0);
+        if let Some(pin) = pinned {
+            pin.session = to.to_string();
+            self.pins_changed(cwd, effects);
+        }
+    }
+
     /// Writes the pins and rebuilds the live sessions buffers listed in `cwd`.
     fn pins_changed(&mut self, cwd: &Path, effects: &mut Vec<Effect>) {
         match toml::to_string(&PinFile {
@@ -1384,26 +1400,23 @@ mod tests {
         let codex = home.join(".codex/sessions");
         assert_eq!(op.roots, [claude.clone(), codex.clone()]);
         assert_eq!(op.names, ["c1", "c2", "x1"]);
-        let hit = |root: &PathBuf, path: &str, text: &str| crate::Hit {
+        // The grep service sends each hit as its said text, with the match's column in it.
+        let hit = |root: &PathBuf, path: &str, text: &str, col| crate::Hit {
             root: root.clone(),
             path: path.into(),
             line: 3,
-            col: 0,
+            col,
             text: text.into(),
         };
-        let long = format!(r#"{{"message":{{"content":"{} needle"}}}}"#, "x".repeat(30));
+        let cut = format!("…{} needle", "x".repeat(19));
         let hits = vec![
-            hit(
-                &claude,
-                "c2.jsonl",
-                r#"{"cwd":"/needle","message":{"content":"hi"}}"#,
-            ),
             hit(
                 &codex,
                 "2026/10/28/rollout-2026-10-28T09-00-00-x1.jsonl",
-                r#"{"payload":{"content":[{"type":"input_text","text":"the needle\nnow"}]}}"#,
+                "the needle now",
+                4,
             ),
-            hit(&claude, "c1.jsonl", &long),
+            hit(&claude, "c1.jsonl", &cut, 21),
         ];
         h.send(Msg::Grepped {
             search: op.id,
@@ -1411,10 +1424,9 @@ mod tests {
             done: true,
         });
         let mb = h.frame(800., 600.).minibuffer.unwrap();
-        let cut = format!("…{} needle", "x".repeat(19));
         assert_eq!(mb.candidates, ["the needle now", cut.as_str()]);
         assert_eq!(mb.groups, [(0, "◆ Port".into()), (1, "✻ Fix it".into())]);
-        assert!(!mb.numbered, "no line numbers");
+        assert!(mb.syntax.iter().all(Vec::is_empty), "no line numbers");
         assert_eq!(mb.highlights, [vec![4..10], vec![23..29]]);
         assert_eq!(previewed(&h), "Port");
         h.keys("C-n");
@@ -1442,7 +1454,7 @@ mod tests {
                 path: "c1.jsonl".into(),
                 line: 0,
                 col: 0,
-                text: r#"{"text":"a needle"}"#.into(),
+                text: "a needle".into(),
             }]),
             done: true,
         });

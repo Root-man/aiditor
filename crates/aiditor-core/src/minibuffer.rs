@@ -14,6 +14,7 @@ use crate::command::{Args, Command, Filter, Preview};
 use crate::display::TEXT_INSET;
 use crate::frame::window_display;
 use crate::project::ProjectId;
+use crate::settings::FaceName;
 use crate::timer::TimerId;
 use crate::window::{Window, WindowId};
 use crate::{Core, Ctx, Effect, Effects, FileOp, Msg, PreviewRequest, display};
@@ -802,6 +803,16 @@ impl Core {
                             )
                         })
                         .unzip();
+                    if grep && self.grep.sessions.is_empty() {
+                        let face = self.settings.theme.face(FaceName::GrepLineNumber);
+                        let width = self.grep.line_number_width();
+                        syntax = (f.matched[rows.clone()].iter())
+                            .map(|&i| {
+                                let hit = self.grep.hit_at(i).expect("listed grep hit");
+                                vec![(0..(hit.line + 1).to_string().len().max(width), face)]
+                            })
+                            .collect();
+                    }
                     if grep {
                         let mut previous = None;
                         for (i, &index) in f.matched[rows.clone()].iter().enumerate() {
@@ -949,7 +960,6 @@ impl Core {
             highlights,
             syntax,
             annotations,
-            numbered: grep && self.grep.sessions.is_empty(),
             groups,
             selected,
             rows: shown,

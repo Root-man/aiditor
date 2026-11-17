@@ -344,7 +344,10 @@ impl Window {
     pub(crate) fn shown(&self, buffer: &Buffer, at: usize) -> usize {
         let (line, col) = buffer.line_col(at).unwrap_or_default();
         let row = self.row_starts(buffer, line).partition_point(|&s| s <= col) - 1;
-        let top = (self.top, self.top_row);
+        let mut top = (self.top, self.top_row);
+        if top.1 > 0 && top.0 < buffer.len_lines() {
+            top.1 = top.1.min(self.row_starts(buffer, top.0).len() - 1);
+        }
         let mut to = match (line, row) < top {
             true => top,
             // shortcut: clamps by whole lines, so a point below the rows lands on a line start; walk rows if that bites.

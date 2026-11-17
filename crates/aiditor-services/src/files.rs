@@ -267,9 +267,17 @@ pub fn root(file: &Path) -> &Path {
         .unwrap_or(folder)
 }
 
-/// The file's bytes and their hash, or `None` when there is no file.
+/// The file's bytes and their hash, or `None` when there is no file. Files over
+/// `VISIT_LIMIT` are refused unread.
 pub fn read(path: &Path) -> io::Result<Option<(Vec<u8>, u64)>> {
-    match checked_metadata(path).and_then(|_| fs::read(path)) {
+    let checked = checked_metadata(path).and_then(|m| match m.len() {
+        len if len > VISIT_LIMIT => Err(io::Error::other(format!(
+            "file too large ({} MiB)",
+            len / (1024 * 1024)
+        ))),
+        _ => fs::read(path),
+    });
+    match checked {
         Ok(bytes) => {
             let h = hash(&bytes);
             Ok(Some((bytes, h)))
@@ -280,6 +288,7 @@ pub fn read(path: &Path) -> io::Result<Option<(Vec<u8>, u64)>> {
 }
 
 const PREVIEW_LIMIT: u64 = 10 * 1024 * 1024;
+const VISIT_LIMIT: u64 = 256 * 1024 * 1024;
 
 fn checked_metadata(path: &Path) -> io::Result<fs::Metadata> {
     let metadata = fs::metadata(path)?;
@@ -570,6 +579,10 @@ pub fn write(path: &Path, bytes: &[u8], expected: WriteExpectation) -> Result<u6
         }
         WriteExpectation::Update(expected) => {
             let on_disk = read(path).map_err(err)?.map(|(_, h)| h);
+            // A second save sent before the first answered expects what the first replaced.
+            if on_disk == Some(hash(bytes)) {
+                return Ok(hash(bytes));
+            }
             if on_disk.is_some() && on_disk != expected {
                 return Err(WriteFailure::Conflict);
             }
@@ -712,6 +725,21 @@ mod tests {
         ));
         write(&path, b"retry", WriteExpectation::Create).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"retry");
+    }
+
+    #[test]
+    fn a_second_save_of_the_same_bytes_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, "old").unwrap();
+        let old = WriteExpectation::Update(Some(hash(b"old")));
+        assert_eq!(write(&path, b"new", old).unwrap(), hash(b"new"));
+        assert_eq!(write(&path, b"new", old).unwrap(), hash(b"new"));
+        assert!(matches!(
+            write(&path, b"newer", old),
+            Err(WriteFailure::Conflict)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"new");
     }
 
     #[test]
@@ -1423,6 +1451,26 @@ mod tests {
             read(dir.path()).unwrap_err().raw_os_error(),
             fs::read(dir.path()).unwrap_err().raw_os_error()
         );
+    }
+
+    #[test]
+    fn refuses_to_visit_files_over_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.log");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(300 * 1024 * 1024).unwrap();
+        let Msg::Opened { result, .. } = run(FileOp::Open {
+            intent: aiditor_core::VisitIntent {
+                request: 1,
+                workspace: Default::default(),
+                window: Default::default(),
+            },
+            path: path.clone(),
+        }) else {
+            panic!("not opened");
+        };
+        let too_large = format!("{}: file too large (300 MiB)", path.display());
+        assert_eq!(result, Err(too_large));
     }
 
     #[test]

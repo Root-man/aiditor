@@ -84,7 +84,7 @@ pub(super) struct Cache {
     index: HashMap<usize, Arc<Fragment>>,
     // Pins the allocations whose node identities the immutable fragments refer to.
     tree: Option<Tree>,
-    edited: HashSet<usize>,
+    pub(super) edited: HashSet<usize>,
     facts: HashMap<usize, Arc<Facts>>,
     resolved: HashMap<usize, (Environment, Arc<Locals>)>,
     #[cfg(test)]

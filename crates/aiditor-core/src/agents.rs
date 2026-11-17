@@ -1255,7 +1255,15 @@ impl Core {
         // The prompt area carries only chips and pastes, so it is cleared whole.
         if std::mem::replace(&mut session.painted, buffer.tick()) != buffer.tick() {
             let range = buffer.prompt_start()..buffer.len_chars();
-            buffer.remove_properties(range.clone());
+            // `remove_properties` walks the whole transcript's; a bisect finds none to remove.
+            let inside = |r: &Range<usize>| r.start >= range.start && r.end <= range.end;
+            if buffer
+                .properties_near(range.clone())
+                .iter()
+                .any(|(r, _)| inside(r))
+            {
+                buffer.remove_properties(range.clone());
+            }
             self.chips.paint(buffer, range);
             session.paint_pastes(buffer, buffer.prompt_start());
         }
@@ -1574,8 +1582,13 @@ impl Core {
     /// Puts rolled back session buffer `source`'s fork, `buffer` with its `log`, in its place:
     /// in every window showing it and under its and its log's names. Killing the source stops
     /// its agent, then the fork's agent `id` deletes its session. Nothing happens once the
-    /// source is gone.
-    fn take_place(&mut self, id: AgentId, source: BufferId, buffer: BufferId, log: BufferId) {
+    /// source is gone. A pin of the source moves to the fork.
+    fn take_place(
+        &mut self,
+        id: AgentId,
+        (source, buffer, log): (BufferId, BufferId, BufferId),
+        effects: &mut Vec<Effect>,
+    ) {
         let Some(old) = (self.buffers.get(source).and_then(Buffer::agent))
             .and_then(|old| self.agents.get_mut(&old))
         else {
@@ -1586,9 +1599,16 @@ impl Core {
             old.agent.clone(),
             old.session.as_ref().map(|r| r.session_id.clone()),
         );
-        let old = old.log;
-        if let (agent, Some(id)) = listed {
-            self.forget_listed(&agent, &id);
+        let (old, root) = (old.log, old.root.clone());
+        if let (agent, Some(from)) = listed {
+            self.forget_listed(&agent, &from);
+            let fork = self.agents[&id]
+                .session
+                .as_ref()
+                .map(|r| r.session_id.clone());
+            if let Some(to) = fork {
+                self.move_pin(&agent, &root, (&from, &to), effects);
+            }
         }
         let name = |id| self.buffers.get(id).map(|b| b.name.clone());
         let names = (name(source), name(old));
@@ -1803,7 +1823,7 @@ impl Ctx<'_> {
                 let (buffer, log) = (session.buffer, session.log);
                 match session.load {
                     Some((_, source)) if session.rollback => {
-                        core.take_place(id, source, buffer, log)
+                        core.take_place(id, (source, buffer, log), &mut self.effects)
                     }
                     Some((_, from)) if from == selected => core.switch_to(buffer),
                     _ => {}
@@ -2188,12 +2208,22 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// `agent-reject-once`: answers the oldest pending request: a permission request with its
-    /// first `reject_once` option, a question with `decline`.
+    /// `agent-reject-once`: answers the pending request point is on, else the oldest: a
+    /// permission request with its first `reject_once` option, a question with `decline`.
     pub(crate) fn agent_reject_once(&mut self) -> Result<(), String> {
         let kind = PermissionOptionKind::RejectOnce;
-        let (id, session) = self.core.current_session()?;
-        let (at, ask) = (session.asks().next()).ok_or("No permission request is pending")?;
+        let (id, at) = match self.ask_at_point() {
+            Some((id, at, _)) => (id, at),
+            None => {
+                let (id, session) = self.core.current_session()?;
+                let at = session
+                    .asks()
+                    .next()
+                    .ok_or("No permission request is pending")?;
+                (id, at.0)
+            }
+        };
+        let ask = self.core.agents[&id].ask(at);
         let options = match &ask.body {
             Body::Permission(options) => options,
             Body::Question(_) => {
@@ -3488,6 +3518,50 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_paste_sends_and_its_echo_marks_every_line() {
+        let mut h = session();
+        let text = paste_text(20_000);
+        h.clipboard = Some(text.clone());
+        h.keys("C-y RET");
+        assert_eq!(ops(&mut h), [format!("prompt 0 s {text:?}")]);
+        assert!(session_rows(&mut h)[0].contains("≡ Pasted 20000 lines"));
+        // The folded echo hides its lines; marked as plain text, each gets the band.
+        let mut h = Harness::new(&[]);
+        let b = crate::harness::buffer(&mut h);
+        b.insert(0, &text).unwrap();
+        user_lines(b, 0..b.len_chars());
+        let user = Prop::Line(Decoration::Background(FaceName::SessionUser));
+        assert_eq!(b.properties().filter(|(_, p)| **p == user).count(), 20_000);
+    }
+
+    #[test]
+    fn a_stale_top_row_clamps_when_the_window_widens() {
+        let mut h = session();
+        h.send(Msg::Insert {
+            text: "q".into(),
+            replace: None,
+        });
+        h.keys("RET");
+        let long = "word ".repeat(400);
+        chunk(&mut h, &format!("{long}\n{}", "x\n".repeat(60)));
+        prompted(&mut h, Ok(StopReason::EndTurn));
+        // Point at the long line's end, in a short narrow window, scrolls to one of its last rows.
+        let text = h.text();
+        let at = text[..text.find(&long).unwrap() + long.len() - 1]
+            .chars()
+            .count();
+        let core = &mut h.core;
+        (core.windows.window.set_point(&mut core.buffers, at)).unwrap();
+        h.joined_frame(300., 100.);
+        assert!(h.core.windows.window.top_row() > 2);
+        h.keys("M->");
+        let rows: Vec<String> = (h.joined_frame(1000., 400.).windows[0].display.lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert!(rows[0].starts_with("word "), "{rows:?}");
+    }
+
+    #[test]
     fn short_yanks_and_ordinary_buffers_stay_plain() {
         for lines in [1, 19, 20] {
             let mut h = session();
@@ -4438,6 +4512,25 @@ mod tests {
         assert!(!h.core.agents.contains_key(&AgentId(0)));
         h.keys("h i RET");
         assert_eq!(ops(&mut h), ["prompt 1 f \"hi\""]);
+    }
+
+    #[test]
+    fn a_rollback_moves_the_sources_pin_to_the_fork() {
+        let mut h = rolled_back("yes");
+        let cwd = h.core.agents[&AgentId(0)].root.display().to_string();
+        let pin = |s| format!("[[pin]]\nagent = \"claude\"\ncwd = \"{cwd}\"\nsession = \"{s}\"\n");
+        h.send(Msg::PinsLoaded(Ok(Some(pin("s")))));
+        let response = NewSessionResponse::new("f").config_options(options("auto"));
+        h.send(Msg::AgentStarted {
+            id: AgentId(1),
+            result: Ok(response),
+        });
+        let written = crate::sessions::parse_pins(h.pins.last().map(String::as_str)).unwrap();
+        assert_eq!(
+            written,
+            crate::sessions::parse_pins(Some(&pin("f"))).unwrap()
+        );
+        assert_eq!(h.core.pins, written);
     }
 
     #[test]
@@ -9382,6 +9475,35 @@ mod tests {
         );
         assert!(text.contains("▸ ○ Which env?  Closed\n"), "{text}");
         assert_eq!(right(&mut h).len(), 0, "{:?}", right(&mut h));
+    }
+
+    #[test]
+    fn c_c_c_k_answers_the_request_at_point_first() {
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        ask(&mut h, 2, "c", Some("Edit A"));
+        point_in(&mut h, "Edit A", 0);
+        h.keys("C-c C-k");
+        assert_eq!(
+            ops(&mut h),
+            ["reply 0 2 reject"],
+            "the question stays pending"
+        );
+
+        let mut h = session();
+        h.keys("a RET");
+        ops(&mut h);
+        question(&mut h, 1, None);
+        question(&mut h, 2, None);
+        let all = h.core.text();
+        let second = all[..all.rfind("Which?").unwrap()].chars().count();
+        h.ctx().goto(second).unwrap();
+        h.keys("C-c C-k");
+        assert_eq!(ops(&mut h), [r#"reply 0 2 {"action":"decline"}"#]);
+        h.keys("C-c C-k");
+        assert_eq!(ops(&mut h), [r#"reply 0 1 {"action":"decline"}"#]);
     }
 
     #[test]

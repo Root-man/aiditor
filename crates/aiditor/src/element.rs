@@ -165,6 +165,9 @@ impl Element for FrameElement {
                 };
                 editor.handle(msg, cx);
                 self.windows = editor.frame().windows;
+                // The workspace modeline and echo line were rendered at the old size, and a
+                // `notify` during prepaint is dropped, so draw once more.
+                window.request_animation_frame();
             }
             let start = Instant::now();
             let settings = editor.core.settings();
@@ -705,13 +708,7 @@ pub(crate) fn candidate_faces(
     i: usize,
     theme: &Theme,
 ) -> Vec<(Range<usize>, Face)> {
-    let under = match mb.numbered {
-        true => {
-            let number = mb.candidates[i].find(':').expect("grep line number");
-            vec![(0..number, theme.face(FaceName::GrepLineNumber))]
-        }
-        false => mb.syntax.get(i).cloned().unwrap_or_default(),
-    };
+    let under = mb.syntax.get(i).cloned().unwrap_or_default();
     let matched = &mb.highlights[i];
     let mut cuts: Vec<usize> = (under.iter().map(|(r, _)| r))
         .chain(matched)

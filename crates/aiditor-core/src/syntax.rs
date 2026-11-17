@@ -22,6 +22,22 @@ struct Grammar {
     locals: Option<Query>,
 }
 
+/// The language a file extension or a fence's full name or extension names, and its grammar.
+fn language(name: &str) -> Option<(&'static str, &'static Grammar)> {
+    Some(match name {
+        "javascript" | "js" | "mjs" | "cjs" | "jsx" => ("JavaScript", &JAVASCRIPT),
+        "typescript" | "ts" | "mts" | "cts" => ("TypeScript", &TYPESCRIPT),
+        "tsx" => ("TSX", &TSX),
+        "rust" | "rs" => ("Rust", &RUST),
+        "elixir" | "ex" | "exs" => ("Elixir", &ELIXIR),
+        "heex" => ("HEEx", &HEEX),
+        "yaml" | "yml" => ("YAML", &YAML),
+        "md" | "markdown" => ("Markdown", &MARKDOWN),
+        "toml" => ("TOML", &TOML),
+        _ => return None,
+    })
+}
+
 /// Compiles `queries` joined, later patterns overriding earlier ones, as Zed and Helix extend
 /// JavaScript's query for TypeScript.
 fn grammar(language: Language, queries: &[&str]) -> Grammar {
@@ -236,15 +252,11 @@ fn injections(
             match query.capture_names()[c.index as usize] {
                 "content" | "injection.content" => content = Some(c.node),
                 "language" => {
-                    grammar = match text.byte_slice(c.node.byte_range()).to_string().as_str() {
-                        "rust" => Some(&RUST),
-                        "elixir" => Some(&ELIXIR),
-                        "js" => Some(&JAVASCRIPT),
-                        "ts" => Some(&TYPESCRIPT),
-                        "yaml" => Some(&YAML),
-                        "toml" => Some(&TOML),
-                        _ => None,
-                    };
+                    let name = text.byte_slice(c.node.byte_range()).to_string();
+                    // Markdown stays out of fences: a nested Markdown injection is not handled.
+                    grammar = language(&name)
+                        .map(|(_, g)| g)
+                        .filter(|g| !std::ptr::eq(*g, &*MARKDOWN));
                 }
                 _ => {}
             }
@@ -312,7 +324,9 @@ fn injections(
 
 impl Injection {
     fn edit(&mut self, edit: &InputEdit) {
-        self.locals.get_mut().edit(&self.tree, edit);
+        if self.grammar.locals.is_some() {
+            self.locals.get_mut().edit(&self.tree, edit);
+        }
         self.tree.edit(edit);
         for range in &mut self.ranges {
             edit.edit_range(range);
@@ -503,18 +517,7 @@ impl Syntax {
         if ext == "eex" {
             ext = Path::new(path.file_stem()?).extension()?.to_str()?;
         }
-        let (name, grammar): (_, &'static Grammar) = match ext {
-            "js" | "mjs" | "cjs" | "jsx" => ("JavaScript", &JAVASCRIPT),
-            "ts" | "mts" | "cts" => ("TypeScript", &TYPESCRIPT),
-            "tsx" => ("TSX", &TSX),
-            "rs" => ("Rust", &RUST),
-            "ex" | "exs" => ("Elixir", &ELIXIR),
-            "heex" => ("HEEx", &HEEX),
-            "yml" | "yaml" => ("YAML", &YAML),
-            "md" | "markdown" => ("Markdown", &MARKDOWN),
-            "toml" => ("TOML", &TOML),
-            _ => return None,
-        };
+        let (name, grammar) = language(ext)?;
         let mut parser = Parser::new();
         (parser.set_language(&grammar.language)).expect("bundled grammars suit this tree-sitter");
         // Text over the cut starts uncoloured, with an empty tree, until its `Parse` arrives.
@@ -561,7 +564,10 @@ impl Syntax {
     }
 
     fn apply(&mut self, edit: &InputEdit) {
-        self.locals.get_mut().edit(&self.tree, edit);
+        // Only a grammar with locals reads the cache; walking the tree for others costs per edit.
+        if self.grammar.locals.is_some() {
+            self.locals.get_mut().edit(&self.tree, edit);
+        }
         self.apply_to_trees(edit);
     }
 
@@ -827,7 +833,7 @@ mod tests {
         assert_eq!(
             runs(
                 "a.md",
-                "# Title\n\n- item\n\n> quote\n\n---\n\n```rs\nfn x\n```\n\n[a]: http://x\n",
+                "# Title\n\n- item\n\n> quote\n\n---\n\n```sh\nfn x\n```\n\n[a]: http://x\n",
                 &p
             ),
             [
@@ -837,7 +843,7 @@ mod tests {
                 ("- ".into(), 3),
                 ("> ".into(), 3),
                 ("---\n".into(), 3),
-                ("```rs\nfn x\n```\n".into(), 2),
+                ("```sh\nfn x\n```\n".into(), 2),
                 ("[a]".into(), 4),
                 ("http://x".into(), 5),
             ]
@@ -1345,6 +1351,11 @@ mod tests {
             ("ts", "a.ts", "const x: number = 1;\n"),
             ("yaml", "a.yaml", "a: true\n"),
             ("toml", "a.toml", "[package]\nname = \"é\"\n"),
+            ("typescript", "a.ts", "const x: number = 1;\n"),
+            ("javascript", "a.js", "const f = (x) => x + 1;\n"),
+            ("tsx", "a.tsx", "const a = <div x={1} />;\n"),
+            ("rs", "a.rs", "fn main() { let s = \"é\"; }\n"),
+            ("yml", "a.yaml", "a: true\n"),
         ] {
             let prefix = format!("é\n\n```{language} extra\n");
             let text = format!("{prefix}{code}```\n");
@@ -1359,6 +1370,18 @@ mod tests {
             assert_eq!(face_at(&text, &highlighted, "```"), literal);
             assert_eq!(highlighted[highlighted.len() - 2], literal);
         }
+    }
+
+    #[test]
+    fn editing_markdown_leaves_the_locals_cache_alone() {
+        let mut rope = Rope::from_str("# a\n\n*b* and `c`\n");
+        let mut syntax = Syntax::for_file(Path::new("a.md"), &rope).unwrap();
+        let start = position(&rope, 4);
+        rope.insert(4, "x");
+        syntax.edit(start, start, position(&rope, 5));
+        assert!(syntax.locals.borrow().edited.is_empty());
+        let inline = &syntax.injections[0];
+        assert!(inline.locals.borrow().edited.is_empty());
     }
 
     #[test]

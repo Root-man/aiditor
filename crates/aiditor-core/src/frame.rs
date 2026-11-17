@@ -558,10 +558,12 @@ fn window_rows(
     mark: Option<usize>,
 ) -> display::WindowDisplay {
     let cols = window.cols();
+    // A stale `top_row`, from a narrower window or a shortened line, clamps to the line's last.
+    let starts = window.row_starts(buffer, top);
     let wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
         width,
         word,
-        from: window.row_starts(buffer, top)[top_row],
+        from: starts[top_row.min(starts.len() - 1)],
         left: window.left(),
     });
     let shown = match wrap {
