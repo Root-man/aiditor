@@ -35,20 +35,34 @@ impl Core {
         id
     }
 
+    /// What is wrong with `project`'s agent keys under the settings in effect, one per agent.
+    fn agent_problems(&self, project: &Project) -> Vec<String> {
+        let registered = |name: &String| self.settings.agents.contains_key(name);
+        let mut problems: Vec<_> = (project.enabled_agents.iter().flatten())
+            .filter(|name| !registered(name))
+            .map(|name| format!("enabled_agents: {name:?} is not a registered agent"))
+            .collect();
+        if let Some(agent) = &project.default_agent {
+            if !registered(agent) {
+                problems.push(format!("{agent:?} is not a registered agent"));
+            } else if !self.enabled_agents(project).contains(agent) {
+                problems.push(format!("default_agent {agent:?} is not enabled"));
+            }
+        }
+        problems
+    }
+
     pub(crate) fn reconcile_projects(&mut self, loaded: Vec<Result<Loaded, String>>) {
         let mut old = std::mem::take(&mut self.projects);
         let mut valid = Vec::new();
         for result in loaded {
             match result {
                 Ok(loaded) => {
-                    if let (Some(agent), Some((path, _))) =
-                        (&loaded.project.default_agent, &loaded.file)
-                        && !self.settings.agents.contains_key(agent)
-                    {
+                    if let Some((path, _)) = &loaded.file {
                         let file = file_name(path);
-                        self.report(format!(
-                            "project {file}: {agent:?} is not a registered agent"
-                        ));
+                        for reason in self.agent_problems(&loaded.project) {
+                            self.report(format!("project {file}: {reason}"));
+                        }
                     }
                     valid.push(loaded);
                 }
@@ -325,6 +339,7 @@ impl Ctx<'_> {
             default_agent: None,
             ignore: Vec::new(),
             env: Default::default(),
+            enabled_agents: None,
             primary: Root {
                 path: self.core.root_path(primary),
             },
@@ -428,6 +443,10 @@ impl Ctx<'_> {
         let agent = &args.strings[1];
         if !agent.is_empty() && !self.core.settings.agents.contains_key(agent) {
             return Err(format!("{agent:?} is not a registered agent"));
+        }
+        let project = &self.core.projects[self.core.project_arg(args)?].project;
+        if !agent.is_empty() && !self.core.enabled_agents(project).contains(agent) {
+            return Err(format!("{agent:?} is not enabled in {}", project.name));
         }
         self.edit_project(args, |p| {
             p.default_agent = (!agent.is_empty()).then(|| agent.clone());
@@ -800,6 +819,7 @@ mod tests {
             default_agent: None,
             ignore: Vec::new(),
             env: Default::default(),
+            enabled_agents: None,
             primary: Root { path: h.path("a") },
             roots: Vec::new(),
         };
@@ -1024,6 +1044,56 @@ mod tests {
             projects: vec![Ok(gemini)],
         });
         assert_eq!(h.core.message(), None);
+    }
+
+    #[test]
+    fn bad_enabled_agents_are_reported_and_the_project_still_loads() {
+        let mut h = with(Vec::new());
+        h.send(Msg::SettingsLoaded(Ok(Some(
+            "[agents.codex]\ncommand = \"codex-acp\"".into(),
+        ))));
+        let mut a = saved(&h, "projects/a.toml", "a");
+        a.project.enabled_agents = Some(vec!["claude".into(), "gemini".into()]);
+        h.send(Msg::ProjectsLoaded {
+            dir: Some(h.path("projects")),
+            projects: vec![Ok(a)],
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project a.toml: enabled_agents: \"gemini\" is not a registered agent")
+        );
+        assert_eq!(h.core.enabled_agents(&project(&h, "a")), ["claude"]);
+        let mut b = saved(&h, "projects/b.toml", "b");
+        b.project.enabled_agents = Some(vec!["claude".into()]);
+        b.project.default_agent = Some("codex".into());
+        h.core.message = None;
+        h.send(Msg::ProjectsLoaded {
+            dir: Some(h.path("projects")),
+            projects: vec![Ok(b)],
+        });
+        assert_eq!(
+            h.core.message(),
+            Some("project b.toml: default_agent \"codex\" is not enabled")
+        );
+        assert_eq!(project(&h, "b").default_agent.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn a_disabled_default_agent_is_refused() {
+        let mut h = with(Vec::new());
+        h.core.add_project(ad_hoc(&h));
+        h.send(Msg::SettingsLoaded(Ok(Some(
+            "[agents.codex]\ncommand = \"codex-acp\"".into(),
+        ))));
+        h.core.projects.last_mut().unwrap().project.enabled_agents = Some(vec!["claude".into()]);
+        h.keys("M-x project-set-default-agent RET tmp RET");
+        assert_eq!(crate::harness::listed(&mut h).0, ["claude"]);
+        h.keys("C-g");
+        assert_eq!(
+            call(&mut h, "project-set-default-agent", &["tmp", "codex"]).as_deref(),
+            Some("\"codex\" is not enabled in tmp")
+        );
+        assert_eq!(project(&h, "tmp").default_agent, None);
     }
 
     #[test]

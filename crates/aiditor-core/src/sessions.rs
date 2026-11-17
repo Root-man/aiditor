@@ -531,20 +531,22 @@ impl Ctx<'_> {
     pub(crate) fn agent_sessions(&mut self) -> Result<(), String> {
         self.outside_minibuffer("Can't list sessions in the minibuffer")?;
         let core = &mut *self.core;
-        if core.settings.agents.is_empty() {
-            return Err("No agents registered".into());
-        }
         let workspace = core.current_workspace()?;
         let (project, name) = (workspace.project, format!("*Sessions*<{}>", workspace.name));
         let loaded = &core.projects[core.project_at(project)?].project;
+        let enabled = core.enabled_agents(loaded);
+        if enabled.is_empty() {
+            return Err("No agents enabled".into());
+        }
         let cwd = loaded.primary.path.clone();
         let mut agents = Vec::new();
-        for (name, agent) in &core.settings.agents {
+        for name in enabled {
+            let agent = &core.settings.agents[&name];
             core.list_requests += 1;
             let request = core.list_requests;
             let op = list_op(agent, request, loaded, None);
             agents.push(Listing {
-                name: name.clone(),
+                name,
                 request,
                 held: Some(op),
                 answer: None,
@@ -1050,11 +1052,28 @@ mod tests {
     }
 
     #[test]
+    fn only_enabled_agents_are_asked_for_sessions() {
+        let mut h = work();
+        h.core.projects[0].project.enabled_agents = Some(vec!["codex".into()]);
+        h.keys("M-x agent-sessions RET");
+        let commands: Vec<_> = lists(&mut h).into_iter().map(|l| l.1).collect();
+        assert_eq!(commands, ["codex-acp"]);
+        assert_eq!(body(&h), "Listing codex...");
+        h.keys("g");
+        let commands: Vec<_> = lists(&mut h).into_iter().map(|l| l.1).collect();
+        assert_eq!(commands, ["codex-acp"], "g asks the same agents");
+        h.core.projects[0].project.enabled_agents = Some(Vec::new());
+        h.keys("M-x agent-sessions RET");
+        assert_eq!(h.core.message(), Some("No agents enabled"));
+        assert!(lists(&mut h).is_empty());
+    }
+
+    #[test]
     fn no_agents_lists_nothing() {
         let mut h = work();
         h.core.settings.agents.clear();
         h.keys("M-x agent-sessions RET");
-        assert_eq!(h.core.message(), Some("No agents registered"));
+        assert_eq!(h.core.message(), Some("No agents enabled"));
         assert!(h.core.buffers.find("*Sessions*<work>").is_none());
     }
 

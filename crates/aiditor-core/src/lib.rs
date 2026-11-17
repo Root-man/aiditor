@@ -754,6 +754,13 @@ impl Ctx<'_> {
             args.project = Some(self.core.project_id(name)?);
         }
         if let Some(&prompt) = command.spec.prompts.get(args.strings.len()) {
+            if command.spec.single
+                && let Some(completion) = command.spec.completion
+                && let [only] = &completion(&*self.core, &args)[..]
+            {
+                args.strings.push(only.clone());
+                return self.try_call(name, args);
+            }
             return self.read_string(command, args, prompt.into(), None);
         }
         PANIC_HOOK.call_once(|| {

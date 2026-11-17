@@ -7,7 +7,7 @@ The project file: a TOML file in the editor's config dir naming a primary repo, 
 ## Requirements
 
 ### Requirement: Project file format
-A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional boolean `watch` defaulting to true, an optional `ignore` list of gitignore-syntax patterns, an optional `env` table of string variables, a `primary` table and zero or more `roots` tables. Each root SHALL have only a `path`; a missing `ignore` an empty list, and a missing `env` no variables. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore` and `env` as they are in the file.
+A project SHALL be a TOML file in the `projects` directory of the editor's config dir with a `name`, an optional `default_agent`, an optional boolean `watch` defaulting to true, an optional `ignore` list of gitignore-syntax patterns, an optional `env` table of string variables, an optional `enabled_agents` list of agent names, a `primary` table and zero or more `roots` tables. Each root SHALL have only a `path`; a missing `ignore` an empty list, and a missing `env` no variables. A project written back out SHALL read back as the same project, and project commands SHALL leave `ignore`, `env` and `enabled_agents` as they are in the file.
 
 #### Scenario: Full file
 - **WHEN** a project file sets a name, a default agent, a primary root and two additional roots
@@ -32,6 +32,10 @@ A project SHALL be a TOML file in the `projects` directory of the editor's confi
 #### Scenario: Project commands keep env
 - **WHEN** a project file with an `[env]` table and a comment on one of its lines has a root added by a project command
 - **THEN** the file still holds the `[env]` table and its comment
+
+#### Scenario: Enabled agents
+- **WHEN** a project file sets `enabled_agents = ["codex"]`
+- **THEN** the loaded project has the list `codex`, and a project command that adds a root leaves the key in the file
 
 ### Requirement: Invalid project files are rejected with a clear error
 A project file that is not valid TOML, has a value of the wrong type, a key the editor does not know, a missing or empty name, a missing primary root, a path that is not absolute, a path that does not exist as a directory, a root that is the same as or inside another root of the same project, an ignore pattern that is not a valid gitignore pattern, or an `env` variable whose value is not a string, whose name is empty or holds `=` or NUL, or whose value holds NUL SHALL be rejected. The error SHALL name the file and the problem, be shown in the echo area and logged to `*Messages*`; errors from several files SHALL share the line. Valid files SHALL still load. Roots shared between different projects SHALL NOT be an error.
@@ -146,7 +150,7 @@ The editor SHALL provide `project-create`, `project-add-root`, `project-remove-r
 - **THEN** the directory is made and the file written in it
 
 ### Requirement: Edit a project's roots and default agent
-`project-add-root` SHALL add a directory, completing file names, as an additional root; a relative one is taken from the current buffer's directory and a trailing `/` dropped. `project-remove-root` SHALL remove one of the additional roots, never the primary. `project-set-default-agent` SHALL set the default agent, completing over the registered agents' names, empty text removing it; a name that is not a registered agent SHALL leave the project unchanged and say so in the echo area.
+`project-add-root` SHALL add a directory, completing file names, as an additional root; a relative one is taken from the current buffer's directory and a trailing `/` dropped. `project-remove-root` SHALL remove one of the additional roots, never the primary. `project-set-default-agent` SHALL set the default agent, completing over the project's enabled agents, empty text removing it; a name that is not a registered agent, or a registered one the project does not enable, SHALL leave the project unchanged and say so in the echo area.
 
 #### Scenario: Add a root
 - **WHEN** `project-add-root` adds `/r/zed` to a project
@@ -163,6 +167,10 @@ The editor SHALL provide `project-create`, `project-add-root`, `project-remove-r
 #### Scenario: Unregistered default agent
 - **WHEN** `project-set-default-agent` is answered with `gemini` and no agent `gemini` is registered
 - **THEN** the project is unchanged and the echo area names `gemini` as not a registered agent
+
+#### Scenario: Disabled default agent
+- **WHEN** project `app` enables only `claude` and `project-set-default-agent` is answered with `codex`
+- **THEN** the project is unchanged and the echo area says `"codex" is not enabled in app`
 
 ### Requirement: Edits are checked and keep the rest of the file
 An edit to a project that has a file SHALL rewrite that file, keeping its comments, key order and every part the edit does not change. An edit SHALL be refused, with the file unchanged and the reason in the echo area, when the result would be rejected as a project file (an overlapping root, a missing directory) or when an existing file on disk differs from the text last loaded or written. A file that has been deleted SHALL be recreated with the checked edited definition, since no existing disk content is lost. A refused edit SHALL leave the loaded project unchanged. A disk conflict SHALL direct the user to reload with `C-x C-r`; other failures SHALL retain their specific cause. Project creation and saving an ad-hoc project SHALL continue to refuse an existing target file.
@@ -263,7 +271,7 @@ Loaded projects SHALL retain identity independently of their display name for th
 - **THEN** its old definition does not replace the newer in-memory definition and a fresh read reconciles the actual file content
 
 ### Requirement: An unknown default agent is reported without rejecting the project
-When project files load, at launch or on `C-x C-r`, a project whose `default_agent` names no agent in the settings in effect SHALL be reported as `project <file>: <reason>` naming the agent, in the echo area and `*Messages*`, sharing the line with other errors. The project SHALL still load with everything else in the file, and SHALL keep the `default_agent` value so writing the project back leaves it in the file.
+When project files load, at launch or on `C-x C-r`, a project whose `default_agent` names no agent in the settings in effect or one outside its enabled agents, or whose `enabled_agents` names an agent the settings do not register, SHALL be reported as `project <file>: <reason>` naming the agent, one report per agent, in the echo area and `*Messages*`, sharing the line with other errors. The project SHALL still load with everything else in the file, and SHALL keep the `default_agent` and `enabled_agents` values so writing the project back leaves them in the file; an unregistered name in `enabled_agents` enables nothing.
 
 #### Scenario: Unknown default agent
 - **WHEN** a project file sets `default_agent = "gemini"` and no agent `gemini` is registered
@@ -273,3 +281,11 @@ When project files load, at launch or on `C-x C-r`, a project whose `default_age
 - **GIVEN** a project file's `default_agent` named an unregistered agent `codex`
 - **WHEN** the user adds `[agents.codex]` to settings and presses `C-x C-r`
 - **THEN** no error about the project is shown
+
+#### Scenario: Unknown enabled agent
+- **WHEN** a project file sets `enabled_agents = ["claude", "gemini"]` and no agent `gemini` is registered
+- **THEN** the echo area shows `project <file>: ` with a reason naming `gemini`, and the project loads with `claude` as its only enabled agent
+
+#### Scenario: Default agent not enabled
+- **WHEN** a project file sets `enabled_agents = ["claude"]` and `default_agent = "codex"`, with both registered
+- **THEN** the echo area shows `project <file>: ` with a reason saying `codex` is not enabled, and `agent-start` preselects `claude`

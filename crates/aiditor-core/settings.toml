@@ -29,6 +29,9 @@ paste_fold_lines = 20
 # Session tables wider than this many columns wrap their cells.
 table_width = 100
 
+# The agents offered in every project; unset offers all of them. A project file's list replaces it.
+# enabled_agents = ["claude"]
+
 # Agents by name: an ACP adapter's command, args, env (on top of the captured environment, under a
 # project file's) and the session mode to start in. A user table changes single keys or adds an agent.
 [agents.claude]

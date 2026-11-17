@@ -1475,18 +1475,33 @@ impl Core {
         Some(note.collect::<Vec<_>>().join("  "))
     }
 
-    /// The agent names `agent-start` completes over, in registry order.
+    /// The registered agents `project` enables, in registry order: its own list, else the
+    /// settings', else every one.
+    pub(crate) fn enabled_agents(&self, project: &crate::project::Project) -> Vec<String> {
+        let list = (project.enabled_agents.as_ref()).or(self.settings.enabled_agents.as_ref());
+        (self.settings.agents.keys())
+            .filter(|name| list.is_none_or(|list| list.contains(name)))
+            .cloned()
+            .collect()
+    }
+
+    fn current_project(&self) -> Option<&crate::project::Project> {
+        let workspace = self.current_workspace().ok()?;
+        Some(&self.projects[self.project_at(workspace.project).ok()?].project)
+    }
+
+    /// The agent names `agent-start` completes over: the current project's enabled agents.
     pub(crate) fn agent_names(&self) -> Vec<String> {
-        self.settings.agents.keys().cloned().collect()
+        (self.current_project()).map_or_else(Vec::new, |p| self.enabled_agents(p))
     }
 
     /// The current project's `default_agent` among `agent_names`, else the first.
     pub(crate) fn default_agent_index(&self) -> usize {
-        let default = (self.current_workspace().ok())
-            .and_then(|w| self.project_at(w.project).ok())
-            .and_then(|at| self.projects[at].project.default_agent.as_ref());
+        let default = self
+            .current_project()
+            .and_then(|p| p.default_agent.as_ref());
         default
-            .and_then(|name| self.settings.agents.keys().position(|n| n == name))
+            .and_then(|name| self.agent_names().iter().position(|n| n == name))
             .unwrap_or(0)
     }
 
@@ -1648,6 +1663,9 @@ impl Ctx<'_> {
             workspace.name.clone(),
         );
         let loaded = &core.projects[core.project_at(project)?].project;
+        if matches!(open, Open::New) && !core.enabled_agents(loaded).iter().any(|n| n == name) {
+            return Err(format!("{name:?} is not enabled in {}", loaded.name));
+        }
         // Under the captured environment, which `release_agents` puts first.
         let env = (agent.env.into_iter()).chain(loaded.env.clone()).collect();
         let cwd = loaded.primary.path.clone();
@@ -3141,6 +3159,58 @@ mod tests {
         let log = h.core.buffers.find("*codex stderr*<work>").unwrap();
         let log = h.core.buffers.get(log).unwrap();
         assert!(log.read_only && log.workspace == h.core.workspace());
+    }
+
+    #[test]
+    fn enabled_agents_take_the_project_list_over_the_settings_list() {
+        let mut h = work();
+        let mut p = h.core.projects[0].project.clone();
+        assert_eq!(h.core.enabled_agents(&p), ["claude", "codex"]);
+        h.core.settings.enabled_agents = Some(vec!["codex".into()]);
+        assert_eq!(h.core.enabled_agents(&p), ["codex"]);
+        p.enabled_agents = Some(vec!["codex".into(), "claude".into(), "gemini".into()]);
+        assert_eq!(
+            h.core.enabled_agents(&p),
+            ["claude", "codex"],
+            "registry order"
+        );
+        p.enabled_agents = Some(Vec::new());
+        assert!(h.core.enabled_agents(&p).is_empty());
+    }
+
+    #[test]
+    fn agent_start_offers_only_enabled_agents_and_takes_a_single_one_without_asking() {
+        let mut h = work();
+        let gemini = h.core.settings.agents["codex"].clone();
+        h.core.settings.agents.insert("gemini".into(), gemini);
+        h.core.projects[0].project.enabled_agents = Some(vec!["claude".into(), "codex".into()]);
+        h.core.projects[0].project.default_agent = Some("gemini".into());
+        h.keys("M-x agent-start RET");
+        let preselected_first = (vec!["claude".into(), "codex".into()], Some(0));
+        assert_eq!(
+            listed(&mut h),
+            preselected_first,
+            "a disabled default isn't preselected"
+        );
+        h.keys("C-g");
+        h.core.projects[0].project.enabled_agents = Some(vec!["codex".into()]);
+        h.keys("M-x agent-start RET");
+        assert!(h.core.minibuffer().is_none());
+        let app = h.path("app");
+        assert_eq!(
+            ops(&mut h),
+            [format!("spawn 0 codex-acp {} ", app.display())]
+        );
+        assert_eq!(h.core.message(), Some("Starting codex..."));
+        let args = crate::command::Args {
+            strings: vec!["claude".into()],
+            ..Default::default()
+        };
+        h.call("agent-start", args);
+        let project = h.core.projects[0].project.name.clone();
+        let refused = format!("\"claude\" is not enabled in {project}");
+        assert_eq!(h.core.message(), Some(refused.as_str()));
+        assert!(ops(&mut h).is_empty());
     }
 
     #[test]
