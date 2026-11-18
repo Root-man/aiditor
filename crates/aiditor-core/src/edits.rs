@@ -58,7 +58,7 @@ impl Core {
             let buffer = self.buffers.visiting_in(&file.path, workspace);
             let visit = match buffer {
                 Some(id) => {
-                    self.prepare(id, at);
+                    self.prepare(id, workspace, at);
                     0
                 }
                 None => {
@@ -129,13 +129,18 @@ impl Core {
         let edit = &mut client.edits[at];
         (edit.buffer, edit.opened) = (Some(id), opened);
         let at = edit.at;
-        self.prepare(id, at);
+        self.prepare(id, workspace, at);
         self.show_client(request);
         None
     }
 
     /// Turns `server-edit` on in buffer `id` and puts its point at `at`.
-    fn prepare(&mut self, id: BufferId, at: Option<(usize, Option<usize>)>) {
+    fn prepare(
+        &mut self,
+        id: BufferId,
+        workspace: Option<WorkspaceId>,
+        at: Option<(usize, Option<usize>)>,
+    ) {
         let buffer = self.buffers.get_mut(id).expect("live");
         if !buffer.minor_modes.contains(&MODE) {
             buffer.minor_modes.insert(0, MODE);
@@ -145,6 +150,18 @@ impl Core {
             // A line past the end is the end.
             let p = (buffer.char_idx(line, col)).unwrap_or(buffer.len_chars());
             _ = buffer.set_marker(buffer.point, p);
+            // A window already showing it keeps its own point.
+            let windows = match workspace == self.buffers.workspace {
+                true => Some(&mut self.windows),
+                false => (self.workspaces.iter_mut())
+                    .find(|w| Some(w.id) == workspace)
+                    .and_then(|w| w.windows.as_mut()),
+            };
+            for window in windows.into_iter().flat_map(|w| w.windows_mut()) {
+                if window.buffer() == id {
+                    _ = window.set_point(&mut self.buffers, p);
+                }
+            }
         }
     }
 
@@ -477,6 +494,25 @@ mod tests {
             }],
         });
         assert_eq!(h.core.point(), 5, "line 2, after `cd`");
+    }
+
+    #[test]
+    fn point_goes_to_the_position_in_a_window_already_showing_the_file() {
+        let mut h = Harness::new(&[("a", "1\n2\n3\n4\n")]);
+        h.keys("M-x vterm RET");
+        h.open("a");
+        assert_eq!(h.core.point(), 0);
+        h.send(Msg::EditRequest {
+            request: 1,
+            terminal: TerminalId(0),
+            files: vec![ClientFile {
+                path: h.path("a"),
+                line: Some(3),
+                col: None,
+            }],
+        });
+        assert_eq!(name(&h), "a");
+        assert_eq!(h.core.point(), 4, "line 3");
     }
 
     #[test]

@@ -316,6 +316,44 @@ fn main() {
     let markers = core.current().marker_count();
     println!("hot-stream/prompt-typing-5000-line-transcript: {markers} markers");
     assert_eq!(markers, MARKERS);
+    // The frame after that keystroke repaints the prompt area among the transcript's properties.
+    prepared(
+        "hot-stream/prompt-keystroke-frame-5000-line-transcript",
+        || {
+            let (mut core, _) = session();
+            command(&mut core, "end-of-buffer");
+            core.handle(
+                Instant::now(),
+                Msg::Insert {
+                    text: "x".into(),
+                    replace: None,
+                },
+            );
+            core
+        },
+        |core| {
+            black_box(core.frame());
+        },
+        &mut output,
+    );
+    let props = core.current().properties().count();
+    println!("hot-stream/prompt-keystroke-frame-5000-line-transcript: {props} properties");
+    // A wrapped window of long paragraphs lays out about its rows, not that many paragraphs.
+    let paragraphs = format!("{}\n", "word ".repeat(120)).repeat(200);
+    // A `.txt` file word-wraps.
+    let wrapped = || open("/bench/prose.txt", &paragraphs);
+    prepared(
+        "hot-display/wrapped-600-char-paragraphs-50-rows",
+        wrapped,
+        |core| {
+            black_box(core.frame());
+        },
+        &mut output,
+    );
+    let window = wrapped().frame().windows.remove(0);
+    let built = window.display.lines.len();
+    println!("hot-display/wrapped-600-char-paragraphs-50-rows: {built} rows");
+    assert!((45..=51).contains(&built), "{built} rows");
     for lines in [10_000, 100_000] {
         let source: String = (0..lines)
             .map(|i| {

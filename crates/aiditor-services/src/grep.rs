@@ -42,6 +42,113 @@ impl Grep {
 
 const HELD: usize = 64;
 
+/// Metadata keys of Claude Code's and Codex's session lines: their values are not text.
+const METADATA: &[&str] = &[
+    "approval_policy",
+    "base_instructions",
+    "branch",
+    "call_id",
+    "cli_version",
+    "commit_hash",
+    "cwd",
+    "effort",
+    "encrypted_content",
+    "entrypoint",
+    "gitBranch",
+    "id",
+    "instructions",
+    "leafUuid",
+    "messageId",
+    "model",
+    "originator",
+    "parentUuid",
+    "permissionMode",
+    "promptId",
+    "promptSource",
+    "repository_url",
+    "requestId",
+    "role",
+    "sandbox_policy",
+    "sessionId",
+    "session_id",
+    "signature",
+    "slug",
+    "source",
+    "status",
+    "stop_reason",
+    "timestamp",
+    "toolUseID",
+    "tool_use_id",
+    "type",
+    "userType",
+    "uuid",
+    "version",
+];
+
+/// The most chars a session hit's text keeps, past the frame's widest list.
+const SAID_CHARS: usize = 500;
+
+/// The first JSON string value of `line` that is neither a key nor metadata and that `pattern`
+/// matches: unescaped, line breaks as spaces, from up to 20 chars before the match, `…` marking a
+/// cut, with the match's char column in it.
+fn said(line: &str, pattern: &RegexMatcher) -> Option<(String, usize)> {
+    let bytes = line.as_bytes();
+    let (mut at, mut key) = (0, "");
+    while let Some(start) = (at..bytes.len()).find(|&i| bytes[i] == b'"') {
+        let mut end = start + 1;
+        while end < bytes.len() && bytes[end] != b'"' {
+            end += if bytes[end] == b'\\' { 2 } else { 1 };
+        }
+        at = (end + 1).min(bytes.len());
+        let literal = &line[start..at];
+        if let Some(value) = line[at..].trim_start().strip_prefix(':') {
+            key = literal.trim_matches('"');
+            let value = value.trim_start();
+            // A metadata object or array, as Codex's `base_instructions`, is skipped whole.
+            if METADATA.contains(&key) && value.starts_with(['{', '[']) {
+                let (mut depth, mut quoted, mut escaped) = (0, false, false);
+                let from = bytes.len() - value.len();
+                // An unclosed value runs to the end of the line.
+                at = bytes.len();
+                for (i, &b) in bytes.iter().enumerate().skip(from) {
+                    match b {
+                        _ if escaped => escaped = false,
+                        b'\\' if quoted => escaped = true,
+                        b'"' => quoted = !quoted,
+                        b'{' | b'[' if !quoted => depth += 1,
+                        b'}' | b']' if !quoted => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        at = i + 1;
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if METADATA.contains(&key) {
+            continue;
+        }
+        let Ok(text) = serde_json::from_str::<String>(literal) else {
+            continue;
+        };
+        // One byte for one, so the match's offsets stay right.
+        let text = text.replace(['\n', '\r', '\t'], " ");
+        let Some(m) = pattern.find(text.as_bytes()).ok().flatten() else {
+            continue;
+        };
+        let col = text[..m.start()].chars().count();
+        let cut = col.saturating_sub(20);
+        let kept = text.chars().skip(cut).take(SAID_CHARS);
+        return Some(match cut {
+            0 => (kept.collect(), col),
+            _ => (std::iter::once('…').chain(kept).collect(), 21),
+        });
+    }
+    None
+}
+
 /// Searches roots in order and delivers each root's hits in collector arrival order.
 pub fn search(op: &GrepSearch, cancelled: impl Fn() -> bool + Sync, send: impl FnMut(Msg)) {
     search_with_hook(op, cancelled, send, |_, _| {});
@@ -105,7 +212,8 @@ fn search_with_hook(
                         if crate::files::searchable_file(&entry) && (op.names.is_empty() || named())
                         {
                             hook(entry.path(), 0);
-                            search_file(&mut searcher, matcher, root, &entry, &tx, halted, hook);
+                            let found = (matcher, !op.names.is_empty());
+                            search_file(&mut searcher, found, root, &entry, &tx, halted, hook);
                         }
                         if halted() {
                             WalkState::Quit
@@ -163,7 +271,8 @@ fn search_with_hook(
 
 fn search_file(
     searcher: &mut Searcher,
-    matcher: &RegexMatcher,
+    // `session` searches session JSONL, listing each line's said text.
+    (matcher, session): (&RegexMatcher, bool),
     root: &std::path::Path,
     entry: &ignore::DirEntry,
     tx: &mpsc::SyncSender<Hit>,
@@ -180,13 +289,24 @@ fn search_file(
         let text = text.strip_suffix('\n').unwrap_or(text);
         let text = text.strip_suffix('\r').unwrap_or(text);
         // shortcut: a non-UTF-8 line's lossy text may not match, giving column 0; match bytes if that matters.
-        let start = (matcher.find(text.as_bytes()).ok().flatten()).map_or(0, |m| m.start());
+        let (text, col) = if session {
+            // A session line without a matching said string is no hit.
+            let Some(said) = said(text, matcher) else {
+                return Ok(!halted());
+            };
+            said
+        } else {
+            let start = (matcher.find(text.as_bytes()).ok().flatten()).map_or(0, |m| m.start());
+            // A byte pattern can start inside a char; it then counts as column 0.
+            let col = text.get(..start).map_or(0, |s| s.chars().count());
+            (text.to_string(), col)
+        };
         let hit = Hit {
             root: root.to_path_buf(),
             path: path.to_path_buf(),
             line: line as usize - 1,
-            col: text[..start].chars().count(),
-            text: text.to_string(),
+            col,
+            text,
         };
         found += 1;
         // A failed send means the coordinator stopped.
@@ -291,9 +411,9 @@ mod tests {
     #[test]
     fn searches_only_the_named_files_when_some_are_named() {
         let files = [
-            ("a/x1.jsonl", "x\n"),
-            ("b/rollout-x2.jsonl", "x\n"),
-            ("c3.jsonl", "x\n"),
+            ("a/x1.jsonl", "{\"t\":\"x\"}\n"),
+            ("b/rollout-x2.jsonl", "{\"t\":\"x\"}\n"),
+            ("c3.jsonl", "{\"t\":\"x\"}\n"),
         ];
         let dir = tree(&files);
         let op = GrepSearch {
@@ -352,12 +472,60 @@ mod tests {
     }
 
     #[test]
+    fn session_text_is_a_string_value_neither_a_key_nor_metadata() {
+        let said = |line: &str, pattern: &str| {
+            super::said(line, &RegexMatcherBuilder::new().build(pattern).unwrap())
+        };
+        assert_eq!(
+            said(r#"{"type":"text","text":"a type"}"#, "type"),
+            Some(("a type".into(), 2))
+        );
+        assert_eq!(said(r#"{"type":"text","uuid":"text"}"#, "text"), None);
+        let spec = r#"{"cwd":"/r/app","message":{"content":"fix the app now"}}"#;
+        assert_eq!(said(spec, "app"), Some(("fix the app now".into(), 8)));
+        let meta = r#"{"cwd":"/r/app","message":{"content":"hello"}}"#;
+        assert_eq!(said(meta, "app"), None);
+        let base = r#"{"base_instructions":{"text":"a [needle] \"}"},"x":["needle"]}"#;
+        assert_eq!(said(base, "needle"), Some(("needle".into(), 0)));
+        assert_eq!(
+            said(r#"{"a":"\"q\"\tb"}"#, "b"),
+            Some((r#""q" b"#.into(), 4))
+        );
+    }
+
+    #[test]
     fn a_hit_is_one_line_with_its_first_match_column_in_chars() {
         let dir = tree(&[("src/a.rs", "fn f() {\r\nlet été = needle + needle;\r\n")]);
         assert_eq!(
             hits(&op(&[dir.path()], "needle", 100)),
             ["src/a.rs:1:10:let été = needle + needle;"]
         );
+    }
+
+    #[test]
+    fn a_match_starting_inside_a_char_is_column_0() {
+        let dir = tree(&[("a", "café\n")]);
+        assert_eq!(hits(&op(&[dir.path()], r"(?-u:\xA9)", 100)), ["a:0:0:café"]);
+    }
+
+    #[test]
+    fn a_session_hit_is_its_said_text_cut_to_said_chars() {
+        let line = format!(
+            "{{\"t\":\"{}needle{}\"}}\n",
+            "a".repeat(100),
+            "b".repeat(1000)
+        );
+        let dir = tree(&[("s1.jsonl", &line), ("s2.jsonl", "{\"needle\":1}\n")]);
+        let op = GrepSearch {
+            names: vec!["s1".into(), "s2".into()],
+            ..op(&[dir.path()], "needle", 100)
+        };
+        let found = hits(&op);
+        let [hit] = &found[..] else {
+            panic!("{found:?}")
+        };
+        let text = hit.strip_prefix("s1.jsonl:0:21:").unwrap();
+        assert!(text.starts_with("…aaaa") && text.chars().count() == SAID_CHARS + 1);
     }
 
     #[test]

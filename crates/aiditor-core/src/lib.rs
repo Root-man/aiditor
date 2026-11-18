@@ -1065,6 +1065,9 @@ impl Ctx<'_> {
     }
 }
 
+/// The most lines `*Messages*` keeps, the oldest going first.
+const MESSAGES_LINES: usize = 1000;
+
 pub struct Core {
     buffers: Buffers,
     windows: Windows,
@@ -1266,11 +1269,13 @@ impl Core {
         self.message = Some(msg);
     }
 
-    /// Appends `line` to `*Messages*`, making the buffer if there is none.
+    /// Appends `line` to `*Messages*`, making the buffer if there is none, and keeps its last
+    /// `MESSAGES_LINES`.
     fn log(&mut self, line: &str) {
         let id = self.messages();
         let buffer = self.buffers.get_mut(id).expect("found or created");
         buffer.append(&format!("{line}\n"));
+        buffer.keep_last_lines(MESSAGES_LINES);
     }
 
     /// `*Messages*`, made if there is none.
@@ -1759,6 +1764,27 @@ mod tests {
             projects: Vec::new(),
         });
         assert_eq!(h.core.projects(), [&home]);
+    }
+
+    #[test]
+    fn messages_keeps_its_last_1000_lines() {
+        let mut h = Harness::new(&[]);
+        h.keys("C-x b *Messages* RET");
+        for i in 0..super::MESSAGES_LINES {
+            h.send(Msg::Log(format!("line {i}")));
+        }
+        h.keys("M-> C-p");
+        let before = messages(&h).unwrap();
+        assert_eq!(before.lines().count(), super::MESSAGES_LINES);
+        let at = |h: &Harness| {
+            let (l, _) = h.core.current().line_col(h.point()).unwrap();
+            h.core.current().text().line(l).to_string()
+        };
+        let shown = at(&h);
+        h.send(Msg::Log("new".into()));
+        let first = before.find('\n').unwrap() + 1;
+        assert_eq!(messages(&h).unwrap(), format!("{}new\n", &before[first..]));
+        assert_eq!(at(&h), shown, "point stays on its text");
     }
 
     #[test]

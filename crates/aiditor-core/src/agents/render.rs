@@ -92,8 +92,9 @@ pub(super) fn prompt_glyph(buffer: &mut Buffer, at: usize) {
 pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
     let text = buffer.text().slice(range.clone()).to_string();
     let after_newlines = text.chars().enumerate().filter(|(_, c)| *c == '\n');
+    let chars = text.chars().count();
     let starts: Vec<_> = (std::iter::once(0).chain(after_newlines.map(|(i, _)| i + 1)))
-        .filter(|&i| i < text.chars().count())
+        .filter(|&i| i < chars)
         .map(|i| range.start + i)
         .collect();
     let border = |top| {

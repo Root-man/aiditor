@@ -621,6 +621,20 @@ impl Buffer {
         (self.read_only, self.tick) = (read_only, tick);
     }
 
+    /// Removes the first lines past the last `keep` newline-ended ones, as `append` writes.
+    pub(crate) fn keep_last_lines(&mut self, keep: usize) {
+        let text = self.text();
+        // The empty line after the last newline isn't one.
+        let lines = text.len_lines() - 1;
+        if lines <= keep {
+            return;
+        }
+        let end = text.line_to_char(lines - keep);
+        let (read_only, tick) = (std::mem::take(&mut self.read_only), self.tick);
+        self.raw_delete(0..end).expect("the start is in range");
+        (self.read_only, self.tick) = (read_only, tick);
+    }
+
     /// Inserts `text` at `at`, before the prompt boundary, past read-only and without undo,
     /// moving the undo history's positions from `at` on along with the text.
     pub(crate) fn insert_output(&mut self, at: usize, text: &str) {

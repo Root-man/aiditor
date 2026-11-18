@@ -124,7 +124,7 @@ impl Ctx<'_> {
                 None => {
                     let command = self.core.commands["revert-buffer"];
                     let prompt = format!("Revert buffer from file {}? ", path.display());
-                    return self.read_string(command, args, prompt, Some(&["Yes", "No"]));
+                    return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
                 }
                 Some(answer) if answer.eq_ignore_ascii_case("yes") => {}
                 Some(_) => return Ok(()),
@@ -869,7 +869,7 @@ mod tests {
         let mut h = reverting();
         h.keys("x");
         revert(&mut h, "z\n");
-        h.keys("RET");
+        h.keys("Yes RET");
         assert_eq!(h.text(), "z\n");
         assert!(!h.core.current().modified());
         h.keys("C-/");
@@ -928,9 +928,10 @@ mod tests {
         revert(&mut h, "z\n");
         let prompt = format!("Revert buffer from file {}? ", h.path("a.txt").display());
         assert_eq!(h.core.minibuffer().unwrap().prompt, prompt);
-        assert_eq!(listed(&mut h).0, ["Yes", "No"]);
-        h.keys("No RET");
-        assert!(h.core.current().modified());
+        assert_eq!(listed(&mut h).0, ["No", "Yes"]);
+        h.keys("RET");
+        assert!(h.core.current().modified(), "RET keeps the edits");
+        assert!(h.text().contains("fx"), "{}", h.text());
         h.keys("M-x revert-buffer RET y RET");
         assert_eq!(h.text(), "z\n");
     }

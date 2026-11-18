@@ -24,113 +24,6 @@ const LIMIT: usize = 10_000;
 
 pub(crate) const STATUS_COLS: usize = "[no matches]".len() + 2;
 
-/// Metadata keys of Claude Code's and Codex's session lines: their values are not text.
-const METADATA: &[&str] = &[
-    "approval_policy",
-    "base_instructions",
-    "branch",
-    "call_id",
-    "cli_version",
-    "commit_hash",
-    "cwd",
-    "effort",
-    "encrypted_content",
-    "entrypoint",
-    "gitBranch",
-    "id",
-    "instructions",
-    "leafUuid",
-    "messageId",
-    "model",
-    "originator",
-    "parentUuid",
-    "permissionMode",
-    "promptId",
-    "promptSource",
-    "repository_url",
-    "requestId",
-    "role",
-    "sandbox_policy",
-    "sessionId",
-    "session_id",
-    "signature",
-    "slug",
-    "source",
-    "status",
-    "stop_reason",
-    "timestamp",
-    "toolUseID",
-    "tool_use_id",
-    "type",
-    "userType",
-    "uuid",
-    "version",
-];
-
-/// The most chars a session hit's text keeps, past the frame's widest list.
-const SAID_CHARS: usize = 500;
-
-/// The first JSON string value of `line` that is neither a key nor metadata and that `pattern`
-/// matches: unescaped, line breaks as spaces, from up to 20 chars before the match, `…` marking a
-/// cut, with the match's char column in it.
-pub(crate) fn said(line: &str, pattern: &RegexMatcher) -> Option<(String, usize)> {
-    let bytes = line.as_bytes();
-    let (mut at, mut key) = (0, "");
-    while let Some(start) = (at..bytes.len()).find(|&i| bytes[i] == b'"') {
-        let mut end = start + 1;
-        while end < bytes.len() && bytes[end] != b'"' {
-            end += if bytes[end] == b'\\' { 2 } else { 1 };
-        }
-        at = (end + 1).min(bytes.len());
-        let literal = &line[start..at];
-        if let Some(value) = line[at..].trim_start().strip_prefix(':') {
-            key = literal.trim_matches('"');
-            let value = value.trim_start();
-            // A metadata object or array, as Codex's `base_instructions`, is skipped whole.
-            if METADATA.contains(&key) && value.starts_with(['{', '[']) {
-                let (mut depth, mut quoted, mut escaped) = (0, false, false);
-                let from = bytes.len() - value.len();
-                // An unclosed value runs to the end of the line.
-                at = bytes.len();
-                for (i, &b) in bytes.iter().enumerate().skip(from) {
-                    match b {
-                        _ if escaped => escaped = false,
-                        b'\\' if quoted => escaped = true,
-                        b'"' => quoted = !quoted,
-                        b'{' | b'[' if !quoted => depth += 1,
-                        b'}' | b']' if !quoted => depth -= 1,
-                        _ => {}
-                    }
-                    if depth == 0 {
-                        at = i + 1;
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if METADATA.contains(&key) {
-            continue;
-        }
-        let Ok(text) = serde_json::from_str::<String>(literal) else {
-            continue;
-        };
-        // One byte for one, so the match's offsets stay right.
-        let text = text.replace(['\n', '\r', '\t'], " ");
-        let Some(m) = pattern.find(text.as_bytes()).ok().flatten() else {
-            continue;
-        };
-        let col = text[..m.start()].chars().count();
-        let cut = col.saturating_sub(20);
-        let kept = text.chars().skip(cut).take(SAID_CHARS);
-        return Some(match cut {
-            0 => (kept.collect(), col),
-            _ => (std::iter::once('…').chain(kept).collect(), 21),
-        });
-    }
-    None
-}
-
 /// A searched session: its agent's index in the list, its id and its group header.
 pub(crate) struct Searched {
     pub(crate) agent: usize,
@@ -256,16 +149,11 @@ impl ProjectGrep {
         self.line_number_width.max(3)
     }
 
-    /// `<root name>/<path>:<1-based line>:<text>`.
+    /// `<root name>/<path>:<1-based line>`, unique as a file has one hit per line.
     fn label(&self, hit: &Hit) -> String {
         let root = self.roots.iter().find(|(path, _)| *path == hit.root);
         let name = root.map_or("", |(_, name)| name.as_str());
-        format!(
-            "{name}/{}:{}:{}",
-            hit.path.display(),
-            hit.line + 1,
-            hit.text
-        )
+        format!("{name}/{}:{}", hit.path.display(), hit.line + 1)
     }
 }
 
@@ -352,14 +240,7 @@ impl Core {
         }
         match hits {
             Ok(hits) => {
-                for mut hit in hits {
-                    if !grep.sessions.is_empty() {
-                        let pattern = grep.pattern.as_ref();
-                        let Some((text, col)) = pattern.and_then(|p| said(&hit.text, p)) else {
-                            continue;
-                        };
-                        (hit.text, hit.col) = (text, col);
-                    }
+                for hit in hits {
                     let label = grep.label(&hit);
                     let next = grep.groups.len();
                     let group = *grep
@@ -498,36 +379,12 @@ impl Ctx<'_> {
 mod tests {
     use std::time::Duration;
 
-    use grep_regex::RegexMatcherBuilder;
-
     use crate::buffer::FileState;
     use crate::harness::{Harness, line_start};
     use crate::project::Root;
     use crate::{Hit, Msg};
 
     const WAIT: Duration = Duration::from_millis(200);
-
-    #[test]
-    fn session_text_is_a_string_value_neither_a_key_nor_metadata() {
-        let said = |line: &str, pattern: &str| {
-            super::said(line, &RegexMatcherBuilder::new().build(pattern).unwrap())
-        };
-        assert_eq!(
-            said(r#"{"type":"text","text":"a type"}"#, "type"),
-            Some(("a type".into(), 2))
-        );
-        assert_eq!(said(r#"{"type":"text","uuid":"text"}"#, "text"), None);
-        let spec = r#"{"cwd":"/r/app","message":{"content":"fix the app now"}}"#;
-        assert_eq!(said(spec, "app"), Some(("fix the app now".into(), 8)));
-        let meta = r#"{"cwd":"/r/app","message":{"content":"hello"}}"#;
-        assert_eq!(said(meta, "app"), None);
-        let base = r#"{"base_instructions":{"text":"a [needle] \"}"},"x":["needle"]}"#;
-        assert_eq!(said(base, "needle"), Some(("needle".into(), 0)));
-        assert_eq!(
-            said(r#"{"a":"\"q\"\tb"}"#, "b"),
-            Some((r#""q" b"#.into(), 4))
-        );
-    }
 
     fn preview_spans(h: &mut Harness) -> Vec<(String, Option<u32>)> {
         h.frame(800., 600.).windows.remove(0).display.lines[0]
@@ -775,7 +632,7 @@ mod tests {
             col: 0,
             text: "needle".into(),
         };
-        assert_eq!(h.core.grep.label(&hit), "lib<2>/a:1:needle");
+        assert_eq!(h.core.grep.label(&hit), "lib<2>/a:1");
     }
 
     #[test]
@@ -1246,6 +1103,12 @@ mod tests {
         let mb = h.core.minibuffer().unwrap();
         assert_eq!(mb.groups, [(0, "lib/only.rs".into())]);
         assert_eq!(mb.candidates, ["  1: needles"]);
+        let number = h
+            .core
+            .settings
+            .theme
+            .face(crate::settings::FaceName::GrepLineNumber);
+        assert_eq!(mb.syntax, [vec![(0..3, number)]], "the padded line number");
         assert_eq!(
             (mb.rows, mb.selected, mb.count.trim()),
             (10, Some(0), "1/1")
