@@ -2392,6 +2392,75 @@ milestones:
               - "Typing `a` in the transcript inserts `a` at the prompt, and the transcript keeps its rows; `TAB` on a tool group still folds it"
               - "Core tests cover each case with the docked pane"
               - "Spec updated in docs/editor.md and openspec/specs"
+      - key: m8-notifications
+        title: "System notifications"
+        labels: [frontend]
+        design: "#acp-integration-and-session-management"
+        body: |
+          System notifications for what needs you while you look elsewhere: an agent asking for permission or an answer, finishing or failing a turn, and a long terminal command ending. macOS is required, Linux (KDE Plasma on Fedora) optional. GPUI 0.2.2 has no notification API and Zed's later GPUI, which has one (`gpui_macos`/`gpui_linux` `system_notifications.rs`, zed-industries/zed#61189), isn't published to crates.io, so aiditor carries its own copy of that code until it can move to a published GPUI. Tasks are tracked as sub-issues.
+
+          The core decides and the frontend posts: a new `Effect::Notify { tag, title, body }` goes through the frontend's platform branch, as `Effect::OpenUrl` does. A notification fires only when you can't see its buffer: the window is inactive, or the buffer isn't shown in the current workspace. The tag is the buffer, so a newer notification replaces an older one for the same buffer, and clicking one raises the window and shows the buffer in its workspace.
+        tasks:
+          - key: m8-notify-macos
+            title: "Post system notifications on macOS"
+            labels: [macos, core]
+            body: |
+              Port Zed's `crates/gpui_macos/src/system_notifications.rs` into the frontend, cut to what aiditor uses: no action buttons, one click callback. It uses `UNUserNotificationCenter` through `objc2-user-notifications` (`objc2` and `block2` are already in the tree through GPUI). The center is touched lazily, on the first notification, so nothing asks for authorization before then.
+
+              - **Effect.** `Effect::Notify { tag, title, body }`, carried out by the frontend's platform branch; the runner and headless binaries ignore it as they do `OpenUrl`. A denied authorization or a post error is noted once in `*Messages*`.
+              - **Unbundled runs.** `UNUserNotificationCenter` aborts the process outside an app bundle, and `aiditor .` runs the bare binary. Without a main bundle identifier, notifications are skipped, noted once in `*Messages*`.
+              - **Focus.** The frontend sends `Msg::WindowActive(bool)` from `observe_window_activation`, so the core can tell whether you are looking.
+              - **Click.** The response comes back as `Msg::NotificationClicked { tag }`: the core shows the tagged buffer in its workspace, switching to it, and the frontend activates the app and window. A tag whose buffer is gone does nothing.
+              - **Setting.** `notifications` in `settings.toml`, bundled as true, turns them all off.
+            acceptance:
+              - "From `aiditor.app`, a test command (or the first event task) posts a notification attributed to aiditor, asking for authorization the first time"
+              - "Run as `aiditor .` outside a bundle, nothing aborts and `*Messages*` says notifications need the app bundle"
+              - "Clicking a notification raises aiditor and shows its buffer in its workspace"
+              - "`notifications = false` posts nothing"
+              - "Core tests cover the effect, the focus message and click routing"
+              - "Spec updated in docs/editor.md and openspec/specs"
+          - key: m8-notify-agents
+            title: "Notify on agent session events"
+            labels: [acp, core]
+            body: |
+              A session's `Activity` already gives the workspace modeline its urgent states. Post a notification, tagged with the session buffer, when you can't see the session and it:
+              - asks for permission (`Waiting`): the tool call's title;
+              - asks a question (`Asking`, URL requests included): the question;
+              - ends a turn (`Working` to idle): `Turn ended`, with the stop reason when it isn't `end_turn`; a turn you cancelled posts nothing;
+              - exits on its own (`Failed`).
+              The title is `<agent> · <workspace>`, as the session buffer names them. Seeing the session again (showing its buffer in the current workspace with the window active) doesn't withdraw the notification.
+            acceptance:
+              - "With the window inactive, a fake agent's permission request, question, finished turn and crash each post one notification with the agent and workspace"
+              - "With the session shown in the active window, none post"
+              - "A cancelled turn posts nothing"
+              - "A second event for the same session replaces the first notification"
+              - "Core tests with the fake agent cover each event and the suppression"
+              - "Spec updated in docs/editor.md and openspec/specs"
+            blocked_by: [m8-notify-macos]
+          - key: m8-notify-terminal
+            title: "Notify when a long terminal command finishes"
+            labels: [terminal, core]
+            body: |
+              The terminal already parses OSC 133 `C` (with the command line) and `D` (with the exit code). Record when `C` arrives, and when its `D` comes at least `terminal_notify_after` seconds later (a new setting in `settings.toml`, bundled as 10, a nonnegative integer; 0 turns it off), post a notification tagged with the terminal buffer if you can't see it: the command line, or `Command` without one, and `finished in 2m 16s` or `failed (exit 2) after 2m 16s`. Shells without OSC 133 get none.
+            acceptance:
+              - "`sleep 12` in a zsh terminal, with the window inactive, posts a notification naming `sleep 12` and its time"
+              - "A failing command's notification has its exit code"
+              - "A command under the threshold, or one in a shown terminal, posts nothing"
+              - "`terminal_notify_after = 0` turns it off; a bad value is reported as other settings errors"
+              - "Core tests feed OSC 133 marks with a fake clock"
+              - "Spec updated in docs/editor.md and openspec/specs"
+            blocked_by: [m8-notify-macos]
+          - key: m8-notify-linux
+            title: "Post system notifications on Linux"
+            labels: [linux]
+            body: |
+              Port Zed's `crates/gpui_linux/src/linux/system_notifications.rs`: the XDG notifications D-Bus interface through `notify-rust`, a Linux-only dependency. The default action routes a click as on macOS. No server on the bus is noted once in `*Messages*` and notifications are skipped. Tested on Fedora with KDE Plasma.
+            acceptance:
+              - "On Fedora KDE, agent and terminal notifications appear, named aiditor with its icon"
+              - "Clicking one raises aiditor and shows its buffer"
+              - "Without a notification server, nothing fails and `*Messages*` says so once"
+              - "The macOS build doesn't pull in `notify-rust`"
+            blocked_by: [m8-notify-macos]
 
   # ───────────────────────────────────────────── M9 ─────────────────────────────────────────────
   - key: m9
