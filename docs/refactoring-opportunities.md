@@ -181,7 +181,7 @@ A scan of the whole repo found 20 problems, fixed as the `fix-2026-11-17-refacto
 | 8 | A grep hit's label repeats its line's text. | Done: `<root>/<path>:<line>`. |
 | 9 | The project file prompt builds its candidates twice. | Done: opened empty, its files passed to `add_candidates` once. |
 | 10 | Two language tables: files and Markdown fences. | Done: one `syntax::language`; fences take full names and every extension. |
-| 11 | After a resize the modeline keeps the old width until the next message. | Coded: `request_animation_frame` after `Msg::Resize`. Not yet checked in a running window. |
+| 11 | After a resize the modeline keeps the old width until the next message. | Done: `request_animation_frame` after `Msg::Resize`; checked on macOS by maximising, full screen and drag-resizing. |
 | 12 | Saving the same bytes twice before the first reply conflicts. | Done: bytes already on disk count as written. |
 | 13 | `agents.rs` is 10,105 lines. | Done: moves only, into `agents/tests.rs`, `asks.rs`, `tools.rs` and `config.rs`; `agents.rs` is 1,718 lines. |
 | 14 | A wrapped window lays out `rows` lines, not rows. | Done: `display::build` counts at least the visual rows each line takes. 600-char paragraphs in a 50-row window 1.38 ms → 224 µs. |
@@ -196,4 +196,4 @@ A scan of the whole repo found 20 problems, fixed as the `fix-2026-11-17-refacto
 
 Run: `cargo test --workspace` (core 1,052, services 121), `cargo clippy --workspace` clean, and `hot_paths` with the new `hot-display/wrapped-600-char-paragraphs-50-rows` case.
 
-Not checked: #11 in a running window, Linux, and a 200 MiB file opening (#7's "just under the limit").
+Not checked: Linux, and a 200 MiB file opening (#7's "just under the limit").

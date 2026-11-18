@@ -37,7 +37,7 @@ Each finding keeps its scan row number. Every task lands its own test.
 ## 6. Frontend and logging (#11, #17)
 
 - [x] 6.1 #17: `Core::log` removes the oldest lines past 1,000 without undo. Verify with the "The oldest line goes" scenario and that `*Messages*` tests pass. Record the cap in `docs/editor.md`.
-- [ ] 6.2 #11: after `Msg::Resize` in `element.rs` `prepaint`, call `window.request_animation_frame()`. Check on macOS in a running window that maximising re-lays out a truncated workspace modeline at once; if it already did before the change, drop it and note why in the scan record.
+- [x] 6.2 #11: after `Msg::Resize` in `element.rs` `prepaint`, call `window.request_animation_frame()`. Check on macOS in a running window that maximising re-lays out a truncated workspace modeline at once; if it already did before the change, drop it and note why in the scan record.
 
 ## 7. Split `agents.rs` (#13, D9)
 
