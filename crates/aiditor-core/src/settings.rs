@@ -67,6 +67,8 @@ pub struct Settings {
     pub line_numbers: LineNumbers,
     /// Whether point's line has the `hl-line` background.
     pub hl_line: bool,
+    /// Whether anything posts system notifications.
+    pub notifications: bool,
     pub max_watched_files: usize,
     /// Files project grep searches at once.
     pub grep_workers: NonZeroUsize,
@@ -362,6 +364,7 @@ mod tests {
         assert!(s.option_as_meta);
         assert_eq!(s.line_numbers, LineNumbers::Absolute);
         assert!(s.hl_line);
+        assert!(s.notifications);
         assert_eq!(s.max_watched_files, 10000);
         assert_eq!(s.grep_workers.get(), 1);
         assert_eq!(s.paste_fold_lines, 20);
@@ -653,6 +656,7 @@ mod tests {
             ("[themes.other]\nbackground = 1", "background"),
             ("line_numbers = \"sometimes\"", "sometimes"),
             ("hl_line = \"yes\"", "hl_line"),
+            ("notifications = \"yes\"", "notifications"),
             ("font_size = 0", "outside"),
             ("line_height = 0.5", "line_height 0.5 is outside"),
             ("line_height = 3.5", "line_height 3.5 is outside"),

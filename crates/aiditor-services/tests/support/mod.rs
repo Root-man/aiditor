@@ -56,7 +56,8 @@ impl Driver {
                 | Effect::EditReply { .. }
                 | Effect::SetClipboard(_)
                 | Effect::OpenWithSystem(_)
-                | Effect::OpenUrl(_) => {}
+                | Effect::OpenUrl(_)
+                | Effect::Notify { .. } => {}
                 Effect::Quit => self.quit = true,
                 Effect::LoadConfiguration { .. } | Effect::CaptureEnvironment { .. } => {
                     panic!("unexpected effect in service test")

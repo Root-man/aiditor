@@ -132,6 +132,7 @@ impl Runner {
             effect @ (Effect::SetClipboard(_)
             | Effect::OpenWithSystem(_)
             | Effect::OpenUrl(_)
+            | Effect::Notify { .. }
             | Effect::Quit) => Run::Platform(effect),
         }
     }

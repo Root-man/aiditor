@@ -32,6 +32,7 @@ mod mark;
 mod markdown;
 mod minibuffer;
 mod motion;
+mod notifications;
 mod prefix;
 pub mod project;
 mod project_commands;
@@ -298,6 +299,12 @@ pub enum Msg {
     Hint,
     /// The system clipboard's text, sent before a key `Core::wants_clipboard` accepts.
     Clipboard(String),
+    /// The frame's window became active (true) or inactive.
+    WindowActive(bool),
+    /// The notification posted with this tag was clicked.
+    NotificationClicked {
+        tag: String,
+    },
     /// A line the app logged, for `*Messages*`.
     Log(String),
     /// The window was asked to close; quits as `C-x C-c` does.
@@ -456,6 +463,12 @@ pub enum Effect {
     OpenWithSystem(PathBuf),
     /// Open this web URL in the system's default browser.
     OpenUrl(String),
+    /// Post a system notification; `tag` comes back in `Msg::NotificationClicked`.
+    Notify {
+        tag: String,
+        title: String,
+        body: String,
+    },
     /// Quit the app.
     Quit,
 }
@@ -956,6 +969,8 @@ impl Ctx<'_> {
                 self.core.hint_shown = true;
             }
             Msg::Clipboard(text) => self.core.kills.clipboard = Some(text),
+            Msg::WindowActive(active) => self.core.window_active = active,
+            Msg::NotificationClicked { tag } => self.notification_clicked(&tag),
             Msg::Log(line) => self.core.log(&line),
             Msg::Quit => self.call("save-buffers-kill-terminal", Args::default()),
             Msg::AutoSave => self.write_autosaves(),
@@ -1098,6 +1113,8 @@ pub struct Core {
     session_tick: Option<TimerId>,
     /// Whether the hint for `pending` is shown.
     hint_shown: bool,
+    /// Whether the frame's window is active, as the frontend last reported.
+    window_active: bool,
     /// The command the current key sequence runs, while it runs.
     this_command: Option<&'static str>,
     /// The command the previous complete key sequence ran; `None` if it ran none.
@@ -1208,6 +1225,7 @@ impl Default for Core {
             now: None,
             session_tick: None,
             hint_shown: false,
+            window_active: true,
             this_command: None,
             last_command: None,
             prefix_arg: None,

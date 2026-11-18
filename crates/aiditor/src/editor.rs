@@ -40,6 +40,9 @@ pub(crate) struct Editor {
     pub(crate) painted: Vec<Painted>,
     /// The windows area's size and cell width last sent to the core.
     pub(crate) reported: (Pixels, Pixels, Pixels),
+    /// The notification center, made on the first notification; `None` outside an app bundle.
+    #[cfg(target_os = "macos")]
+    notifications: std::cell::OnceCell<Option<crate::notifications::Notifications>>,
 }
 
 #[derive(Default)]
@@ -71,6 +74,10 @@ impl Editor {
             _ = this.update(cx, |editor, cx| editor.handle(Msg::Quit, cx));
             false
         });
+        cx.observe_window_activation(window, |editor, window, cx| {
+            editor.handle(Msg::WindowActive(window.is_window_active()), cx)
+        })
+        .detach();
         Self::drain(rx, cx);
         if args.debug {
             spawn_heartbeat(cx);
@@ -128,6 +135,8 @@ impl Editor {
             marked: None,
             painted: Vec::new(),
             reported: Default::default(),
+            #[cfg(target_os = "macos")]
+            notifications: Default::default(),
         }
     }
 
@@ -491,6 +500,18 @@ impl Editor {
                 }
                 Run::Platform(Effect::OpenWithSystem(path)) => cx.open_with_system(&path),
                 Run::Platform(Effect::OpenUrl(url)) => cx.open_url(&url),
+                #[cfg(target_os = "macos")]
+                Run::Platform(Effect::Notify { tag, title, body }) => {
+                    let tx = &self.runner.tx;
+                    let center = (self.notifications)
+                        .get_or_init(|| crate::notifications::Notifications::new(tx.clone()));
+                    if let Some(center) = center {
+                        center.show(&tag, &title, &body, tx.clone());
+                    }
+                }
+                // shortcut: Linux posts nothing until #527.
+                #[cfg(not(target_os = "macos"))]
+                Run::Platform(Effect::Notify { .. }) => {}
                 Run::Platform(Effect::Quit) => {
                     self.runner.shutdown();
                     cx.quit()
