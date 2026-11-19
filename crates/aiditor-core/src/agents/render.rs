@@ -118,7 +118,7 @@ pub(super) fn user_lines(buffer: &mut Buffer, range: Range<usize>) {
 }
 
 /// `12s`, `2m 05s` or `1h 02m 05s`.
-pub(super) fn long_duration(d: Duration) -> String {
+pub(crate) fn long_duration(d: Duration) -> String {
     let s = d.as_secs();
     match (s / 3600, s / 60 % 60, s % 60) {
         (0, 0, s) => format!("{s}s"),

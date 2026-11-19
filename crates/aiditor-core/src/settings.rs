@@ -69,6 +69,8 @@ pub struct Settings {
     pub hl_line: bool,
     /// Whether anything posts system notifications.
     pub notifications: bool,
+    /// The seconds a terminal command runs before its end notifies; 0 never.
+    pub terminal_notify_after: u64,
     pub max_watched_files: usize,
     /// Files project grep searches at once.
     pub grep_workers: NonZeroUsize,
@@ -365,6 +367,7 @@ mod tests {
         assert_eq!(s.line_numbers, LineNumbers::Absolute);
         assert!(s.hl_line);
         assert!(s.notifications);
+        assert_eq!(s.terminal_notify_after, 10);
         assert_eq!(s.max_watched_files, 10000);
         assert_eq!(s.grep_workers.get(), 1);
         assert_eq!(s.paste_fold_lines, 20);
@@ -398,6 +401,17 @@ mod tests {
         for value in ["-1", "\"wide\""] {
             let error = Settings::parse(Some(&format!("table_width = {value}"))).unwrap_err();
             assert!(error.contains("table_width"), "{error}");
+        }
+    }
+
+    #[test]
+    fn terminal_notify_after_accepts_nonnegative_seconds() {
+        let settings = Settings::parse(Some("terminal_notify_after = 30")).unwrap();
+        assert_eq!(settings.terminal_notify_after, 30);
+        for value in ["-1", "\"soon\""] {
+            let error =
+                Settings::parse(Some(&format!("terminal_notify_after = {value}"))).unwrap_err();
+            assert!(error.contains("terminal_notify_after"), "{error}");
         }
     }
 
