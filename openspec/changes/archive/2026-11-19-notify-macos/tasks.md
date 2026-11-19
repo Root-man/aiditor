@@ -12,7 +12,7 @@
 
 - [x] 2.1 Add the macOS-only dependencies and `notifications.rs`, trimmed from Zed's; verify `cargo build -p aiditor` on macOS
 - [x] 2.2 Carry out `Effect::Notify` in `Editor::handle` (dropped off macOS) and send `Msg::WindowActive` from `observe_window_activation`; verify `cargo test -p aiditor`
-- [ ] 2.3 Check by hand: unbundled run notes once without aborting; from `aiditor.app` a notification posts, asks authorization, and clicking it shows the buffer
+- [x] 2.3 Check by hand: unbundled run notes once without aborting; from `aiditor.app` a notification posts, asks authorization, and clicking it shows the buffer
 
 ## 3. Docs
 
