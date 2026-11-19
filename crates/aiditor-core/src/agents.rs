@@ -1153,7 +1153,9 @@ impl Ctx<'_> {
                 session.ended = true;
                 // Stops an agent that lives on after an error answer, and releases its handle.
                 self.effects.push(Effect::Agent(AgentOp::Kill { id }));
-                core.echo(format!("{agent} session failed to start: {err}"));
+                let line = format!("{agent} session failed to start: {err}");
+                core.echo(line.clone());
+                self.notify_session(id, line);
             }
         }
     }
@@ -1247,7 +1249,10 @@ impl Ctx<'_> {
         };
         let result = match *body.0 {
             AgentRequest::RequestPermissionRequest(ask) if ready => {
-                return core.show_permission(id, request, ask);
+                if let Some(title) = core.show_permission(id, request, ask) {
+                    self.notify_session(id, title);
+                }
+                return;
             }
             AgentRequest::RequestPermissionRequest(_) if gone => {
                 Ok(ClientResponse::RequestPermissionResponse(
@@ -1255,7 +1260,14 @@ impl Ctx<'_> {
                 ))
             }
             AgentRequest::CreateElicitationRequest(ask) if ready => match questions::parse(&ask) {
-                Some(question) => return core.show_question(id, request, question),
+                Some(question) => {
+                    let blocking = (!question.0.nonblocking).then(|| question.0.message.clone());
+                    core.show_question(id, request, question);
+                    if let Some(message) = blocking {
+                        self.notify_session(id, message);
+                    }
+                    return;
+                }
                 None => {
                     let agent = &core.agents[&id].agent;
                     core.echo(format!("Can't show {agent}'s question yet; declined"));
@@ -1664,6 +1676,7 @@ impl Ctx<'_> {
                 self.close_ask(id, at, "○ Closed, the turn ended first", Some(response));
             }
         }
+        let cancelled = matches!(result, Ok(StopReason::Cancelled));
         let core = &mut *self.core;
         let line = match result {
             Ok(StopReason::EndTurn) => None,
@@ -1674,10 +1687,22 @@ impl Ctx<'_> {
             Ok(reason) => Some(format!("Turn ended: {reason:?}")),
             Err(err) => Some(format!("Error: {err}")),
         };
-        if let Some(line) = line {
-            core.output(id, &line, Chunk::Line);
+        if let Some(line) = &line {
+            core.output(id, line, Chunk::Line);
         }
         core.settle_turn(id);
+        if !cancelled {
+            self.notify_session(id, line.unwrap_or_else(|| "Turn ended".into()));
+        }
+    }
+
+    /// Notifies about session `id` unless you can see it, titled as its buffer names it.
+    fn notify_session(&mut self, id: AgentId, body: String) {
+        let Some(s) = self.core.agents.get(&id) else {
+            return;
+        };
+        let title = format!("{} · {}", s.agent, s.workspace);
+        self.notify_unseen(s.buffer, title, body);
     }
 
     /// Ends the session after its agent exited, noting a crash, and releases the agent's handle.
@@ -1709,6 +1734,7 @@ impl Ctx<'_> {
                 None => format!("{agent} session exited with code {code}"),
             };
             core.log(&line);
+            self.notify_session(id, line);
         }
         self.effects.push(Effect::Agent(AgentOp::Kill { id }));
     }

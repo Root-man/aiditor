@@ -12,6 +12,14 @@ impl Ctx<'_> {
         }
     }
 
+    /// Notifies about `buffer` unless you can see it: the window is active and the current
+    /// workspace shows it.
+    pub(crate) fn notify_unseen(&mut self, buffer: BufferId, title: String, body: String) {
+        if !self.core.window_active || !self.core.shown_buffers().contains(&buffer) {
+            self.notify(buffer, title, body);
+        }
+    }
+
     /// `notify-test`: a notification for the current buffer, to check the setup.
     pub(crate) fn notify_test(&mut self) -> Result<(), String> {
         let id = self.core.windows.window.buffer();

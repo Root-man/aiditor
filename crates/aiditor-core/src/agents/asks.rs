@@ -94,22 +94,27 @@ pub(super) struct Answered {
 
 impl Core {
     /// Puts permission request `ask` above session `id`'s prompt line as a block of its own,
-    /// pending until answered.
+    /// pending until answered, and returns its title.
     pub(super) fn show_permission(
         &mut self,
         id: AgentId,
         request: RequestId,
         ask: RequestPermissionRequest,
-    ) {
-        let Some(session) = self.agents.get(&id) else {
-            return;
-        };
+    ) -> Option<String> {
+        let session = self.agents.get(&id)?;
         let call = &ask.tool_call;
         let shown = session.tools.get(&call.tool_call_id).map(|t| &t.call.title);
         let title = (call.fields.title.as_ref().or(shown))
             .map_or_else(|| call.tool_call_id.to_string(), |t| first_line(t));
         let tool = Some(ask.tool_call.tool_call_id);
-        self.show_ask(id, request, tool, title, Body::Permission(ask.options));
+        self.show_ask(
+            id,
+            request,
+            tool,
+            title.clone(),
+            Body::Permission(ask.options),
+        );
+        Some(title)
     }
 
     /// Puts question `question` above session `id`'s prompt line, pending until answered. Point
