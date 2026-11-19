@@ -791,7 +791,13 @@ impl Ctx<'_> {
             && after > 0
             && took >= Duration::from_secs(after)
         {
-            let title = command.map_or("Command".into(), |c| c.replace(char::is_control, " "));
+            let command = command.map_or("Command".into(), |c| c.replace(char::is_control, " "));
+            let workspace = (core.buffers.get(buffer).and_then(|b| b.workspace))
+                .and_then(|id| core.workspaces.iter().find(|w| w.id == id));
+            let title = match workspace {
+                Some(w) => format!("{command} · {}", w.name),
+                None => command,
+            };
             let took = crate::agents::long_duration(took);
             let body = match code {
                 None | Some(0) => format!("finished in {took}"),
@@ -1851,9 +1857,9 @@ mod tests {
             run(&mut h, id, "C;cmdline_url=make%0Aall", 3600, "D");
             run(&mut h, id, "C;cmdline_url=ls", 9, "D;0");
             let notes = [
-                ("sleep 12", "finished in 12s"),
-                ("Command", "failed (exit 2) after 2m 16s"),
-                ("make all", "finished in 1h 00m 00s"),
+                ("sleep 12 · main", "finished in 12s"),
+                ("Command · main", "failed (exit 2) after 2m 16s"),
+                ("make all · main", "finished in 1h 00m 00s"),
             ];
             let notes = notes.map(|(t, b)| (t.to_string(), b.to_string()));
             assert_eq!(notified(&mut h), notes);
@@ -1878,11 +1884,18 @@ mod tests {
             run(&mut h, id, "C;cmdline_url=make", 10, "D;0");
             let notes: Vec<_> = (h.effects.iter())
                 .filter_map(|e| match e {
-                    Effect::Notify { tag, body, .. } => Some((tag.clone(), body.clone())),
+                    Effect::Notify { tag, title, body } => {
+                        Some((tag.clone(), title.clone(), body.clone()))
+                    }
                     _ => None,
                 })
                 .collect();
-            assert_eq!(notes, [(tag, "finished in 10s".to_string())]);
+            let note = (tag, "make · main".into(), "finished in 10s".into());
+            assert_eq!(
+                notes,
+                [note],
+                "the terminal's workspace, not the current one"
+            );
         }
     }
 

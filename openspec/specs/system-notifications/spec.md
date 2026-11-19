@@ -29,8 +29,8 @@ When the binary runs without a main bundle identifier, as `aiditor .` and `cargo
 Settings SHALL accept a boolean `notifications`, bundled as `true`. With `false`, the core SHALL request no notification. Other types SHALL reject the settings through the existing error flow.
 
 #### Scenario: Turned off
-- **GIVEN** `settings.toml` sets `notifications = false`
-- **WHEN** `M-x notify-test` runs
+- **GIVEN** `settings.toml` sets `notifications = false` and the window is inactive
+- **WHEN** a long terminal command ends
 - **THEN** no notification is requested
 
 ### Requirement: The core knows whether the window is active
@@ -52,14 +52,6 @@ Clicking a notification SHALL bring aiditor to the front and show the notificati
 - **GIVEN** a notification for a buffer that has since been killed
 - **WHEN** the notification is clicked
 - **THEN** the workspace and windows are unchanged
-
-### Requirement: notify-test posts a notification for the current buffer
-`M-x notify-test` SHALL request a notification tagged with the current buffer, titled `aiditor` with the body `Test notification for <buffer name>`, subject to the `notifications` setting.
-
-#### Scenario: Test notification
-- **GIVEN** the current buffer is `notes.txt`
-- **WHEN** `M-x notify-test` runs
-- **THEN** a notification titled `aiditor` with the body `Test notification for notes.txt` is requested, tagged with that buffer
 
 ### Requirement: Agent session events notify while the session can't be seen
 A session SHALL request a notification tagged with its session buffer and titled `<agent> · <workspace>`, with the names its buffer was given, when it asks for permission (body: the tool call's title), asks a blocking question (body: the question), ends a turn not cancelled (body: `Turn ended` for `end_turn`, otherwise the line the session buffer shows for the end), or fails to start or exits on its own (body: the line `*Messages*` or the echo area gets). A cancelled turn and a non-blocking question SHALL request none. A notification SHALL be requested only while the window is inactive or the current workspace's windows don't show the session buffer.
@@ -94,17 +86,17 @@ A session SHALL request a notification tagged with its session buffer and titled
 - **THEN** both notifications carry the same tag
 
 ### Requirement: Long terminal commands notify while their terminal can't be seen
-A terminal command SHALL request a notification tagged with its terminal buffer when its OSC 133 `D` mark arrives at least `terminal_notify_after` seconds after its `C` mark, measured on the core's clock, and the setting is not 0. The title SHALL be the command line the `C` mark gave, control characters shown as spaces, or `Command` without one. The body SHALL be `finished in <duration>` when the exit code is 0 or absent, otherwise `failed (exit <code>) after <duration>`, the duration as `12s`, `2m 05s` or `1h 02m 05s`. A prompt mark between them SHALL drop the command. A notification SHALL be requested only while the window is inactive or the current workspace's windows don't show the terminal buffer.
+A terminal command SHALL request a notification tagged with its terminal buffer when its OSC 133 `D` mark arrives at least `terminal_notify_after` seconds after its `C` mark, measured on the core's clock, and the setting is not 0. The title SHALL be `<command> · <workspace>`: the command line the `C` mark gave, control characters shown as spaces, or `Command` without one, then the current name of the workspace the terminal buffer belongs to; a terminal without a workspace SHALL get the command alone. The body SHALL be `finished in <duration>` when the exit code is 0 or absent, otherwise `failed (exit <code>) after <duration>`, the duration as `12s`, `2m 05s` or `1h 02m 05s`. A prompt mark between them SHALL drop the command. A notification SHALL be requested only while the window is inactive or the current workspace's windows don't show the terminal buffer.
 
 #### Scenario: Long command while the window is inactive
-- **GIVEN** a terminal and the window inactive
+- **GIVEN** a terminal in workspace `work` and the window inactive
 - **WHEN** the shell marks `C` with command line `sleep 12`, then `D;0` 12 seconds later
-- **THEN** a notification titled `sleep 12` with body `finished in 12s` is requested, tagged with the terminal buffer
+- **THEN** a notification titled `sleep 12 · work` with body `finished in 12s` is requested, tagged with the terminal buffer
 
 #### Scenario: Failing command
 - **GIVEN** the window is inactive
 - **WHEN** a command without a command line ends with `D;2` after 2 minutes 16 seconds
-- **THEN** a notification titled `Command` with body `failed (exit 2) after 2m 16s` is requested
+- **THEN** a notification titled `Command · work` with body `failed (exit 2) after 2m 16s` is requested
 
 #### Scenario: Short command
 - **WHEN** a command ends 9 seconds after it started, with the setting at 10

@@ -20,14 +20,6 @@ impl Ctx<'_> {
         }
     }
 
-    /// `notify-test`: a notification for the current buffer, to check the setup.
-    pub(crate) fn notify_test(&mut self) -> Result<(), String> {
-        let id = self.core.windows.window.buffer();
-        let body = format!("Test notification for {}", self.core.current().name);
-        self.notify(id, "aiditor".into(), body);
-        Ok(())
-    }
-
     /// Shows the clicked notification's buffer in its workspace; a buffer gone since does nothing.
     pub(crate) fn notification_clicked(&mut self, tag: &str) {
         let core = &mut *self.core;
@@ -52,32 +44,19 @@ mod tests {
     use crate::harness::Harness;
     use crate::{Effect, Msg};
 
-    fn notified(h: &Harness) -> Vec<(String, String, String)> {
-        (h.effects.iter())
-            .filter_map(|e| match e {
-                Effect::Notify { tag, title, body } => {
-                    Some((tag.clone(), title.clone(), body.clone()))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn notify_test_tags_the_current_buffer() {
-        let mut h = Harness::new(&[("notes.txt", "hi")]);
-        h.open("notes.txt").keys("M-x notify-test RET");
-        let tag = h.core.windows.window.buffer().number().to_string();
-        let body = "Test notification for notes.txt".to_string();
-        assert_eq!(notified(&h), [(tag, "aiditor".into(), body)]);
-    }
-
     #[test]
     fn the_setting_turns_them_off() {
         let mut h = Harness::new(&[]);
-        h.core.settings.notifications = false;
-        h.keys("M-x notify-test RET");
-        assert_eq!(notified(&h), []);
+        for on in [true, false] {
+            h.core.settings.notifications = on;
+            let mut ctx = h.ctx();
+            let id = ctx.core.windows.window.buffer();
+            ctx.notify(id, "title".into(), "body".into());
+            let posted = matches!(&ctx.effects[..], [Effect::Notify { tag, .. }]
+                if *tag == id.number().to_string());
+            assert_eq!(posted, on);
+            assert_eq!(ctx.effects.len(), usize::from(on));
+        }
     }
 
     #[test]
