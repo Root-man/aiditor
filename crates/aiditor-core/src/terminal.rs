@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -180,7 +181,12 @@ pub struct Terminal {
     running: Option<String>,
     /// The last command's exit status, when it failed.
     failed: Option<i32>,
+    /// When the running command's `C` mark arrived, and its command line.
+    began: Option<(Instant, Option<String>)>,
 }
+
+/// A command that ended: its command line, exit code and how long it ran.
+pub type Finished = (Option<String>, Option<i32>, Duration);
 
 impl Terminal {
     pub fn new(rows: u16, cols: u16) -> Self {
@@ -200,11 +206,18 @@ impl Terminal {
             cwd: None,
             running: None,
             failed: None,
+            began: None,
         }
     }
 
     /// Feeds the program's output into the grid; returns the replies it asked for, in order.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        self.feed_at(bytes, Instant::now()).0
+    }
+
+    /// `feed`, arriving at `now`; also returns the last command that ended in `bytes`.
+    pub fn feed_at(&mut self, bytes: &[u8], now: Instant) -> (Vec<u8>, Option<Finished>) {
+        let mut finished = None;
         let mut rest = bytes;
         while !rest.is_empty() {
             // Both parsers see the same chunks, so their states stay in step across batches.
@@ -220,10 +233,16 @@ impl Terminal {
             match self.scan.signal.take() {
                 Some(Signal::Mark(mark, command)) => {
                     match mark {
-                        Mark::Prompt => self.running = None,
-                        Mark::Output => (self.running, self.failed) = (command, None),
+                        Mark::Prompt => (self.running, self.began) = (None, None),
+                        Mark::Output => {
+                            self.began = Some((now, command.clone()));
+                            (self.running, self.failed) = (command, None);
+                        }
                         Mark::End(code) => {
                             (self.running, self.failed) = (None, code.filter(|&c| c != 0));
+                            if let Some((at, command)) = self.began.take() {
+                                finished = Some((command, code, now - at));
+                            }
                         }
                         Mark::Input => {}
                     }
@@ -243,7 +262,7 @@ impl Terminal {
                 self.marks.clear();
             }
         }
-        std::mem::take(&mut *self.replies.0.borrow_mut())
+        (std::mem::take(&mut *self.replies.0.borrow_mut()), finished)
     }
 
     /// The OSC 133 marks kept so far, oldest first, each with its absolute line (`history()`
@@ -754,6 +773,34 @@ impl Ctx<'_> {
         self.vterm_copy_mode()
     }
 
+    /// Feeds terminal `id`'s output, writing back its replies and notifying about a long command.
+    pub(crate) fn terminal_output(&mut self, id: TerminalId, bytes: &[u8]) {
+        let core = &mut *self.core;
+        let Some(&buffer) = core.terminals.get(&id) else {
+            return;
+        };
+        let Some(terminal) = core.buffers.get_mut(buffer).and_then(Buffer::terminal_mut) else {
+            return;
+        };
+        let (bytes, finished) = terminal.feed_at(bytes, self.now);
+        if !bytes.is_empty() {
+            (self.effects).push(Effect::Terminal(TerminalOp::Write { id, bytes }));
+        }
+        let after = core.settings.terminal_notify_after;
+        if let Some((command, code, took)) = finished
+            && after > 0
+            && took >= Duration::from_secs(after)
+        {
+            let title = command.map_or("Command".into(), |c| c.replace(char::is_control, " "));
+            let took = crate::agents::long_duration(took);
+            let body = match code {
+                None | Some(0) => format!("finished in {took}"),
+                Some(code) => format!("failed (exit {code}) after {took}"),
+            };
+            self.notify_unseen(buffer, title, body);
+        }
+    }
+
     /// Kills terminal `id`'s buffer after its shell exited or failed to start, echoing `err`, and
     /// sends the terminal its one kill, which releases it.
     pub(crate) fn end_terminal(&mut self, id: TerminalId, err: Option<String>) {
@@ -1004,6 +1051,36 @@ mod tests {
         assert_eq!(t.running(), Some("make"), "past a full scrollback");
         t.feed(b"\x1b]133;D;2\x07");
         assert_eq!((t.running(), t.failed()), (None, Some(2)));
+    }
+
+    #[test]
+    fn a_command_is_timed_from_its_output_to_its_end() {
+        let (mut t, t0) = (Terminal::new(3, 20), Instant::now());
+        let c = b"\x1b]133;C;cmdline_url=make\x07";
+        assert_eq!(t.feed_at(c, t0).1, None);
+        let end = t
+            .feed_at(b"\x1b]133;D;2\x07", t0 + Duration::from_secs(5))
+            .1;
+        assert_eq!(
+            end,
+            Some((Some("make".into()), Some(2), Duration::from_secs(5)))
+        );
+        assert_eq!(
+            t.feed_at(b"\x1b]133;D\x07", t0).1,
+            None,
+            "one end per command"
+        );
+        t.feed_at(b"\x1b]133;C\x07", t0);
+        assert_eq!(
+            t.feed_at(b"\x1b]133;D\x07", t0).1,
+            Some((None, None, Duration::ZERO))
+        );
+        t.feed_at(b"\x1b]133;C\x07\x1b]133;A\x07", t0);
+        assert_eq!(
+            t.feed_at(b"\x1b]133;D;0\x07", t0).1,
+            None,
+            "a prompt drops it"
+        );
     }
 
     #[test]
@@ -1273,7 +1350,7 @@ mod tests {
         use crate::settings::FaceName;
         use crate::{Effect, Msg, TerminalId, TerminalOp};
 
-        fn output(h: &mut Harness, id: TerminalId, bytes: &str) {
+        pub(super) fn output(h: &mut Harness, id: TerminalId, bytes: &str) {
             h.send(Msg::TerminalOutput {
                 id,
                 bytes: bytes.into(),
@@ -1354,7 +1431,7 @@ mod tests {
         }
 
         /// A harness showing a live terminal, collecting effects.
-        fn shown() -> (Harness, TerminalId) {
+        pub(super) fn shown() -> (Harness, TerminalId) {
             let mut h = Harness::new(&[]);
             let (id, buffer) = h.core.create_terminal("t", 2, 10);
             h.core.show_buffer(buffer);
@@ -1730,6 +1807,82 @@ mod tests {
             };
             assert_eq!(typed(&mut h, other), sent);
             assert_eq!(h.text(), "", "nothing inserted");
+        }
+    }
+
+    mod notifying {
+        use std::time::Duration;
+
+        use super::in_the_core::{output, shown};
+        use crate::harness::Harness;
+        use crate::{Effect, Msg, TerminalId};
+
+        /// Runs a command for `secs` seconds on the fake clock, ending with `end`'s `D` mark.
+        fn run(h: &mut Harness, id: TerminalId, c: &str, secs: u64, end: &str) {
+            output(h, id, &format!("\x1b]133;{c}\x07"));
+            h.advance(Duration::from_secs(secs));
+            output(h, id, &format!("\x1b]133;{end}\x07"));
+        }
+
+        /// The notifications requested so far, each checked to be tagged with the shown terminal.
+        fn notified(h: &mut Harness) -> Vec<(String, String)> {
+            let tag = h.core.windows.window.buffer().number().to_string();
+            (h.effects.drain(..))
+                .filter_map(|e| match e {
+                    Effect::Notify {
+                        tag: t,
+                        title,
+                        body,
+                    } => {
+                        assert_eq!(t, tag);
+                        Some((title, body))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn long_commands_notify_while_the_window_is_inactive() {
+            let (mut h, id) = shown();
+            h.send(Msg::WindowActive(false));
+            run(&mut h, id, "C;cmdline_url=sleep%2012", 12, "D;0");
+            run(&mut h, id, "C", 136, "D;2");
+            run(&mut h, id, "C;cmdline_url=make%0Aall", 3600, "D");
+            run(&mut h, id, "C;cmdline_url=ls", 9, "D;0");
+            let notes = [
+                ("sleep 12", "finished in 12s"),
+                ("Command", "failed (exit 2) after 2m 16s"),
+                ("make all", "finished in 1h 00m 00s"),
+            ];
+            let notes = notes.map(|(t, b)| (t.to_string(), b.to_string()));
+            assert_eq!(notified(&mut h), notes);
+        }
+
+        #[test]
+        fn a_shown_terminal_or_a_zero_setting_notifies_nothing() {
+            let (mut h, id) = shown();
+            run(&mut h, id, "C;cmdline_url=make", 60, "D;1");
+            assert_eq!(notified(&mut h), []);
+            h.send(Msg::WindowActive(false));
+            h.core.settings.terminal_notify_after = 0;
+            run(&mut h, id, "C;cmdline_url=make", 60, "D;1");
+            assert_eq!(notified(&mut h), []);
+        }
+
+        #[test]
+        fn a_terminal_in_another_workspace_notifies() {
+            let (mut h, id) = shown();
+            let tag = h.core.windows.window.buffer().number().to_string();
+            h.new_workspace("two", "home");
+            run(&mut h, id, "C;cmdline_url=make", 10, "D;0");
+            let notes: Vec<_> = (h.effects.iter())
+                .filter_map(|e| match e {
+                    Effect::Notify { tag, body, .. } => Some((tag.clone(), body.clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(notes, [(tag, "finished in 10s".to_string())]);
         }
     }
 

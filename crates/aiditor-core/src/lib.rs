@@ -800,18 +800,7 @@ impl Ctx<'_> {
 
     fn dispatch(&mut self, msg: Msg) {
         match msg {
-            Msg::TerminalOutput { id, bytes } => {
-                let core = &mut *self.core;
-                let terminal = (core.terminals.get(&id))
-                    .and_then(|&buffer| core.buffers.get_mut(buffer))
-                    .and_then(Buffer::terminal_mut);
-                if let Some(terminal) = terminal {
-                    let bytes = terminal.feed(&bytes);
-                    if !bytes.is_empty() {
-                        (self.effects).push(Effect::Terminal(TerminalOp::Write { id, bytes }));
-                    }
-                }
-            }
+            Msg::TerminalOutput { id, bytes } => self.terminal_output(id, &bytes),
             Msg::TerminalSpawned {
                 id,
                 result: Err(err),

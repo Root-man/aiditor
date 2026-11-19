@@ -18,6 +18,8 @@ line_numbers = "absolute"
 hl_line = true
 # System notifications for what needs you while you look elsewhere; false turns them off.
 notifications = true
+# Terminal commands running at least this many seconds notify when they end; 0 turns it off.
+terminal_notify_after = 10
 
 # Maximum kept files and directories per watched project; project files can override it.
 max_watched_files = 10000

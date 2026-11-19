@@ -45,6 +45,7 @@ pub(crate) use chips::{Chips, is_chip};
 use config::{mode_option, values};
 use groups::*;
 pub(crate) use questions::Preview;
+pub(crate) use render::long_duration;
 use render::*;
 use tools::{Term, Tool};
 
