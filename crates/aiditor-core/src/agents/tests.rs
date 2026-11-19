@@ -7077,3 +7077,90 @@ fn the_preview_follows_point_and_folds_long_text() {
     let lines = shown(&mut h, 30);
     assert!(!lines.iter().any(|l| l.contains("l1")), "C has none");
 }
+
+/// The notifications requested since the last call, as title and body, each checked to be
+/// tagged with session 0's buffer.
+fn notified(h: &mut Harness) -> Vec<(String, String)> {
+    let tag = h.core.agents[&AgentId(0)].buffer.number().to_string();
+    (h.effects.drain(..))
+        .filter_map(|effect| match effect {
+            Effect::Notify {
+                tag: t,
+                title,
+                body,
+            } => {
+                assert_eq!(t, tag);
+                Some((title, body))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn notes(bodies: &[&str]) -> Vec<(String, String)> {
+    (bodies.iter())
+        .map(|b| ("claude · work".into(), b.to_string()))
+        .collect()
+}
+
+#[test]
+fn session_events_notify_while_the_window_is_inactive() {
+    let mut h = session();
+    h.collect_effects = true;
+    h.keys("a RET");
+    h.send(Msg::WindowActive(false));
+    ask(&mut h, 1, "c1", Some("Edit main.rs"));
+    question(&mut h, 2, None);
+    async_question(&mut h, 3);
+    prompted(&mut h, Ok(StopReason::EndTurn));
+    h.keys("b RET");
+    prompted(&mut h, Ok(StopReason::Cancelled));
+    h.keys("c RET");
+    prompted(&mut h, Ok(StopReason::MaxTokens));
+    h.keys("d RET");
+    prompted(&mut h, Err("boom"));
+    exited(&mut h, 0, 1);
+    let bodies = [
+        "Edit main.rs",
+        "Which?",
+        "Turn ended",
+        "Turn ended: max_tokens",
+        "Error: boom",
+        "claude session exited with code 1",
+    ];
+    assert_eq!(notified(&mut h), notes(&bodies));
+}
+
+#[test]
+fn a_shown_session_notifies_nothing_until_another_workspace_is_current() {
+    let mut h = session();
+    h.collect_effects = true;
+    h.keys("a RET");
+    ask(&mut h, 1, "c1", Some("Edit main.rs"));
+    question(&mut h, 2, None);
+    prompted(&mut h, Ok(StopReason::EndTurn));
+    assert_eq!(notified(&mut h), []);
+    h.keys("b RET");
+    let work = h.core.workspace().unwrap();
+    h.new_workspace("two", "home");
+    prompted(&mut h, Ok(StopReason::EndTurn));
+    assert_eq!(notified(&mut h), notes(&["Turn ended"]));
+    h.core.switch_workspace(work).unwrap();
+    exited(&mut h, 0, 1);
+    assert_eq!(notified(&mut h), []);
+}
+
+#[test]
+fn a_failed_start_notifies_once() {
+    let mut h = work();
+    h.collect_effects = true;
+    h.keys("M-x agent-start RET claude RET");
+    h.send(Msg::WindowActive(false));
+    h.send(Msg::AgentStarted {
+        id: AgentId(0),
+        result: Err("no such file".into()),
+    });
+    exited(&mut h, 0, 1);
+    let bodies = ["claude session failed to start: no such file"];
+    assert_eq!(notified(&mut h), notes(&bodies));
+}
