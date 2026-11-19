@@ -19,6 +19,8 @@ mod element;
 mod emoji;
 mod icons;
 mod input;
+#[cfg(target_os = "macos")]
+mod notifications;
 
 #[cfg(test)]
 #[path = "../../aiditor-services/tests/support/native.rs"]

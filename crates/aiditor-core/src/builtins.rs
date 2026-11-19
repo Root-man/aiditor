@@ -721,6 +721,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.kill_buffer(args),
         },
         Command {
+            name: "notify-test",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.notify_test(),
+        },
+        Command {
             name: "agent-start",
             spec: ArgSpec {
                 workspace: true,

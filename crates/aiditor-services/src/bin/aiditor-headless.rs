@@ -101,6 +101,7 @@ fn send(core: &mut Core, service: &mut Service, msg: Msg) {
             Effect::SetClipboard(_)
             | Effect::OpenWithSystem(_)
             | Effect::OpenUrl(_)
+            | Effect::Notify { .. }
             | Effect::LoadConfiguration { .. }
             | Effect::WritePins(_)
             | Effect::Watch(_)
