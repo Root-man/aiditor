@@ -46,6 +46,8 @@ struct Args {
     config_dir: Option<PathBuf>,
     /// `recovery` in the platform data dir, for auto-save files.
     recovery_dir: Option<PathBuf>,
+    /// `snapshots` in the platform data dir, holding each process's working-tree snapshots.
+    snapshots: Option<PathBuf>,
     /// `shell/zsh` in the platform data dir, for zsh's shell integration.
     zsh_dir: Option<PathBuf>,
     /// `sessions.toml` in the platform local data dir, for pinned sessions.
@@ -81,6 +83,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> 
         (parsed.config_dir).or_else(|| dirs.as_ref().map(|d| d.config_dir().to_owned()));
     parsed.recovery_dir = dirs.as_ref().map(|d| d.data_dir().join("recovery"));
     parsed.pins = (dirs.as_ref()).map(|d| d.data_local_dir().join("sessions.toml"));
+    parsed.snapshots = dirs.as_ref().map(|d| d.data_dir().join("snapshots"));
     parsed.zsh_dir = dirs.map(|d| d.data_dir().join("shell/zsh"));
     parsed.socket = aiditor_services::server::socket_path();
     Ok(parsed)
@@ -186,6 +189,9 @@ fn main() {
             core.launch(&path, files::root(&path));
             core.open(&path, file);
         }
+    }
+    if let Some(dir) = args.snapshots.clone() {
+        std::thread::spawn(move || files::clear_snapshots(&dir));
     }
     // Read before this session writes any, so all are an earlier session's.
     let recovered = args

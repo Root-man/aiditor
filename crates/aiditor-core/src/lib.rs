@@ -188,6 +188,11 @@ pub enum Msg {
         request: u64,
         result: Result<Vec<ChangedFile>, String>,
     },
+    /// The file service's answer to `FileOp::GitSnapshot` `request`; `None` outside a repository.
+    GitSnapshot {
+        request: u64,
+        result: Result<Option<Snapshot>, String>,
+    },
     /// The file service's declared language version for a buffer's latest lookup.
     LanguageVersion {
         buffer: BufferId,
@@ -435,6 +440,16 @@ pub enum GitSide {
     WorkingTree,
 }
 
+/// A tree holding a repository's working tree, written outside the repository.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    /// The directory holding the repository's `.git`; the tree's paths are relative to it.
+    pub repository: PathBuf,
+    pub tree: String,
+    /// Where the tree's objects are read from.
+    pub objects: GitObjects,
+}
+
 /// Where git reads objects from instead of the repository's: a snapshot's object directory and
 /// its alternates.
 #[derive(Clone, Debug, PartialEq)]
@@ -645,6 +660,13 @@ pub enum FileOp {
         old: String,
         new: Option<String>,
         objects: Option<GitObjects>,
+    },
+    /// Write a tree of `root`'s repository's working tree, keeping its index and objects in
+    /// `dir`, and send `Msg::GitSnapshot`.
+    GitSnapshot {
+        request: u64,
+        root: PathBuf,
+        dir: PathBuf,
     },
     /// Read the nearest pin for this language and answer `Msg::LanguageVersion`.
     LanguageVersion {
@@ -1059,7 +1081,8 @@ impl Ctx<'_> {
             Msg::GitStatus(_)
             | Msg::GitDiffed { .. }
             | Msg::LinesDiffed { .. }
-            | Msg::GitDiffFiles { .. } => {}
+            | Msg::GitDiffFiles { .. }
+            | Msg::GitSnapshot { .. } => {}
             Msg::LanguageVersion {
                 buffer,
                 request,

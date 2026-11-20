@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use aiditor_core::buffer::{decode, encode, hash, hunks, prepare_preview, revert, unified_diff};
 use aiditor_core::{
     ChangedFile, FileDiff, FileEntry, FileOp, GitChange, GitFile, GitObjects, GitSide, GitStatus,
-    Head, Msg,
+    Head, Msg, Snapshot,
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -176,6 +176,10 @@ pub fn run(op: FileOp) -> Msg {
         } => Msg::GitDiffFiles {
             request,
             result: git_diff_files(&root, &old, new.as_deref(), objects.as_ref()),
+        },
+        FileOp::GitSnapshot { request, root, dir } => Msg::GitSnapshot {
+            request,
+            result: snapshot(&root, &dir),
         },
         FileOp::LanguageVersion {
             buffer,
@@ -452,6 +456,97 @@ fn git_diff_files(
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(name_status(&output.stdout))
+}
+
+/// A tree of `root`'s repository's working tree as it is on disk, untracked files included and
+/// ignored ones not, written with an index and objects kept in `dir`, so the repository is
+/// untouched. The kept index seeds the next snapshot, so a file whose stat is unchanged isn't
+/// read again. `None` outside a repository.
+pub fn snapshot(root: &Path, dir: &Path) -> Result<Option<Snapshot>, String> {
+    let Some((repository, ..)) = repository(root) else {
+        return Ok(None);
+    };
+    // `git add` runs clean filters.
+    no_filter(&repository)?;
+    let run = |git: &mut Command| {
+        let output = git.output().map_err(|err| format!("git: {err}"))?;
+        match output.status.success() {
+            true => Ok(output.stdout),
+            false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        }
+    };
+    // A linked worktree has its own index and the main repository's objects.
+    let paths = run(git(&repository).args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+        "--git-path",
+        "objects",
+    ]))?;
+    let mut paths = (paths.split(|&b| b == b'\n')).map(|p| PathBuf::from(OsStr::from_bytes(p)));
+    let (Some(index), Some(alternate)) = (paths.next(), paths.next()) else {
+        return Err("git rev-parse named no index".into());
+    };
+    let objects = GitObjects {
+        directory: dir.join("objects"),
+        alternates: vec![alternate],
+    };
+    let indexes = dir.join("indexes");
+    let kept = indexes.join(format!("{:016x}", hash(repository.as_os_str().as_bytes())));
+    let io = |err: io::Error| format!("{}: {err}", dir.display());
+    fs::create_dir_all(&indexes).map_err(io)?;
+    fs::create_dir_all(&objects.directory).map_err(io)?;
+    // Each snapshot writes its own copy, so two at once don't share a lock; the later one is kept.
+    let (copy, _) = create_temp(&kept, &NEXT_TEMP).map_err(io)?;
+    let tree = (|| {
+        let seed = if kept.exists() { &kept } else { &index };
+        match fs::copy(seed, &copy) {
+            Ok(_) => {}
+            // A repository with nothing added has no index; git starts one.
+            Err(err) if err.kind() == ErrorKind::NotFound => fs::remove_file(&copy).map_err(io)?,
+            Err(err) => return Err(io(err)),
+        }
+        let snap = |args: &[&str]| {
+            let mut git = with_objects(git(&repository), Some(&objects))?;
+            // A split index would write its shared part next to the repository's index.
+            git.args(["-c", "core.splitIndex=false"])
+                .env("GIT_INDEX_FILE", &copy);
+            run(git.args(args))
+        };
+        snap(&["add", "-A"])?;
+        let tree = snap(&["write-tree"])?;
+        fs::rename(&copy, &kept).map_err(io)?;
+        Ok(String::from_utf8_lossy(&tree).trim().to_string())
+    })();
+    if tree.is_err() {
+        _ = fs::remove_file(&copy);
+    }
+    Ok(Some(Snapshot {
+        repository,
+        tree: tree?,
+        objects,
+    }))
+}
+
+/// Removes the snapshot directories under `parent`, each named by its process id, whose process
+/// has exited.
+pub fn clear_snapshots(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let pid = (entry.file_name().to_str()).and_then(|name| name.parse::<libc::pid_t>().ok());
+        // Signal 0 is only checked; ESRCH means no such process.
+        let gone = pid.is_some_and(|pid| {
+            pid > 0
+                && unsafe { libc::kill(pid, 0) } != 0
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        });
+        if gone {
+            _ = fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// The files in `git diff --name-status -z` output: a status, then the path, or a rename's or
@@ -2356,5 +2451,199 @@ mod tests {
             result,
             Ok(("".into(), "a\n".into(), vec![hunk(0..0, 0..1)]))
         );
+    }
+
+    /// Each file in a snapshot's tree with its text.
+    fn snapshot_files(snap: &Snapshot) -> Vec<(String, String)> {
+        let read = |args: &[&str]| {
+            let mut git = with_objects(git(&snap.repository), Some(&snap.objects)).unwrap();
+            let output = git.args(args).output().unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        (read(&["ls-tree", "-r", "--name-only", &snap.tree]).lines())
+            .map(|path| {
+                let blob = format!("{}:{path}", snap.tree);
+                (path.to_string(), read(&["cat-file", "blob", &blob]))
+            })
+            .collect()
+    }
+
+    /// Every file under `dir` with its bytes.
+    fn all_bytes(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            match entry.file_type().unwrap().is_dir() {
+                true => files.extend(all_bytes(&entry.path())),
+                false => files.push((entry.path(), fs::read(entry.path()).unwrap())),
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// A repository with a modified, a staged-then-changed, a deleted, an untracked and an
+    /// ignored file.
+    fn dirty_repo(repo: &Path) {
+        fs::create_dir_all(repo).unwrap();
+        git_in(repo, &["init", "-q"]);
+        fs::write(repo.join(".gitignore"), "ignored\n").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(repo.join(name), format!("{name}1\n")).unwrap();
+        }
+        git_in(repo, &["add", "."]);
+        git_in(repo, &["commit", "-qm", "1"]);
+        fs::write(repo.join("a"), "a2\n").unwrap();
+        fs::write(repo.join("b"), "b2\n").unwrap();
+        git_in(repo, &["add", "b"]);
+        fs::write(repo.join("b"), "b3\n").unwrap();
+        fs::remove_file(repo.join("c")).unwrap();
+        fs::create_dir(repo.join("sub")).unwrap();
+        fs::write(repo.join("sub/d"), "d\n").unwrap();
+        fs::write(repo.join("ignored"), "x\n").unwrap();
+    }
+
+    fn snapshot_of(root: &Path, dir: &Path) -> Result<Option<Snapshot>, String> {
+        let op = FileOp::GitSnapshot {
+            request: 7,
+            root: root.into(),
+            dir: dir.into(),
+        };
+        match run(op) {
+            Msg::GitSnapshot { request: 7, result } => result,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn git_snapshot_holds_the_working_tree_as_it_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = &dir.path().join("repo");
+        dirty_repo(repo);
+        let snap = snapshot_of(&repo.join("sub"), &dir.path().join("snapshots"));
+        let snap = snap.unwrap().unwrap();
+        assert_eq!(&snap.repository, repo);
+        let expected = [(".gitignore", "ignored\n"), ("a", "a2\n"), ("b", "b3\n")];
+        let mut expected: Vec<_> = (expected.iter())
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect();
+        expected.push(("sub/d".into(), "d\n".into()));
+        assert_eq!(snapshot_files(&snap), expected);
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(snapshot_of(outside.path(), dir.path()), Ok(None));
+    }
+
+    #[test]
+    fn git_snapshot_leaves_the_repository_byte_for_byte_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = &dir.path().join("repo");
+        dirty_repo(repo);
+        let before = all_bytes(repo);
+        let snapshots = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            snapshot_of(repo, snapshots.path()).unwrap().unwrap();
+        }
+        assert_eq!(all_bytes(repo), before);
+    }
+
+    #[test]
+    fn git_snapshot_of_a_linked_worktree_reads_its_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = &dir.path().join("repo");
+        dirty_repo(repo);
+        git_in(repo, &["worktree", "add", "-q", "../wt"]);
+        let worktree = dir.path().join("wt");
+        fs::write(worktree.join("new"), "n\n").unwrap();
+        let snap = snapshot_of(&worktree, &dir.path().join("snapshots"));
+        let paths: Vec<_> = (snapshot_files(&snap.unwrap().unwrap()).into_iter())
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(paths, [".gitignore", "a", "b", "c", "new"]);
+    }
+
+    #[test]
+    fn git_snapshot_refuses_a_repository_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = &dir.path().join("repo");
+        dirty_repo(repo);
+        git_in(repo, &["config", "filter.x.clean", "touch marker; cat"]);
+        fs::write(repo.join(".gitattributes"), "* filter=x\n").unwrap();
+        let answer = snapshot_of(repo, &dir.path().join("snapshots"));
+        assert!(answer.is_err(), "{answer:?}");
+        assert!(!repo.join("marker").exists());
+    }
+
+    #[test]
+    fn git_snapshot_inside_a_submodule_reads_the_submodule() {
+        let dir = tempfile::tempdir().unwrap();
+        let (inner, outer) = (&dir.path().join("inner"), &dir.path().join("outer"));
+        dirty_repo(inner);
+        git_in(inner, &["add", "-A"]);
+        git_in(inner, &["commit", "-qm", "2"]);
+        fs::create_dir(outer).unwrap();
+        git_in(outer, &["init", "-q"]);
+        let file = ["-c", "protocol.file.allow=always"];
+        let add = [&file[..], &["submodule", "add", "-q", "../inner", "sub"]].concat();
+        git_in(outer, &add);
+        let sub = outer.join("sub");
+        fs::write(sub.join("a"), "a3\n").unwrap();
+        let snap = snapshot_of(&sub, &dir.path().join("snapshots"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.repository, sub);
+        let files = snapshot_files(&snap);
+        assert!(files.contains(&("a".into(), "a3\n".into())), "{files:?}");
+        assert!(files.iter().all(|(path, _)| path != ".gitmodules"));
+    }
+
+    #[test]
+    fn git_snapshot_again_reads_no_unchanged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = &dir.path().join("repo");
+        dirty_repo(repo);
+        // An mtime older than the index, so git doesn't take the entries as racily clean.
+        let past = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        for name in [".gitignore", "a", "b", "sub/d"] {
+            let file = fs::File::options().write(true).open(repo.join(name));
+            file.unwrap().set_modified(past).unwrap();
+        }
+        // diff-files lists every entry whose stat differs from the disk; those are the files
+        // the next `git add -A` would read. The repository's index has `.gitignore`'s old stat.
+        let stale = |index: &Path| {
+            let output = git(repo)
+                .args(["diff-files", "--name-only"])
+                .env("GIT_INDEX_FILE", index)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert!(stale(&repo.join(".git/index")).contains(".gitignore"));
+        let snapshots = dir.path().join("snapshots");
+        let first = snapshot_of(repo, &snapshots).unwrap().unwrap();
+        let kept = fs::read_dir(snapshots.join("indexes")).unwrap();
+        let kept: Vec<_> = kept.flatten().map(|entry| entry.path()).collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(stale(&kept[0]), "");
+        let again = snapshot_of(repo, &snapshots).unwrap().unwrap();
+        assert_eq!(again.tree, first.tree);
+    }
+
+    #[test]
+    fn clear_snapshots_removes_only_exited_processes_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = Command::new("true").spawn().unwrap();
+        let exited = child.id().to_string();
+        child.wait().unwrap();
+        let alive = std::process::id().to_string();
+        for name in [&exited, &alive, "notes"] {
+            fs::create_dir_all(dir.path().join(name).join("objects")).unwrap();
+        }
+        clear_snapshots(dir.path());
+        let mut left: Vec<_> = (fs::read_dir(dir.path()).unwrap().flatten())
+            .map(|entry| entry.file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, [alive, "notes".to_string()]);
     }
 }
