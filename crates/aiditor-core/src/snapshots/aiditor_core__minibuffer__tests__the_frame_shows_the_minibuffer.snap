@@ -30,6 +30,7 @@ Some(
                     decorations: [],
                     aligned: false,
                     icons: [],
+                    diff: None,
                 },
             ],
             cursor: Some(

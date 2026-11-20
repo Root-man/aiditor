@@ -212,6 +212,7 @@ impl Ctx<'_> {
         }
         let core = &mut *self.core;
         let rows = core.windows.window.rows();
+        // shortcut: scrolls whole lines, so wrapped lines and diff rows make a screenful scroll more rows than it shows; scroll rows if that bites.
         let top = core.windows.window.scroll(&core.buffers, rows);
         let buffer = core.current();
         let last = buffer.len_lines() as i64 - 1;
@@ -326,10 +327,8 @@ impl Ctx<'_> {
                 (if n < 0 { rows + n } else { n }).clamp(0, rows - 1)
             }
         };
-        let (line, _) = core.current().line_col(at).expect("point is in the buffer");
-        core.windows
-            .window
-            .set_top(line.saturating_sub(row as usize));
+        let window = &mut core.windows.window;
+        window.show_above(&core.buffers, at, row as usize);
     }
 }
 

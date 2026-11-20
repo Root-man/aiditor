@@ -1511,6 +1511,7 @@ mod tests {
             decorations: Vec::new(),
             aligned: false,
             icons: vec![(1, Icon::Book), (4, Icon::Globe)],
+            diff: None,
         };
         editor.update_in(cx, |e, window, _| {
             let (font, cell) = e.font(window);
@@ -1600,6 +1601,7 @@ mod tests {
             decorations: Vec::new(),
             aligned: false,
             icons: Vec::new(),
+            diff: None,
         };
         editor.update_in(cx, |e, window, _| {
             let font = e.font(window).0;
@@ -3295,6 +3297,53 @@ mod tests {
         let bar = right.1.expect("the diff window's mode line");
         assert_eq!((bar.left(), bar.right()), (list.0.left(), right.0.right()));
         assert_eq!(bar.bottom(), list.0.bottom());
+    }
+
+    #[gpui::test]
+    fn diff_rows_paint_between_lines_in_both_themes(cx: &mut TestAppContext) {
+        use aiditor_core::buffer::FaceRef;
+        use aiditor_core::settings::FaceName;
+        use aiditor_core::window::DiffRow;
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "a\nb");
+        let light = "theme = 'light'\n[themes.light.faces]\ndiff-removed = { fg = 0x9d0006 }";
+        for (settings, fg) in [("", 0xf14c4c), (light, 0x9d0006)] {
+            editor.update(cx, |e, cx| {
+                e.handle(Msg::SettingsLoaded(Ok(Some(settings.into()))), cx);
+                let removed = vec![("old".into(), vec![FaceRef::Face(FaceName::DiffRemoved)])];
+                let row = |runs, label: Option<&str>, height| DiffRow {
+                    after: true,
+                    runs,
+                    label: label.map(String::from),
+                    height,
+                };
+                e.core.set_diff_rows(vec![
+                    (0, row(removed, Some("7"), 1)),
+                    (1, row(Vec::new(), None, 2)),
+                ]);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            editor.update(cx, |e, _| {
+                let line = &e.core.frame().windows[0].display.lines[1];
+                assert_eq!(line.spans[0].face.fg, Some(fg), "{settings}");
+                let rows = &e.painted[0].rows;
+                let texts: Vec<_> = rows
+                    .iter()
+                    .map(|r| r.text.text.trim_end().to_string())
+                    .collect();
+                assert_eq!(texts[..5], ["a", "old", "b", "", ""], "{settings}");
+                let label = |i: usize| rows[i].number.as_ref().map(|(_, l)| l.text.to_string());
+                assert_eq!(label(1).as_deref(), Some("7"));
+                assert_eq!(
+                    label(2).as_deref(),
+                    Some("2"),
+                    "line numbers go on past the row"
+                );
+                let gap = rows[4].top - rows[3].top - rows[3].height;
+                assert!(gap.abs() < px(0.01), "filler rows stack");
+            });
+        }
     }
 
     #[gpui::test]

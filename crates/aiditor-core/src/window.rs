@@ -1,6 +1,6 @@
 //! Windows: viewports onto buffers, holding point and mark as markers and the first line shown.
 
-use crate::buffer::{Buffer, BufferId, Buffers, Error, InsertionType, MarkerId};
+use crate::buffer::{Buffer, BufferId, Buffers, Error, FaceRef, InsertionType, MarkerId};
 use crate::display::{self, Rect};
 use crate::workspace::WorkspaceId;
 
@@ -8,6 +8,18 @@ use crate::workspace::WorkspaceId;
 const MARK_RING_MAX: usize = 16;
 /// The px between side-by-side windows.
 pub(crate) const DIVIDER: f32 = 1.;
+
+/// A row drawn before or after a buffer line in one window, which is not the buffer's text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffRow {
+    /// Drawn after its line, else before it.
+    pub after: bool,
+    pub runs: Vec<(String, Vec<FaceRef>)>,
+    /// The gutter's label, as an old line number; blank when `None`.
+    pub label: Option<String>,
+    /// The rows it takes at least, blank past its text's.
+    pub height: usize,
+}
 
 pub struct Window {
     buffer: BufferId,
@@ -35,6 +47,8 @@ pub struct Window {
     pub(crate) follow: bool,
     /// Where point was last in a session's transcript, and in its prompt area.
     parts: [Option<MarkerId>; 2],
+    /// Diff rows, each with a marker at its line's start.
+    diff_rows: Vec<(MarkerId, DiffRow)>,
 }
 
 impl Window {
@@ -58,6 +72,7 @@ impl Window {
             next: Vec::new(),
             follow: true,
             parts: [None; 2],
+            diff_rows: Vec::new(),
         }
     }
 
@@ -91,7 +106,9 @@ impl Window {
             old.set_marker(old.point, point)
                 .expect("point is in the buffer");
             old.remove_marker(self.point);
-            for &m in (self.mark.iter().chain(&self.ring)).chain(self.parts.iter().flatten()) {
+            let rows = self.diff_rows.iter().map(|(m, _)| m);
+            let parts = self.parts.iter().flatten().chain(rows);
+            for &m in (self.mark.iter().chain(&self.ring)).chain(parts) {
                 old.remove_marker(m);
             }
         }
@@ -282,12 +299,17 @@ impl Window {
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
         let (line, col) = buffer.line_col(self.point(buffers)).unwrap_or_default();
         self.rows = rows.max(1);
-        let starts = |l: usize| self.row_starts(buffer, l);
-        let row = starts(line).partition_point(|&s| s <= col) - 1;
-        // The lowest first row: `rows - 1` rows above point's.
-        let (low, low_row) = self.back(buffer, (line, row), self.rows - 1);
+        let row = self.text_row(buffer, line, col);
+        // On the last line, the rows after it show too, as long as point's row does.
+        let below: usize = (self.diff_rows_around(buffer, line).1.iter())
+            .map(|r| self.diff_row_rows(buffer, r))
+            .sum();
+        let last = line + 1 == buffer.len_lines() && row + 1 == self.block(buffer, line);
+        let tail = if last { below } else { 0 };
+        // The lowest first row: `rows - 1` rows above point's, less the tail.
+        let (low, low_row) = self.back(buffer, (line, row), (self.rows - 1).saturating_sub(tail));
         if self.top_row > 0 && self.top < buffer.len_lines() {
-            self.top_row = self.top_row.min(starts(self.top).len() - 1);
+            self.top_row = self.top_row.min(self.block(buffer, self.top) - 1);
         }
         (self.top, self.top_row) = (self.top, self.top_row).clamp((low, low_row), (line, row));
         self.top
@@ -308,6 +330,83 @@ impl Window {
         let len = end - buffer.text().line_to_char(line);
         let width = width.saturating_sub(buffer.line_indent(line)).max(1);
         display::row_starts(len, width, word, |i| text.char(i).is_whitespace())
+    }
+
+    /// The row of `line`'s block that its char column `col` is on.
+    fn text_row(&self, buffer: &Buffer, line: usize, col: usize) -> usize {
+        self.above(buffer, line) + self.row_starts(buffer, line).partition_point(|&s| s <= col) - 1
+    }
+
+    /// The rows `line` takes in scrolling: the diff rows above it, then its text's.
+    fn block(&self, buffer: &Buffer, line: usize) -> usize {
+        self.above(buffer, line) + self.row_starts(buffer, line).len()
+    }
+
+    /// The rows of the diff rows drawn above `line`'s text.
+    pub(crate) fn above(&self, buffer: &Buffer, line: usize) -> usize {
+        let rows = self.diff_rows_around(buffer, line).0;
+        rows.iter().map(|r| self.diff_row_rows(buffer, r)).sum()
+    }
+
+    pub(crate) fn has_diff_rows(&self) -> bool {
+        !self.diff_rows.is_empty()
+    }
+
+    /// Replaces the diff rows with `rows`, each anchored to a buffer line, past the last clamped
+    /// to it.
+    pub fn set_diff_rows(&mut self, buffers: &mut Buffers, rows: Vec<(usize, DiffRow)>) {
+        let buffer = self.live(buffers).expect("window buffer is live");
+        for (m, _) in self.diff_rows.drain(..) {
+            buffer.remove_marker(m);
+        }
+        let last = buffer.len_lines() - 1;
+        self.diff_rows = (rows.into_iter())
+            .map(|(line, row)| {
+                let at = buffer
+                    .char_idx(line.min(last), 0)
+                    .expect("line is in the buffer");
+                // Advance: text typed at the line's start leaves the row by the line's old text.
+                let m = buffer.add_marker(at, InsertionType::Advance);
+                (m.expect("at is in the buffer"), row)
+            })
+            .collect();
+    }
+
+    /// The diff rows drawn above `line`'s text, those after the line before first, and the ones
+    /// after it when it is the last.
+    pub(crate) fn diff_rows_around(
+        &self,
+        buffer: &Buffer,
+        line: usize,
+    ) -> (Vec<&DiffRow>, Vec<&DiffRow>) {
+        // shortcut: scans every row for each line asked about; keep them sorted by line if large diffs scroll slowly.
+        let (mut above, mut before, mut below) = (Vec::new(), Vec::new(), Vec::new());
+        let last = buffer.len_lines() - 1;
+        for (m, row) in &self.diff_rows {
+            let at = buffer.marker(*m).expect("diff row markers are live");
+            let anchor = buffer.text().char_to_line(at);
+            match (row.after, anchor) {
+                (true, a) if a + 1 == line => above.push(row),
+                (false, a) if a == line => before.push(row),
+                (true, a) if a == line && line == last => below.push(row),
+                _ => {}
+            }
+        }
+        above.extend(before);
+        (above, below)
+    }
+
+    /// The rows `row` takes: its text's, wrapped as a line would be, or its height.
+    pub(crate) fn diff_row_rows(&self, buffer: &Buffer, row: &DiffRow) -> usize {
+        let text = match buffer.wrap(self.cols) {
+            Some((width, word)) => {
+                let chars: Vec<char> = row.runs.iter().flat_map(|(t, _)| t.chars()).collect();
+                let space = |i: usize| chars[i].is_whitespace();
+                display::row_starts(chars.len(), width.max(1), word, space).len()
+            }
+            None => 1,
+        };
+        text.max(row.height)
     }
 
     /// The first line shown and its first row.
@@ -332,7 +431,7 @@ impl Window {
                 (0, 0) => break,
                 (0, _) => {
                     line = buffer.unfolded_line(line - 1, false);
-                    row = self.row_starts(buffer, line).len() - 1;
+                    row = self.block(buffer, line) - 1;
                 }
                 _ => row -= 1,
             }
@@ -343,10 +442,10 @@ impl Window {
     /// `at`, or the nearest row start the `rows` rows from the top show.
     pub(crate) fn shown(&self, buffer: &Buffer, at: usize) -> usize {
         let (line, col) = buffer.line_col(at).unwrap_or_default();
-        let row = self.row_starts(buffer, line).partition_point(|&s| s <= col) - 1;
+        let row = self.text_row(buffer, line, col);
         let mut top = (self.top, self.top_row);
         if top.1 > 0 && top.0 < buffer.len_lines() {
-            top.1 = top.1.min(self.row_starts(buffer, top.0).len() - 1);
+            top.1 = top.1.min(self.block(buffer, top.0) - 1);
         }
         let mut to = match (line, row) < top {
             true => top,
@@ -360,10 +459,19 @@ impl Window {
         match to == (line, row) {
             true => at,
             false => {
-                let start = self.row_starts(buffer, to.0)[to.1];
+                let row = to.1.saturating_sub(self.above(buffer, to.0));
+                let start = self.row_starts(buffer, to.0)[row];
                 buffer.char_idx(to.0, start).expect("a shown line")
             }
         }
+    }
+
+    /// Shows from `n` rows above the row of `at`, or from the buffer's start.
+    pub(crate) fn show_above(&mut self, buffers: &Buffers, at: usize, n: usize) {
+        let buffer = buffers.get(self.buffer).expect("window buffer is live");
+        let (line, col) = buffer.line_col(at).unwrap_or_default();
+        let (top, row) = self.back(buffer, (line, self.text_row(buffer, line, col)), n);
+        (self.top, self.top_row, self.follow) = (top, row, false);
     }
 
     /// Shows `rows` rows from `(top, top_row)`, as `scroll` would have.

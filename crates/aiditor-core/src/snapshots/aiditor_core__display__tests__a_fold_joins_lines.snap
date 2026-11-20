@@ -25,6 +25,7 @@ WindowDisplay {
             decorations: [],
             aligned: false,
             icons: [],
+            diff: None,
         },
         Line {
             number: 1,
@@ -66,6 +67,7 @@ WindowDisplay {
             ],
             aligned: false,
             icons: [],
+            diff: None,
         },
         Line {
             number: 4,
@@ -88,6 +90,7 @@ WindowDisplay {
             decorations: [],
             aligned: false,
             icons: [],
+            diff: None,
         },
     ],
     cursor: Some(
