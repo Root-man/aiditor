@@ -3282,6 +3282,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_diff_view_paints_one_mode_line_under_both_windows(cx: &mut TestAppContext) {
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "a");
+        cx.simulate_keystrokes("alt-x d i f f - s t a t u s enter");
+        cx.run_until_parked();
+        let (list, right) = editor.read_with(cx, |e, _| {
+            let p = |i: usize| (e.painted[i].bounds, e.painted[i].bar);
+            (p(0), p(1))
+        });
+        assert_eq!(list.1, None, "the list draws no mode line");
+        let bar = right.1.expect("the diff window's mode line");
+        assert_eq!((bar.left(), bar.right()), (list.0.left(), right.0.right()));
+        assert_eq!(bar.bottom(), list.0.bottom());
+    }
+
+    #[gpui::test]
     fn side_by_side_windows_leave_a_pixel_for_the_divider(cx: &mut TestAppContext) {
         let _native = NativeTest::new(cx);
         let (editor, cx) = editor(cx, "");

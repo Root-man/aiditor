@@ -801,6 +801,21 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.sessions_search(args),
         },
         Command {
+            name: "diff-status",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_status(),
+        },
+        Command {
+            name: "diff-refresh",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_refresh(),
+        },
+        Command {
+            name: "diff-quit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_quit(),
+        },
+        Command {
             name: "agent-sessions-quit",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.sessions_quit(),

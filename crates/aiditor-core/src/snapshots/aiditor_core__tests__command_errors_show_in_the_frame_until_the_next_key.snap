@@ -247,6 +247,17 @@ FrameDisplay {
                     },
                 ],
             },
+            bar: Some(
+                (
+                    Rect {
+                        x: 0.0,
+                        y: 575.0,
+                        width: 800.0,
+                        height: 25.0,
+                    },
+                    true,
+                ),
+            ),
         },
     ],
     message: Some(

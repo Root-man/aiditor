@@ -35,11 +35,28 @@ pub(crate) struct Windows {
     pub(crate) selected: WindowId,
     pub(crate) others: HashMap<WindowId, Window>,
     pub(crate) tree: Tree,
+    /// The layout the diff view replaced, restored when it quits; never itself has one.
+    pub(crate) saved: Option<Box<Windows>>,
 }
 
 impl Windows {
+    pub(crate) fn new(window: Window, selected: WindowId) -> Self {
+        Windows {
+            window,
+            selected,
+            others: HashMap::new(),
+            tree: Tree::Leaf(selected),
+            saved: None,
+        }
+    }
+
+    /// Every window, a saved layout's included.
     pub(crate) fn windows_mut(&mut self) -> impl Iterator<Item = &mut Window> {
-        std::iter::once(&mut self.window).chain(self.others.values_mut())
+        let saved = (self.saved.iter_mut())
+            .flat_map(|s| std::iter::once(&mut s.window).chain(s.others.values_mut()));
+        std::iter::once(&mut self.window)
+            .chain(self.others.values_mut())
+            .chain(saved)
     }
 
     /// Drops killed buffers from every window's history; a window that showed one shows its
@@ -87,12 +104,7 @@ impl Core {
             .workspace = Some(id);
         let selected = WindowId(self.next_window);
         self.next_window += 1;
-        let windows = Windows {
-            window: Window::new(&mut self.buffers, scratch),
-            selected,
-            others: HashMap::new(),
-            tree: Tree::Leaf(selected),
-        };
+        let windows = Windows::new(Window::new(&mut self.buffers, scratch), selected);
         self.show_workspace(Some(id), windows);
         id
     }
@@ -144,12 +156,7 @@ impl Core {
         let messages = self.messages();
         let selected = WindowId(self.next_window);
         self.next_window += 1;
-        let windows = Windows {
-            window: Window::new(&mut self.buffers, messages),
-            selected,
-            others: HashMap::new(),
-            tree: Tree::Leaf(selected),
-        };
+        let windows = Windows::new(Window::new(&mut self.buffers, messages), selected);
         self.show_workspace(None, windows);
         self.list_workspaces().expect("a new list has its point");
     }

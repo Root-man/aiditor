@@ -283,6 +283,17 @@ FrameDisplay {
                     },
                 ],
             },
+            bar: Some(
+                (
+                    Rect {
+                        x: 0.0,
+                        y: 575.0,
+                        width: 400.0,
+                        height: 25.0,
+                    },
+                    true,
+                ),
+            ),
         },
         FrameWindow {
             id: WindowId(
@@ -559,6 +570,17 @@ FrameDisplay {
                     },
                 ],
             },
+            bar: Some(
+                (
+                    Rect {
+                        x: 401.0,
+                        y: 575.0,
+                        width: 399.0,
+                        height: 25.0,
+                    },
+                    false,
+                ),
+            ),
         },
     ],
     message: None,

@@ -14,6 +14,7 @@ pub mod buffer;
 mod builtins;
 pub mod command;
 pub mod configuration;
+mod diff;
 pub mod display;
 mod editing;
 mod edits;
@@ -77,7 +78,7 @@ use minibuffer::Prompts;
 use project::{Entry, Loaded, Project, ProjectId, WriteIntent};
 use settings::Settings;
 use timer::{TimerId, Timers};
-use window::{Tree, Window, WindowId};
+use window::{Window, WindowId};
 use workspace::{Windows, Workspace, WorkspaceId};
 
 /// One filesystem completion candidate and its metadata snapshot.
@@ -1077,9 +1078,9 @@ impl Ctx<'_> {
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
             Msg::Heads(files) => self.on_heads(files),
+            Msg::GitStatus(answer) => self.core.on_git_status(answer),
             // The diff view (M9) will ask; nothing does yet.
-            Msg::GitStatus(_)
-            | Msg::GitDiffed { .. }
+            Msg::GitDiffed { .. }
             | Msg::LinesDiffed { .. }
             | Msg::GitDiffFiles { .. }
             | Msg::GitSnapshot { .. } => {}
@@ -1342,12 +1343,7 @@ impl Default for Core {
         }
         let mut core = Core {
             buffers,
-            windows: Windows {
-                window,
-                selected: WindowId(0),
-                others: HashMap::new(),
-                tree: Tree::Leaf(WindowId(0)),
-            },
+            windows: Windows::new(window, WindowId(0)),
             workspaces: Vec::new(),
             next_workspace: 0,
             shown: 0,

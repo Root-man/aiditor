@@ -293,6 +293,8 @@ pub struct FrameWindow {
     /// The px between the text and the window's left side, where it has no gutter, and its right.
     pub inset: (f32, f32),
     pub mode_line: ModeBar,
+    /// Where its mode line is drawn in the frame and whether it is active; `None` draws none.
+    pub bar: Option<(Rect, bool)>,
 }
 
 /// A window's line numbers, drawn in the width its text leaves.
