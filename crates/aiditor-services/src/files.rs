@@ -1,6 +1,6 @@
 //! Reading and writing visited files. Blocking calls; the app runs saves on Tokio's blocking pool.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -11,8 +11,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
-use aiditor_core::{FileEntry, FileOp, GitChange, GitFile, GitStatus, Head, Msg};
+use aiditor_core::buffer::{decode, encode, hash, hunks, prepare_preview, revert, unified_diff};
+use aiditor_core::{
+    ChangedFile, FileDiff, FileEntry, FileOp, GitChange, GitFile, GitObjects, GitSide, GitStatus,
+    Head, Msg,
+};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
 
@@ -149,6 +152,31 @@ pub fn run(op: FileOp) -> Msg {
                 })
                 .collect()
         })),
+        FileOp::GitDiff {
+            request,
+            repository,
+            path,
+            old,
+            new,
+            objects,
+        } => Msg::GitDiffed {
+            request,
+            result: git_diff(&repository, &path, [&old, &new], objects.as_ref()),
+        },
+        FileOp::DiffLines { request, old, new } => Msg::LinesDiffed {
+            request,
+            hunks: hunks(&old.to_string(), &new.to_string()),
+        },
+        FileOp::GitDiffFiles {
+            request,
+            root,
+            old,
+            new,
+            objects,
+        } => Msg::GitDiffFiles {
+            request,
+            result: git_diff_files(&root, &old, new.as_deref(), objects.as_ref()),
+        },
         FileOp::LanguageVersion {
             buffer,
             request,
@@ -253,26 +281,16 @@ fn git_status(root: &Path) -> Result<Option<GitStatus>, String> {
     let Some((repository, _, branch)) = repository(root) else {
         return Ok(None);
     };
-    match own_filter(root) {
-        Some(false) => {}
-        Some(true) => {
-            return Err(
-                "the repository's config defines a filter, which git status would run".into(),
-            );
-        }
-        None => return Err("git can't read the repository's config".into()),
-    }
-    let output = Command::new("git")
-        .args(["--no-optional-locks", "--literal-pathspecs"])
+    no_filter(root)?;
+    let output = git(root)
         .args([
-            "-c",
-            "core.fsmonitor=false",
             "status",
             "--porcelain=v2",
             "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
         ])
-        .args(["--untracked-files=all", "--", "."])
-        .current_dir(root)
         .output()
         .map_err(|err| format!("git: {err}"))?;
     if !output.status.success() {
@@ -289,16 +307,7 @@ fn git_status(root: &Path) -> Result<Option<GitStatus>, String> {
 /// The files in `git status --porcelain=v2 -z` output.
 fn porcelain_v2(out: &[u8]) -> Vec<GitFile> {
     let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
-    let change = |letter: u8| match letter {
-        b'M' => Some(GitChange::Modified),
-        b'T' => Some(GitChange::TypeChanged),
-        b'A' => Some(GitChange::Added),
-        b'D' => Some(GitChange::Deleted),
-        b'R' => Some(GitChange::Renamed),
-        b'C' => Some(GitChange::Copied),
-        b'U' => Some(GitChange::Unmerged),
-        _ => None,
-    };
+    let change = git_change;
     let mut records = out.split(|&b| b == 0).filter(|r| !r.is_empty());
     let mut files = Vec::new();
     while let Some(record) = records.next() {
@@ -334,6 +343,184 @@ fn porcelain_v2(out: &[u8]) -> Vec<GitFile> {
     files
 }
 
+/// A change from git's status letter.
+fn git_change(letter: u8) -> Option<GitChange> {
+    match letter {
+        b'M' => Some(GitChange::Modified),
+        b'T' => Some(GitChange::TypeChanged),
+        b'A' => Some(GitChange::Added),
+        b'D' => Some(GitChange::Deleted),
+        b'R' => Some(GitChange::Renamed),
+        b'C' => Some(GitChange::Copied),
+        b'U' => Some(GitChange::Unmerged),
+        _ => None,
+    }
+}
+
+/// `path`'s texts on two sides of the repository at `repository`, decoded as a buffer would be,
+/// and the lines that differ.
+fn git_diff(
+    repository: &Path,
+    path: &Path,
+    sides: [&GitSide; 2],
+    objects: Option<&GitObjects>,
+) -> Result<FileDiff, String> {
+    let [old, new] = sides.map(|side| {
+        let bytes = side_bytes(repository, path, side, objects)?;
+        decode(&bytes)
+            .map(|(text, ..)| text)
+            .map_err(|reason| format!("{}: {reason}", path.display()))
+    });
+    let (old, new) = (old?, new?);
+    Ok(FileDiff {
+        hunks: hunks(&old, &new),
+        old: old.into(),
+        new: new.into(),
+    })
+}
+
+/// `path`'s bytes on `side`, empty where it is missing.
+// shortcut: a blob is read whole with no size limit; check `cat-file -s` first if a huge one turns up.
+fn side_bytes(
+    repository: &Path,
+    path: &Path,
+    side: &GitSide,
+    objects: Option<&GitObjects>,
+) -> Result<Vec<u8>, String> {
+    let tree = match side {
+        // shortcut: a symlink reads as its target and a submodule as an error, unlike a tree side; read links and gitlinks if the view shows them.
+        GitSide::WorkingTree => {
+            let file = repository.join(path);
+            let read = read(&file).map_err(|err| format!("{}: {err}", file.display()))?;
+            return Ok(read.map(|(bytes, _)| bytes).unwrap_or_default());
+        }
+        GitSide::Index => None,
+        GitSide::Tree(tree) => Some(tree_ish(tree)?),
+    };
+    // Stage 0, since `:/…` would search commit messages.
+    let mut spec = OsString::from(format!("{}:", tree.unwrap_or(":0")));
+    spec.push(path);
+    let output = with_objects(git(repository), objects)?
+        .args(["cat-file", "blob"])
+        .arg(&spec)
+        .output()
+        .map_err(|err| format!("git: {err}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    // A missing path and an unknown tree-ish fail alike; a tree-ish that names a tree means the former.
+    let missing = tree.is_none_or(|tree| {
+        (with_objects(git(repository), objects).ok())
+            .unwrap_or_else(|| git(repository))
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("{tree}^{{tree}}"))
+            .output()
+            .is_ok_and(|o| o.status.success())
+    });
+    match missing {
+        true => Ok(Vec::new()),
+        false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+    }
+}
+
+/// The files under `root` that differ between `old` and `new`, or the working tree, as
+/// `git diff --name-status` reports them.
+fn git_diff_files(
+    root: &Path,
+    old: &str,
+    new: Option<&str>,
+    objects: Option<&GitObjects>,
+) -> Result<Vec<ChangedFile>, String> {
+    let trees = [Some(old), new].into_iter().flatten();
+    let trees = trees.map(tree_ish).collect::<Result<Vec<_>, _>>()?;
+    if new.is_none() {
+        no_filter(root)?;
+    }
+    let output = with_objects(git(root), objects)?
+        .args([
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-ext-diff",
+            "--no-relative",
+        ])
+        .args(trees)
+        .args(["--", "."])
+        .output()
+        .map_err(|err| format!("git: {err}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(name_status(&output.stdout))
+}
+
+/// The files in `git diff --name-status -z` output: a status, then the path, or a rename's or
+/// copy's old and new paths.
+fn name_status(out: &[u8]) -> Vec<ChangedFile> {
+    let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+    let mut fields = out.split(|&b| b == 0);
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let Some(change) = status.first().copied().and_then(git_change) else {
+            continue;
+        };
+        let Some(first) = fields.next() else { break };
+        let (name, old_path) = match change {
+            GitChange::Renamed | GitChange::Copied => (fields.next(), Some(path(first))),
+            _ => (Some(first), None),
+        };
+        // The output ends in NUL, so a cut record's last field is empty.
+        let Some(name) = name.filter(|name| !name.is_empty()) else {
+            break;
+        };
+        files.push(ChangedFile {
+            path: path(name),
+            change,
+            old_path,
+        });
+    }
+    files
+}
+
+/// `tree`, unless git would read it as an option.
+fn tree_ish(tree: &str) -> Result<&str, String> {
+    match tree.starts_with('-') {
+        true => Err(format!("{tree}: not a tree-ish")),
+        false => Ok(tree),
+    }
+}
+
+/// git in `dir` with no optional locks, literal pathspecs and fsmonitor off, so it neither
+/// rewrites the index nor runs the repository's fsmonitor command.
+fn git(dir: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.args(["--no-optional-locks", "--literal-pathspecs"])
+        .args(["-c", "core.fsmonitor=false"])
+        .current_dir(dir);
+    git
+}
+
+/// `git` reading objects from `objects` instead of the repository's.
+fn with_objects(mut git: Command, objects: Option<&GitObjects>) -> Result<Command, String> {
+    if let Some(objects) = objects {
+        let alternates = std::env::join_paths(&objects.alternates)
+            .map_err(|err| format!("object alternates: {err}"))?;
+        git.env("GIT_OBJECT_DIRECTORY", &objects.directory);
+        git.env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternates);
+    }
+    Ok(git)
+}
+
+/// Err when the repository at `dir` defines a content filter, which git would run, or git
+/// can't say.
+fn no_filter(dir: &Path) -> Result<(), String> {
+    match own_filter(dir) {
+        Some(false) => Ok(()),
+        Some(true) => Err("the repository's config defines a filter, which git would run".into()),
+        None => Err("git can't read the repository's config".into()),
+    }
+}
+
 /// Whether git reports `path` as changed or untracked; no if git can't say.
 // shortcut: two processes per file, so a commit with many buffers open runs many; ask once per repository if that shows.
 fn changed(path: &Path) -> bool {
@@ -345,11 +532,9 @@ fn changed(path: &Path) -> bool {
     }
     // Without `--no-optional-locks` status rewrites the index, whose report would run it again.
     // A repository's `core.fsmonitor` is a command, and opening a file mustn't run it.
-    let status = Command::new("git")
-        .args(["--no-optional-locks", "--literal-pathspecs"])
-        .args(["-c", "core.fsmonitor=false", "status", "--porcelain", "--"])
+    let status = git(dir)
+        .args(["status", "--porcelain", "--"])
         .arg(name)
-        .current_dir(dir)
         .stderr(Stdio::null())
         .output();
     status.is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
@@ -804,6 +989,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+    use aiditor_core::Hunk;
+    use std::ops::Range;
 
     fn hash_of(path: &Path) -> Option<u64> {
         read(path).unwrap().map(|(_, h)| h)
@@ -1874,6 +2061,300 @@ mod tests {
                 raw,
                 file("", None, Some(Untracked)),
             ]
+        );
+    }
+
+    fn diff_of(
+        repo: &Path,
+        path: &str,
+        old: GitSide,
+        new: GitSide,
+        objects: Option<GitObjects>,
+    ) -> Result<(String, String, Vec<Hunk>), String> {
+        let op = FileOp::GitDiff {
+            request: 7,
+            repository: repo.into(),
+            path: path.into(),
+            old,
+            new,
+            objects,
+        };
+        match run(op) {
+            Msg::GitDiffed { request: 7, result } => {
+                result.map(|d| (d.old.to_string(), d.new.to_string(), d.hunks))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn listed(
+        root: &Path,
+        old: &str,
+        new: Option<&str>,
+        objects: Option<GitObjects>,
+    ) -> Result<Vec<ChangedFile>, String> {
+        let op = FileOp::GitDiffFiles {
+            request: 8,
+            root: root.into(),
+            old: old.into(),
+            new: new.map(Into::into),
+            objects,
+        };
+        match run(op) {
+            Msg::GitDiffFiles { request: 8, result } => result,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn hunk(old: Range<usize>, new: Range<usize>) -> Hunk {
+        Hunk { old, new }
+    }
+
+    fn changed_file(path: &str, change: GitChange, old_path: Option<&str>) -> ChangedFile {
+        ChangedFile {
+            path: path.into(),
+            change,
+            old_path: old_path.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn git_diff_reads_each_pair_of_sides() {
+        use GitSide::*;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| git_in(repo, args);
+        let write = |text: &str| fs::write(repo.join("a.txt"), text).unwrap();
+        git(&["init", "-q"]);
+        write("x\none\n");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "1"]);
+        write("x\ntwo\n");
+        git(&["commit", "-qam", "2"]);
+        write("x\nthree\n");
+        git(&["add", "."]);
+        write("x\r\nfour\r\n");
+        let tree = |t: &str| Tree(t.into());
+        let pairs = [
+            (tree("HEAD~"), tree("HEAD"), "one", "two"),
+            (tree("HEAD"), Index, "two", "three"),
+            (Index, WorkingTree, "three", "four"),
+            (tree("HEAD"), WorkingTree, "two", "four"),
+        ];
+        for (old, new, before, after) in pairs {
+            assert_eq!(
+                diff_of(repo, "a.txt", old.clone(), new.clone(), None),
+                Ok((
+                    format!("x\n{before}\n"),
+                    format!("x\n{after}\n"),
+                    vec![hunk(1..2, 1..2)]
+                )),
+                "{old:?} → {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_diff_reads_a_missing_side_as_empty() {
+        use GitSide::*;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| git_in(repo, args);
+        git(&["init", "-q"]);
+        fs::write(repo.join("gone"), "a\nb\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "1"]);
+        git(&["rm", "-q", "gone"]);
+        fs::write(repo.join("added"), "a\nb\n").unwrap();
+        git(&["add", "added"]);
+        fs::write(repo.join("untracked"), "a\nb\n").unwrap();
+        let both = |path| diff_of(repo, path, Tree("HEAD".into()), Index, None);
+        let all = vec![hunk(0..0, 0..2)];
+        assert_eq!(both("added"), Ok(("".into(), "a\nb\n".into(), all.clone())));
+        assert_eq!(
+            both("gone"),
+            Ok(("a\nb\n".into(), "".into(), vec![hunk(0..2, 0..0)]))
+        );
+        assert_eq!(
+            diff_of(repo, "untracked", Index, WorkingTree, None),
+            Ok(("".into(), "a\nb\n".into(), all))
+        );
+        let unknown = diff_of(repo, "added", Tree("nope".into()), Index, None);
+        assert!(unknown.is_err(), "{unknown:?}");
+    }
+
+    #[test]
+    fn git_diff_answers_a_binary_file_s_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_in(repo, &["init", "-q"]);
+        fs::write(repo.join("bin"), b"a\0b").unwrap();
+        git_in(repo, &["add", "."]);
+        let result = diff_of(repo, "bin", GitSide::Index, GitSide::WorkingTree, None);
+        assert_eq!(result, Err("bin: binary file".into()));
+    }
+
+    #[test]
+    fn diff_lines_matches_the_diff_of_the_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_in(repo, &["init", "-q"]);
+        let old = "a\nb\nc\nd\ne\n";
+        fs::write(repo.join("f"), old).unwrap();
+        git_in(repo, &["add", "."]);
+        let edited = "a\nB\nc\ne\nf\n";
+        let op = FileOp::DiffLines {
+            request: 3,
+            old: old.into(),
+            new: edited.into(),
+        };
+        let Msg::LinesDiffed { request: 3, hunks } = run(op) else {
+            panic!("not diffed")
+        };
+        assert!(!hunks.is_empty());
+        fs::write(repo.join("f"), edited).unwrap();
+        let saved = diff_of(repo, "f", GitSide::Index, GitSide::WorkingTree, None);
+        assert_eq!(saved.unwrap().2, hunks);
+    }
+
+    #[test]
+    fn git_diff_files_lists_what_git_diff_name_status_does() {
+        use GitChange::*;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| git_in(repo, args);
+        git(&["init", "-q"]);
+        for name in ["mod", "gone", "old", "ä b"] {
+            fs::write(repo.join(name), format!("{name}\nsame\nlines\nhere\n")).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "1"]);
+        fs::write(repo.join("mod"), "changed\n").unwrap();
+        fs::write(repo.join("new"), "new\n").unwrap();
+        git(&["rm", "-q", "gone"]);
+        git(&["mv", "old", "renamed"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "2"]);
+        let names = Command::new("git")
+            .args(["diff", "--name-status", "HEAD~", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&names.stdout).lines().count(), 4);
+        assert_eq!(
+            listed(repo, "HEAD~", Some("HEAD"), None),
+            Ok(vec![
+                changed_file("gone", Deleted, None),
+                changed_file("mod", Modified, None),
+                changed_file("new", Added, None),
+                changed_file("renamed", Renamed, Some("old")),
+            ])
+        );
+        fs::write(repo.join("ä b"), "edited\n").unwrap();
+        fs::write(repo.join("untracked"), "u\n").unwrap();
+        assert_eq!(
+            listed(repo, "HEAD", None, None),
+            Ok(vec![changed_file("ä b", Modified, None)])
+        );
+    }
+
+    #[test]
+    fn git_diff_reads_a_snapshot_tree_from_its_object_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = &dir.path().join("repo");
+        let snapshot = dir.path().join("snapshot");
+        fs::create_dir_all(repo).unwrap();
+        fs::create_dir_all(snapshot.join("objects")).unwrap();
+        git_in(repo, &["init", "-q"]);
+        fs::write(repo.join("a"), "one\n").unwrap();
+        git_in(repo, &["add", "."]);
+        git_in(repo, &["commit", "-qm", "1"]);
+        fs::write(repo.join("a"), "two\n").unwrap();
+        let objects = GitObjects {
+            directory: snapshot.join("objects"),
+            alternates: vec![repo.join(".git/objects")],
+        };
+        fs::copy(repo.join(".git/index"), snapshot.join("index")).unwrap();
+        let snap = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .env("GIT_INDEX_FILE", snapshot.join("index"))
+                .env("GIT_OBJECT_DIRECTORY", &objects.directory)
+                .env(
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                    repo.join(".git/objects"),
+                )
+                .current_dir(repo)
+                .output()
+                .unwrap()
+        };
+        assert!(snap(&["add", "-A"]).status.success());
+        let tree = String::from_utf8(snap(&["write-tree"]).stdout).unwrap();
+        let tree = tree.trim();
+        fs::write(repo.join("a"), "three\n").unwrap();
+        let side = || GitSide::Tree(tree.into());
+        assert_eq!(
+            diff_of(
+                repo,
+                "a",
+                side(),
+                GitSide::WorkingTree,
+                Some(objects.clone())
+            ),
+            Ok(("two\n".into(), "three\n".into(), vec![hunk(0..1, 0..1)]))
+        );
+        assert_eq!(
+            listed(repo, tree, None, Some(objects)),
+            Ok(vec![changed_file("a", GitChange::Modified, None)])
+        );
+        let without = diff_of(repo, "a", side(), GitSide::WorkingTree, None);
+        assert!(without.is_err(), "{without:?}");
+    }
+
+    #[test]
+    fn git_diff_runs_no_option_or_repository_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_in(repo, &["init", "-q"]);
+        fs::write(repo.join("a"), "a\n").unwrap();
+        git_in(repo, &["add", "."]);
+        git_in(repo, &["commit", "-qm", "1"]);
+        let option = GitSide::Tree("--output=x".into());
+        assert!(diff_of(repo, "a", option, GitSide::Index, None).is_err());
+        assert!(listed(repo, "HEAD", Some("--output=x"), None).is_err());
+        assert!(!repo.join("x").exists());
+        git_in(repo, &["config", "filter.x.clean", "touch marker; cat"]);
+        fs::write(repo.join(".gitattributes"), "* filter=x\n").unwrap();
+        fs::write(repo.join("a"), "b\n").unwrap();
+        assert!(listed(repo, "HEAD", None, None).is_err());
+        assert_eq!(listed(repo, "HEAD", Some("HEAD"), None), Ok(vec![]));
+        assert!(!repo.join("marker").exists());
+    }
+
+    #[test]
+    fn name_status_reads_copies_raw_names_and_stops_at_a_cut_record() {
+        use GitChange::*;
+        let out = b"C075\0src\0copy\0M\0raw\xff\0R100\0old\0".to_vec();
+        let raw = ChangedFile {
+            path: PathBuf::from(OsStr::from_bytes(b"raw\xff")),
+            ..changed_file("", Modified, None)
+        };
+        assert_eq!(
+            name_status(&out),
+            [changed_file("copy", Copied, Some("src")), raw]
+        );
+    }
+
+    #[test]
+    fn git_diff_strips_a_byte_order_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_in(repo, &["init", "-q"]);
+        fs::write(repo.join("a"), "\u{feff}a\n").unwrap();
+        let result = diff_of(repo, "a", GitSide::Index, GitSide::WorkingTree, None);
+        assert_eq!(
+            result,
+            Ok(("".into(), "a\n".into(), vec![hunk(0..0, 0..1)]))
         );
     }
 }
