@@ -172,6 +172,22 @@ pub enum Msg {
     /// The file service's answer to `FileOp::GitStatus`, in the roots' order: `Ok(None)` for a
     /// root in no repository, `Err` for git's failure.
     GitStatus(Vec<(PathBuf, Result<Option<GitStatus>, String>)>),
+    /// The file service's answer to `FileOp::GitDiff` `request`: the file's texts and changed
+    /// lines, or why there are none.
+    GitDiffed {
+        request: u64,
+        result: Result<FileDiff, String>,
+    },
+    /// The file service's answer to `FileOp::DiffLines` `request`.
+    LinesDiffed {
+        request: u64,
+        hunks: Vec<Hunk>,
+    },
+    /// The file service's answer to `FileOp::GitDiffFiles` `request`.
+    GitDiffFiles {
+        request: u64,
+        result: Result<Vec<ChangedFile>, String>,
+    },
     /// The file service's declared language version for a buffer's latest lookup.
     LanguageVersion {
         buffer: BufferId,
@@ -411,6 +427,47 @@ pub enum GitChange {
     Untracked,
 }
 
+/// One side of a diff.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GitSide {
+    Tree(String),
+    Index,
+    WorkingTree,
+}
+
+/// Where git reads objects from instead of the repository's: a snapshot's object directory and
+/// its alternates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitObjects {
+    pub directory: PathBuf,
+    pub alternates: Vec<PathBuf>,
+}
+
+/// A file's text on two sides and the lines that differ.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileDiff {
+    pub old: Rope,
+    pub new: Rope,
+    pub hunks: Vec<Hunk>,
+}
+
+/// The `old` side's lines that the `new` side's replace; an empty range is where lines are only
+/// added or only removed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hunk {
+    pub old: Range<usize>,
+    pub new: Range<usize>,
+}
+
+/// A file that differs between two sides, as `git diff --name-status` reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangedFile {
+    pub path: PathBuf,
+    pub change: GitChange,
+    /// A rename's or copy's source.
+    pub old_path: Option<PathBuf>,
+}
+
 /// What a path the watcher reports is on disk now.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Disk {
@@ -568,6 +625,27 @@ pub enum FileOp {
     Head(Vec<PathBuf>),
     /// Ask git for each root's branch and changed files and send `Msg::GitStatus`.
     GitStatus(Vec<PathBuf>),
+    /// Read `path`, relative to the repository's top directory `repository`, on the `old` and
+    /// `new` sides, diff them and send `Msg::GitDiffed`.
+    GitDiff {
+        request: u64,
+        repository: PathBuf,
+        path: PathBuf,
+        old: GitSide,
+        new: GitSide,
+        objects: Option<GitObjects>,
+    },
+    /// Diff a held old side against a snapshot of a buffer's text and send `Msg::LinesDiffed`.
+    DiffLines { request: u64, old: Rope, new: Rope },
+    /// List the files under `root` that differ between the tree-ishes `old` and `new`, or the
+    /// working tree when `new` is `None`, and send `Msg::GitDiffFiles`.
+    GitDiffFiles {
+        request: u64,
+        root: PathBuf,
+        old: String,
+        new: Option<String>,
+        objects: Option<GitObjects>,
+    },
     /// Read the nearest pin for this language and answer `Msg::LanguageVersion`.
     LanguageVersion {
         buffer: BufferId,
@@ -978,7 +1056,10 @@ impl Ctx<'_> {
             Msg::Checked(files) => self.on_checked(files),
             Msg::Heads(files) => self.on_heads(files),
             // The diff view (M9) will ask; nothing does yet.
-            Msg::GitStatus(_) => {}
+            Msg::GitStatus(_)
+            | Msg::GitDiffed { .. }
+            | Msg::LinesDiffed { .. }
+            | Msg::GitDiffFiles { .. } => {}
             Msg::LanguageVersion {
                 buffer,
                 request,

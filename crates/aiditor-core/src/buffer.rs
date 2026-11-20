@@ -1377,6 +1377,28 @@ pub fn diff(old: &str, new: &str) -> Vec<(Range<usize>, String)> {
     edits
 }
 
+/// The runs of lines that differ between `old` and `new`, in order. Diffing is slow, so services
+/// call this.
+pub fn hunks(old: &str, new: &str) -> Vec<crate::Hunk> {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut hunks: Vec<crate::Hunk> = Vec::new();
+    for op in diff
+        .ops()
+        .iter()
+        .filter(|op| op.tag() != similar::DiffTag::Equal)
+    {
+        let (old, new) = (op.old_range(), op.new_range());
+        match hunks.last_mut() {
+            Some(last) if last.old.end == old.start && last.new.end == new.start => {
+                last.old.end = old.end;
+                last.new.end = new.end;
+            }
+            _ => hunks.push(crate::Hunk { old, new }),
+        }
+    }
+    hunks
+}
+
 /// The text as the file's bytes: its BOM and line ending, as loaded.
 pub fn encode(text: &Rope, crlf: bool, bom: bool) -> Vec<u8> {
     let mut out = String::with_capacity(text.len_bytes() + 3);
@@ -2108,6 +2130,17 @@ mod tests {
         assert_eq!(b.text().to_string(), "x");
         assert!(b.read_only && !b.modified());
         assert_eq!(b.undo(), None);
+    }
+
+    #[test]
+    fn hunks_join_a_change_and_mark_pure_additions_and_removals() {
+        let hunk = |old, new| crate::Hunk { old, new };
+        let old = "a\nb\nc\nd\n";
+        assert_eq!(hunks(old, old), []);
+        assert_eq!(hunks(old, "a\nB\nC\nd\n"), [hunk(1..3, 1..3)]);
+        assert_eq!(hunks(old, "a\nb\nx\nc\nd\n"), [hunk(2..2, 2..3)]);
+        assert_eq!(hunks(old, "b\nc\nd"), [hunk(0..1, 0..0), hunk(3..4, 2..3)]);
+        assert_eq!(hunks("", "a\n"), [hunk(0..0, 0..1)]);
     }
 
     #[test]
