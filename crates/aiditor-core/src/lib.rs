@@ -359,6 +359,8 @@ pub struct Recovered {
 pub struct Head {
     /// The repository's `HEAD` file.
     pub path: PathBuf,
+    /// The directory holding the repository's `.git`, the file's repository root.
+    pub root: PathBuf,
     pub branch: String,
     /// Git reports a change to the file, staged or not, or the file is untracked.
     pub changed: bool,

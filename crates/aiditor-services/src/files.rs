@@ -199,6 +199,7 @@ pub fn head(path: &Path) -> Option<Head> {
     let git = (path.ancestors().skip(1))
         .map(|dir| dir.join(".git"))
         .find(|git| git.exists())?;
+    let root = git.parent()?.to_path_buf();
     let dir = match git.is_file() {
         true => {
             let text = fs::read_to_string(&git).ok()?;
@@ -218,6 +219,7 @@ pub fn head(path: &Path) -> Option<Head> {
     };
     Some(Head {
         path: head,
+        root,
         branch,
         changed: changed(path),
     })
@@ -1275,6 +1277,7 @@ mod tests {
         let found = |name: &str| {
             Some(Head {
                 path: git.join("HEAD"),
+                root: dir.path().to_path_buf(),
                 branch: name.to_string(),
                 changed: false,
             })
@@ -1307,6 +1310,7 @@ mod tests {
             let found = head(&tree.join("a.rs")).unwrap();
             assert_eq!(found.branch, "side");
             assert!(found.path.ends_with("worktrees/tree/HEAD"));
+            assert_eq!(found.root, tree, "the worktree, not the main repository");
         }
     }
 

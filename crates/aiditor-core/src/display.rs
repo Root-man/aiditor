@@ -2798,6 +2798,7 @@ mod tests {
         let mut h = Harness::new(&[("a.txt", "")]);
         let mut head = crate::Head {
             path: h.path(".git/HEAD"),
+            root: h.path(""),
             branch: "main".into(),
             changed: false,
         };

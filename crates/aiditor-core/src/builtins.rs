@@ -129,6 +129,22 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, args| ctx.kill_region(args.region, true),
         },
         Command {
+            name: "copy-relative-path",
+            spec: ArgSpec {
+                clipboard: true,
+                ..ArgSpec::default()
+            },
+            handler: |ctx, _| ctx.copy_path(true),
+        },
+        Command {
+            name: "copy-absolute-path",
+            spec: ArgSpec {
+                clipboard: true,
+                ..ArgSpec::default()
+            },
+            handler: |ctx, _| ctx.copy_path(false),
+        },
+        Command {
             name: "yank",
             spec: ArgSpec {
                 clipboard: true,

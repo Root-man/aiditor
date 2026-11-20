@@ -410,9 +410,10 @@ mod tests {
     #[test]
     fn the_branch_follows_a_checkout_and_a_rescan() {
         let mut h = Harness::new(&[("a.txt", "a\n"), ("b.txt", "b\n")]);
-        let (a, head) = (h.path("a.txt"), h.path(".git/HEAD"));
+        let (a, head, root) = (h.path("a.txt"), h.path(".git/HEAD"), h.path(""));
         let on = |branch: &str| crate::Head {
             path: head.clone(),
+            root: root.clone(),
             branch: branch.into(),
             changed: false,
         };
@@ -478,6 +479,7 @@ mod tests {
         let head = h.path(".git/HEAD");
         let found = crate::Head {
             path: head.clone(),
+            root: h.path(""),
             branch: "main".into(),
             changed: false,
         };
