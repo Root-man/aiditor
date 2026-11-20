@@ -21,6 +21,9 @@ mod icons;
 mod input;
 #[cfg(target_os = "macos")]
 mod notifications;
+#[cfg(target_os = "linux")]
+#[path = "notifications_linux.rs"]
+mod notifications;
 
 #[cfg(test)]
 #[path = "../../aiditor-services/tests/support/native.rs"]

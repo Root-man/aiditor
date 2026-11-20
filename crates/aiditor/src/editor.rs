@@ -41,7 +41,7 @@ pub(crate) struct Editor {
     /// The windows area's size and cell width last sent to the core.
     pub(crate) reported: (Pixels, Pixels, Pixels),
     /// The notification center, made on the first notification; `None` outside an app bundle.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     notifications: std::cell::OnceCell<Option<crate::notifications::Notifications>>,
 }
 
@@ -135,7 +135,7 @@ impl Editor {
             marked: None,
             painted: Vec::new(),
             reported: Default::default(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             notifications: Default::default(),
         }
     }
@@ -473,6 +473,14 @@ impl Editor {
     /// Every message reaches the core here, so the timer is always re-armed.
     pub(crate) fn handle(&mut self, msg: Msg, cx: &mut Context<Self>) {
         let start = Instant::now();
+        // macOS raises the app on a click itself; Linux needs asking.
+        if matches!(msg, Msg::NotificationClicked { .. }) {
+            cx.defer(|cx| {
+                for window in cx.windows() {
+                    _ = window.update(cx, |_, window, _| window.activate_window());
+                }
+            });
+        }
         if let Some(benchmark) = &mut self.benchmark {
             benchmark.output(&msg, start);
         }
@@ -500,7 +508,7 @@ impl Editor {
                 }
                 Run::Platform(Effect::OpenWithSystem(path)) => cx.open_with_system(&path),
                 Run::Platform(Effect::OpenUrl(url)) => cx.open_url(&url),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 Run::Platform(Effect::Notify { tag, title, body }) => {
                     let tx = &self.runner.tx;
                     let center = (self.notifications)
@@ -509,8 +517,7 @@ impl Editor {
                         center.show(&tag, &title, &body, tx.clone());
                     }
                 }
-                // shortcut: Linux posts nothing until #527.
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 Run::Platform(Effect::Notify { .. }) => {}
                 Run::Platform(Effect::Quit) => {
                     self.runner.shutdown();
