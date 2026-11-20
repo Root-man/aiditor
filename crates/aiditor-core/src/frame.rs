@@ -113,7 +113,7 @@ impl Core {
     }
 
     /// The roots of the current workspace's project.
-    fn roots(&self) -> Vec<PathBuf> {
+    pub(crate) fn roots(&self) -> Vec<PathBuf> {
         let Ok(workspace) = self.current_workspace() else {
             return Vec::new();
         };
@@ -147,6 +147,7 @@ impl Core {
         };
         let chrome = self.settings.mode_line_height();
         let panes = self.windows.tree.layout(frame, cell, chrome);
+        let span = self.diff_bar(&panes, chrome);
         self.render_streams(&self.shown_buffers());
         let origin = self.prompts.minibuffer.as_ref().map(|mb| mb.from);
         let search = self.prompts.preview_search(&self.grep, &self.commands);
@@ -232,7 +233,23 @@ impl Core {
                     let unwatched = ("[unwatched]".to_string(), FaceName::ModeLineDim);
                     display.mode_line.right.insert(0, vec![unwatched]);
                 }
-                let bar_cols = ((rect.width - 2. * TEXT_INSET) / cell_width) as usize;
+                // The diff list's window draws no mode line; the one right of it draws one under both.
+                let bar = match span {
+                    Some((list, ..)) if list == id => None,
+                    Some((list, right, bar)) if right == id => {
+                        Some((bar, selected || list == self.windows.selected))
+                    }
+                    _ => Some((
+                        display::Rect {
+                            y: rect.y + rect.height - chrome,
+                            height: chrome,
+                            ..rect
+                        },
+                        selected,
+                    )),
+                };
+                let bar_width = bar.map_or(rect.width, |(r, _)| r.width);
+                let bar_cols = ((bar_width - 2. * TEXT_INSET) / cell_width) as usize;
                 if buffers
                     .get(window.buffer())
                     .unwrap()
@@ -243,7 +260,8 @@ impl Core {
                 {
                     display.mode_line.left.truncate(1);
                 }
-                let mode_line = display.mode_line.draw(bar_cols, selected, &settings.theme);
+                let active = bar.is_some_and(|(_, active)| active);
+                let mode_line = display.mode_line.draw(bar_cols, active, &settings.theme);
                 display::FrameWindow {
                     id,
                     rect,
@@ -252,6 +270,7 @@ impl Core {
                     gutter,
                     inset,
                     mode_line,
+                    bar,
                 }
             })
             .collect();
@@ -280,6 +299,7 @@ impl Core {
                     None => crate::workspace_list::LOBBY_HINTS,
                 }),
                 Some(b) if b.session_list().is_some() => self.key_hints(crate::sessions::HINTS),
+                Some(b) if b.diff_list().is_some() => self.key_hints(crate::diff::HINTS),
                 _ => Vec::new(),
             },
             minibuffer: self.minibuffer(),
@@ -287,6 +307,32 @@ impl Core {
             title,
             workspaces,
         }
+    }
+
+    /// While the diff view is open, its list's window, the window right of it along its bottom
+    /// edge, and the mode line under both.
+    fn diff_bar(
+        &self,
+        panes: &[(WindowId, display::Rect)],
+        chrome: f32,
+    ) -> Option<(WindowId, WindowId, display::Rect)> {
+        self.windows.saved.as_ref()?;
+        let shows_list = |id: &WindowId| {
+            let window = (self.windows.others.get(id)).unwrap_or(&self.windows.window);
+            (self.buffers.get(window.buffer())).is_some_and(|b| b.diff_list().is_some())
+        };
+        let &(list, l) = panes.iter().find(|(id, _)| shows_list(id))?;
+        let &(right, r) = panes.iter().find(|(_, r)| {
+            (r.x - (l.x + l.width + crate::window::DIVIDER)).abs() < 0.5
+                && (r.y + r.height - (l.y + l.height)).abs() < 0.5
+        })?;
+        let bar = display::Rect {
+            x: l.x,
+            y: r.y + r.height - chrome,
+            width: r.x + r.width - l.x,
+            height: chrome,
+        };
+        Some((list, right, bar))
     }
 
     /// Makes window `id` the selected one.

@@ -289,6 +289,8 @@ pub(crate) enum Kind {
     },
     /// `*Sessions*`.
     SessionList(crate::sessions::SessionList),
+    /// The diff view's changed-file list.
+    DiffList(crate::diff::DiffList),
 }
 
 static EMPTY: LazyLock<Rope> = LazyLock::new(Rope::new);
@@ -718,6 +720,20 @@ impl Buffer {
     pub(crate) fn session_list_mut(&mut self) -> Option<&mut crate::sessions::SessionList> {
         match &mut self.kind {
             Kind::SessionList(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn diff_list(&self) -> Option<&crate::diff::DiffList> {
+        match &self.kind {
+            Kind::DiffList(list) => Some(list),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn diff_list_mut(&mut self) -> Option<&mut crate::diff::DiffList> {
+        match &mut self.kind {
+            Kind::DiffList(list) => Some(list),
             _ => None,
         }
     }

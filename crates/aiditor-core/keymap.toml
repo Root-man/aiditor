@@ -192,6 +192,15 @@
 "g" = "agent-sessions"
 "q" = "agent-sessions-quit"
 
+[diff-list-mode]
+"g" = "diff-refresh"
+"q" = "diff-quit"
+
+# On while the diff view is open, in both its windows.
+[diff-view]
+"C-c g" = "diff-refresh"
+"C-c q" = "diff-quit"
+
 [minibuffer-mode]
 "RET" = "exit-minibuffer"
 "C-g" = "abort-minibuffers"

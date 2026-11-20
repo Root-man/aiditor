@@ -99,6 +99,11 @@ session-code = { fg = 0xce9178 }
 diff-added = { fg = 0x0dbc79 }
 diff-removed = { fg = 0xf14c4c }
 diff-hunk = { fg = 0x569cd6 }
+diff-file-modified = { fg = 0xfabd2f }
+diff-file-added = { fg = 0xb8bb26 }
+diff-file-deleted = { fg = 0xfb4934 }
+diff-file-untracked = { fg = 0x928374 }
+diff-list-group = { fg = 0x83a598, bold = true }
 key-hint = { fg = 0x1e1e1e, bg = 0xffcc00, bold = true }
 permission = { bg = 0x3c3c3c }
 link = { fg = 0xce9178, underline = true }

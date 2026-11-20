@@ -7,7 +7,7 @@ use crate::workspace::WorkspaceId;
 /// How many marks the ring keeps, Emacs's `mark-ring-max`.
 const MARK_RING_MAX: usize = 16;
 /// The px between side-by-side windows.
-const DIVIDER: f32 = 1.;
+pub(crate) const DIVIDER: f32 = 1.;
 
 pub struct Window {
     buffer: BufferId,

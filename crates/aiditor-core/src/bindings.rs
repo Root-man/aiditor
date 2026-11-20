@@ -38,9 +38,9 @@ impl Core {
     /// The keymaps in lookup order.
     fn layers(&self) -> impl Iterator<Item = &Keymap> {
         let buffer = self.current();
-        let modes = buffer
-            .minor_modes
-            .iter()
+        let view = self.windows.saved.as_ref().map(|_| &"diff-view");
+        let modes = (buffer.minor_modes.iter())
+            .chain(view)
             .chain([&buffer.major_mode, &"global"]);
         self.transient
             .iter()

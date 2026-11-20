@@ -32,6 +32,8 @@ pub(crate) struct Painted {
     pub(crate) rule: Option<Bounds<Pixels>>,
     /// A terminal's runs, each placed on its grid column.
     pub(crate) cells: Vec<Cells>,
+    /// Where its mode line is drawn, which can be wider than the window; `None` for none.
+    pub(crate) bar: Option<Bounds<Pixels>>,
     /// Its mode line's background and an inactive one's rule, each with its colour.
     pub(crate) mode_line_fill: Vec<(Bounds<Pixels>, u32)>,
     pub(crate) mode_line: ShapedLine,
@@ -46,7 +48,7 @@ pub(crate) struct Painted {
 impl Painted {
     /// Where the mode line's right group starts, so that it ends at the window's right inset.
     pub(crate) fn mode_line_right_x(&self) -> Pixels {
-        self.bounds.right() - px(TEXT_INSET) - self.mode_line_right.width
+        self.bar.unwrap_or(self.bounds).right() - px(TEXT_INSET) - self.mode_line_right.width
     }
 }
 
@@ -176,8 +178,9 @@ impl Element for FrameElement {
                 (window.text_system()).shape_line(text.into(), font_size, runs, None)
             };
             let line_height = px(settings.line_height());
+            let origin = bounds.origin;
             let painted = std::mem::take(&mut self.windows).into_iter().map(|w| {
-                let bounds = to_bounds(w.rect, bounds.origin);
+                let bounds = to_bounds(w.rect, origin);
                 let text_x = px(w.gutter.as_ref().map_or(w.inset.0, |g| g.width));
                 let mut top = px(0.);
                 let mut cursor = None;
@@ -352,7 +355,8 @@ impl Element for FrameElement {
                         }
                     }
                 }
-                let line_face = match w.selected {
+                let active = w.bar.is_some_and(|(_, active)| active);
+                let line_face = match active {
                     true => FaceName::ModeLine,
                     false => FaceName::ModeLineInactive,
                 };
@@ -362,23 +366,11 @@ impl Element for FrameElement {
                         |s: &Span| text_run(s.text.len(), s.face, false, &font, &settings.theme);
                     shape(text, &spans.iter().map(run).collect::<Vec<_>>())
                 };
-                let height = px(settings.mode_line_height());
-                let bar = Bounds::new(
-                    point(bounds.left(), bounds.bottom() - height),
-                    gpui::size(bounds.size.width, height),
-                );
-                let bar_fill = settings.theme.face(line_face).bg.map(|bg| (bar, bg));
-                let rule = gpui::size(bounds.size.width, px(1.));
-                let rule = Bounds::new(bar.origin, rule);
-                let rule_fill = (!w.selected)
-                    .then(|| {
-                        settings
-                            .theme
-                            .face(FaceName::ModeLine)
-                            .bg
-                            .map(|bg| (rule, bg))
-                    })
-                    .flatten();
+                let bar = w.bar.map(|(r, _)| to_bounds(r, origin));
+                let bar_fill = bar.zip(settings.theme.face(line_face).bg);
+                let rule = bar.map(|b| Bounds::new(b.origin, gpui::size(b.size.width, px(1.))));
+                let rule_fill =
+                    (rule.filter(|_| !active)).zip(settings.theme.face(FaceName::ModeLine).bg);
                 Painted {
                     bounds,
                     selected: w.selected,
@@ -387,6 +379,7 @@ impl Element for FrameElement {
                     cell,
                     rows,
                     rule: pane_rule,
+                    bar,
                     mode_line_fill: bar_fill.into_iter().chain(rule_fill).collect(),
                     mode_line: group(&w.mode_line.left),
                     mode_line_right: group(&w.mode_line.right),
@@ -529,11 +522,18 @@ impl Element for FrameElement {
                             .ok();
                     }
                 }
+            });
+        }
+        // After every window's text, since a bar can run under its left neighbour.
+        for p in painted.iter() {
+            let Some(bar) = p.bar else {
+                continue;
+            };
+            window.with_content_mask(Some(ContentMask { bounds: bar }), |window| {
                 for (bounds, color) in &p.mode_line_fill {
                     window.paint_quad(fill(*bounds, rgb(*color)));
                 }
-                let x = p.bounds.left() + px(TEXT_INSET);
-                let origin = point(x, p.bounds.bottom() - mode_line_height);
+                let origin = point(bar.left() + px(TEXT_INSET), bar.top());
                 p.mode_line.paint(origin, mode_line_height, window, cx).ok();
                 let right = point(p.mode_line_right_x(), origin.y);
                 (p.mode_line_right)
