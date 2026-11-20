@@ -363,7 +363,8 @@ impl Harness {
                         | FileOp::GitStatus(_)
                         | FileOp::GitDiff { .. }
                         | FileOp::DiffLines { .. }
-                        | FileOp::GitDiffFiles { .. } => None,
+                        | FileOp::GitDiffFiles { .. }
+                        | FileOp::GitSnapshot { .. } => None,
                         FileOp::Head(paths) => Some(Msg::Heads(
                             (paths.iter())
                                 .map(|path| (path.clone(), self.heads.get(path).cloned()))

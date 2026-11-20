@@ -1,8 +1,9 @@
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use aiditor_core::{GrepSearch, Msg};
 use aiditor_services::{files, grep};
@@ -152,8 +153,70 @@ fn main() {
             &mut output,
         );
     }
+    snapshots(&mut output);
     if let Some(path) = std::env::var_os("BENCH_OUTPUT") {
         std::fs::write(path, output).expect("write benchmark results");
+    }
+}
+
+/// A 2,000-file repository with 300 files modified and 20 untracked, snapshotted with no kept
+/// index and again with the one the first left.
+fn snapshots(output: &mut String) {
+    let directory = tempfile::tempdir().unwrap();
+    let repo = directory.path().join("repo");
+    let git = |args: &[&str]| {
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        let mut git = Command::new("git");
+        let status = git.args(identity).args(args).current_dir(&repo).status();
+        assert!(status.unwrap().success(), "{args:?}");
+    };
+    let body = "ordinary source line\n".repeat(50);
+    let files: Vec<_> = (0..2_000)
+        .map(|n| repo.join(format!("src{:02}/file{:03}.txt", n / 100, n % 100)))
+        .collect();
+    for file in &files {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, &body).unwrap();
+    }
+    backdate(&files);
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "1"]);
+    let changed: Vec<_> = files.iter().step_by(2_000 / 300).take(300).collect();
+    for file in &changed {
+        std::fs::write(file, format!("{body}changed\n")).unwrap();
+    }
+    let new: Vec<_> = (0..20).map(|n| repo.join(format!("new{n}.txt"))).collect();
+    for file in &new {
+        std::fs::write(file, &body).unwrap();
+    }
+    // Only these, since setting a file's mtime changes its ctime, which git compares too.
+    backdate(changed.into_iter().chain(&new));
+    let snapshot = |dir: &tempfile::TempDir| {
+        let snap = files::snapshot(&repo, dir.path()).unwrap().unwrap();
+        black_box(snap);
+    };
+    support::prepared(
+        "snapshot/300-changed-files-first",
+        || tempfile::tempdir().unwrap(),
+        |dir| snapshot(dir),
+        output,
+    );
+    let kept = tempfile::tempdir().unwrap();
+    support::measure(
+        "snapshot/300-changed-files-again",
+        || snapshot(&kept),
+        output,
+    );
+}
+
+/// Sets the files' mtime a minute back, older than any index as edits made before a prompt are,
+/// so git takes no entry as racily clean and reads it again.
+fn backdate<'a>(files: impl IntoIterator<Item = &'a PathBuf>) {
+    let past = SystemTime::now() - Duration::from_secs(60);
+    for path in files {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(past).unwrap();
     }
 }
 
