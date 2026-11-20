@@ -2,6 +2,7 @@
 name = "aiditor-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 # No gpui or tokio here: the core is a plain state machine (CI checks this).
 [dependencies]
