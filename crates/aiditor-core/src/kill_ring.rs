@@ -45,13 +45,40 @@ impl Ctx<'_> {
             }
             _ => core.kills.kill_new(text),
         }
-        let head = core.kills.ring[0].clone();
-        core.kills.clipboard_seen = Some(head.clone());
-        self.effects.push(Effect::SetClipboard(head));
+        self.publish_kill();
         // Every kill counts as `kill-region` so the next one joins it, as in Emacs.
         if !copy {
-            core.this_command = Some("kill-region");
+            self.core.this_command = Some("kill-region");
         }
+        Ok(())
+    }
+
+    /// Writes the newest kill to the clipboard.
+    fn publish_kill(&mut self) {
+        let head = self.core.kills.ring[0].clone();
+        self.core.kills.clipboard_seen = Some(head.clone());
+        self.effects.push(Effect::SetClipboard(head));
+    }
+
+    /// Puts `text` on the kill ring as a new entry and on the clipboard.
+    fn copy_text(&mut self, text: String) {
+        self.core.kills.take_clipboard();
+        self.core.kills.kill_new(text);
+        self.publish_kill();
+    }
+
+    /// Copies the current file's path, from its repository's root when `relative`.
+    pub(crate) fn copy_path(&mut self, relative: bool) -> Result<(), String> {
+        let file = (self.core.current().file.as_ref()).ok_or("Buffer is not visiting a file")?;
+        let path = match relative {
+            false => file.path.as_path(),
+            true => (file.head.as_ref())
+                .and_then(|head| file.path.strip_prefix(&head.root).ok())
+                .ok_or("File is not in a git repository")?,
+        };
+        let text = path.to_string_lossy().into_owned();
+        self.copy_text(text.clone());
+        self.core.echo(format!("Copied {text}"));
         Ok(())
     }
 
@@ -272,6 +299,51 @@ mod tests {
         let mut h = at("ab\ncd", 3);
         h.keys("C-u 5 C-k");
         assert_eq!(h.text(), "ab\n", "past the last line kills to the end");
+    }
+
+    #[test]
+    fn copy_paths_from_the_repository_root_or_absolute() {
+        let mut h = Harness::new(&[("lib/src/a.rs", ""), ("b.txt", "")]);
+        let lib = crate::Head {
+            path: h.path("lib/.git/HEAD"),
+            root: h.path("lib"),
+            branch: "main".into(),
+            changed: false,
+        };
+        h.heads.insert(h.path("lib/src/a.rs"), lib);
+        h.open("lib/src/a.rs");
+        h.keys("M-x copy-relative-path RET");
+        let copied = |h: &Harness| (h.clipboard.clone(), h.core.message().map(String::from));
+        assert_eq!(
+            copied(&h),
+            (Some("src/a.rs".into()), Some("Copied src/a.rs".into())),
+            "from the repository, not the project root"
+        );
+        h.keys("M-x copy-absolute-path RET");
+        assert_eq!(h.clipboard.as_deref(), Some("/aiditor-test/lib/src/a.rs"));
+        h.keys("C-x b *scratch* RET C-y");
+        assert_eq!(
+            h.text(),
+            "/aiditor-test/lib/src/a.rs",
+            "on the kill ring too"
+        );
+        for command in ["copy-relative-path", "copy-absolute-path"] {
+            h.keys(&format!("M-x {command} RET"));
+            assert_eq!(h.core.message(), Some("Buffer is not visiting a file"));
+        }
+        let unchanged = Some("/aiditor-test/lib/src/a.rs");
+        assert_eq!(h.clipboard.as_deref(), unchanged, "nothing copied");
+        h.open("b.txt");
+        h.keys("M-x copy-relative-path RET");
+        assert_eq!(
+            copied(&h),
+            (
+                Some("/aiditor-test/lib/src/a.rs".into()),
+                Some("File is not in a git repository".into())
+            )
+        );
+        h.keys("M-x copy-absolute-path RET");
+        assert_eq!(h.clipboard.as_deref(), Some("/aiditor-test/b.txt"));
     }
 
     #[test]
