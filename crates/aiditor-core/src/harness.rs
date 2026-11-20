@@ -359,7 +359,7 @@ impl Harness {
                                     }),
                                 })
                         }
-                        FileOp::Annotate { .. } => None,
+                        FileOp::Annotate { .. } | FileOp::GitStatus(_) => None,
                         FileOp::Head(paths) => Some(Msg::Heads(
                             (paths.iter())
                                 .map(|path| (path.clone(), self.heads.get(path).cloned()))

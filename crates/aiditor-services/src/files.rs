@@ -1,7 +1,9 @@
 //! Reading and writing visited files. Blocking calls; the app runs saves on Tokio's blocking pool.
 
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use aiditor_core::buffer::{encode, hash, prepare_preview, revert, unified_diff};
-use aiditor_core::{FileEntry, FileOp, Head, Msg};
+use aiditor_core::{FileEntry, FileOp, GitChange, GitFile, GitStatus, Head, Msg};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
 
@@ -133,6 +135,20 @@ pub fn run(op: FileOp) -> Msg {
                 })
                 .collect(),
         ),
+        FileOp::GitStatus(roots) => Msg::GitStatus(std::thread::scope(|scope| {
+            let threads: Vec<_> = (roots.iter())
+                .map(|root| scope.spawn(|| git_status(root)))
+                .collect();
+            (threads.into_iter())
+                .zip(roots.clone())
+                .map(|(thread, root)| {
+                    let status = thread
+                        .join()
+                        .unwrap_or_else(|_| Err("git status panicked".into()));
+                    (root, status)
+                })
+                .collect()
+        })),
         FileOp::LanguageVersion {
             buffer,
             request,
@@ -196,7 +212,18 @@ pub fn language_version(path: &Path, language: &str) -> Option<String> {
 /// `None` outside a repository.
 // shortcut: reftable repositories keep a placeholder in `HEAD`, shown as the branch `.invalid`; read their tables if one is used.
 pub fn head(path: &Path) -> Option<Head> {
-    let git = (path.ancestors().skip(1))
+    let (root, head, branch) = repository(path.parent()?)?;
+    Some(Head {
+        path: head,
+        root,
+        branch,
+        changed: changed(path),
+    })
+}
+
+/// The directory holding the nearest `.git` at or above `dir`, its `HEAD` file and the branch.
+fn repository(dir: &Path) -> Option<(PathBuf, PathBuf, String)> {
+    let git = (dir.ancestors())
         .map(|dir| dir.join(".git"))
         .find(|git| git.exists())?;
     let root = git.parent()?.to_path_buf();
@@ -217,12 +244,94 @@ pub fn head(path: &Path) -> Option<Head> {
         }
         None => text.chars().take(7).collect(),
     };
-    Some(Head {
-        path: head,
-        root,
+    Some((root, head, branch))
+}
+
+/// `root`'s repository, branch and the changes git reports under it; `None` outside a repository.
+// shortcut: a submodule's own filter config isn't checked; check each submodule if one turns up.
+fn git_status(root: &Path) -> Result<Option<GitStatus>, String> {
+    let Some((repository, _, branch)) = repository(root) else {
+        return Ok(None);
+    };
+    match own_filter(root) {
+        Some(false) => {}
+        Some(true) => {
+            return Err(
+                "the repository's config defines a filter, which git status would run".into(),
+            );
+        }
+        None => return Err("git can't read the repository's config".into()),
+    }
+    let output = Command::new("git")
+        .args(["--no-optional-locks", "--literal-pathspecs"])
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v2",
+            "-z",
+        ])
+        .args(["--untracked-files=all", "--", "."])
+        .current_dir(root)
+        .output()
+        .map_err(|err| format!("git: {err}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let files = porcelain_v2(&output.stdout);
+    Ok(Some(GitStatus {
+        repository,
         branch,
-        changed: changed(path),
-    })
+        files,
+    }))
+}
+
+/// The files in `git status --porcelain=v2 -z` output.
+fn porcelain_v2(out: &[u8]) -> Vec<GitFile> {
+    let path = |bytes: &[u8]| PathBuf::from(OsStr::from_bytes(bytes));
+    let change = |letter: u8| match letter {
+        b'M' => Some(GitChange::Modified),
+        b'T' => Some(GitChange::TypeChanged),
+        b'A' => Some(GitChange::Added),
+        b'D' => Some(GitChange::Deleted),
+        b'R' => Some(GitChange::Renamed),
+        b'C' => Some(GitChange::Copied),
+        b'U' => Some(GitChange::Unmerged),
+        _ => None,
+    };
+    let mut records = out.split(|&b| b == 0).filter(|r| !r.is_empty());
+    let mut files = Vec::new();
+    while let Some(record) = records.next() {
+        // Ordinary entries have 8 space-separated fields before the path, renames 9, unmerged 10.
+        let fields = match record.first() {
+            Some(b'1') => 8,
+            Some(b'2') => 9,
+            Some(b'u') => 10,
+            Some(b'?') => {
+                files.push(GitFile {
+                    path: path(record.get(2..).unwrap_or_default()),
+                    staged: None,
+                    unstaged: Some(GitChange::Untracked),
+                    old_path: None,
+                });
+                continue;
+            }
+            _ => continue,
+        };
+        let mut parts = record.splitn(fields + 1, |&b| b == b' ');
+        let (Some(&[x, y]), Some(name)) = (parts.nth(1), parts.nth(fields - 2)) else {
+            continue;
+        };
+        files.push(GitFile {
+            path: path(name),
+            staged: change(x),
+            unstaged: change(y),
+            old_path: (record[0] == b'2')
+                .then(|| records.next().map(path))
+                .flatten(),
+        });
+    }
+    files
 }
 
 /// Whether git reports `path` as changed or untracked; no if git can't say.
@@ -231,22 +340,8 @@ fn changed(path: &Path) -> bool {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return false;
     };
-    let filters = Command::new("git")
-        .args(["config", "--show-scope", "--get-regexp", "^filter\\."])
-        .current_dir(dir)
-        .stderr(Stdio::null())
-        .output();
-    match filters {
-        Ok(output) if output.status.success() => {
-            if String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| !matches!(line.split_whitespace().next(), Some("global" | "system")))
-            {
-                return false;
-            }
-        }
-        Ok(output) if output.status.code() == Some(1) => {}
-        _ => return false,
+    if own_filter(dir) != Some(false) {
+        return false;
     }
     // Without `--no-optional-locks` status rewrites the index, whose report would run it again.
     // A repository's `core.fsmonitor` is a command, and opening a file mustn't run it.
@@ -258,6 +353,26 @@ fn changed(path: &Path) -> bool {
         .stderr(Stdio::null())
         .output();
     status.is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
+/// Whether the repository at `dir` defines a content filter in its own config, which git would
+/// run; `None` when git can't say.
+fn own_filter(dir: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .args(["config", "--show-scope", "--get-regexp", "^filter\\."])
+        .current_dir(dir)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    match output.status.code() {
+        Some(0) => Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| !matches!(line.split_whitespace().next(), Some("global" | "system"))),
+        ),
+        Some(1) => Some(false),
+        _ => None,
+    }
 }
 
 /// The ad-hoc project root for `file`: the nearest directory above it holding `.git`, else its
@@ -1610,5 +1725,155 @@ mod tests {
         };
         assert_eq!(open(None), Some(repo.clone()));
         assert_eq!(open(Some(Default::default())), None, "only the lobby's");
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        let mut git = Command::new("git");
+        let status = git.args(identity).args(args).current_dir(dir).status();
+        assert!(status.unwrap().success(), "{args:?}");
+    }
+
+    fn statuses(roots: &[&Path]) -> Vec<(PathBuf, Result<Option<GitStatus>, String>)> {
+        match run(FileOp::GitStatus(
+            roots.iter().map(|r| r.to_path_buf()).collect(),
+        )) {
+            Msg::GitStatus(roots) => roots,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn file(path: &str, staged: Option<GitChange>, unstaged: Option<GitChange>) -> GitFile {
+        GitFile {
+            path: path.into(),
+            staged,
+            unstaged,
+            old_path: None,
+        }
+    }
+
+    #[test]
+    fn git_status_reports_each_kind_of_change_on_each_side() {
+        use GitChange::*;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| git_in(repo, args);
+        git(&["init", "-q", "-b", "main"]);
+        for name in ["modified", "deleted", "renamed", "both", "kept"] {
+            fs::write(repo.join(name), format!("{name}\n")).unwrap();
+        }
+        fs::write(repo.join(".gitignore"), "ignored\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        fs::write(repo.join("modified"), "edit\n").unwrap();
+        fs::remove_file(repo.join("deleted")).unwrap();
+        git(&["mv", "renamed", "new name"]);
+        fs::write(repo.join("added"), "added\n").unwrap();
+        git(&["add", "added"]);
+        fs::write(repo.join("both"), "staged\n").unwrap();
+        git(&["add", "both"]);
+        fs::write(repo.join("both"), "and again\n").unwrap();
+        fs::write(repo.join("ignored"), "").unwrap();
+        fs::write(repo.join("ü x.txt"), "").unwrap();
+        let index = fs::read(repo.join(".git/index")).unwrap();
+        let [(root, status)] = &statuses(&[repo])[..] else {
+            panic!()
+        };
+        assert_eq!(root, repo);
+        let status = status.clone().unwrap().unwrap();
+        assert_eq!(
+            (status.repository.as_path(), &*status.branch),
+            (repo, "main")
+        );
+        let mut files = status.files;
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let renamed = GitFile {
+            old_path: Some("renamed".into()),
+            ..file("new name", Some(Renamed), None)
+        };
+        assert_eq!(
+            files,
+            [
+                file("added", Some(Added), None),
+                file("both", Some(Modified), Some(Modified)),
+                file("deleted", None, Some(Deleted)),
+                file("modified", None, Some(Modified)),
+                renamed,
+                file("ü x.txt", None, Some(Untracked)),
+            ]
+        );
+        assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
+    }
+
+    #[test]
+    fn git_status_answers_each_root_on_its_own() {
+        let repo = tempfile::tempdir().unwrap();
+        let plain = tempfile::tempdir().unwrap();
+        git_in(repo.path(), &["init", "-q", "-b", "trunk"]);
+        fs::create_dir(repo.path().join("sub")).unwrap();
+        fs::write(repo.path().join("outside"), "").unwrap();
+        fs::write(repo.path().join("sub/inside"), "").unwrap();
+        let sub = repo.path().join("sub");
+        let answers = statuses(&[plain.path(), &sub]);
+        assert_eq!(answers[0], (plain.path().to_path_buf(), Ok(None)));
+        let status = answers[1].1.clone().unwrap().unwrap();
+        assert_eq!(answers[1].0, sub);
+        assert_eq!(status.branch, "trunk");
+        assert_eq!(
+            status.files,
+            [file("sub/inside", None, Some(GitChange::Untracked))]
+        );
+    }
+
+    #[test]
+    fn git_status_refuses_a_repository_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q"]);
+        git_in(
+            dir.path(),
+            &["config", "filter.x.clean", "touch marker; cat"],
+        );
+        fs::write(dir.path().join(".gitattributes"), "* filter=x\n").unwrap();
+        let answers = statuses(&[dir.path()]);
+        assert!(answers[0].1.is_err(), "{answers:?}");
+        assert!(!dir.path().join("marker").exists());
+    }
+
+    #[test]
+    fn git_status_answers_git_s_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let answers = statuses(&[dir.path()]);
+        assert!(answers[0].1.is_err(), "{answers:?}");
+    }
+
+    #[test]
+    fn porcelain_v2_reads_copies_conflicts_and_raw_names() {
+        use GitChange::*;
+        let fields = "N... 100644 100644 100644 h1 h2";
+        let out = [
+            format!("2 C. {fields} C100 copy\0source\0").into_bytes(),
+            b"u UU N... 100644 100644 100644 100644 h1 h2 h3 conflict\0".to_vec(),
+            b"? raw\xff name\0?\0".to_vec(),
+        ]
+        .concat();
+        let copy = GitFile {
+            old_path: Some("source".into()),
+            ..file("copy", Some(Copied), None)
+        };
+        let raw = GitFile {
+            path: PathBuf::from(OsStr::from_bytes(b"raw\xff name")),
+            ..file("", None, Some(Untracked))
+        };
+        assert_eq!(
+            porcelain_v2(&out),
+            [
+                copy,
+                file("conflict", Some(Unmerged), Some(Unmerged)),
+                raw,
+                file("", None, Some(Untracked)),
+            ]
+        );
     }
 }

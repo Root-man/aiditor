@@ -169,6 +169,9 @@ pub enum Msg {
     Checked(Vec<(PathBuf, Option<u64>)>),
     /// The file service's answer to `FileOp::Head`: each file's repository, if it is in one.
     Heads(Vec<(PathBuf, Option<Head>)>),
+    /// The file service's answer to `FileOp::GitStatus`, in the roots' order: `Ok(None)` for a
+    /// root in no repository, `Err` for git's failure.
+    GitStatus(Vec<(PathBuf, Result<Option<GitStatus>, String>)>),
     /// The file service's declared language version for a buffer's latest lookup.
     LanguageVersion {
         buffer: BufferId,
@@ -373,6 +376,41 @@ impl Head {
     }
 }
 
+/// A repository's changes under one root, as `git status` reports them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitStatus {
+    /// The directory holding the repository's `.git`; the files' paths are relative to it.
+    pub repository: PathBuf,
+    /// As the mode line names it.
+    pub branch: String,
+    pub files: Vec<GitFile>,
+}
+
+/// A file git reports changed or untracked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitFile {
+    pub path: PathBuf,
+    /// `HEAD` → index.
+    pub staged: Option<GitChange>,
+    /// Index → working tree.
+    pub unstaged: Option<GitChange>,
+    /// A rename's or copy's source.
+    pub old_path: Option<PathBuf>,
+}
+
+/// One side of a file's change, from git's status letter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitChange {
+    Modified,
+    TypeChanged,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    Unmerged,
+    Untracked,
+}
+
 /// What a path the watcher reports is on disk now.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Disk {
@@ -528,6 +566,8 @@ pub enum FileOp {
     Check(Vec<PathBuf>),
     /// Find each file's repository and send `Msg::Heads`.
     Head(Vec<PathBuf>),
+    /// Ask git for each root's branch and changed files and send `Msg::GitStatus`.
+    GitStatus(Vec<PathBuf>),
     /// Read the nearest pin for this language and answer `Msg::LanguageVersion`.
     LanguageVersion {
         buffer: BufferId,
@@ -937,6 +977,8 @@ impl Ctx<'_> {
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
             Msg::Heads(files) => self.on_heads(files),
+            // The diff view (M9) will ask; nothing does yet.
+            Msg::GitStatus(_) => {}
             Msg::LanguageVersion {
                 buffer,
                 request,
