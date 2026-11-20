@@ -221,7 +221,7 @@ impl Core {
                 let gutter = numbered.then(|| {
                     let buffer = buffers.get(window.buffer()).expect("window buffer is live");
                     let (point, _) = buffer.line_col(window.point(buffers)).unwrap_or_default();
-                    let continued = window.top_row() > 0;
+                    let continued = window.top_row() > window.above(buffer, window.top().0);
                     let lines = &display.lines;
                     display::gutter(lines, style, width, point, continued, &settings.theme)
                 });
@@ -351,6 +351,11 @@ impl Core {
         self.windows.selected = id;
     }
 
+    /// Gives the selected window `rows`, each anchored to a buffer line, in place of its own.
+    pub fn set_diff_rows(&mut self, rows: Vec<(usize, crate::window::DiffRow)>) {
+        (self.windows.window).set_diff_rows(&mut self.buffers, rows);
+    }
+
     /// The window's first line once point's line is among the `rows` it shows.
     #[cfg(test)]
     pub fn scroll(&mut self, rows: usize) -> usize {
@@ -386,10 +391,12 @@ pub(crate) fn window_display(
     let mark = window.mark(buffers).filter(|_| window.active());
     // shortcut: point's column is its char column in the buffer line, so a fold before point on its line shifts the scroll; use the display column when folds get common.
     // shortcut: a tab or wide char counts as one column, so the cursor can sit past the edge on such lines; measure widths when the display does.
+    // A first row among the diff rows above the line starts its text from column 0.
+    let text_row = window.top_row().saturating_sub(window.above(buffer, top));
     let mut wrap = (buffer.wrap(cols)).map(|(width, word)| display::Wrap {
         width,
         word,
-        from: window.row_starts(buffer, top)[window.top_row()],
+        from: window.row_starts(buffer, top)[text_row],
         left: 0,
     });
     // A wrapped line never scrolls sideways, but a drawn table's lines aren't wrapped.
@@ -413,7 +420,24 @@ pub(crate) fn window_display(
         None => left..left.saturating_add(width),
     };
     let mut display = display::build(
-        buffer, top, drawn, point, mark, settings, shown, wrap, roots, search,
+        buffer,
+        top,
+        drawn,
+        point,
+        mark,
+        settings,
+        shown.clone(),
+        wrap,
+        roots,
+        search,
+    );
+    splice_diff_rows(
+        window,
+        buffer,
+        &mut display,
+        settings,
+        (wrap, shown.len()),
+        drawn,
     );
     if let Some(snapshot) = buffer.workspace_list() {
         let line = buffer.line_col(point).map_or(0, |(l, _)| l) + 1;
@@ -444,6 +468,47 @@ pub(crate) fn window_display(
         (display.cursor, display.terminal) = (None, Some(terminal.display(&settings.theme)));
     }
     display
+}
+
+/// Puts `window`'s diff rows among `display`'s lines, wrapped as `wrap` or cut to `width`, those
+/// above the first line from the window's first row, and keeps to the `drawn` rows.
+fn splice_diff_rows(
+    window: &Window,
+    buffer: &crate::buffer::Buffer,
+    display: &mut display::WindowDisplay,
+    settings: &Settings,
+    (wrap, width): (Option<display::Wrap>, usize),
+    drawn: usize,
+) {
+    if !window.has_diff_rows() {
+        return;
+    }
+    let rows = |rows: Vec<&crate::window::DiffRow>, number| {
+        (rows.into_iter())
+            .flat_map(|r| display::diff_row_lines(r, number, settings, wrap, width))
+            .collect::<Vec<_>>()
+    };
+    let (mut out, mut previous, cursor) = (Vec::new(), None, display.cursor);
+    for (i, line) in std::mem::take(&mut display.lines).into_iter().enumerate() {
+        if previous != Some(line.number) {
+            let mut above = rows(window.diff_rows_around(buffer, line.number).0, line.number);
+            if i == 0 {
+                above.drain(..window.top_row().min(above.len()));
+            }
+            out.extend(above);
+        }
+        if cursor.is_some_and(|(at, _)| at == i) {
+            display.cursor = cursor.map(|(_, col)| (out.len(), col));
+        }
+        previous = Some(line.number);
+        out.push(line);
+    }
+    if let Some(last) = previous.filter(|&l| l + 1 == buffer.len_lines()) {
+        out.extend(rows(window.diff_rows_around(buffer, last).1, last));
+    }
+    out.truncate(drawn);
+    display.cursor = display.cursor.filter(|&(at, _)| at < out.len());
+    display.lines = out;
 }
 
 /// Draws an option's `preview` under its row, display line `at`, in the question's box from the
@@ -483,6 +548,7 @@ fn show_preview(
             ],
             aligned: false,
             icons: Vec::new(),
+            diff: None,
         }
     });
     display.lines.splice(at + 1..at + 1, lines);
@@ -646,6 +712,7 @@ mod tests {
     use crate::harness::ask;
     use crate::harness::on;
     use crate::settings::{FaceName, Settings};
+    use crate::window::DiffRow;
 
     /// Each window's (id, point), in tree order, and the selected id.
     fn windows(h: &Harness) -> (Vec<(usize, usize)>, usize) {
@@ -1490,5 +1557,156 @@ mod tests {
         h.open("a.txt");
         assert!(labels(&mut h, 50.).is_empty(), "one cell left");
         assert_eq!(labels(&mut h, 51.), ["1*"]);
+    }
+
+    /// A diff row of `text` in `diff-removed`, `after` its line, labelled `label`, `height` high.
+    fn row(text: &str, after: bool, label: Option<&str>, height: usize) -> DiffRow {
+        let face = vec![crate::buffer::FaceRef::Face(FaceName::DiffRemoved)];
+        DiffRow {
+            after,
+            runs: vec![(text.to_string(), face)],
+            label: label.map(String::from),
+            height,
+        }
+    }
+
+    fn set_rows(h: &mut Harness, rows: Vec<(usize, DiffRow)>) {
+        (h.core.windows.window).set_diff_rows(&mut h.core.buffers, rows);
+    }
+
+    fn texts(d: &crate::display::WindowDisplay) -> Vec<String> {
+        let text = |l: &crate::display::Line| l.spans.iter().map(|s| s.text.as_str()).collect();
+        d.lines.iter().map(text).collect()
+    }
+
+    /// The px high a window is with `rows` text rows.
+    fn high(h: &Harness, rows: usize) -> f32 {
+        let s = h.core.settings();
+        s.mode_line_height() + rows as f32 * s.line_height()
+    }
+
+    #[test]
+    fn diff_rows_draw_before_between_and_after_lines() {
+        let mut h = numbered(&[("a.rs", "a\nb\nc")], "absolute");
+        h.open("a.rs");
+        set_rows(
+            &mut h,
+            vec![
+                (0, row("x", false, Some("9"), 1)),
+                (1, row("y", true, None, 1)),
+                (2, row("z", true, None, 1)),
+            ],
+        );
+        let frame = h.frame(400., high(&h, 10));
+        let w = &frame.windows[0];
+        assert_eq!(texts(&w.display), ["x", "a", "b", "y", "c", "z"]);
+        assert_eq!(w.display.cursor, Some((1, 0)), "point on `a`, not the row");
+        let removed = h.core.settings().theme.face(FaceName::DiffRemoved);
+        assert_eq!(w.display.lines[0].spans[0].face, removed);
+        assert!(
+            (w.display.lines[0].decorations).is_empty(),
+            "no hl-line on a row at point's line"
+        );
+        assert_eq!(h.text(), "a\nb\nc");
+        assert_eq!(labels(&mut h, 400.), ["9", "1*", "2", "", "3", ""]);
+    }
+
+    #[test]
+    fn filler_draws_blank_and_scrolls_as_its_height() {
+        let mut h = Harness::new(&[("a.txt", "0\n1\n2\n3\n4\n5")]);
+        h.open("a.txt");
+        set_rows(&mut h, vec![(3, row("", false, None, 3))]);
+        assert_eq!(texts(&h.display(5)), ["0", "1", "2", "", ""]);
+        h.keys("C-n C-n C-n");
+        assert_eq!(
+            h.core.current().line_col(h.point()).unwrap(),
+            (3, 0),
+            "C-n skips it"
+        );
+        let d = h.display(5);
+        assert_eq!(texts(&d), ["2", "", "", "", "3"]);
+        assert_eq!(d.cursor, Some((4, 0)));
+        // C-l puts point's line mid-window, the filler counted above it.
+        h.keys("C-l");
+        assert_eq!(texts(&h.display(5)), ["", "", "3", "4", "5"]);
+    }
+
+    #[test]
+    fn a_long_diff_row_wraps_as_a_line_would() {
+        let mut h = Harness::new(&[("a.md", "one\ntwo")]);
+        h.open("a.md");
+        set_rows(&mut h, vec![(0, row("one two three", true, Some("4"), 1))]);
+        // 9 columns, 8 chars to a row.
+        let frame = h.frame(96., high(&h, 10));
+        assert_eq!(
+            texts(&frame.windows[0].display),
+            ["one", "one two ", "three", "two"]
+        );
+    }
+
+    #[test]
+    fn diff_rows_belong_to_their_window_and_follow_edits() {
+        let mut h = Harness::new(&[("a.txt", "a\nb\nc"), ("b.txt", "other")]);
+        h.open("a.txt");
+        let before = h.frame(400., high(&h, 10));
+        set_rows(&mut h, vec![(1, row("x", false, None, 1))]);
+        h.keys("C-x 2");
+        let frame = h.frame(400., high(&h, 20));
+        let shown: Vec<_> = (frame.windows.iter()).map(|w| texts(&w.display)).collect();
+        assert!(
+            shown.contains(&vec!["a".into(), "x".into(), "b".into(), "c".into()])
+                && shown.contains(&vec!["a".into(), "b".into(), "c".into()]),
+            "only one window shows the row: {shown:?}"
+        );
+        h.keys("C-x 1");
+        // A line inserted above, and text typed at the anchor line's start, keep the row by `b`.
+        h.keys("n e w RET C-n z");
+        assert_eq!(texts(&h.display(10)), ["new", "a", "x", "zb", "c"]);
+        h.keys("C-/ C-/ C-/ C-/ C-/");
+        set_rows(&mut h, Vec::new());
+        let after = h.frame(400., high(&h, 10));
+        let shown = |f: &FrameDisplay| {
+            (
+                f.windows[0].display.lines.len(),
+                f.windows[0].display.cursor,
+            )
+        };
+        assert_eq!(shown(&after), shown(&before), "removing the rows");
+        assert_eq!(
+            after.windows[0].display.lines,
+            before.windows[0].display.lines
+        );
+        set_rows(&mut h, vec![(1, row("x", false, None, 1))]);
+        h.open("b.txt").open("a.txt");
+        assert_eq!(
+            texts(&h.display(10)),
+            ["a", "b", "c"],
+            "showing another buffer drops them"
+        );
+    }
+
+    #[test]
+    fn rows_after_the_last_line_scroll_in_and_motion_and_copying_skip_rows() {
+        let mut h = Harness::new(&[("a.txt", "0\n1\n2\n3")]);
+        h.open("a.txt");
+        set_rows(
+            &mut h,
+            vec![(1, row("x", true, None, 1)), (3, row("end", true, None, 2))],
+        );
+        // C-n from line 1 passes the row after it; the region and copying hold only text.
+        h.keys("C-n C-SPC C-n");
+        assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
+        let removed = h.core.settings().theme.face(FaceName::DiffRemoved);
+        let d = h.display(5);
+        assert_eq!(texts(&d), ["0", "1", "x", "2", "3"]);
+        assert_eq!(d.lines[2].spans[0].face, removed, "no region on the row");
+        h.keys("M-w M-> C-y");
+        assert_eq!(h.text(), "0\n1\n2\n31\n");
+        h.keys("C-/ M->");
+        assert_eq!(
+            texts(&h.display(5)),
+            ["x", "2", "3", "end", ""],
+            "point on the last line scrolls the rows after it in"
+        );
     }
 }

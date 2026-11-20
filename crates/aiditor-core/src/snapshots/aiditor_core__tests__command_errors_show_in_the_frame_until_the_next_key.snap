@@ -28,6 +28,7 @@ FrameDisplay {
                         ],
                         aligned: false,
                         icons: [],
+                        diff: None,
                     },
                 ],
                 cursor: Some(

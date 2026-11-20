@@ -327,6 +327,8 @@ pub struct Line {
     pub aligned: bool,
     /// The icons on it, each with the char column of the first of its two cells.
     pub icons: Vec<(usize, Icon)>,
+    /// On a diff row's rows, which are not text: its gutter label, empty past its first row.
+    pub diff: Option<String>,
 }
 
 impl Line {
@@ -388,7 +390,9 @@ pub(crate) fn gutter(
     let rows = (lines.iter())
         .map(|line| {
             let n = line.number;
-            let (label, face) = if previous.replace(n) == Some(n) {
+            let (label, face) = if let Some(label) = &line.diff {
+                (label.clone(), FaceName::LineNumber)
+            } else if previous.replace(n) == Some(n) {
                 ("↪".to_string(), FaceName::LineNumber)
             } else if n == point {
                 ((n + 1).to_string(), FaceName::LineNumberCurrent)
@@ -408,7 +412,8 @@ pub(crate) fn highlight_line(display: &mut WindowDisplay) {
     let Some(number) = display.cursor.map(|(l, _)| display.lines[l].number) else {
         return;
     };
-    for line in display.lines.iter_mut().filter(|l| l.number == number) {
+    let lines = display.lines.iter_mut();
+    for line in lines.filter(|l| l.number == number && l.diff.is_none()) {
         (line.decorations).insert(0, Decoration::Background(FaceName::HlLine));
     }
 }
@@ -545,6 +550,7 @@ pub fn build(
         decorations: Vec::new(),
         aligned: false,
         icons: Vec::new(),
+        diff: None,
     };
     // A background decoration's face, less its background, sits under its line's text.
     let line_faces: Vec<(usize, Face)> = (props.iter())
@@ -1128,6 +1134,50 @@ fn search_overlays(
     }
 }
 
+/// The display rows of diff row `row` by buffer line `number`: wrapped as `wrap` wraps, else cut
+/// to `width` chars, and padded with blank rows to its height.
+pub(crate) fn diff_row_lines(
+    row: &crate::window::DiffRow,
+    number: usize,
+    settings: &Settings,
+    wrap: Option<Wrap>,
+    width: usize,
+) -> Vec<Line> {
+    let blank = || Line {
+        number,
+        height: settings.line_height(),
+        spans: Vec::new(),
+        decorations: Vec::new(),
+        aligned: false,
+        icons: Vec::new(),
+        diff: Some(String::new()),
+    };
+    let spans = (row.runs.iter()).map(|(text, refs)| Span {
+        text: text.clone(),
+        face: settings.theme.resolve(refs),
+        fold: false,
+    });
+    let mut first = Line {
+        spans: spans.filter(|s| !s.text.is_empty()).collect(),
+        diff: Some(row.label.clone().unwrap_or_default()),
+        ..blank()
+    };
+    let mut lines = match wrap {
+        Some(wrap) => {
+            let marker = crate::syntax::face(&settings.theme.syntax, "comment").unwrap_or_default();
+            wrap_lines(vec![first], &mut None, usize::MAX, wrap, marker, &mut None)
+        }
+        None => {
+            cut_spans(&mut first.spans, width);
+            vec![first]
+        }
+    };
+    while lines.len() < row.height {
+        lines.push(blank());
+    }
+    lines
+}
+
 /// `spans` cut to their first `keep` chars.
 fn cut_spans(spans: &mut Vec<Span>, mut keep: usize) {
     spans.retain_mut(|span| {
@@ -1224,6 +1274,8 @@ fn wrap_lines(
                 decorations,
                 aligned: line.aligned,
                 icons,
+                diff: (line.diff.as_ref())
+                    .map(|l| if row == 0 { l.clone() } else { String::new() }),
             });
         }
     }
