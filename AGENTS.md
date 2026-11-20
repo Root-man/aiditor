@@ -37,6 +37,10 @@ The approved designs are in [docs/design](docs/design), exported from the [aidit
 - **13c · Workspace list in a split** ([WorkspaceListNarrow.dc.html](docs/design/WorkspaceListNarrow.dc.html)): the list in a narrow window, beside a file.
 - **13d · Workspace list, Gruvbox light** ([WorkspaceListLight.dc.html](docs/design/WorkspaceListLight.dc.html)): the folded list in the light theme, with point away from the current workspace.
 - **14 · Agent sessions list** ([Sessions.dc.html](docs/design/Sessions.dc.html)): `*Sessions*` grouped by activity (Pinned, Today, Yesterday, This week, Older, Archived) with `TAB` folding, agent glyphs, times by age, open sessions' state dots and key hints in the echo line.
+- **15 · Diff view, inline** ([Diff.dc.html](docs/design/Diff.dc.html)): the status diff full-frame: the changed-file list (root headings with branch, `Staged` and `Changes`, status letters) beside the file's own buffer with added lines and removed diff rows, an unsaved edit, one mode line with counts, change position and sides, and `C-c` key hints.
+- **15b · Diff view, side by side** ([DiffSplit.dc.html](docs/design/DiffSplit.dc.html)): the same diff as two panes, the old side read-only with filler rows, the new side editable. For after M9; build the inline view so this can follow.
+- **15c · Diff view, agent turn** ([DiffTurn.dc.html](docs/design/DiffTurn.dc.html)): the turn diff across two roots: the session heads the list, no `Staged`/`Changes`, and the mode line names the turn.
+- **15d · Diff view, Gruvbox light** ([DiffLight.dc.html](docs/design/DiffLight.dc.html)): 15b in the light theme.
 
 Frames 2, 5, 6b, 7, 10 and 11 still draw the older workspace modeline and mode lines without `│` separators; frames 1 and 9 are the reference for those. Frames 6d, 6e, 6f and 6g still draw a prompt's and a message's time at the right of its first line; frame 6 is the reference: small, on the blank line under the block.
 

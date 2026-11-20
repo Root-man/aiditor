@@ -24,7 +24,11 @@
     "WorkspaceList.dc.html": {"h": 900, "title": "13 · Workspace list", "w": 1440, "x": 0, "y": 4080},
     "WorkspaceListStudy.dc.html": {"h": 900, "title": "13b · Workspace list study", "w": 1440, "x": 1520, "y": 4080},
     "WorkspaceListNarrow.dc.html": {"h": 600, "title": "13c · Workspace list in a split", "w": 900, "x": 3040, "y": 4080},
-    "WorkspaceListLight.dc.html": {"h": 900, "title": "13d · Workspace list, Gruvbox light", "w": 1440, "x": 4020, "y": 4080}
+    "WorkspaceListLight.dc.html": {"h": 900, "title": "13d · Workspace list, Gruvbox light", "w": 1440, "x": 4020, "y": 4080},
+    "Diff.dc.html": {"h": 900, "title": "15 · Diff view, inline", "w": 1440, "x": 0, "y": 6120},
+    "DiffSplit.dc.html": {"h": 900, "title": "15b · Diff view, side by side", "w": 1440, "x": 1520, "y": 6120},
+    "DiffTurn.dc.html": {"h": 900, "title": "15c · Diff view, agent turn", "w": 1440, "x": 3040, "y": 6120},
+    "DiffLight.dc.html": {"h": 900, "title": "15d · Diff view, side by side, Gruvbox light", "w": 1440, "x": 4560, "y": 6120}
   },
   "createdOnFiles": {"at": "2026-10-28T19:00:00Z", "v": 1},
   "designSystems": [],
@@ -53,7 +57,11 @@
     "WorkspaceListStudy.dc.html",
     "WorkspaceListNarrow.dc.html",
     "WorkspaceListLight.dc.html",
-    "Sessions.dc.html"
+    "Sessions.dc.html",
+    "Diff.dc.html",
+    "DiffSplit.dc.html",
+    "DiffTurn.dc.html",
+    "DiffLight.dc.html"
   ],
   "pages": [],
   "title": "aiditor visual direction"

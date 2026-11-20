@@ -2465,8 +2465,8 @@ milestones:
   # ───────────────────────────────────────────── M9 ─────────────────────────────────────────────
   - key: m9
     title: "M9 · Diff review"
-    description: "Changed files and an inline diff in a full-frame view, staging, comparing revisions, and an agent turn's changes from a tree snapshot."
-    gate: "Review an agent's turn across two repos, revert one of its changes, stage the rest and commit in a terminal, then compare two branches of one repo."
+    description: "Changed files and an editable inline diff in a full-frame view, staging, comparing revisions, and an agent turn's changes from a tree snapshot."
+    gate: "Review an agent's turn across two repos, fix one of its changes in the diff and save it, revert another, stage the rest and commit in a terminal, then compare two branches of one repo."
     epics:
       - key: m9-git
         title: "Git service: status, file diffs and snapshots"
@@ -2488,10 +2488,11 @@ milestones:
           - key: m9-git-file-diff
             title: "Diff a file between two sides of a repo"
             body: |
-              A service operation that reads one file's text on two sides of a root and diffs it line by line with `similar`, as a revert does. A side is a tree-ish, the index or the working tree. It answers both texts and the changed line ranges, so the core can lay out an inline diff and highlight each side. A file missing on a side (added, deleted, untracked) is empty there; a binary or non-UTF-8 file answers a reason and no text. A second operation lists the files that differ between two tree-ishes, or a tree-ish and the working tree (`git diff --name-status -z`), for the revisions and turn modes. The object directory and alternates can be given, for snapshot trees.
+              A service operation that reads one file's text on two sides of a root and diffs it line by line with `similar`, as a revert does. A side is a tree-ish, the index or the working tree. It answers both texts and the changed line ranges (old and new, one list that both the inline and a later side-by-side view draw from), so the core can draw the diff and highlight each side. A second entry diffs a held old text against a snapshot of a buffer's text, so a working-tree side that is being edited is diffed as the buffer holds it, unsaved edits included, and re-diffed after each edit. A file missing on a side (added, deleted, untracked) is empty there; a binary or non-UTF-8 file answers a reason and no text. A second operation lists the files that differ between two tree-ishes, or a tree-ish and the working tree (`git diff --name-status -z`), for the revisions and turn modes. The object directory and alternates can be given, for snapshot trees.
             acceptance:
               - "Each pair of sides (tree-ish, index, working tree) answers the right texts"
               - "An added, a deleted and an untracked file diff against an empty side"
+              - "A held old text diffed against a buffer snapshot answers the same ranges as against the file that buffer saves"
               - "A binary file answers a reason, not text"
               - "Listing two tree-ishes answers the same files as `git diff --name-status`"
               - "Service tests run against repositories made in a temp dir"
@@ -2510,14 +2511,26 @@ milestones:
         labels: [core, frontend]
         design: "#subsystems"
         body: |
-          The diff view in status mode, read-only: two ordinary buffers in a temporary full-frame layout, the changed-file list on the left and the inline diff of the file at point on the right, with one mode line. See "Diff review" in docs/editor.md. Keys are the implementer's choice, on the lines of the workspace and sessions lists. Tasks are tracked as sub-issues.
+          The diff view in status mode: a temporary full-frame layout with the changed-file list on the left and the inline diff of the file at point on the right, drawn as diff rows over the file's own buffer, editable when the new side is the working tree, with one mode line. See "Diff review" in docs/editor.md. Keys are the implementer's choice, on the lines of the workspace and sessions lists. Tasks are tracked as sub-issues.
         tasks:
+          - key: m9-diff-rows
+            title: "Diff rows: rows drawn between a buffer's lines"
+            body: |
+              The display model gains diff rows: rows anchored before or after a buffer line that are not part of its text. Each carries its own text runs with faces, its own gutter label (an old line number or none) and a height in lines, and may be empty (filler). Point, motion, search, the region and copying skip them; scrolling, `C-l` and the visible line count include them. They belong to a window's view of a buffer, not to the buffer, so one buffer can show rows in one window and none in another, and the side-by-side diff that comes later can put filler under either side. Soft-wrapped rows wrap as text lines do. Removing a buffer's rows leaves its display as it was.
+            acceptance:
+              - "Rows drawn before the first line, between two lines and after the last line show in place, with their faces and gutter labels"
+              - "Point and C-n/C-p, C-s, the region and kill skip the rows; the buffer's text is unchanged"
+              - "The same buffer in two windows shows rows only in the window that has them"
+              - "An empty row of three lines' height draws as blank space and scrolls as three lines"
+              - "Editing the buffer keeps each row at the line it is anchored to"
+              - "Core tests cover the layout with rows, and the frontend draws them in both themes"
+              - "Spec updated in docs/editor.md and openspec/specs"
           - key: m9-diff-layout
             title: "Diff layout: the changed-file list in a full frame"
             body: |
-              A command (`diff-status`) saves the current workspace's window layout and replaces it with two windows: a narrow one on the left showing the changed-file list, a new read-only buffer kind, and one on the right for the diff. Both buffers belong to the current workspace, one pair per workspace, and are temporary: quitting from either kills both and restores the saved layout. The list shows each root of the project as a heading with its branch, then its `Staged` files and its `Changes` (untracked included), each with a status letter and a path relative to the root; a root with nothing changed says so, a non-git root says it isn't a repository. The list window draws no mode line; one mode line spans the frame under both windows. The list refreshes only on a refresh key, keeping point on its file. Motion, search and copying work as in any read-only buffer.
+              A command (`diff-status`) saves the current workspace's window layout and replaces it with two windows: a narrow one on the left showing the changed-file list, a new read-only buffer kind, and one on the right for the diff. The list belongs to the current workspace, one per workspace, and is temporary: quitting from either window kills the list and any read-only side buffers the view made, and restores the saved layout. File buffers the diff showed stay open, unsaved edits included. The list shows each root of the project as a heading with its branch, then its `Staged` files and its `Changes` (untracked included), each with a status letter and a path relative to the root; a root with nothing changed says so, a non-git root says it isn't a repository. The list window draws no mode line; one mode line spans the frame under both windows. The list refreshes only on a refresh key, keeping point on its file. Motion, search and copying work as in any read-only buffer.
             acceptance:
-              - "The command shows the list and the diff window full-frame, whatever the layout was, and quitting restores that layout and kills both buffers"
+              - "The command shows the list and the diff window full-frame, whatever the layout was, and quitting restores that layout and kills the list, leaving file buffers open"
               - "Files of two roots on different branches list under their own root heading with its branch"
               - "A file staged and changed again lists under both Staged and Changes"
               - "The list changes only on refresh, and point stays on its file"
@@ -2529,21 +2542,26 @@ milestones:
           - key: m9-diff-view
             title: "Inline diff of the file at point"
             body: |
-              The right window shows the file under point in the list as a read-only inline diff: the whole new text with the removed lines in place above what replaced them, added and removed lines in their own faces, and the line number gutter numbering the new side. A file under `Staged` compares `HEAD` with the index, one under `Changes` the index with the working tree. Moving point in the list shows the new file's diff, a stale answer being dropped. Commands move to the next and previous change, in either window, and to the next and previous file; `RET` on a line quits the view and visits the file at that line. A binary, non-UTF-8 or oversized file shows a one-line reason. The mode line names the file, its root when the project has several, its added and removed line counts, which change point is in out of how many, and the two sides compared.
+              The right window shows the file under point in the list as an inline diff drawn over a buffer: the new side is the buffer's text, added lines take the added face, and the removed lines are diff rows above what replaced them, in the removed face with their old line numbers. A file under `Changes` compares the index with the working tree, and its new side is the file's own buffer (visited if it isn't open), editable and saved with `C-x C-s` as anywhere else. A file under `Staged` compares `HEAD` with the index; its new side is a read-only buffer holding the index text. The view holds the old side's text, and after each edit or revert of the new side's buffer it diffs again off the core thread, a moment later, and redraws the rows, a stale answer being dropped. Moving point in the list shows the new file's diff. Commands move to the next and previous change, in either window, and to the next and previous file; `RET` in the diff quits the view and leaves point where it is in the file. Copying a change's removed lines is its own command, since the rows aren't text. A binary, non-UTF-8 or oversized file shows a one-line reason. The mode line names the file, its root when the project has several, the buffer's modified mark, its added and removed line counts, which change point is in out of how many, and the two sides compared. Nothing here assumes the removed lines share the new side's window, so the later side-by-side view reuses the diff model and the rows.
             acceptance:
               - "Added, removed and changed lines show in place in the whole file, and the gutter numbers the new side"
+              - "Typing in a Changes diff edits the file's buffer, the rows follow the edit, and C-x C-s saves the file"
+              - "A Staged diff refuses edits as read-only"
+              - "Quitting with unsaved edits leaves the file's buffer modified and open"
+              - "A file the agent changes on disk while its unmodified buffer is shown auto-reverts and the diff follows"
               - "Staged and unstaged changes of one file show as two different diffs"
               - "Next and previous change stop at each change, and say so at the last and first"
-              - "RET on a line of the new side visits the file at that line in the restored layout"
+              - "RET in the diff quits the view with the file's buffer at point in the restored layout"
+              - "Copying a change's removed lines puts them in the kill ring"
               - "An untracked file shows as all added, a deleted one as all removed, a binary one as a reason"
               - "The mode line shows the file, counts, change position and sides"
               - "Core tests cover the layout of the diff text and the motion"
               - "Spec updated in docs/editor.md and openspec/specs"
-            blocked_by: [m9-diff-layout, m9-git-file-diff]
+            blocked_by: [m9-diff-layout, m9-git-file-diff, m9-diff-rows]
           - key: m9-diff-highlight
             title: "Syntax highlighting in the diff view"
             body: |
-              The diff view highlights code as the file's own buffer would. An inline diff isn't one parseable file, so the old and the new text are each parsed with the file's grammar (off the core thread over the size limit, as file buffers are) and each line of the diff takes its faces from the side it came from, under the added and removed line faces.
+              The diff view highlights code as the file's own buffer would. The new side is a buffer and keeps its own highlighting (a read-only side buffer takes the file's major mode); the removed lines in diff rows take their faces from a parse of the old text with the file's grammar (off the core thread over the size limit, as file buffers are), under the removed line face. Added lines show their syntax faces under the added line face.
             acceptance:
               - "Unchanged and added lines carry the faces the file buffer shows for them"
               - "Removed lines are highlighted from the old text, a removed line inside a multi-line string or comment included"
@@ -2554,7 +2572,7 @@ milestones:
             title: "Decide: how the diff view looks"
             labels: [decision]
             body: |
-              No frame of the visual direction canvas shows the diff view. Draw one (the list with root headings, Staged and Changes, status letters; the inline diff with added and removed line faces over syntax colours; the single mode line; both themes), export it to docs/design, list it in AGENTS.md and add its faces to docs/editor.md.
+              No frame of the visual direction canvas shows the diff view. Draw one (the list with root headings, Staged and Changes, status letters; the inline diff with added lines and removed diff rows over syntax colours, point on an edited line and the modified mark; the single mode line; both themes), and sketch the later side-by-side view with its filler rows so the faces suit both. Export it to docs/design, list it in AGENTS.md and add its faces to docs/editor.md.
             acceptance:
               - "The frame is exported to docs/design and listed in AGENTS.md"
               - "New faces are recorded in docs/editor.md"
@@ -2588,11 +2606,12 @@ milestones:
           - key: m9-actions-change
             title: "Stage, unstage and discard a change or a region"
             body: |
-              In the diff view: stage the change at point (in a `Changes` diff), unstage it (in a `Staged` diff) or discard it, and with an active region only the region's added and removed lines. The core builds a patch for those lines and the service applies it with `git apply --cached` (reversed to unstage), or reversed to the working tree to discard, which asks for confirmation. The diff refreshes and point stays near the change.
+              In the diff view: stage the change at point (in a `Changes` diff), unstage it (in a `Staged` diff) or discard it, and with an active region only the region's lines: its added lines, and the removed rows of every change the region touches. The core builds a patch for those lines and the service applies it with `git apply --cached` (reversed to unstage). Staging refuses while the file's buffer has unsaved edits (`Save <file> first`), since git sees the disk. Discarding in a `Changes` diff edits the file's buffer instead of the disk: the change goes back to the old side's text as one undo group, without confirmation since `C-/` restores it, and the buffer is left unsaved. Discarding in a `Staged` diff unstages. The diff refreshes and point stays near the change.
             acceptance:
               - "Staging one change of several leaves the others unstaged, and `git diff --cached` shows exactly that change"
               - "A region inside a change stages only its lines"
-              - "Unstaging a change returns it to Changes; discarding removes it from the file after confirmation"
+              - "Unstaging a change returns it to Changes; discarding returns it to the old text in the buffer, and C-/ brings it back"
+              - "Staging with unsaved edits in the file's buffer is refused and names the file"
               - "A change at the start and at the end of a file, and in a file without a final newline, applies"
               - "The wrong action for the diff (stage in a Staged diff) echoes why"
               - "Spec updated in docs/editor.md and openspec/specs"
@@ -2607,12 +2626,13 @@ milestones:
           - key: m9-diff-revisions
             title: "Diff two revisions of a root"
             body: |
-              `diff-revisions` asks for a root when the project has several git roots, then for the old revision and the new one, completing over branches and tags and accepting anything git resolves (a commit, `HEAD~3`); an empty new revision means the working tree. The view opens with that root's differing files in one list and their diffs, read-only: the staging and discard commands echo that this diff can't be changed. The mode line names both revisions. A revision git can't resolve is echoed and nothing opens.
+              `diff-revisions` asks for a root when the project has several git roots, then for the old revision and the new one, completing over branches and tags and accepting anything git resolves (a commit, `HEAD~3`); an empty new revision means the working tree. The view opens with that root's differing files in one list and their diffs; the staging and discard commands echo that this diff can't be changed. When the new side is the working tree its files are their own buffers and can be edited as in a status diff; otherwise the new side is read-only. The mode line names both revisions. A revision git can't resolve is echoed and nothing opens.
             acceptance:
               - "Two branches, a tag and a commit, and a revision against the working tree each list the files `git diff --name-status` lists"
               - "Completion offers the root's branches and tags"
               - "An unknown revision echoes git's error and opens nothing"
               - "Stage, unstage and discard are refused"
+              - "Against the working tree, editing the new side edits the file's buffer; between two revisions it is read-only"
               - "Refresh resolves the revisions again"
               - "Spec updated in docs/editor.md and openspec/specs"
             blocked_by: [m9-diff-view]
@@ -2637,20 +2657,21 @@ milestones:
           - key: m9-turn-diff
             title: "Show what changed since the last prompt"
             body: |
-              `agent-diff-turn` in a session buffer opens the diff view comparing each root's snapshot with its working tree: one list grouped by root, with the changed, new and deleted files, and their diffs. It works while the turn runs and after it; refresh compares again. Staging is refused; the mode line says the diff is the session's turn. A session with no snapshot (none sent since launch, or a resumed session) echoes `No turn to compare`.
+              `agent-diff-turn` in a session buffer opens the diff view comparing each root's snapshot with its working tree: one list grouped by root, with the changed, new and deleted files, and their diffs, each drawn over the file's own buffer so you can fix the agent's change in place and save it. It works while the turn runs and after it; refresh compares again. Staging is refused; the mode line says the diff is the session's turn. A session with no snapshot (none sent since launch, or a resumed session) echoes `No turn to compare`.
             acceptance:
               - "A file changed by an agent's shell command, with no ACP diff reported, is listed"
               - "Changes in two roots list under their roots"
               - "A file that was already dirty before the prompt shows only what changed since"
               - "A session without a snapshot echoes `No turn to compare`"
+              - "Editing a changed file in the turn diff and saving it writes the file, and the diff follows"
               - "Spec updated in docs/editor.md and openspec/specs"
             blocked_by: [m9-turn-snapshot, m9-diff-view]
           - key: m9-turn-revert
             title: "Revert a turn's change or file to the snapshot"
             body: |
-              In a turn diff, the discard commands revert to the snapshot instead of to the index: a file from the list (a file the turn created is deleted, one it deleted is restored), or the change or region at point in the diff, after confirmation. The index isn't touched.
+              In a turn diff, the discard commands revert to the snapshot instead of to the index. A change or region at point in the diff goes back to the snapshot's text in the file's buffer, as one undo group and unsaved, as discard does in a status diff. A file from the list is reverted on disk after confirmation (a file the turn created is deleted, one it deleted is restored), refused while its buffer has unsaved edits. The index isn't touched.
             acceptance:
-              - "Reverting one change leaves the turn's other changes in the file"
+              - "Reverting one change leaves the turn's other changes in the buffer, and C-/ brings it back"
               - "Reverting a created file deletes it and a deleted file restores it, after confirmation"
               - "The repo's index is unchanged"
               - "Spec updated in docs/editor.md and openspec/specs"

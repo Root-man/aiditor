@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diff view, inline</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+.fr{--bg:#282828;--fg:#ebdbb2;--wbbg:#1d2021;--wbfg:#a89984;--mlbg:#3c3836;--div:#1d2021;--gut:#665c54;--curnum:#fabd2f;--hl:#32302f;--dim:#a89984;--sep:#504945;--echo:#928374;--add:#b8bb26;--addbg:#32361a;--rem:#fb4934;--rembg:#3c1f1e;--fill:#3c3836;--k:#fb4934;--s:#b8bb26;--t:#fabd2f;--c:#928374;--n:#d3869b;--p:#83a598;--m:#8ec07c;--o:#fe8019;--mod:#fe8019;--branch:#8ec07c;--grp:#83a598;--cnt:#665c54;--note:#928374;--kh:#fabd2f;--ws:#fabd2f;--curbg:#ebdbb2;--curfg:#282828;--run:#b8bb26;--claude:#fe8019}
+.fr{box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;font-family:'Cascadia Code','JetBrains Mono',Menlo,monospace;font-size:15px;line-height:21px;font-variant-ligatures:none;background:var(--bg);color:var(--fg)}
+.k{color:var(--k)}.s{color:var(--s)}.f{color:var(--s)}.t{color:var(--t)}.c{color:var(--c);font-style:italic}.n{color:var(--n)}.p{color:var(--p)}.m{color:var(--m)}.o{color:var(--o)}
+.dim{color:var(--dim)}.sep{color:var(--sep)}.bold{font-weight:700}.branch{color:var(--branch)}.grp{color:var(--grp);font-weight:700}.cnt{color:var(--cnt)}.note{color:var(--note)}
+.stM{color:var(--t)}.stA{color:var(--add)}.stD{color:var(--rem)}.stU{color:var(--note)}.plus{color:var(--add)}.minus{color:var(--rem)}.ro{color:var(--rem)}
+.mod{color:var(--mod)}.claude{color:var(--claude)}.run{color:var(--run)}.kh{color:var(--kh);font-weight:700}.ws{color:var(--ws)}
+.pt{background:var(--curbg);color:var(--curfg)}
+.wb{height:22px;line-height:22px;flex:none;display:flex;justify-content:space-between;padding:0 12px;background:var(--wbbg);color:var(--wbfg);font-size:13px;white-space:pre}
+.main{flex:1;min-height:0;display:flex}
+.list{flex:none;min-height:0;overflow:hidden;padding-top:6px}
+.lr{white-space:pre;padding:0 12px;min-height:21px;overflow:hidden}
+.lr.sel{background:var(--hl)}
+.vd{width:1px;flex:none;background:var(--div)}
+.pane{flex:1;min-width:0;display:flex;flex-direction:column}
+.ph{height:21px;flex:none;white-space:pre;padding:3px 12px 3px 58px;background:var(--hl);color:var(--dim)}
+.body{flex:1;min-height:0;overflow:hidden;padding-top:6px}
+.l{display:flex;white-space:pre;min-height:21px}
+.g{width:2ch;flex:none;text-align:right;padding:0 8px 0 10px;color:var(--gut)}
+.sg{width:1ch;flex:none;padding-right:10px}
+.tx{min-width:0;overflow:hidden}
+.l.cur{background:var(--hl)}
+.l.cur .g{color:var(--curnum)}
+.l.add{background:var(--addbg)}
+.l.add .sg{color:var(--add)}
+.l.rem{background:var(--rembg)}
+.l.rem .sg{color:var(--rem)}
+.l.fill{background:repeating-linear-gradient(135deg,transparent 0 6px,var(--fill) 6px 7px)}
+.ml{height:26px;line-height:26px;flex:none;display:flex;justify-content:space-between;padding:0 12px;background:var(--mlbg);white-space:pre}
+.echo{height:26px;line-height:26px;flex:none;padding:0 12px;color:var(--echo);white-space:pre}
+</style>
+</helmet>
+<div class="fr" style="width: 1440px; height: 900px">
+  <div class="wb">
+    <span><sc-for list="{{wb}}" as="t" hint-placeholder-count="6"><span class="{{t.c}}">{{t.t}}</span></sc-for></span>
+    <span>15:42</span>
+  </div>
+  <div class="main">
+    <div class="list" style="{{listStyle}}">
+      <sc-for list="{{list}}" as="r" hint-placeholder-count="14">
+        <div class="lr {{r.cls}}"><sc-for list="{{r.toks}}" as="t"><span class="{{t.c}}">{{t.t}}</span></sc-for></div>
+      </sc-for>
+    </div>
+    <div class="vd"></div>
+    <sc-for list="{{panes}}" as="p" hint-placeholder-count="1">
+      <div class="pane">
+        <sc-if value="{{p.head}}" hint-placeholder-val="{{false}}">
+          <div class="ph"><sc-for list="{{p.headToks}}" as="t"><span class="{{t.c}}">{{t.t}}</span></sc-for></div>
+        </sc-if>
+        <div class="body">
+          <sc-for list="{{p.rows}}" as="l" hint-placeholder-count="38">
+            <div class="l {{l.cls}}"><span class="g">{{l.n}}</span><span class="sg">{{l.sign}}</span><span class="tx"><sc-for list="{{l.toks}}" as="t"><span class="{{t.c}}">{{t.t}}</span></sc-for></span></div>
+          </sc-for>
+        </div>
+      </div>
+      <sc-if value="{{p.divAfter}}" hint-placeholder-val="{{false}}">
+        <div class="vd"></div>
+      </sc-if>
+    </sc-for>
+  </div>
+  <div class="ml">
+    <span><sc-for list="{{mlLeft}}" as="t" hint-placeholder-count="8"><span class="{{t.c}}">{{t.t}}</span></sc-for></span>
+    <span><sc-for list="{{mlRight}}" as="t" hint-placeholder-count="6"><span class="{{t.c}}">{{t.t}}</span></sc-for></span>
+  </div>
+  <div class="echo"><sc-for list="{{echo}}" as="t" hint-placeholder-count="16"><span class="{{t.c}}">{{t.t}}</span></sc-for></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    // The four diff frames share this script; only these two lines differ.
+    const LAYOUT = 'inline';
+    const MODE = 'status';
+
+    const KW = /^(use|pub|fn|let|mut|loop|for|in|if|else|break|impl|as|return|match|struct|const|mod|crate|self|true|false)$/;
+    const T = (t, c) => ({ t, c: c || '' });
+    const tok = (line) => {
+      const toks = [];
+      const re = /(\/\/.*$)|(b?'(?:[^'\\]|\\.)')|("(?:[^"\\]|\\.)*")|(\b\d[\d_.]*\b)|(#\[[^\]]*\])|([A-Za-z_][A-Za-z0-9_]*!?)|(\s+)|(.)/g;
+      let m;
+      while ((m = re.exec(line))) {
+        const t = m[0];
+        let c = '';
+        if (m[1]) c = 'c';
+        else if (m[2] || m[3]) c = 's';
+        else if (m[4]) c = 'n';
+        else if (m[5]) c = 'o';
+        else if (m[6]) c = t.endsWith('!') ? 'o' : KW.test(t) ? 'k' : /^[A-Z]/.test(t) ? 't' : line[re.lastIndex] === '(' ? 'f' : '';
+        toks.push(T(t, c));
+      }
+      return toks;
+    };
+
+    // Line diff (LCS); each run of changes keeps its removed lines before its added ones.
+    const diff = (a, b) => {
+      const n = a.length, m = b.length;
+      const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+        L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+      const ops = [];
+      let i = 0, j = 0;
+      while (i < n || j < m) {
+        if (i < n && j < m && a[i] === b[j]) { ops.push({ eq: true, o: i, nw: j }); i++; j++; continue; }
+        const g = { eq: false, dels: [], ins: [] };
+        while (i < n || j < m) {
+          if (i < n && j < m && a[i] === b[j]) break;
+          if (j >= m || (i < n && L[i + 1][j] >= L[i][j + 1])) g.dels.push(i++); else g.ins.push(j++);
+        }
+        ops.push(g);
+      }
+      return ops;
+    };
+
+    const gitOld = `//! Git status, file diffs and snapshots.
+
+use std::path::PathBuf;
+
+/// A changed file, as \`git status\` reports it.
+#[derive(Debug, PartialEq)]
+pub struct Entry {
+    pub path: PathBuf,
+    pub staged: bool,
+    pub unstaged: bool,
+}
+
+impl Entry {
+    fn untracked(path: &str) -> Entry {
+        let path = path.into();
+        Entry { path, staged: false, unstaged: true }
+    }
+}
+
+/// Parses a \`git status --porcelain=v2\` record.
+fn parse_entry(record: &str) -> Option<Entry> {
+    let mut fields = record.splitn(9, ' ');
+    let kind = fields.next()?;
+    if kind != "1" {
+        return None;
+    }
+    let xy = fields.next()?;
+    let path = fields.nth(6)?;
+    Some(Entry {
+        path: path.into(),
+        staged: xy.as_bytes()[0] != b'.',
+        unstaged: xy.as_bytes()[1] != b'.',
+    })
+}`;
+    const gitNew = `//! Git status, file diffs and snapshots.
+
+use std::path::PathBuf;
+
+/// A changed file, as \`git status\` reports it.
+#[derive(Debug, PartialEq)]
+pub struct Entry {
+    pub path: PathBuf,
+    pub staged: bool,
+    pub unstaged: bool,
+}
+
+impl Entry {
+    fn untracked(path: &str) -> Entry {
+        let path = path.into();
+        Entry { path, staged: false, unstaged: true }
+    }
+}
+
+/// Parses a \`git status --porcelain=v2\` record.
+fn parse_entry(record: &str) -> Option<Entry> {
+    let mut fields = record.splitn(9, ' ');
+    let kind = fields.next()?;
+    if kind == "?" {
+        let path = record.get(2..)?;
+        return Some(Entry::untracked(path));
+    }
+    if kind != "1" {
+        return None;
+    }
+    let [x, y] = *fields.next()?.as_bytes() else {
+        return None;
+    };
+    let path = fields.nth(6)?;
+    Some(Entry {
+        path: path.into(),
+        staged: x != b'.',
+        unstaged: y != b'.',
+    })
+}`;
+    const grepOld = `//! Project grep, searched on the blocking pool.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long hits wait, so a search doesn't flood the core.
+const BATCH: Duration = Duration::from_millis(100);
+
+/// Runs searches one at a time; each stops the one before.
+pub struct Grep {
+    latest: Arc<AtomicU64>,
+}
+
+impl Grep {
+    pub fn run(&self, op: GrepOp, tx: mpsc::Sender<Msg>) {
+        self.latest.store(op.id, Ordering::Relaxed);
+        let latest = self.latest.clone();
+        for hit in search(&op) {
+            if latest.load(Ordering::Relaxed) != op.id {
+                return;
+            }
+            tx.send(Msg::Hit(hit)).ok();
+        }
+        tx.send(Msg::Done).ok();
+    }
+}`;
+    const grepNew = `//! Project grep, searched on the blocking pool.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long hits wait, so a search doesn't flood the core.
+const BATCH: Duration = Duration::from_millis(50);
+
+/// Runs searches one at a time; each stops the one before.
+pub struct Grep {
+    latest: Arc<AtomicU64>,
+}
+
+impl Grep {
+    pub fn run(&self, op: GrepOp, tx: mpsc::Sender<Msg>) {
+        self.latest.store(op.id, Ordering::Relaxed);
+        let latest = self.latest.clone();
+        let started = Instant::now();
+        let mut sent = 0;
+        for hit in search(&op) {
+            if latest.load(Ordering::Relaxed) != op.id {
+                return;
+            }
+            sent += 1;
+            tx.send(Msg::Hit(hit)).ok();
+        }
+        tx.send(Msg::Done { sent, took: started.elapsed() }).ok();
+    }
+}`;
+
+    const turn = MODE === 'turn';
+    const split = LAYOUT === 'split';
+    const A = (turn ? grepOld : gitOld).split('\n');
+    const B = (turn ? grepNew : gitNew).split('\n');
+    const CUR = turn ? 25 : 31;
+    const SKIP = turn ? 0 : split ? 2 : 4;
+    const ops = diff(A, B);
+
+    const row = (n, sign, cls, text, cur) => {
+      const toks = text == null ? [] : tok(text);
+      if (cur) toks.push(T(' ', 'pt'));
+      return { n: n == null ? '' : String(n), sign, cls: cls + (cur ? ' cur' : ''), toks };
+    };
+    let changes = 0, curChange = 0, plus = 0, minus = 0;
+    const inline = [], left = [], right = [];
+    ops.forEach((op) => {
+      if (op.eq) {
+        inline.push(row(op.nw + 1, ' ', '', B[op.nw], op.nw + 1 === CUR));
+        left.push(row(op.o + 1, ' ', '', A[op.o]));
+        right.push(row(op.nw + 1, ' ', '', B[op.nw], op.nw + 1 === CUR));
+        return;
+      }
+      changes++;
+      plus += op.ins.length;
+      minus += op.dels.length;
+      if (op.ins.some((j) => j + 1 === CUR)) curChange = changes;
+      op.dels.forEach((i) => inline.push(row(null, '-', 'rem', A[i])));
+      op.ins.forEach((j) => inline.push(row(j + 1, '+', 'add', B[j], j + 1 === CUR)));
+      for (let x = 0; x < Math.max(op.dels.length, op.ins.length); x++) {
+        const i = op.dels[x], j = op.ins[x];
+        left.push(i == null ? row(null, '', 'fill', null) : row(i + 1, '-', 'rem', A[i]));
+        right.push(j == null ? row(null, '', 'fill', null) : row(j + 1, '+', 'add', B[j], j + 1 === CUR));
+      }
+    });
+
+    const panes = split
+      ? [
+          { head: true, headToks: [T(turn ? 'turn 15:31' : 'index'), T('  '), T('⊘ read-only', 'ro')], rows: left.slice(SKIP), divAfter: true },
+          { head: true, headToks: [T('working tree')], rows: right.slice(SKIP), divAfter: false },
+        ]
+      : [{ head: false, headToks: [], rows: inline.slice(SKIP), divAfter: false }];
+
+    // The changed-file list: paths cut from the left to fit the window.
+    const listW = split ? 340 : 460;
+    const cols = Math.floor((listW - 24) / 9);
+    const L = (toks, cls) => ({ toks, cls: cls || '' });
+    const path = (p, max) => {
+      const s = p.length > max ? '…' + p.slice(p.length - max + 1) : p;
+      const k = s.lastIndexOf('/') + 1;
+      return [T(s.slice(0, k), 'dim'), T(s.slice(k))];
+    };
+    const letterCls = { M: 'stM', A: 'stA', D: 'stD', '?': 'stU' };
+    const file = (indent, letter, p, sel) => L([T(indent), T(letter, letterCls[letter]), T('  '), ...path(p, cols - indent.length - 3)], sel ? 'sel' : '');
+    const root = (name, branch) => L([T('▾ ', 'dim'), T(name, 'bold'), T('  '), T('⎇ ' + branch, 'branch')]);
+    const gap = L([]);
+    const list = turn
+      ? [
+          L([T('✻ ', 'claude'), T('Fix grep count width', 'bold')]),
+          L([T('  since the prompt at 15:31   ', 'dim'), T('● working', 'run')]),
+          gap,
+          root('aiditor', 'grep-count'),
+          file('    ', 'M', 'crates/aiditor-services/src/grep.rs', true),
+          file('    ', 'M', 'crates/aiditor-core/src/grep.rs'),
+          file('    ', 'A', 'crates/aiditor-core/src/grep_count.rs'),
+          gap,
+          root('zed', 'main'),
+          file('    ', 'M', 'crates/search/src/buffer_search.rs'),
+          file('    ', 'D', 'crates/search/src/match_count.rs'),
+        ]
+      : [
+          root('aiditor', 'diff-view'),
+          L([T('    '), T('Staged', 'grp'), T('  1', 'cnt')]),
+          file('      ', 'M', 'crates/aiditor-core/src/buffer.rs'),
+          L([T('    '), T('Changes', 'grp'), T('  4', 'cnt')]),
+          file('      ', 'M', 'crates/aiditor-services/src/git.rs', true),
+          file('      ', 'M', 'docs/editor.md'),
+          file('      ', 'A', 'crates/aiditor-core/src/diff_rows.rs'),
+          file('      ', '?', 'crates/aiditor-services/tests/git.rs'),
+          gap,
+          root('zed', 'main'),
+          L([T('    No changes', 'note')]),
+          gap,
+          L([T('  '), T('notes', 'bold'), T('  not a git repository', 'note')]),
+        ];
+
+    const SEP = T('  │  ', 'sep');
+    const dir = turn ? 'aiditor › crates/aiditor-services/src/' : 'aiditor › crates/aiditor-services/src/';
+    const name = turn ? 'grep.rs' : 'git.rs';
+    const mlLeft = [
+      ...(turn ? [] : [T('●', 'mod'), T(' ')]),
+      T(dir, 'dim'), T(name, 'bold'), SEP,
+      T('+' + plus, 'plus'), T(' '), T('−' + minus, 'minus'), SEP,
+      ...(turn ? [T('✻ ', 'claude'), T('turn 15:31 → working tree', 'dim')] : [T('index → working tree', 'dim')]),
+      ...(split ? [SEP, T('side by side', 'dim')] : []),
+    ];
+    const curCol = B[CUR - 1].length;
+    const mlRight = [T('⎇ ' + (turn ? 'grep-count' : 'diff-view'), 'branch'), SEP, T('change ' + curChange + '/' + changes), SEP, T(CUR + ':' + curCol), SEP, T(turn ? 'All' : '62%', 'dim')];
+
+    const hint = (k, d) => [T(k, 'kh'), T(' ' + d + '   ')];
+    const echo = [
+      ...hint('C-c n/p', 'change'),
+      ...hint('C-c f/b', 'file'),
+      ...(turn ? [] : hint('C-c s', 'stage')),
+      ...hint('C-c k', turn ? 'revert to turn' : 'discard'),
+      ...hint('C-c w', 'copy old lines'),
+      ...hint('C-c v', split ? 'inline' : 'side by side'),
+      ...hint('C-c g', 'refresh'),
+      ...hint('C-c q', 'quit'),
+    ];
+
+    const wb = [
+      T('aiditor', 'bold'), T(' › ', 'cnt'), T(turn ? 'grep-count' : 'diff-view', 'ws'), T(' '), T('●', 'ws'),
+      SEP, T('aiditor › grep-progress '), T('●', 'run'), SEP, T('zed › tab-bar'),
+    ];
+
+    return { wb, list, listStyle: 'width: ' + listW + 'px', panes, mlLeft, mlRight, echo };
+  }
+}
+</script>
+</body>
+</html>
