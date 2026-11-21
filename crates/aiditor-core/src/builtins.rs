@@ -816,6 +816,36 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.diff_quit(),
         },
         Command {
+            name: "diff-next-change",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_change(true),
+        },
+        Command {
+            name: "diff-previous-change",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_change(false),
+        },
+        Command {
+            name: "diff-next-file",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_file(true),
+        },
+        Command {
+            name: "diff-previous-file",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_file(false),
+        },
+        Command {
+            name: "diff-copy-removed",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_copy_removed(),
+        },
+        Command {
+            name: "diff-visit",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_visit(),
+        },
+        Command {
             name: "agent-sessions-quit",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.sessions_quit(),

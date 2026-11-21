@@ -322,6 +322,8 @@ pub enum Msg {
     },
     /// The prefix hint's delay passed with the prefix still pending.
     Hint,
+    /// The diff view's pause after an edit of the buffer diff list `0` shows passed.
+    Rediff(BufferId),
     /// The system clipboard's text, sent before a key `Core::wants_clipboard` accepts.
     Clipboard(String),
     /// The frame's window became active (true) or inactive.
@@ -1079,11 +1081,13 @@ impl Ctx<'_> {
             Msg::Checked(files) => self.on_checked(files),
             Msg::Heads(files) => self.on_heads(files),
             Msg::GitStatus(answer) => self.core.on_git_status(answer),
-            // The diff view (M9) will ask; nothing does yet.
-            Msg::GitDiffed { .. }
-            | Msg::LinesDiffed { .. }
-            | Msg::GitDiffFiles { .. }
-            | Msg::GitSnapshot { .. } => {}
+            Msg::GitDiffed { request, result } => {
+                (self.core).on_git_diffed(request, result, &mut self.effects)
+            }
+            Msg::LinesDiffed { request, hunks } => self.core.on_lines_diffed(request, hunks),
+            Msg::Rediff(list) => self.rediff(list),
+            // The diff view's later modes will ask; nothing does yet.
+            Msg::GitDiffFiles { .. } | Msg::GitSnapshot { .. } => {}
             Msg::LanguageVersion {
                 buffer,
                 request,
@@ -1488,6 +1492,7 @@ impl Core {
         self.autosave(now, input, &mut effects);
         self.poll_completion(now, &mut effects);
         self.preview(&mut effects);
+        self.sync_diff(now, &mut effects);
         self.watch(&mut effects);
         effects.append(&mut self.released);
         self.size_terminals(&mut effects);

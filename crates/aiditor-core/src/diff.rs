@@ -1,21 +1,41 @@
 //! The diff view (M9): a temporary full-frame layout of the current workspace, the changed-file
 //! list on the left and a window for the diff on the right.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use ropey::Rope;
 
 use crate::buffer::{BufferId, FaceRef, Kind, Prop};
+use crate::display::Segment;
 use crate::settings::FaceName;
-use crate::window::{Tree, Window, WindowId};
+use crate::timer::TimerId;
+use crate::window::{DiffRow, Tree, Window, WindowId};
 use crate::workspace::Windows;
-use crate::{Core, Ctx, Effect, FileOp, GitChange, GitStatus};
+use crate::{
+    Core, Ctx, Effect, Effects, FileDiff, FileOp, GitChange, GitSide, GitStatus, Hunk, Msg,
+    VisitIntent,
+};
 
 pub(crate) const MODE: &str = "diff-list-mode";
 /// The list's share of the frame: frame 15's 460 of 1440 px.
 const RATIO: f32 = 0.32;
 
+/// A file service read: the bytes and hash, `None` for no file.
+type Read = Result<Option<(Vec<u8>, u64)>, String>;
+
+/// The pause after an edit before the shown diff is worked out again.
+const REDIFF: Duration = Duration::from_millis(300);
+
 /// The echo line's actions in the list.
-pub(crate) const HINTS: &[(&[&str], &str)] =
-    &[(&["diff-refresh"], "refresh"), (&["diff-quit"], "quit")];
+pub(crate) const HINTS: &[(&[&str], &str)] = &[
+    (&["diff-next-change", "diff-previous-change"], "change"),
+    (&["diff-next-file", "diff-previous-file"], "file"),
+    (&["diff-copy-removed"], "copy old lines"),
+    (&["diff-refresh"], "refresh"),
+    (&["diff-quit"], "quit"),
+];
 
 /// A line of the list point can be kept on across a refresh.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,7 +45,47 @@ enum Row {
         root: PathBuf,
         staged: bool,
         path: PathBuf,
+        /// The repository's top directory and the file's path from it.
+        repository: PathBuf,
+        file: PathBuf,
     },
+}
+
+/// The diff the view's right window shows.
+struct Shown {
+    /// A `Row::File`.
+    row: Row,
+    /// The answer awaited; 0 for none.
+    request: u64,
+    /// The `FileOp::Open` awaited for the file's buffer.
+    visit: Option<u64>,
+    /// The old side's text, once answered.
+    old: Option<Rope>,
+    /// The new side's buffer, once there.
+    buffer: Option<BufferId>,
+    /// A buffer the view made for the index text or a reason, killed with the diff.
+    side: Option<BufferId>,
+    hunks: Vec<Hunk>,
+    /// The new side's tick the hunks were last asked for; `None` before the first ask.
+    tick: Option<u64>,
+    timer: Option<TimerId>,
+}
+
+impl Shown {
+    fn staged(&self) -> bool {
+        matches!(self.row, Row::File { staged: true, .. })
+    }
+
+    /// Where change `h` starts in a new side whose last line is `last`: removed rows past the
+    /// end sit on the last line.
+    fn start(h: &Hunk, last: usize) -> usize {
+        h.new.start.min(last)
+    }
+
+    /// The change point's `line` is in: its new lines, or the line its removed rows sit on.
+    fn change_at(&self, (line, last): (usize, usize)) -> Option<usize> {
+        (self.hunks.iter()).position(|h| h.new.contains(&line) || Self::start(h, last) == line)
+    }
 }
 
 type Answer = Vec<(PathBuf, Result<Option<GitStatus>, String>)>;
@@ -38,6 +98,9 @@ pub(crate) struct DiffList {
     /// Statuses asked and not yet answered.
     pending: usize,
     rows: Vec<(usize, Row)>,
+    /// The view's right window.
+    window: WindowId,
+    shown: Option<Shown>,
 }
 
 /// The status letter of a change and its face.
@@ -168,8 +231,14 @@ impl Core {
                                 (letter.into(), face(letter_face)),
                                 (format!("  {}", path.display()), None),
                             ]);
-                            let root = root.clone();
-                            rows.push((lines.len() - 1, Row::File { root, staged, path }));
+                            let row = Row::File {
+                                root: root.clone(),
+                                staged,
+                                path,
+                                repository: status.repository.clone(),
+                                file: file.path.clone(),
+                            };
+                            rows.push((lines.len() - 1, row));
                         }
                     }
                 }
@@ -211,6 +280,385 @@ impl Core {
     }
 }
 
+/// The diff rows of `hunks`' removed lines over a new side of `lines` lines: each above the line
+/// that replaced it, after the last when the removal ended the file.
+fn removed_rows(old: &Rope, hunks: &[Hunk], lines: usize) -> Vec<(usize, DiffRow)> {
+    let last = lines.saturating_sub(1);
+    let face = vec![FaceRef::Face(FaceName::DiffRemoved)];
+    (hunks.iter())
+        .flat_map(|h| h.old.clone().map(move |i| (h.new.start, i)))
+        .filter(|(_, i)| *i < old.len_lines())
+        .map(|(at, i)| {
+            let text = old.line(i).to_string();
+            let text = text.trim_end_matches(['\n', '\r']).to_string();
+            let row = DiffRow {
+                after: at > last,
+                runs: vec![(text, face.clone())],
+                label: Some((i + 1).to_string()),
+                height: 1,
+            };
+            (at.min(last), row)
+        })
+        .collect()
+}
+
+/// What `frame` adds for the diff window: its id, the added lines and the mode line's segments.
+pub(crate) struct Decor {
+    pub(crate) window: WindowId,
+    pub(crate) added: Vec<Range<usize>>,
+    pub(crate) left: Vec<Segment>,
+    pub(crate) right: Segment,
+}
+
+impl Core {
+    /// The list whose shown diff awaits `request`, and that diff.
+    fn awaiting(&mut self, request: u64) -> Option<(BufferId, WindowId, &mut Shown)> {
+        (self.buffers.iter_mut()).find_map(|(id, b)| {
+            let list = b.diff_list_mut()?;
+            let window = list.window;
+            let shown = list.shown.as_mut().filter(|s| s.request == request)?;
+            Some((id, window, shown))
+        })
+    }
+
+    fn shown_mut(&mut self, list: BufferId) -> Option<&mut Shown> {
+        self.buffers.get_mut(list)?.diff_list_mut()?.shown.as_mut()
+    }
+
+    /// Forgets list `list`'s shown diff, killing its side buffer and timer.
+    fn drop_shown(&mut self, list: BufferId) {
+        let shown = (self.buffers.get_mut(list)).and_then(|b| b.diff_list_mut()?.shown.take());
+        let Some(shown) = shown else {
+            return;
+        };
+        if let Some(timer) = shown.timer {
+            self.timers.cancel(timer);
+        }
+        if let Some(side) = shown.side.filter(|&b| self.buffers.get(b).is_some()) {
+            self.kill_buffer(side);
+        }
+    }
+
+    /// After each message: shows the file at point in the current workspace's list, and asks
+    /// for the shown diff again a moment after its buffer changes.
+    pub(crate) fn sync_diff(&mut self, now: Instant, effects: &mut Effects) {
+        let Some(id) = self
+            .diff_list_here()
+            .filter(|_| self.windows.saved.is_some())
+        else {
+            return;
+        };
+        let list = self
+            .buffers
+            .get(id)
+            .and_then(|b| b.diff_list())
+            .expect("found");
+        let shown_window = (std::iter::once(&self.windows.window)
+            .chain(self.windows.others.values()))
+        .find(|w| w.buffer() == id);
+        let row = shown_window.and_then(|w| {
+            let buffer = self.buffers.get(id)?;
+            let line = buffer.line_col(w.point(&self.buffers)).ok()?.0;
+            (list.rows.iter()).find(|(l, r)| *l == line && matches!(r, Row::File { .. }))
+        });
+        if let Some((_, row)) = row
+            && list.shown.as_ref().is_none_or(|s| s.row != *row)
+        {
+            let row = row.clone();
+            self.show_diff(id, row, effects);
+        }
+        let Some(shown) = self
+            .buffers
+            .get(id)
+            .and_then(|b| b.diff_list()?.shown.as_ref())
+        else {
+            return;
+        };
+        let tick = shown
+            .buffer
+            .and_then(|b| self.buffers.get(b))
+            .map(|b| b.tick());
+        let Some(tick) =
+            tick.filter(|&t| shown.old.is_some() && !shown.staged() && shown.tick != Some(t))
+        else {
+            return;
+        };
+        if shown.tick.is_none() {
+            return self.ask_lines(id, effects);
+        }
+        let timer = self.timers.start(now, REDIFF, None, Msg::Rediff(id));
+        let shown = self.shown_mut(id).expect("checked above");
+        let old = shown.timer.replace(timer);
+        // An answer for the text before this edit is stale.
+        (shown.tick, shown.request) = (Some(tick), 0);
+        if let Some(old) = old {
+            self.timers.cancel(old);
+        }
+    }
+
+    /// Takes the old and new sides of a shown diff.
+    pub(crate) fn on_git_diffed(
+        &mut self,
+        request: u64,
+        result: Result<FileDiff, String>,
+        effects: &mut Effects,
+    ) {
+        let Some((list, window, shown)) = self.awaiting(request) else {
+            return;
+        };
+        shown.request = 0;
+        let Row::File {
+            staged,
+            path,
+            repository,
+            file,
+            ..
+        } = shown.row.clone()
+        else {
+            return;
+        };
+        let diff = match result {
+            Ok(diff) => diff,
+            Err(err) => {
+                let id = self.side_buffer(list, "*Diff file*", &err);
+                return self.attach(list, window, id);
+            }
+        };
+        let shown = self.shown_mut(list).expect("awaited");
+        shown.old = Some(diff.old);
+        if staged {
+            shown.hunks = diff.hunks;
+            let name = format!("{} (index)", path.display());
+            let id = self.side_buffer(list, &name, &diff.new.to_string());
+            return self.attach(list, window, id);
+        }
+        let full = repository.join(file);
+        let workspace = self.buffers.get(list).expect("a live list").workspace;
+        match self.buffers.visiting_in(&full, workspace) {
+            Some(id) => self.attach(list, window, id),
+            None => {
+                self.visits += 1;
+                let intent = VisitIntent {
+                    request: self.visits,
+                    workspace,
+                    window,
+                };
+                self.shown_mut(list).expect("awaited").visit = Some(intent.request);
+                let path = full;
+                effects.push(Effect::File(FileOp::Open { intent, path }));
+            }
+        }
+    }
+
+    /// Starts showing `row`'s diff for list `list`.
+    fn show_diff(&mut self, list: BufferId, row: Row, effects: &mut Effects) {
+        self.drop_shown(list);
+        let Row::File {
+            staged,
+            repository,
+            file,
+            ..
+        } = &row
+        else {
+            return;
+        };
+        let (old, new) = match staged {
+            true => (GitSide::Tree("HEAD".into()), GitSide::Index),
+            false => (GitSide::Index, GitSide::WorkingTree),
+        };
+        self.visits += 1;
+        let request = self.visits;
+        effects.push(Effect::File(FileOp::GitDiff {
+            request,
+            repository: repository.clone(),
+            path: file.clone(),
+            old,
+            new,
+            objects: None,
+        }));
+        let diff = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut());
+        diff.expect("a live list").shown = Some(Shown {
+            row,
+            request,
+            visit: None,
+            old: None,
+            buffer: None,
+            side: None,
+            hunks: Vec::new(),
+            tick: None,
+            timer: None,
+        });
+    }
+
+    /// A read-only buffer of `text` named `name`, in list `list`'s workspace, as its side buffer.
+    fn side_buffer(&mut self, list: BufferId, name: &str, text: &str) -> BufferId {
+        let workspace = self.buffers.get(list).expect("a live list").workspace;
+        let id = self.buffers.create(name);
+        let buffer = self.buffers.get_mut(id).expect("just created");
+        buffer.set_text(text);
+        (buffer.read_only, buffer.workspace) = (true, workspace);
+        self.shown_mut(list).expect("showing").side = Some(id);
+        id
+    }
+
+    /// Shows buffer `id` as the new side of list `list`'s diff in its window `window`.
+    fn attach(&mut self, list: BufferId, window: WindowId, id: BufferId) {
+        self.shown_mut(list).expect("showing").buffer = Some(id);
+        if let Some(window) = view_window(&mut self.windows, &mut self.workspaces, window) {
+            window.show(&mut self.buffers, id);
+        }
+        self.redraw(list);
+    }
+
+    /// Puts list `list`'s removed rows in its window, if it shows the diff's buffer.
+    fn redraw(&mut self, list: BufferId) {
+        let Some(diff) = self.buffers.get(list).and_then(|b| b.diff_list()) else {
+            return;
+        };
+        let Some(shown) = &diff.shown else {
+            return;
+        };
+        let (Some(old), Some(id)) = (&shown.old, shown.buffer) else {
+            return;
+        };
+        let Some(lines) = self.buffers.get(id).map(|b| b.len_lines()) else {
+            return;
+        };
+        let rows = removed_rows(old, &shown.hunks, lines);
+        let window = diff.window;
+        let window = view_window(&mut self.windows, &mut self.workspaces, window);
+        if let Some(window) = window.filter(|w| w.buffer() == id) {
+            window.set_diff_rows(&mut self.buffers, rows);
+        }
+    }
+
+    /// Takes the hunks of a re-diff.
+    pub(crate) fn on_lines_diffed(&mut self, request: u64, hunks: Vec<Hunk>) {
+        let Some((list, _, shown)) = self.awaiting(request) else {
+            return;
+        };
+        (shown.hunks, shown.request) = (hunks, 0);
+        self.redraw(list);
+    }
+
+    /// Asks for the hunks of list `list`'s diff against its buffer's text now.
+    fn ask_lines(&mut self, list: BufferId, effects: &mut Effects) {
+        self.visits += 1;
+        let request = self.visits;
+        let Some(shown) = self.shown_mut(list) else {
+            return;
+        };
+        let (Some(old), Some(id)) = (shown.old.clone(), shown.buffer) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get(id) else {
+            return;
+        };
+        let (new, tick) = (buffer.text().clone(), buffer.tick());
+        let shown = self.shown_mut(list).expect("checked above");
+        (shown.request, shown.tick) = (request, Some(tick));
+        effects.push(Effect::File(FileOp::DiffLines { request, old, new }));
+    }
+
+    /// Takes an `Opened` the view asked for, else hands `result` back.
+    pub(crate) fn diff_read(&mut self, request: u64, path: &Path, result: Read) -> Option<Read> {
+        let found = (self.buffers.iter_mut()).find_map(|(id, b)| {
+            let list = b.diff_list_mut()?;
+            let shown = list.shown.as_mut().filter(|s| s.visit == Some(request))?;
+            shown.visit = None;
+            Some((id, list.window, b.workspace))
+        });
+        let Some((list, window, workspace)) = found else {
+            return Some(result);
+        };
+        // A buffer made meanwhile, by `C-x C-f` say, is the one to show.
+        let made = match self.buffers.visiting_in(path, workspace) {
+            Some(id) => Ok(id),
+            None => result.and_then(|file| self.file_buffer(path, file, true)),
+        };
+        match made {
+            Ok(id) => {
+                self.buffers.get_mut(id).expect("live").workspace = workspace;
+                self.attach(list, window, id);
+            }
+            Err(err) => {
+                let id = self.side_buffer(list, "*Diff file*", &err);
+                self.attach(list, window, id);
+            }
+        }
+        None
+    }
+
+    /// The current view's list, its right window and the shown diff, while the window shows
+    /// the diff's buffer.
+    fn diff_shown(&self) -> Option<(BufferId, &Window, &Shown)> {
+        let list = self
+            .diff_list_here()
+            .filter(|_| self.windows.saved.is_some())?;
+        let diff = self.buffers.get(list)?.diff_list()?;
+        let shown = diff.shown.as_ref().filter(|s| s.old.is_some())?;
+        let window = match diff.window == self.windows.selected {
+            true => &self.windows.window,
+            false => self.windows.others.get(&diff.window)?,
+        };
+        (shown.buffer == Some(window.buffer())).then_some((list, window, shown))
+    }
+
+    /// Point's line in the diff window and the window buffer's last line.
+    fn diff_line(&self, window: &Window) -> (usize, usize) {
+        let buffer = self
+            .buffers
+            .get(window.buffer())
+            .expect("window buffer is live");
+        let line = buffer
+            .line_col(window.point(&self.buffers))
+            .map_or(0, |(l, _)| l);
+        (line, buffer.len_lines() - 1)
+    }
+
+    /// The added lines and mode line segments `frame` draws in the diff window.
+    pub(crate) fn diff_decor(&self) -> Option<Decor> {
+        let (list, window, shown) = self.diff_shown()?;
+        let line = self.diff_line(window);
+        let count = |r: fn(&Hunk) -> &Range<usize>| shown.hunks.iter().map(|h| r(h).len()).sum();
+        let (added, removed): (usize, usize) = (count(|h| &h.new), count(|h| &h.old));
+        let sides = match shown.staged() {
+            true => "HEAD → index",
+            false => "index → working tree",
+        };
+        let n = shown.hunks.len();
+        let change = match shown.change_at(line) {
+            Some(i) => format!("change {}/{n}", i + 1),
+            None if n == 1 => "1 change".into(),
+            None => format!("{n} changes"),
+        };
+        let diff = self.buffers.get(list)?.diff_list()?;
+        Some(Decor {
+            window: diff.window,
+            added: shown.hunks.iter().map(|h| h.new.clone()).collect(),
+            left: vec![
+                vec![
+                    (format!("+{added}"), FaceName::DiffAdded),
+                    (" ".into(), FaceName::ModeLine),
+                    (format!("−{removed}"), FaceName::DiffRemoved),
+                ],
+                vec![(sides.into(), FaceName::ModeLineDim)],
+            ],
+            right: vec![(change, FaceName::ModeLine)],
+        })
+    }
+}
+
+/// Window `id` of the current layout or a saved workspace's.
+fn view_window<'a>(
+    windows: &'a mut Windows,
+    workspaces: &'a mut [crate::workspace::Workspace],
+    id: WindowId,
+) -> Option<&'a mut Window> {
+    let saved = workspaces.iter_mut().filter_map(|w| w.windows.as_mut());
+    (std::iter::once(windows).chain(saved)).find_map(|w| w.get_mut(id))
+}
+
 impl Ctx<'_> {
     /// `diff-status`: saves the workspace's layout and shows its changed-file list beside the
     /// current buffer; while the view is open, selects the list.
@@ -228,6 +676,8 @@ impl Ctx<'_> {
                 answer: None,
                 pending: 0,
                 rows: Vec::new(),
+                window: WindowId(core.next_window + 1),
+                shown: None,
             });
             id
         });
@@ -279,11 +729,149 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// The pause after an edit passed: asks for the shown diff against the text now.
+    pub(crate) fn rediff(&mut self, list: BufferId) {
+        if let Some(shown) = self.core.shown_mut(list) {
+            shown.timer = None;
+            self.core.ask_lines(list, &mut self.effects);
+        }
+    }
+
+    /// `diff-next-change` and `diff-previous-change`: moves the diff window's point to the
+    /// start of the next or previous change.
+    pub(crate) fn diff_change(&mut self, forward: bool) -> Result<(), String> {
+        let core = &mut *self.core;
+        let (list, window, shown) = core.diff_shown().ok_or("No diff shown")?;
+        let (line, last) = core.diff_line(window);
+        let starts = shown.hunks.iter().map(|h| Shown::start(h, last));
+        let target = match forward {
+            true => starts.clone().find(|&s| s > line),
+            false => starts.rev().find(|&s| s < line),
+        };
+        let target = target.ok_or(match forward {
+            true => "No next change",
+            false => "No previous change",
+        })?;
+        let id = core
+            .buffers
+            .get(list)
+            .and_then(|b| b.diff_list())
+            .expect("shown")
+            .window;
+        let window = core.windows.get_mut(id).expect("shown");
+        let buffer = core
+            .buffers
+            .get(window.buffer())
+            .expect("window buffer is live");
+        let at = buffer.char_idx(target, 0).expect("in the buffer");
+        window.jump(&mut core.buffers, at).expect("in the buffer");
+        Ok(())
+    }
+
+    /// `diff-next-file` and `diff-previous-file`: moves the list's point to the next or previous
+    /// file, whose diff then shows.
+    pub(crate) fn diff_file(&mut self, forward: bool) -> Result<(), String> {
+        let core = &mut *self.core;
+        let list = (core.diff_list_here())
+            .filter(|_| core.windows.saved.is_some())
+            .ok_or("No diff view")?;
+        let buffer = core.buffers.get(list).expect("found");
+        let files = (buffer.diff_list().expect("a list").rows.iter())
+            .filter(|(_, r)| matches!(r, Row::File { .. }))
+            .map(|(l, _)| *l);
+        let window = (std::iter::once(&mut core.windows.window))
+            .chain(core.windows.others.values_mut())
+            .find(|w| w.buffer() == list)
+            .ok_or("No diff view")?;
+        let line = buffer
+            .line_col(window.point(&core.buffers))
+            .map_or(0, |(l, _)| l);
+        let target = match forward {
+            true => files.clone().find(|&l| l > line),
+            false => files.rev().find(|&l| l < line),
+        };
+        let target = target.ok_or(match forward {
+            true => "No next file",
+            false => "No previous file",
+        })?;
+        let at = buffer.char_idx(target, 0).expect("a row's line");
+        window
+            .set_point(&mut core.buffers, at)
+            .expect("in the list");
+        Ok(())
+    }
+
+    /// `diff-copy-removed`: puts the removed lines of the change at point on the kill ring.
+    pub(crate) fn diff_copy_removed(&mut self) -> Result<(), String> {
+        let core = &*self.core;
+        let (_, window, shown) = core.diff_shown().ok_or("No diff shown")?;
+        let hunk = (shown.change_at(core.diff_line(window)))
+            .map(|i| shown.hunks[i].clone())
+            .filter(|h| !h.old.is_empty())
+            .ok_or("No removed lines here")?;
+        let old = shown.old.as_ref().expect("shown");
+        let end = old.line_to_char(hunk.old.end.min(old.len_lines()));
+        let mut text = old.slice(old.line_to_char(hunk.old.start)..end).to_string();
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        let n = hunk.old.len();
+        self.copy_text(text);
+        let lines = if n == 1 { "line" } else { "lines" };
+        self.core.echo(format!("Copied {n} removed {lines}"));
+        Ok(())
+    }
+
+    /// `diff-visit`: quits the view and shows the diff's file at point in the restored layout;
+    /// with the region active, only deactivates it.
+    pub(crate) fn diff_visit(&mut self) -> Result<(), String> {
+        if self.core.windows.window.active() {
+            self.core.windows.window.set_active(false);
+            return Ok(());
+        }
+        let core = &*self.core;
+        let visit = core.diff_shown().map(|(_, window, shown)| {
+            let buffer = core
+                .buffers
+                .get(window.buffer())
+                .expect("window buffer is live");
+            let at = buffer
+                .line_col(window.point(&core.buffers))
+                .unwrap_or_default();
+            let Row::File {
+                repository, file, ..
+            } = &shown.row
+            else {
+                unreachable!("a shown row is a file's");
+            };
+            (shown.staged(), window.buffer(), repository.join(file), at)
+        });
+        self.diff_quit()?;
+        let Some((staged, buffer, path, (line, col))) = visit else {
+            return Ok(());
+        };
+        match staged {
+            false => self.core.switch_to(buffer),
+            true => {
+                self.find_path(path);
+                if let Some(pending) = &mut self.core.pending_visit {
+                    pending.destination = Some((line, col));
+                    return Ok(());
+                }
+            }
+        }
+        self.core.goto_line_col(line, col);
+        Ok(())
+    }
+
     /// `diff-quit`: restores the layout the view replaced and kills the list.
     pub(crate) fn diff_quit(&mut self) -> Result<(), String> {
         self.outside_minibuffer("Can't quit the diff view from the minibuffer")?;
         let core = &mut *self.core;
         let saved = core.windows.saved.take().ok_or("No diff view")?;
+        if let Some(list) = core.diff_list_here() {
+            core.drop_shown(list);
+        }
         let mut view = std::mem::replace(&mut core.windows, *saved);
         view.windows_mut()
             .for_each(|w| w.release(&mut core.buffers));
@@ -299,6 +887,7 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::Decoration;
     use crate::command::Args;
     use crate::harness::Harness;
     use crate::project::Root;
@@ -517,5 +1106,273 @@ mod tests {
             list.rect.width < right.rect.width / 2.,
             "the list is narrow"
         );
+    }
+    /// The view over root `a`, its own repository on `main`, with `x.rs` `staged` and/or
+    /// `changed`, on disk as `disk` (`None`: deleted); point on its first row.
+    fn inline(staged: bool, changed: bool, disk: Option<&str>) -> Harness {
+        let mut h = Harness::new(&[]);
+        h.read_reply("a/x.rs", disk.map(str::as_bytes));
+        let project = &mut h.core.projects[0].project;
+        project.primary.path = h.dir.join("a");
+        project.roots = Vec::new();
+        h.call("diff-status", Args::default());
+        let a = h.dir.join("a");
+        let change = |on: bool| on.then_some(GitChange::Modified);
+        let status = GitStatus {
+            repository: a.clone(),
+            branch: "main".into(),
+            files: vec![file("x.rs", change(staged), change(changed))],
+        };
+        h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
+        h
+    }
+
+    /// Answers the newest `GitDiff` asked with `old` and `new`, returning its sides.
+    fn answer_diff(h: &mut Harness, old: &str, new: &str) -> (GitSide, GitSide) {
+        let i = (h.effects.iter())
+            .rposition(|e| matches!(e, Effect::File(FileOp::GitDiff { .. })))
+            .expect("a diff asked");
+        let Effect::File(FileOp::GitDiff {
+            request,
+            old: from,
+            new: to,
+            ..
+        }) = h.effects.remove(i)
+        else {
+            unreachable!()
+        };
+        let result = Ok(FileDiff {
+            old: old.into(),
+            new: new.into(),
+            hunks: crate::buffer::hunks(old, new),
+        });
+        h.send(Msg::GitDiffed { request, result });
+        (from, to)
+    }
+
+    /// The right window's lines: `-<label> ` before a removed row, `+ ` before an added line.
+    fn drawn(h: &mut Harness) -> Vec<String> {
+        let frame = h.frame(1440., 900.);
+        let lines = &frame.windows[1].display.lines;
+        (lines.iter())
+            .map(|l| {
+                let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+                let added = Decoration::Bar(FaceName::DiffAdded);
+                match &l.diff {
+                    Some(label) => format!("-{label} {text}"),
+                    None if l.decorations.contains(&added) => format!("+ {text}"),
+                    None => format!("  {text}"),
+                }
+            })
+            .collect()
+    }
+
+    fn mode_line(h: &mut Harness) -> String {
+        h.frame(1440., 900.).windows[1].display.mode_line.text()
+    }
+
+    fn right(h: &Harness) -> &crate::buffer::Buffer {
+        let id = (h.core.windows.others.values())
+            .chain([&h.core.windows.window])
+            .find(|w| (h.core.buffers.get(w.buffer())).is_some_and(|b| b.diff_list().is_none()))
+            .unwrap()
+            .buffer();
+        h.core.buffers.get(id).unwrap()
+    }
+
+    #[test]
+    fn a_change_shows_in_place_over_the_files_buffer() {
+        let mut h = inline(false, true, Some("a\nB\nc\nd\n"));
+        let sides = answer_diff(&mut h, "a\nb\nc\n", "a\nB\nc\nd\n");
+        assert_eq!(sides, (GitSide::Index, GitSide::WorkingTree));
+        assert_eq!(right(&h).path(), Some(h.path("a/x.rs").as_path()));
+        assert_eq!(drawn(&mut h), ["  a", "-2 b", "+ B", "  c", "+ d", "  "]);
+        let bar = mode_line(&mut h);
+        assert!(bar.contains("+2 −1 │ index → working tree"), "{bar}");
+        assert!(bar.contains("2 changes"), "{bar}");
+        h.keys("n");
+        assert!(mode_line(&mut h).contains("change 1/2"));
+    }
+
+    #[test]
+    fn typing_edits_the_file_and_the_rows_follow() {
+        let mut h = inline(false, true, Some("a\nb\n"));
+        answer_diff(&mut h, "a\nb\n", "a\nb\n");
+        assert_eq!(drawn(&mut h), ["  a", "  b", "  "]);
+        h.keys("C-x o C-n C-k C-k");
+        assert_eq!(
+            drawn(&mut h),
+            ["  a", "  "],
+            "the old answer until the pause"
+        );
+        h.advance(REDIFF);
+        assert_eq!(drawn(&mut h), ["  a", "-2 b", "  "]);
+        h.send(Msg::LinesDiffed {
+            request: 1,
+            hunks: Vec::new(),
+        });
+        assert_eq!(
+            drawn(&mut h),
+            ["  a", "-2 b", "  "],
+            "a stale answer is dropped"
+        );
+        assert!(right(&h).modified());
+        h.keys("C-x C-s");
+        assert_eq!(h.writes.last().unwrap(), &(h.path("a/x.rs"), "a\n".into()));
+    }
+
+    #[test]
+    fn a_reverted_buffer_is_diffed_again() {
+        let mut h = inline(false, true, Some("a\n"));
+        answer_diff(&mut h, "a\n", "a\n");
+        h.read_reply("a/x.rs", Some(b"a\nnew\n"));
+        h.prepare_revert("a/x.rs", Some(b"a\nnew\n"));
+        let path = h.path("a/x.rs");
+        h.send(Msg::FilesChanged {
+            paths: vec![(path, crate::Disk::File)],
+            rescan: false,
+        });
+        h.advance(REDIFF);
+        assert_eq!(drawn(&mut h), ["  a", "+ new", "  "]);
+    }
+
+    #[test]
+    fn staged_and_changed_are_two_diffs_and_staged_is_read_only() {
+        let mut h = inline(true, true, Some("c\n"));
+        let sides = answer_diff(&mut h, "a\n", "b\n");
+        assert_eq!(sides, (GitSide::Tree("HEAD".into()), GitSide::Index));
+        assert_eq!(right(&h).name, "x.rs (index)");
+        assert_eq!(drawn(&mut h), ["-1 a", "+ b", "  "]);
+        assert!(mode_line(&mut h).contains("HEAD → index"));
+        h.keys("C-x o z");
+        assert_eq!(h.core.message(), Some("Buffer is read-only"));
+        h.keys("C-x o f");
+        let sides = answer_diff(&mut h, "b\n", "c\n");
+        assert_eq!(sides, (GitSide::Index, GitSide::WorkingTree));
+        assert_eq!(right(&h).path(), Some(h.path("a/x.rs").as_path()));
+        assert!(
+            h.core.buffers.find_here("x.rs (index)").is_none(),
+            "the index buffer goes with its diff"
+        );
+        h.keys("f");
+        assert_eq!(h.core.message(), Some("No next file"));
+        h.keys("b b");
+        assert_eq!(h.core.message(), Some("No previous file"));
+    }
+
+    #[test]
+    fn next_and_previous_change_stop_at_each_and_say_so_at_the_ends() {
+        let mut h = inline(false, true, Some("a\nB\nc\nd\n"));
+        answer_diff(&mut h, "a\nb\nc\n", "a\nB\nc\nd\n");
+        h.keys("C-x o");
+        let line = |h: &Harness| h.core.current().line_col(h.point()).unwrap().0;
+        h.keys("C-c n");
+        assert_eq!(line(&h), 1);
+        h.keys("C-c n");
+        assert_eq!(line(&h), 3);
+        h.keys("C-c n");
+        assert_eq!(h.core.message(), Some("No next change"));
+        assert_eq!(line(&h), 3);
+        h.keys("C-c p C-c p");
+        assert_eq!(h.core.message(), Some("No previous change"));
+        assert_eq!(line(&h), 1);
+    }
+
+    #[test]
+    fn copying_a_changes_removed_lines() {
+        let mut h = inline(false, true, Some("a\nB\nC\n"));
+        answer_diff(&mut h, "a\nb\nc", "a\nB\nC\n");
+        h.keys("w");
+        assert_eq!(h.core.message(), Some("No removed lines here"));
+        h.keys("n w");
+        assert_eq!(h.core.message(), Some("Copied 2 removed lines"));
+        assert_eq!(h.clipboard.as_deref(), Some("b\nc\n"));
+    }
+
+    #[test]
+    fn c_g_quits_to_the_file_at_point_keeping_unsaved_edits() {
+        let mut h = inline(false, true, Some("a\nb\nc\n"));
+        answer_diff(&mut h, "a\nb\nc\n", "a\nb\nc\n");
+        h.keys("C-x o C-n C-n x");
+        h.keys("C-SPC C-g");
+        assert!(h.core.windows.saved.is_some(), "C-g first drops the region");
+        h.keys("C-g");
+        assert!(h.core.windows.saved.is_none());
+        assert_eq!(shown(&h).len(), 1);
+        assert_eq!(h.core.current().path(), Some(h.path("a/x.rs").as_path()));
+        assert!(h.core.current().modified());
+        assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 1));
+    }
+
+    #[test]
+    fn c_g_from_a_staged_diff_visits_the_file_at_the_line() {
+        let mut h = inline(true, false, Some("a\nb\nc\n"));
+        answer_diff(&mut h, "a\n", "a\nb\nc\n");
+        h.keys("C-x o C-n C-n C-g");
+        assert_eq!(h.core.current().path(), Some(h.path("a/x.rs").as_path()));
+        assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
+        assert!(h.core.buffers.find_here("x.rs (index)").is_none());
+    }
+
+    #[test]
+    fn untracked_deleted_and_binary_files() {
+        let mut h = inline(false, true, Some("x\n"));
+        answer_diff(&mut h, "", "x\n");
+        assert_eq!(drawn(&mut h), ["+ x", "  "], "untracked: all added");
+        let mut h = inline(false, true, None);
+        answer_diff(&mut h, "a\n", "");
+        assert_eq!(drawn(&mut h), ["-1 a", "  "], "deleted: all removed");
+        let mut h = inline(false, true, Some("\0"));
+        let i = (h.effects.iter())
+            .rposition(|e| matches!(e, Effect::File(FileOp::GitDiff { .. })))
+            .unwrap();
+        let Effect::File(FileOp::GitDiff { request, .. }) = h.effects.remove(i) else {
+            unreachable!()
+        };
+        let result = Err("x.rs: binary file".into());
+        h.send(Msg::GitDiffed { request, result });
+        assert_eq!(right(&h).text().to_string(), "x.rs: binary file");
+    }
+
+    #[test]
+    fn c_g_in_the_minibuffer_still_aborts_it() {
+        let mut h = inline(false, true, Some("a\n"));
+        h.keys("M-x C-g");
+        assert!(h.core.prompts.minibuffer.is_none());
+        assert!(h.core.windows.saved.is_some(), "the view stays");
+    }
+
+    #[test]
+    fn a_removal_ending_a_file_without_a_newline_is_a_change_on_its_last_line() {
+        let mut h = inline(false, true, Some("a\nb"));
+        answer_diff(&mut h, "a\nb\nc", "a\nb");
+        // `similar` counts the unterminated `b` as a changed line.
+        assert_eq!(drawn(&mut h), ["  a", "-2 b", "-3 c", "+ b"]);
+        h.keys("C-x o C-c n");
+        assert!(mode_line(&mut h).contains("change 1/1"));
+        h.keys("C-c n");
+        assert_eq!(h.core.message(), Some("No next change"));
+        h.keys("C-c w");
+        assert_eq!(h.clipboard.as_deref(), Some("b\nc\n"));
+    }
+
+    #[test]
+    fn the_views_keys_work_in_either_window() {
+        let mut h = inline(true, true, Some("a\nB\n"));
+        answer_diff(&mut h, "a\n", "a\nb\n");
+        h.keys("C-x o C-c f");
+        answer_diff(&mut h, "a\nb\n", "a\nB\n");
+        assert_eq!(right(&h).path(), Some(h.path("a/x.rs").as_path()));
+        h.keys("C-c n C-c p");
+        assert_eq!(h.core.message(), Some("No previous change"));
+        h.keys("C-c w");
+        assert_eq!(h.clipboard.as_deref(), Some("b\n"));
+        h.keys("C-c b");
+        assert_eq!(h.core.message(), None, "back on the staged row");
+        answer_diff(&mut h, "a\n", "a\nb\n");
+        h.keys("C-x o p");
+        assert_eq!(h.core.message(), Some("No previous change"));
+        h.keys("C-g");
+        assert!(h.core.windows.saved.is_none(), "C-g in the list quits too");
     }
 }

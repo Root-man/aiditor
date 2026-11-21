@@ -232,6 +232,12 @@ impl Ctx<'_> {
     /// it, or asks the app to read it.
     pub(crate) fn find_file(&mut self, name: &str) -> Result<(), String> {
         let path = self.core.directory().join(name);
+        self.find_path(path);
+        Ok(())
+    }
+
+    /// Switches to a buffer visiting `path`, or asks the app to read it.
+    pub(crate) fn find_path(&mut self, path: PathBuf) {
         self.core.pending_visit = None;
         match self.core.buffers.visiting(&path) {
             Some(id) => self.core.switch_to(id),
@@ -251,7 +257,6 @@ impl Ctx<'_> {
                     .push(Effect::File(FileOp::Open { intent, path }));
             }
         }
-        Ok(())
     }
 
     /// Offers to save each modified file buffer, asks before killing live terminals and agents,
@@ -469,6 +474,9 @@ impl Core {
         root: Option<PathBuf>,
     ) {
         let Some(result) = self.client_read(intent.request, &path, result) else {
+            return;
+        };
+        let Some(result) = self.diff_read(intent.request, &path, result) else {
             return;
         };
         let valid = self.pending_visit.as_ref().is_some_and(|pending| {

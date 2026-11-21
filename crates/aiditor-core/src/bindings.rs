@@ -38,7 +38,10 @@ impl Core {
     /// The keymaps in lookup order.
     fn layers(&self) -> impl Iterator<Item = &Keymap> {
         let buffer = self.current();
-        let view = self.windows.saved.as_ref().map(|_| &"diff-view");
+        // Not in the minibuffer, whose `C-g` and keys come first.
+        let view = (self.windows.saved.as_ref())
+            .filter(|_| self.windows.selected != crate::minibuffer::MINIBUFFER)
+            .map(|_| &"diff-view");
         let modes = (buffer.minor_modes.iter())
             .chain(view)
             .chain([&buffer.major_mode, &"global"]);

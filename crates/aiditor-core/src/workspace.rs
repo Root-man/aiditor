@@ -50,6 +50,14 @@ impl Windows {
         }
     }
 
+    /// Window `id` of this layout, not a saved one's.
+    pub(crate) fn get_mut(&mut self, id: WindowId) -> Option<&mut Window> {
+        match id == self.selected {
+            true => Some(&mut self.window),
+            false => self.others.get_mut(&id),
+        }
+    }
+
     /// Every window, a saved layout's included.
     pub(crate) fn windows_mut(&mut self) -> impl Iterator<Item = &mut Window> {
         let saved = (self.saved.iter_mut())

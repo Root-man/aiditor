@@ -32,7 +32,7 @@ const COUNT_WIDTH: usize = 6;
 const REPOLL: Duration = Duration::from_millis(16);
 
 /// The minibuffer's window, kept outside the split tree.
-const MINIBUFFER: WindowId = WindowId(usize::MAX);
+pub(crate) const MINIBUFFER: WindowId = WindowId(usize::MAX);
 
 /// A prompt waiting in the minibuffer for the command that asked.
 pub(crate) struct Minibuffer {

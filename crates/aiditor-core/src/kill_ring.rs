@@ -61,7 +61,7 @@ impl Ctx<'_> {
     }
 
     /// Puts `text` on the kill ring as a new entry and on the clipboard.
-    fn copy_text(&mut self, text: String) {
+    pub(crate) fn copy_text(&mut self, text: String) {
         self.core.kills.take_clipboard();
         self.core.kills.kill_new(text);
         self.publish_kill();
