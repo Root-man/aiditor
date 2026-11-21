@@ -1030,6 +1030,7 @@ impl Ctx<'_> {
                         settings.zoom(old.font_size - old.default_font_size);
                         self.core.settings = settings;
                         self.core.watch.dirty = true;
+                        self.core.redraw_diffs();
                     }
                     Err(err) => self.core.report(format!("settings: {err}")),
                 }
@@ -1104,6 +1105,7 @@ impl Ctx<'_> {
                 if let Some(buffer) = self.core.buffers.get_mut(buffer) {
                     buffer.parsed(parse);
                 }
+                self.core.redraw_diffs();
             }
             Msg::WatchStatus(message) => self.core.report(message),
             Msg::Hint => {

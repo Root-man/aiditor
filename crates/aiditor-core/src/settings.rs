@@ -238,6 +238,7 @@ impl Theme {
                     strike: true,
                     ..Face::default()
                 },
+                FaceRef::Is(face) => face,
             };
             face.over(under)
         })

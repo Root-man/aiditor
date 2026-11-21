@@ -436,6 +436,8 @@ pub enum FaceRef {
     Italic,
     Underline,
     Strike,
+    /// A face already resolved, like a syntax highlight of text no buffer shows.
+    Is(Face),
 }
 
 /// Something drawn across a whole line, in a face's `bg` or, for a rule, its `fg`.
@@ -1220,6 +1222,11 @@ impl Buffer {
     /// Whether it has a syntax tree to colour its text with.
     pub(crate) fn highlighted(&self) -> bool {
         self.syntax.is_some()
+    }
+
+    /// Highlights its text in the grammar of `path`'s language, if aiditor has it.
+    pub(crate) fn set_grammar(&mut self, path: &Path) {
+        self.syntax = Syntax::for_file(path, &self.text);
     }
 
     pub(crate) fn syntax_snapshot(&mut self) -> Option<Syntax> {
