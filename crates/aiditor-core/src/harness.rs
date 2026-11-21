@@ -362,9 +362,12 @@ impl Harness {
                         FileOp::Annotate { .. }
                         | FileOp::GitStatus(_)
                         | FileOp::GitDiff { .. }
-                        | FileOp::DiffLines { .. }
                         | FileOp::GitDiffFiles { .. }
                         | FileOp::GitSnapshot { .. } => None,
+                        FileOp::DiffLines { request, old, new } => Some(Msg::LinesDiffed {
+                            request: *request,
+                            hunks: crate::buffer::hunks(&old.to_string(), &new.to_string()),
+                        }),
                         FileOp::Head(paths) => Some(Msg::Heads(
                             (paths.iter())
                                 .map(|path| (path.clone(), self.heads.get(path).cloned()))

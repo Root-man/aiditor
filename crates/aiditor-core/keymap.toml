@@ -195,11 +195,23 @@
 [diff-list-mode]
 "g" = "diff-refresh"
 "q" = "diff-quit"
+"n" = "diff-next-change"
+"p" = "diff-previous-change"
+"f" = "diff-next-file"
+"b" = "diff-previous-file"
+"w" = "diff-copy-removed"
 
-# On while the diff view is open, in both its windows.
+# On while the diff view is open, in both its windows; not in the minibuffer.
 [diff-view]
 "C-c g" = "diff-refresh"
 "C-c q" = "diff-quit"
+"C-c n" = "diff-next-change"
+"C-c p" = "diff-previous-change"
+"C-c f" = "diff-next-file"
+"C-c b" = "diff-previous-file"
+"C-c w" = "diff-copy-removed"
+# RET edits the file, so C-g leaves the view for it.
+"C-g" = "diff-visit"
 
 [minibuffer-mode]
 "RET" = "exit-minibuffer"

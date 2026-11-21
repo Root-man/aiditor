@@ -151,6 +151,7 @@ impl Core {
         self.render_streams(&self.shown_buffers());
         let origin = self.prompts.minibuffer.as_ref().map(|mb| mb.from);
         let search = self.prompts.preview_search(&self.grep, &self.commands);
+        let decor = self.diff_decor();
         let windows = (panes.into_iter())
             .map(|(id, rect)| {
                 let selected = id == self.windows.selected;
@@ -214,6 +215,16 @@ impl Core {
                     if let Some(lines) = session.message_lines(buffer, point) {
                         display::mark_message(&mut display, lines);
                     }
+                }
+                if let Some(decor) = decor.as_ref().filter(|d| d.window == id) {
+                    let added = |n: &usize| decor.added.iter().any(|r| r.contains(n));
+                    for line in (display.lines.iter_mut()).filter(|l| l.diff.is_none()) {
+                        if added(&line.number) {
+                            (line.decorations).push(Decoration::Bar(FaceName::DiffAdded));
+                        }
+                    }
+                    (display.mode_line.left).splice(1..1, decor.left.iter().cloned());
+                    display.mode_line.right.insert(0, decor.right.clone());
                 }
                 if highlighted {
                     display::highlight_line(&mut display);
