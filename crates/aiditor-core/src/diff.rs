@@ -1,13 +1,14 @@
 //! The diff view (M9): a temporary full-frame layout of the current workspace, the changed-file
 //! list on the left and a window for the diff on the right.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
-use crate::buffer::{BufferId, FaceRef, Kind, Prop};
+use crate::buffer::{Buffer, BufferId, Face, FaceRef, Kind, Prop};
 use crate::display::Segment;
 use crate::settings::FaceName;
 use crate::timer::TimerId;
@@ -61,6 +62,8 @@ struct Shown {
     visit: Option<u64>,
     /// The old side's text, once answered.
     old: Option<Rope>,
+    /// A hidden buffer holding the old text in the file's grammar, for the removed rows' faces.
+    old_buffer: Option<BufferId>,
     /// The new side's buffer, once there.
     buffer: Option<BufferId>,
     /// A buffer the view made for the index text or a reason, killed with the diff.
@@ -280,20 +283,48 @@ impl Core {
     }
 }
 
-/// The diff rows of `hunks`' removed lines over a new side of `lines` lines: each above the line
-/// that replaced it, after the last when the removal ended the file.
-fn removed_rows(old: &Rope, hunks: &[Hunk], lines: usize) -> Vec<(usize, DiffRow)> {
-    let last = lines.saturating_sub(1);
-    let face = vec![FaceRef::Face(FaceName::DiffRemoved)];
+/// The diff rows of `hunks`' removed lines of `old` over a new side of `lines` lines: each above
+/// the line that replaced it, after the last when the removal ended the file, in `old`'s syntax
+/// faces from `palette` over `diff-removed`.
+fn removed_rows(
+    old: &Buffer,
+    hunks: &[Hunk],
+    lines: usize,
+    palette: &BTreeMap<String, Face>,
+) -> Vec<(usize, DiffRow)> {
+    let (text, last) = (old.text(), lines.saturating_sub(1));
+    let to_char = |i: usize| text.line_to_char(i.min(text.len_lines()));
+    // One range per hunk, so a large deletion is painted in one pass.
+    let ranges: Vec<Range<usize>> = (hunks.iter())
+        .map(|h| to_char(h.old.start)..to_char(h.old.end))
+        .filter(|r| !r.is_empty())
+        .collect();
+    let faces = old.highlights(&ranges, palette);
+    let face = FaceRef::Face(FaceName::DiffRemoved);
+    let run = |r: Range<usize>, refs: Vec<FaceRef>| (text.slice(r).to_string(), refs);
+    let mut next = 0;
     (hunks.iter())
         .flat_map(|h| h.old.clone().map(move |i| (h.new.start, i)))
-        .filter(|(_, i)| *i < old.len_lines())
+        .filter(|(_, i)| *i < text.len_lines())
         .map(|(at, i)| {
-            let text = old.line(i).to_string();
-            let text = text.trim_end_matches(['\n', '\r']).to_string();
+            let line = text.line(i).to_string();
+            let start = text.line_to_char(i);
+            let end = start + line.trim_end_matches(['\n', '\r']).chars().count();
+            while faces.get(next).is_some_and(|(r, _)| r.end <= start) {
+                next += 1;
+            }
+            let (mut runs, mut from) = (Vec::new(), start);
+            for (r, is) in faces[next..].iter().take_while(|(r, _)| r.start < end) {
+                let r = r.start.max(start)..r.end.min(end);
+                runs.push(run(from..r.start, vec![face]));
+                from = r.end;
+                runs.push(run(r, vec![face, FaceRef::Is(*is)]));
+            }
+            runs.push(run(from..end, vec![face]));
+            runs.retain(|(t, _)| !t.is_empty());
             let row = DiffRow {
                 after: at > last,
-                runs: vec![(text, face.clone())],
+                runs,
                 label: Some((i + 1).to_string()),
                 height: 1,
             };
@@ -334,8 +365,10 @@ impl Core {
         if let Some(timer) = shown.timer {
             self.timers.cancel(timer);
         }
-        if let Some(side) = shown.side.filter(|&b| self.buffers.get(b).is_some()) {
-            self.kill_buffer(side);
+        for side in [shown.side, shown.old_buffer].into_iter().flatten() {
+            if self.buffers.get(side).is_some() {
+                self.kill_buffer(side);
+            }
         }
     }
 
@@ -424,12 +457,22 @@ impl Core {
                 return self.attach(list, window, id);
             }
         };
+        let old = self.buffers.create(" *diff old*");
+        let buffer = self.buffers.get_mut(old).expect("just created");
+        buffer.set_text(&diff.old.to_string());
+        buffer.set_grammar(&file);
+        let workspace = self.buffers.get(list).expect("a live list").workspace;
+        self.buffers.get_mut(old).expect("just created").workspace = workspace;
         let shown = self.shown_mut(list).expect("awaited");
-        shown.old = Some(diff.old);
+        (shown.old, shown.old_buffer) = (Some(diff.old), Some(old));
         if staged {
             shown.hunks = diff.hunks;
             let name = format!("{} (index)", path.display());
             let id = self.side_buffer(list, &name, &diff.new.to_string());
+            self.buffers
+                .get_mut(id)
+                .expect("just made")
+                .set_grammar(&file);
             return self.attach(list, window, id);
         }
         let full = repository.join(file);
@@ -482,6 +525,7 @@ impl Core {
             request,
             visit: None,
             old: None,
+            old_buffer: None,
             buffer: None,
             side: None,
             hunks: Vec::new(),
@@ -510,6 +554,16 @@ impl Core {
         self.redraw(list);
     }
 
+    /// Redraws every list's removed rows, after a parse or a theme change recolours them.
+    pub(crate) fn redraw_diffs(&mut self) {
+        let lists: Vec<BufferId> = (self.buffers.iter_mut())
+            .filter_map(|(id, b)| b.diff_list().map(|_| id))
+            .collect();
+        for list in lists {
+            self.redraw(list);
+        }
+    }
+
     /// Puts list `list`'s removed rows in its window, if it shows the diff's buffer.
     fn redraw(&mut self, list: BufferId) {
         let Some(diff) = self.buffers.get(list).and_then(|b| b.diff_list()) else {
@@ -518,13 +572,16 @@ impl Core {
         let Some(shown) = &diff.shown else {
             return;
         };
-        let (Some(old), Some(id)) = (&shown.old, shown.buffer) else {
+        let (Some(old), Some(id)) = (shown.old_buffer, shown.buffer) else {
             return;
         };
-        let Some(lines) = self.buffers.get(id).map(|b| b.len_lines()) else {
+        let (Some(old), Some(lines)) = (
+            self.buffers.get(old),
+            self.buffers.get(id).map(|b| b.len_lines()),
+        ) else {
             return;
         };
-        let rows = removed_rows(old, &shown.hunks, lines);
+        let rows = removed_rows(old, &shown.hunks, lines, &self.settings.theme.syntax);
         let window = diff.window;
         let window = view_window(&mut self.windows, &mut self.workspaces, window);
         if let Some(window) = window.filter(|w| w.buffer() == id) {
@@ -1110,8 +1167,12 @@ mod tests {
     /// The view over root `a`, its own repository on `main`, with `x.rs` `staged` and/or
     /// `changed`, on disk as `disk` (`None`: deleted); point on its first row.
     fn inline(staged: bool, changed: bool, disk: Option<&str>) -> Harness {
+        inline_file("x.rs", staged, changed, disk)
+    }
+
+    fn inline_file(name: &str, staged: bool, changed: bool, disk: Option<&str>) -> Harness {
         let mut h = Harness::new(&[]);
-        h.read_reply("a/x.rs", disk.map(str::as_bytes));
+        h.read_reply(&format!("a/{name}"), disk.map(str::as_bytes));
         let project = &mut h.core.projects[0].project;
         project.primary.path = h.dir.join("a");
         project.roots = Vec::new();
@@ -1121,7 +1182,7 @@ mod tests {
         let status = GitStatus {
             repository: a.clone(),
             branch: "main".into(),
-            files: vec![file("x.rs", change(staged), change(changed))],
+            files: vec![file(name, change(staged), change(changed))],
         };
         h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
         h
@@ -1254,10 +1315,90 @@ mod tests {
             h.core.buffers.find_here("x.rs (index)").is_none(),
             "the index buffer goes with its diff"
         );
+        let old = |h: &mut Harness| {
+            (h.core.buffers.iter_mut())
+                .filter(|(_, b)| b.name.starts_with(" *diff old*"))
+                .count()
+        };
+        assert_eq!(old(&mut h), 1, "so does the old side's");
         h.keys("f");
         assert_eq!(h.core.message(), Some("No next file"));
         h.keys("b b");
         assert_eq!(h.core.message(), Some("No previous file"));
+    }
+
+    /// The right window's lines as runs of text and colour.
+    fn colours(h: &mut Harness) -> Vec<Vec<(String, Option<u32>)>> {
+        let frame = h.frame(1440., 900.);
+        (frame.windows[1].display.lines.iter())
+            .map(|l| {
+                (l.spans.iter())
+                    .map(|s| (s.text.clone(), s.face.fg))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn syntax(h: &Harness, capture: &str) -> Option<u32> {
+        h.core.settings().theme.syntax[capture].fg
+    }
+
+    #[test]
+    fn removed_rows_are_highlighted_from_the_old_text() {
+        let old = "/* old\nfn gone() {}\n*/\nfn kept() {}\n";
+        let new = "fn gone() {} // new\nfn kept() {}\n";
+        let mut h = inline(false, true, Some(new));
+        answer_diff(&mut h, old, new);
+        let (comment, keyword) = (syntax(&h, "comment"), syntax(&h, "keyword"));
+        let removed = h.core.settings().theme.face(FaceName::DiffRemoved).fg;
+        let lines = colours(&mut h);
+        assert_eq!(
+            lines[1],
+            [("fn gone() {}".into(), comment)],
+            "inside the old comment"
+        );
+        assert_eq!(lines[3][0], ("fn".into(), keyword), "the same text, added");
+        assert_eq!(lines[4][0], ("fn".into(), keyword), "unchanged");
+        assert!(lines[0].iter().all(|(_, fg)| *fg == comment));
+        assert_ne!(comment, removed);
+        let theme = "[themes.default.syntax]\ncomment = { fg = 7 }";
+        h.send(Msg::SettingsLoaded(Ok(Some(theme.into()))));
+        assert_eq!(
+            colours(&mut h)[1],
+            [("fn gone() {}".into(), Some(7))],
+            "the theme followed"
+        );
+    }
+
+    #[test]
+    fn a_staged_side_takes_the_files_grammar() {
+        let mut h = inline(true, false, None);
+        answer_diff(&mut h, "", "fn f() {}\n");
+        assert_eq!(colours(&mut h)[0][0], ("fn".into(), syntax(&h, "keyword")));
+    }
+
+    #[test]
+    fn a_language_without_a_grammar_is_plain_in_the_diff_faces() {
+        let mut h = inline_file("x.zzz", false, true, Some("fn b\n"));
+        answer_diff(&mut h, "fn a\n", "fn b\n");
+        let removed = h.core.settings().theme.face(FaceName::DiffRemoved).fg;
+        assert_eq!(
+            colours(&mut h)[..2],
+            [vec![("fn a".into(), removed)], vec![("fn b".into(), None)]]
+        );
+    }
+
+    #[test]
+    fn a_large_old_side_is_coloured_when_its_parse_arrives() {
+        let line = "fn f() {}\n";
+        let old = line.repeat(crate::syntax::PARSE_CUT / line.len() + 1);
+        let mut h = inline(false, true, Some(""));
+        answer_diff(&mut h, &old, "");
+        let removed = h.core.settings().theme.face(FaceName::DiffRemoved).fg;
+        assert_eq!(colours(&mut h)[0], [("fn f() {}".into(), removed)]);
+        assert_eq!(h.parses.len(), 1, "the old side parsed off the core thread");
+        h.parse();
+        assert_eq!(colours(&mut h)[0][0], ("fn".into(), syntax(&h, "keyword")));
     }
 
     #[test]
