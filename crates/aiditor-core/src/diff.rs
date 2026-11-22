@@ -27,7 +27,7 @@ const RATIO: f32 = 0.32;
 type Read = Result<Option<(Vec<u8>, u64)>, String>;
 
 /// The pause after an edit before the shown diff is worked out again.
-const REDIFF: Duration = Duration::from_millis(300);
+const REDIFF: Duration = Duration::from_millis(50);
 
 /// The echo line's actions in the list.
 pub(crate) const HINTS: &[(&[&str], &str)] = &[
@@ -43,6 +43,11 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
 #[derive(Clone, Debug, PartialEq)]
 enum Row {
     Root(PathBuf),
+    /// A `Staged` or `Changes` heading.
+    Group {
+        root: PathBuf,
+        staged: bool,
+    },
     File {
         root: PathBuf,
         staged: bool,
@@ -104,8 +109,8 @@ pub(crate) struct DiffList {
     /// Statuses asked and not yet answered.
     pending: usize,
     rows: Vec<(usize, Row)>,
-    /// The roots whose files `TAB` hid.
-    folded: BTreeSet<PathBuf>,
+    /// What `TAB` folded: a root (`None`) or its `Staged`/`Changes` group.
+    folded: BTreeSet<(PathBuf, Option<bool>)>,
     /// The view's right window.
     window: WindowId,
     shown: Option<Shown>,
@@ -230,7 +235,7 @@ impl Core {
                     );
                     rows.push((lines.len(), Row::Root(root.clone())));
                     let has_files = matches!(result, Ok(Some(s)) if !s.files.is_empty());
-                    let folded = has_files && list.folded.contains(root);
+                    let folded = has_files && list.folded.contains(&(root.clone(), None));
                     let mark = match (has_files, folded) {
                         (false, _) => "  ",
                         (true, false) => "▾ ",
@@ -272,14 +277,30 @@ impl Core {
                         if files.is_empty() {
                             continue;
                         }
+                        let folded = list.folded.contains(&(root.clone(), Some(staged)));
                         lines.push(vec![
-                            ("    ".into(), None),
-                            (group.into(), face(FaceName::DiffListGroup)),
                             (
-                                format!("  {}", files.len()),
+                                if folded { "  ▸ " } else { "  ▾ " }.into(),
+                                face(FaceName::ModeLineDim),
+                            ),
+                            (group.into(), face(FaceName::DiffListGroup)),
+                            // Counts right-aligned to 3 digits, past the longer name, line up.
+                            (" ".repeat(9 - group.len()), None),
+                            (
+                                format!("{:>3}", files.len()),
                                 face(FaceName::SessionListCount),
                             ),
                         ]);
+                        rows.push((
+                            lines.len() - 1,
+                            Row::Group {
+                                root: root.clone(),
+                                staged,
+                            },
+                        ));
+                        if folded {
+                            continue;
+                        }
                         for (change, file) in files {
                             let full = status.repository.join(&file.path);
                             let path = (full.strip_prefix(root))
@@ -791,7 +812,7 @@ impl Core {
         let fileless = self.buffers.get(window.buffer())?.file.is_none();
         let root = match &shown.row {
             Row::File { root, .. } => Some(root),
-            Row::Root(_) => None,
+            Row::Root(_) | Row::Group { .. } => None,
         };
         let status = (diff.answer.iter().flatten()).find(|(r, _)| Some(r) == root);
         if let Some((_, Ok(Some(status)))) = status.filter(|_| fileless) {
@@ -970,8 +991,8 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// `diff-toggle`: folds or unfolds the root of the list's row at point, point going to its
-    /// heading.
+    /// `diff-toggle`: folds or unfolds the root or group heading at or above point, point going to
+    /// that heading.
     pub(crate) fn diff_toggle(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
         let id = core.windows.window.buffer();
@@ -979,15 +1000,19 @@ impl Ctx<'_> {
         let buffer = core.buffers.get(id).expect("window buffer is live");
         let list = buffer.diff_list().ok_or("Not in a diff list")?;
         let line = (buffer.line_col(window.point(&core.buffers))).map_or(0, |(l, _)| l);
-        let (heading, root) = (list.rows.iter().rev())
+        let (heading, fold) = (list.rows.iter().rev())
             .find_map(|(l, r)| match r {
-                Row::Root(root) if *l <= line => Some((*l, root.clone())),
+                Row::Root(root) if *l <= line => Some((*l, (root.clone(), None))),
+                Row::Group { root, staged } if *l <= line => {
+                    Some((*l, (root.clone(), Some(*staged))))
+                }
                 _ => None,
             })
             .ok_or("No root here")?;
-        let files =
-            (list.rows.iter()).any(|(_, r)| matches!(r, Row::File { root: r, .. } if *r == root));
-        if !files && !list.folded.contains(&root) {
+        // A group always has files; a root may not.
+        let files = (list.rows.iter())
+            .any(|(_, r)| matches!(r, Row::Group { root, .. } if *root == fold.0));
+        if !files && !list.folded.contains(&fold) {
             return Err("Nothing to fold".into());
         }
         let at = buffer.char_idx(heading, 0).expect("a row's line");
@@ -996,8 +1021,8 @@ impl Ctx<'_> {
             .get_mut(id)
             .and_then(|b| b.diff_list_mut())
             .expect("checked");
-        if !list.folded.remove(&root) {
-            list.folded.insert(root);
+        if !list.folded.remove(&fold) {
+            list.folded.insert(fold);
         }
         window
             .set_point(&mut core.buffers, at)
@@ -1184,14 +1209,14 @@ mod tests {
             h.text(),
             [
                 "▾ a  ⎇ main",
-                "    Staged  1",
+                "  ▾ Staged     1",
                 "      M  src/x.rs",
-                "    Changes  2",
+                "  ▾ Changes    2",
                 "      M  src/x.rs",
                 "      ?  notes",
                 "",
                 "▾ b  ⎇ topic",
-                "    Changes  1",
+                "  ▾ Changes    1",
                 "      D  gone",
                 "",
                 "  c  ⎇ main",
@@ -1773,12 +1798,12 @@ mod tests {
         let mut h = view();
         let status = answer(&h, &[]);
         h.send(status);
-        h.keys("TAB");
+        h.keys("C-p C-p TAB");
         let text = h.text();
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(
             lines[..4],
-            ["▸ a  ⎇ main", "", "▾ b  ⎇ topic", "    Changes  1"]
+            ["▸ a  ⎇ main", "", "▾ b  ⎇ topic", "  ▾ Changes    1"]
         );
         assert_eq!(h.point(), 0, "point on the heading");
         h.keys("g");
@@ -1786,7 +1811,7 @@ mod tests {
         h.send(status);
         assert!(h.text().starts_with("▸ a  ⎇ main\n\n▾ b"), "kept folded");
         h.keys("TAB");
-        assert!(h.text().starts_with("▾ a  ⎇ main\n    Staged"));
+        assert!(h.text().starts_with("▾ a  ⎇ main\n  ▾ Staged"));
         h.keys("C-n C-n C-n C-n C-n C-n C-n C-n C-n C-n C-n");
         assert!(
             h.text()
@@ -1796,6 +1821,66 @@ mod tests {
         );
         h.keys("TAB");
         assert_eq!(h.core.message(), Some("Nothing to fold"));
+    }
+
+    fn point_line(h: &Harness) -> usize {
+        h.text()
+            .chars()
+            .take(h.point())
+            .filter(|&c| c == '\n')
+            .count()
+    }
+
+    #[test]
+    fn tab_folds_one_group_until_unfolded_across_refreshes() {
+        let mut h = view();
+        let status = answer(&h, &[]);
+        h.send(status);
+        h.keys("C-n C-n TAB");
+        let folded = [
+            "▾ a  ⎇ main",
+            "  ▾ Staged     1",
+            "      M  src/x.rs",
+            "  ▸ Changes    2",
+            "",
+        ];
+        assert_eq!(h.text().lines().take(5).collect::<Vec<_>>(), folded);
+        assert_eq!(point_line(&h), 3, "point on the group's heading");
+        h.keys("g");
+        let status = answer(&h, &[]);
+        h.send(status);
+        assert_eq!(
+            h.text().lines().take(5).collect::<Vec<_>>(),
+            folded,
+            "kept folded"
+        );
+        h.keys("C-p C-p C-p TAB TAB");
+        assert_eq!(
+            h.text().lines().take(5).collect::<Vec<_>>(),
+            folded,
+            "kept under a root fold"
+        );
+        h.keys("C-n C-n C-n TAB");
+        assert!(
+            h.text()
+                .contains("  ▾ Changes    2\n      M  src/x.rs\n      ?  notes")
+        );
+    }
+
+    #[test]
+    fn group_counts_line_up_up_to_three_digits() {
+        let mut h = view();
+        let many: Vec<_> = (0..120)
+            .map(|i| file(&format!("a/f{i}"), None, Some(GitChange::Untracked)))
+            .collect();
+        let status = answer(&h, &many);
+        h.send(status);
+        let ends: Vec<_> = (h.text().lines())
+            .filter(|l| l.contains("Staged") || l.contains("Changes"))
+            .map(|l| (l.chars().count(), l.to_string()))
+            .collect();
+        assert!(ends.iter().any(|(_, l)| l.ends_with("122")), "{ends:?}");
+        assert!(ends.iter().all(|(n, _)| *n == ends[0].0), "{ends:?}");
     }
 
     #[test]
