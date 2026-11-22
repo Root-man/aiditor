@@ -2602,6 +2602,19 @@ milestones:
               - "The diff view in a full frame matches the frame in Gruvbox dark and light"
               - "Core tests cover each row piece's face"
             blocked_by: [m9-decide-diff-design, m9-diff-highlight]
+          - key: m9-diff-guard
+            title: "Leave the diff view before changing its windows"
+            body: |
+              The view is a temporary layout, but other commands can still rearrange it: `C-x p f` in the list opens the file in the list's window and leaves the diff beside it, and after `C-x 0` on the diff window no file's diff can show again, `diff-status` only reselecting the list. Instead, anything that would change the view's windows or what they show quits the view first and then runs in the restored layout: visiting or switching buffers (`C-x C-f`, `C-x p f`, `C-x b`, grep and link jumps, a session or terminal shown), splitting, deleting and resizing windows. Editing the shown file, `C-x o` between the two windows, the minibuffer and the view's own commands stay in the view. Start with an audit of every command and service answer that puts a buffer in a window or changes the window tree, and record the list and what each does in the view in docs/editor.md.
+            acceptance:
+              - "The audit lists every command and answer that shows a buffer or changes the window tree, with what each does in the view"
+              - "C-x p f, C-x C-f and C-x b from either window quit the view and show the buffer in the restored selected window"
+              - "C-x 0, C-x 1, C-x 2 and C-x 3 quit the view and act on the restored layout"
+              - "Editing and saving the shown file, C-x o and the view's keys leave the view open"
+              - "The view's own showing of a diff's buffers is unaffected"
+              - "Core tests cover each kind of command the audit finds"
+              - "Spec updated in docs/editor.md and openspec/specs"
+            blocked_by: [m9-diff-view]
       - key: m9-actions
         title: "Stage, unstage and discard"
         labels: [core, files]
