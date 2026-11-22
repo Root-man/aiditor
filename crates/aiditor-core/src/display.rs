@@ -304,6 +304,8 @@ pub struct Gutter {
     pub width: f32,
     /// A label and its face for each of the window's display lines.
     pub rows: Vec<(String, Face)>,
+    /// With a sign column, as the diff window has, a sign (or blank) and its face per row.
+    pub signs: Vec<(String, Face)>,
 }
 
 /// The which-key hint shown while a prefix waits: the pending keys and what can follow them.
@@ -329,6 +331,8 @@ pub struct Line {
     pub icons: Vec<(usize, Icon)>,
     /// On a diff row's rows, which are not text: its gutter label, empty past its first row.
     pub diff: Option<String>,
+    /// The sign column's char and its face, on a line's first row.
+    pub sign: Option<(char, FaceName)>,
 }
 
 impl Line {
@@ -365,6 +369,9 @@ pub struct Wrap {
 /// The px between a gutter's left edge and its digits, and between them and the text.
 const GUTTER_LEFT: f32 = 10.;
 pub const GUTTER_RIGHT: f32 = 12.;
+/// A sign column's room either side of its one cell, frame 15's 8 and 10 px.
+pub const SIGN_LEFT: f32 = 8.;
+pub const SIGN_RIGHT: f32 = 10.;
 /// Between text and a window's side where no gutter stands.
 pub const TEXT_INSET: f32 = 12.;
 /// A session window's text insets, left and right: frame 6's padding, the left one past the bar
@@ -376,11 +383,17 @@ pub(crate) fn gutter_width(lines: usize, cell: f32) -> f32 {
     GUTTER_LEFT + lines.to_string().len() as f32 * cell + GUTTER_RIGHT
 }
 
-/// The gutter of `lines` with point on buffer line `point`. Rows of a wrapped line share its
-/// number, and `continued` says the first row is not its line's first.
+/// What a sign column adds to a gutter.
+pub(crate) fn sign_width(cell: f32) -> f32 {
+    SIGN_LEFT + cell + SIGN_RIGHT - GUTTER_RIGHT
+}
+
+/// The gutter of `lines` with point on buffer line `point`, with a sign column when `signs`.
+/// Rows of a wrapped line share its number, and `continued` says the first row is not its line's
+/// first.
 pub(crate) fn gutter(
     lines: &[Line],
-    style: LineNumbers,
+    (style, signs): (LineNumbers, bool),
     width: f32,
     point: usize,
     continued: bool,
@@ -392,6 +405,8 @@ pub(crate) fn gutter(
             let n = line.number;
             let (label, face) = if let Some(label) = &line.diff {
                 (label.clone(), FaceName::LineNumber)
+            } else if style == LineNumbers::Off {
+                (String::new(), FaceName::LineNumber)
             } else if previous.replace(n) == Some(n) {
                 ("↪".to_string(), FaceName::LineNumber)
             } else if n == point {
@@ -404,7 +419,22 @@ pub(crate) fn gutter(
             (label, theme.face(face))
         })
         .collect();
-    Gutter { width, rows }
+    let sign = |line: &Line| match line.sign {
+        // The row's background is the face's already.
+        Some((c, face)) => (
+            c.to_string(),
+            Face {
+                bg: None,
+                ..theme.face(face)
+            },
+        ),
+        None => (String::new(), Face::default()),
+    };
+    let signs = match signs {
+        true => lines.iter().map(sign).collect(),
+        false => Vec::new(),
+    };
+    Gutter { width, rows, signs }
 }
 
 /// Puts the `hl-line` background under every row of the cursor's line, below any of its own.
@@ -551,6 +581,7 @@ pub fn build(
         aligned: false,
         icons: Vec::new(),
         diff: None,
+        sign: None,
     };
     // A background decoration's face, less its background, sits under its line's text.
     let line_faces: Vec<(usize, Face)> = (props.iter())
@@ -1147,10 +1178,13 @@ pub(crate) fn diff_row_lines(
         number,
         height: settings.line_height(),
         spans: Vec::new(),
-        decorations: Vec::new(),
+        decorations: (row.sign.iter())
+            .map(|&(_, face)| Decoration::Background(face))
+            .collect(),
         aligned: false,
         icons: Vec::new(),
         diff: Some(String::new()),
+        sign: None,
     };
     let spans = (row.runs.iter()).map(|(text, refs)| Span {
         text: text.clone(),
@@ -1160,6 +1194,7 @@ pub(crate) fn diff_row_lines(
     let mut first = Line {
         spans: spans.filter(|s| !s.text.is_empty()).collect(),
         diff: Some(row.label.clone().unwrap_or_default()),
+        sign: row.sign,
         ..blank()
     };
     let mut lines = match wrap {
@@ -1179,7 +1214,7 @@ pub(crate) fn diff_row_lines(
 }
 
 /// `spans` cut to their first `keep` chars.
-fn cut_spans(spans: &mut Vec<Span>, mut keep: usize) {
+pub(crate) fn cut_spans(spans: &mut Vec<Span>, mut keep: usize) {
     spans.retain_mut(|span| {
         let len = span.text.chars().count();
         span.text = span.text.chars().take(keep).collect();
@@ -1276,6 +1311,7 @@ fn wrap_lines(
                 icons,
                 diff: (line.diff.as_ref())
                     .map(|l| if row == 0 { l.clone() } else { String::new() }),
+                sign: line.sign.filter(|_| row == 0),
             });
         }
     }

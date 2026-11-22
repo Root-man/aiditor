@@ -4,7 +4,8 @@ use std::time::Instant;
 use aiditor_core::Msg;
 use aiditor_core::buffer::{Decoration, Face, Icon};
 use aiditor_core::display::{
-    CursorShape, FrameWindow, GUTTER_RIGHT, Line, PANE_PADDING, Rect, Span, TEXT_INSET, Terminal,
+    CursorShape, FrameWindow, GUTTER_RIGHT, Line, PANE_PADDING, Rect, SIGN_LEFT, SIGN_RIGHT, Span,
+    TEXT_INSET, Terminal,
 };
 use aiditor_core::settings::{FaceName, Theme};
 use gpui::{
@@ -73,6 +74,8 @@ pub(crate) struct Row {
     indent: Pixels,
     /// Its label in the gutter, if the window has one, and the label's x from the window's left.
     pub(crate) number: Option<(Pixels, ShapedLine)>,
+    /// Its sign, in a gutter with a sign column, and the sign's x.
+    pub(crate) sign: Option<(Pixels, ShapedLine)>,
     pub(crate) text: ShapedLine,
     pub(crate) boxes: Vec<Boxed>,
     pub(crate) icons: Vec<RowIcon>,
@@ -252,11 +255,21 @@ impl Element for FrameElement {
                         let run = text_run(under.len(), face, false, &font, &settings.theme);
                         cursor_char = Some(shape(under.to_string(), &[run]));
                     }
+                    let label = |(text, face): &(String, Face)| {
+                        let run = text_run(text.len(), *face, false, &font, &settings.theme);
+                        shape(text.clone(), &[run])
+                    };
+                    // A sign column sits between the numbers and the text.
+                    let sign_x = text_x - px(SIGN_RIGHT) - cell;
+                    let signs = w.gutter.as_ref().filter(|g| !g.signs.is_empty());
+                    let sign = signs.zip(i).map(|(g, i)| (sign_x, label(&g.signs[i])));
+                    let right = match signs {
+                        Some(_) => sign_x - px(SIGN_LEFT),
+                        None => text_x - px(GUTTER_RIGHT),
+                    };
                     let number = w.gutter.as_ref().zip(i).map(|(g, i)| {
-                        let (label, face) = &g.rows[i];
-                        let run = text_run(label.len(), *face, false, &font, &settings.theme);
-                        let label = shape(label.clone(), &[run]);
-                        (text_x - px(GUTTER_RIGHT) - label.width, label)
+                        let label = label(&g.rows[i]);
+                        (right - label.width, label)
                     });
                     let start = text_x + indent;
                     let gaps = match line
@@ -282,6 +295,7 @@ impl Element for FrameElement {
                             .collect(),
                         indent,
                         number,
+                        sign,
                         text,
                         boxes,
                         icons,
@@ -480,7 +494,7 @@ impl Element for FrameElement {
                             }
                         }
                     }
-                    if let Some((x, number)) = &row.number {
+                    for (x, number) in row.number.iter().chain(&row.sign) {
                         let at = origin + point(*x, px(0.));
                         number.paint_background(at, row.height, window, cx).ok();
                         number.paint(at, row.height, window, cx).ok();

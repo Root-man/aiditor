@@ -165,12 +165,26 @@ impl Core {
                 };
                 let (buffers, settings) = (&mut self.buffers, &self.settings);
                 let buffer = buffers.get(window.buffer()).expect("window buffer is live");
-                let style = buffer.line_numbers(settings.line_numbers);
+                let decor = decor.as_ref().filter(|d| d.window == id);
+                // A diff's new side is numbered as a file is, a `Staged` diff's index text too.
+                let style = match decor {
+                    Some(_) if !buffer.numbered() => settings.line_numbers,
+                    _ => buffer.line_numbers(settings.line_numbers),
+                };
                 // The window a minibuffer was opened from still shows where point is, as swiper's preview.
+                // The diff list marks the shown file's row from either window.
                 let highlighted = settings.hl_line
-                    && (selected || origin == Some(id))
-                    && (buffer.numbered() || buffer.copy_mode());
-                let width = display::gutter_width(buffer.len_lines(), cell_width);
+                    && ((selected || origin == Some(id))
+                        && (buffer.numbered() || buffer.copy_mode() || decor.is_some())
+                        || buffer.diff_list().is_some());
+                // A diff's window has a sign column, which needs the gutter with numbers off too.
+                let signs = decor.is_some() || window.has_diff_rows();
+                let width = display::gutter_width(buffer.len_lines(), cell_width)
+                    + if signs {
+                        display::sign_width(cell_width)
+                    } else {
+                        0.
+                    };
                 let agent = buffer.agent().and_then(|id| self.agents.get(&id));
                 let session = agent.is_some();
                 let inset = match session {
@@ -179,7 +193,7 @@ impl Core {
                 };
                 // A window too narrow for it keeps its one column of text.
                 let room = rect.width - inset.1;
-                let numbered = style != LineNumbers::Off && room - width > cell_width;
+                let numbered = (style != LineNumbers::Off || signs) && room - width > cell_width;
                 let cols = ((room - if numbered { width } else { inset.0 }) / cell_width) as usize;
                 let rows = settings.text_rows(rect.height);
                 let drawn = settings.drawn_rows(rect.height);
@@ -216,15 +230,23 @@ impl Core {
                         display::mark_message(&mut display, lines);
                     }
                 }
-                if let Some(decor) = decor.as_ref().filter(|d| d.window == id) {
+                if let Some(decor) = decor {
                     let added = |n: &usize| decor.added.iter().any(|r| r.contains(n));
+                    let mut previous = None;
                     for line in (display.lines.iter_mut()).filter(|l| l.diff.is_none()) {
                         if added(&line.number) {
-                            (line.decorations).push(Decoration::Bar(FaceName::DiffAdded));
+                            (line.decorations).push(Decoration::Background(FaceName::DiffAdded));
+                            if previous != Some(line.number) {
+                                line.sign = Some(('+', FaceName::DiffAdded));
+                            }
                         }
+                        previous = Some(line.number);
                     }
                     (display.mode_line.left).splice(1..1, decor.left.iter().cloned());
-                    display.mode_line.right.insert(0, decor.right.clone());
+                    // Before point's position and the window's, a file mode line's last two.
+                    let right = &mut display.mode_line.right;
+                    let at = right.len().saturating_sub(2);
+                    right.splice(at..at, decor.right.iter().cloned());
                 }
                 if highlighted {
                     display::highlight_line(&mut display);
@@ -234,6 +256,7 @@ impl Core {
                     let (point, _) = buffer.line_col(window.point(buffers)).unwrap_or_default();
                     let continued = window.top_row() > window.above(buffer, window.top().0);
                     let lines = &display.lines;
+                    let style = (style, signs);
                     display::gutter(lines, style, width, point, continued, &settings.theme)
                 });
                 if unwatched
@@ -311,6 +334,7 @@ impl Core {
                 }),
                 Some(b) if b.session_list().is_some() => self.key_hints(crate::sessions::HINTS),
                 Some(b) if b.diff_list().is_some() => self.key_hints(crate::diff::HINTS),
+                Some(_) if self.diff_selected() => self.key_hints(crate::diff::HINTS),
                 _ => Vec::new(),
             },
             minibuffer: self.minibuffer(),
@@ -428,6 +452,8 @@ pub(crate) fn window_display(
     // Wrapped, a line is laid out only from the window's first row through the rows it can show.
     let shown = match wrap {
         Some(_) => 0..(drawn + 1).saturating_mul(cols),
+        // The list fits its rows itself, cutting a path from the left.
+        None if buffer.diff_list().is_some() && cols > 0 => 0..usize::MAX,
         None => left..left.saturating_add(width),
     };
     let mut display = display::build(
@@ -454,6 +480,9 @@ pub(crate) fn window_display(
         let line = buffer.line_col(point).map_or(0, |(l, _)| l) + 1;
         snapshot.decorate(buffer, &mut display, line);
         snapshot.fit(&mut display.lines, cols, &settings.theme);
+    }
+    if let Some(list) = buffer.diff_list().filter(|_| cols > 0) {
+        list.fit(&mut display.lines, cols);
     }
     if let Some(list) = buffer.session_list() {
         list.decorate(
@@ -560,6 +589,7 @@ fn show_preview(
             aligned: false,
             icons: Vec::new(),
             diff: None,
+            sign: None,
         }
     });
     display.lines.splice(at + 1..at + 1, lines);
@@ -1577,6 +1607,7 @@ mod tests {
             after,
             runs: vec![(text.to_string(), face)],
             label: label.map(String::from),
+            sign: None,
             height,
         }
     }
@@ -1647,8 +1678,8 @@ mod tests {
         let mut h = Harness::new(&[("a.md", "one\ntwo")]);
         h.open("a.md");
         set_rows(&mut h, vec![(0, row("one two three", true, Some("4"), 1))]);
-        // 9 columns, 8 chars to a row.
-        let frame = h.frame(96., high(&h, 10));
+        // 9 columns, 8 chars to a row, beside a 44 px gutter: one digit and the sign column.
+        let frame = h.frame(128., high(&h, 10));
         assert_eq!(
             texts(&frame.windows[0].display),
             ["one", "one two ", "three", "two"]

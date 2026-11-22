@@ -2,6 +2,7 @@
 
 use crate::buffer::{Buffer, BufferId, Buffers, Error, FaceRef, InsertionType, MarkerId};
 use crate::display::{self, Rect};
+use crate::settings::FaceName;
 use crate::workspace::WorkspaceId;
 
 /// How many marks the ring keeps, Emacs's `mark-ring-max`.
@@ -17,6 +18,9 @@ pub struct DiffRow {
     pub runs: Vec<(String, Vec<FaceRef>)>,
     /// The gutter's label, as an old line number; blank when `None`.
     pub label: Option<String>,
+    /// Its sign column's char on its first row, in the face's foreground, with the face's
+    /// background under all its rows.
+    pub sign: Option<(char, FaceName)>,
     /// The rows it takes at least, blank past its text's.
     pub height: usize,
 }

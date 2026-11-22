@@ -1512,6 +1512,7 @@ mod tests {
             aligned: false,
             icons: vec![(1, Icon::Book), (4, Icon::Globe)],
             diff: None,
+            sign: None,
         };
         editor.update_in(cx, |e, window, _| {
             let (font, cell) = e.font(window);
@@ -1602,6 +1603,7 @@ mod tests {
             aligned: false,
             icons: Vec::new(),
             diff: None,
+            sign: None,
         };
         editor.update_in(cx, |e, window, _| {
             let font = e.font(window).0;
@@ -3315,6 +3317,7 @@ mod tests {
                     after: true,
                     runs,
                     label: label.map(String::from),
+                    sign: None,
                     height,
                 };
                 e.core.set_diff_rows(vec![
@@ -3344,6 +3347,41 @@ mod tests {
                 assert!(gap.abs() < px(0.01), "filler rows stack");
             });
         }
+    }
+
+    #[gpui::test]
+    fn a_sign_sits_between_the_line_numbers_and_the_text(cx: &mut TestAppContext) {
+        use aiditor_core::settings::FaceName;
+        use aiditor_core::window::DiffRow;
+        let _native = NativeTest::new(cx);
+        let (editor, cx) = editor(cx, "a\nb");
+        editor.update(cx, |e, cx| {
+            let row = DiffRow {
+                after: false,
+                runs: vec![("old".into(), Vec::new())],
+                label: None,
+                sign: Some(('-', FaceName::DiffRemoved)),
+                height: 1,
+            };
+            e.core.set_diff_rows(vec![(1, row)]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            let p = &e.painted[0];
+            let (x, sign) = p.rows[1].sign.as_ref().expect("the removed row's sign");
+            assert_eq!(sign.text.as_ref(), "-");
+            let gap = p.text_x - px(10.) - (*x + sign.width);
+            assert!(gap.abs() < px(0.01), "10 px before the text, {gap:?} off");
+            let (n, number) = p.rows[0].number.as_ref().expect("a line number");
+            assert_eq!(*n + number.width, *x - px(8.), "8 px before the sign");
+            let blank = p.rows[0].sign.as_ref().map(|(_, s)| s.text.to_string());
+            assert_eq!(
+                blank.as_deref(),
+                Some(""),
+                "an unchanged line's sign is blank"
+            );
+        });
     }
 
     #[gpui::test]

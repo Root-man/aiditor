@@ -541,7 +541,16 @@ impl Core {
         };
         (hints.iter())
             .filter_map(|(commands, label)| {
-                let keys: Vec<_> = commands.iter().filter_map(|c| keys(c)).collect();
+                let mut keys: Vec<_> = commands.iter().filter_map(|c| keys(c)).collect();
+                // Keys sharing a prefix read as one, `C-c n/p`.
+                let prefix = (keys.first().and_then(|k| k.rsplit_once(' ')))
+                    .map(|(p, _)| format!("{p} "))
+                    .filter(|p| keys.iter().all(|k| k.starts_with(p.as_str())));
+                if let Some(prefix) = prefix {
+                    for key in keys.iter_mut().skip(1) {
+                        key.drain(..prefix.len());
+                    }
+                }
                 (!keys.is_empty()).then(|| (keys.join("/"), *label))
             })
             .collect()
