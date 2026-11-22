@@ -2462,6 +2462,24 @@ milestones:
               - "The macOS build doesn't pull in `notify-rust`"
             blocked_by: [m8-notify-macos]
 
+      - key: m8-parse-speed
+        title: "Faster syntax parses of large files"
+        labels: [text]
+        design: "#subsystems"
+        body: |
+          A buffer over 64 KiB opens uncoloured until its first parse arrives from a service, so a slow parse shows as plain text, then colour. Markdown is the worst case: `docs/editor.md` (273 KB) takes 309 ms to parse in a release build against 10 ms for `crates/aiditor-core/src/diff.rs` (76 KB), about 30 times Rust's per-byte cost, and the diff view parses it twice (the file and its old side). Tasks are tracked as sub-issues.
+        tasks:
+          - key: m8-parse-speed-markdown
+            title: "Investigate and speed up large Markdown parses"
+            body: |
+              Profile the first parse of `docs/editor.md` (block grammar, inline injections, fence injections, locals) and fix what dominates. A likely suspect is the inline grammar's one injection per inline region, thousands in a long document; options include parsing inline regions lazily over visible ranges, combining them into one tree with included ranges, or sharing a parser. Keep the colours #258 and #332 specified. Add a benchmark of a large Markdown file to `crates/aiditor-core/benches/hot_paths.rs` so the gain is measured and kept.
+            acceptance:
+              - "A profile of the first parse of `docs/editor.md` names where the time goes, recorded in the PR"
+              - "The first parse of `docs/editor.md` in a release build is at most 50 ms, or the PR says why not and what bounds it"
+              - "Opening `docs/editor.md`, and showing it in the diff view, colours it with no visible plain-text flash"
+              - "Highlighting is unchanged: existing syntax tests pass"
+              - "A hot-path benchmark covers a large Markdown parse"
+
   # ───────────────────────────────────────────── M9 ─────────────────────────────────────────────
   - key: m9
     title: "M9 · Diff review"
