@@ -202,6 +202,7 @@ impl Core {
             Some(window) => window,
             None => &mut windows.window,
         };
+        // shortcut: a workspace left in the diff view shows the file in the view's window, not its restored layout; quit saved views once that bites.
         window.show(&mut self.buffers, first);
         let name = saved.name.clone();
         let file = self.buffers.get(first).expect("live").name.clone();

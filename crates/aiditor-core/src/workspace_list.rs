@@ -742,8 +742,11 @@ impl Core {
         for (id, point) in points {
             let window = if id == core.windows.selected {
                 &core.windows.window
+            } else if let Some(window) = core.windows.others.get(&id) {
+                window
             } else {
-                core.windows.others.get(&id).expect("sharing window exists")
+                // Gone with the diff view the switch quit.
+                continue;
             };
             window.set_point(&mut core.buffers, point)?;
         }

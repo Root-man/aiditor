@@ -14,6 +14,7 @@ impl Ctx<'_> {
     pub(crate) fn split_window(&mut self, side_by_side: bool) -> Result<(), String> {
         self.outside_minibuffer("Attempt to split minibuffer window")?;
         let core = &mut *self.core;
+        core.leave_diff_view();
         let id = WindowId(core.next_window);
         core.next_window += 1;
         let new = core.windows.window.split(&mut core.buffers);
@@ -28,6 +29,7 @@ impl Ctx<'_> {
     /// keeps the selection, as Emacs's `display-buffer`; a window already showing it is enough.
     pub(crate) fn display_buffer(&mut self, id: BufferId) {
         let core = &mut *self.core;
+        core.leave_diff_view();
         if std::iter::once(&core.windows.window)
             .chain(core.windows.others.values())
             .any(|w| w.buffer() == id)
@@ -61,6 +63,9 @@ impl Ctx<'_> {
     /// Deletes the selected window, selecting the sibling that takes its space.
     pub(crate) fn delete_window(&mut self) -> Result<(), String> {
         let core = &mut *self.core;
+        if core.windows.selected != crate::minibuffer::MINIBUFFER {
+            core.leave_diff_view();
+        }
         let old = core.windows.selected;
         let next = (core.windows.tree.remove(old))
             .ok_or("Attempt to delete minibuffer or sole ordinary window")?;
@@ -77,6 +82,7 @@ impl Ctx<'_> {
     pub(crate) fn delete_other_windows(&mut self) -> Result<(), String> {
         self.outside_minibuffer("Can't expand minibuffer to full frame")?;
         let core = &mut *self.core;
+        core.leave_diff_view();
         for (_, window) in core.windows.others.drain() {
             window.release(&mut core.buffers);
         }
