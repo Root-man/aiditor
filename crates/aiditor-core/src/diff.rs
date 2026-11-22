@@ -2685,4 +2685,12 @@ mod tests {
         let (_, _, steps) = update(&mut h).expect("asked");
         assert_eq!(steps, [(GitStep::Unstage, paths(&["x.rs", "old.rs"]))]);
     }
+
+    #[test]
+    fn a_staged_diff_wraps_as_its_file_does() {
+        let mut h = inline_file("x.md", true, false, None);
+        answer_diff(&mut h, "a\n", "b\n");
+        assert_eq!(right(&h).name, "x.md (index)");
+        assert_eq!(right(&h).wrap(40), Some((39, true)), "at words, as prose");
+    }
 }
