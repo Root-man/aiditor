@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use aiditor_core::buffer::{decode, encode, hash, hunks, prepare_preview, revert, unified_diff};
 use aiditor_core::{
     ChangedFile, FileDiff, FileEntry, FileOp, GitChange, GitFile, GitObjects, GitSide, GitStatus,
-    Head, Msg, Snapshot,
+    GitStep, Head, Msg, Snapshot,
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -177,6 +177,14 @@ pub fn run(op: FileOp) -> Msg {
             request,
             result: git_diff_files(&root, &old, new.as_deref(), objects.as_ref()),
         },
+        FileOp::GitUpdate {
+            list,
+            repository,
+            steps,
+        } => Msg::GitUpdated {
+            list,
+            result: git_update(&repository, &steps),
+        },
         FileOp::GitSnapshot { request, root, dir } => Msg::GitSnapshot {
             request,
             result: snapshot(&root, &dir),
@@ -306,6 +314,36 @@ fn git_status(root: &Path) -> Result<Option<GitStatus>, String> {
         branch,
         files,
     }))
+}
+
+/// Runs `steps` on paths relative to `repository`, stopping at the first failure.
+fn git_update(repository: &Path, steps: &[(GitStep, Vec<PathBuf>)]) -> Result<(), String> {
+    no_filter(repository)?;
+    for (step, paths) in steps.iter().filter(|(_, paths)| !paths.is_empty()) {
+        let args: &[&str] = match step {
+            GitStep::Stage => &["add", "-A"],
+            // `reset` over `restore --staged`, which fails on an unborn branch.
+            GitStep::Unstage => &["reset", "-q"],
+            GitStep::Restore => &["checkout", "-q"],
+            GitStep::Delete => {
+                for path in paths {
+                    fs::remove_file(repository.join(path))
+                        .map_err(|err| format!("{}: {err}", path.display()))?;
+                }
+                continue;
+            }
+        };
+        let output = git(repository)
+            .args(args)
+            .arg("--")
+            .args(paths)
+            .output()
+            .map_err(|err| format!("git: {err}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+    }
+    Ok(())
 }
 
 /// The files in `git status --porcelain=v2 -z` output.
@@ -2105,6 +2143,118 @@ mod tests {
             status.files,
             [file("sub/inside", None, Some(GitChange::Untracked))]
         );
+    }
+
+    /// A repository with `names` committed, each holding its name.
+    fn committed(names: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        for name in names {
+            fs::write(dir.path().join(name), format!("{name}\n")).unwrap();
+        }
+        git_in(dir.path(), &["add", "."]);
+        git_in(dir.path(), &["commit", "-q", "-m", "x"]);
+        dir
+    }
+
+    fn short_status(repo: &Path) -> String {
+        let out = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn git_update_stages_modified_deleted_and_untracked_files() {
+        let dir = committed(&["modified", "deleted"]);
+        let repo = dir.path();
+        fs::write(repo.join("modified"), "edit\n").unwrap();
+        fs::remove_file(repo.join("deleted")).unwrap();
+        fs::write(repo.join("new [x]"), "").unwrap();
+        let steps = [(GitStep::Stage, paths(&["modified", "deleted", "new [x]"]))];
+        assert_eq!(git_update(repo, &steps), Ok(()));
+        assert_eq!(
+            short_status(repo),
+            "D  deleted\nM  modified\nA  \"new [x]\"\n"
+        );
+    }
+
+    #[test]
+    fn git_update_unstages_a_rename_by_both_paths() {
+        let dir = committed(&["old"]);
+        let repo = dir.path();
+        git_in(repo, &["mv", "old", "new"]);
+        assert_eq!(
+            git_update(repo, &[(GitStep::Unstage, paths(&["new", "old"]))]),
+            Ok(())
+        );
+        assert_eq!(short_status(repo), " D old\n?? new\n");
+    }
+
+    #[test]
+    fn git_update_unstages_on_an_unborn_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git_in(repo, &["init", "-q"]);
+        fs::write(repo.join("a"), "").unwrap();
+        git_in(repo, &["add", "a"]);
+        assert_eq!(
+            git_update(repo, &[(GitStep::Unstage, paths(&["a"]))]),
+            Ok(())
+        );
+        assert_eq!(short_status(repo), "?? a\n");
+    }
+
+    #[test]
+    fn git_update_restores_and_deletes() {
+        let dir = committed(&["modified", "deleted"]);
+        let repo = dir.path();
+        fs::write(repo.join("modified"), "edit\n").unwrap();
+        fs::remove_file(repo.join("deleted")).unwrap();
+        fs::write(repo.join("untracked"), "").unwrap();
+        let steps = [
+            (GitStep::Restore, paths(&["modified", "deleted"])),
+            (GitStep::Delete, paths(&["untracked"])),
+        ];
+        assert_eq!(git_update(repo, &steps), Ok(()));
+        assert_eq!(short_status(repo), "");
+        assert_eq!(
+            fs::read_to_string(repo.join("deleted")).unwrap(),
+            "deleted\n"
+        );
+    }
+
+    #[test]
+    fn git_update_stops_at_the_first_failure() {
+        let dir = committed(&["a"]);
+        let repo = dir.path();
+        fs::write(repo.join("untracked"), "").unwrap();
+        let steps = [
+            (GitStep::Restore, paths(&["unknown"])),
+            (GitStep::Delete, paths(&["untracked"])),
+        ];
+        let err = git_update(repo, &steps).unwrap_err();
+        assert!(err.contains("unknown"), "{err}");
+        assert!(repo.join("untracked").exists());
+    }
+
+    #[test]
+    fn git_update_refuses_a_repository_filter() {
+        let dir = committed(&["a"]);
+        let repo = dir.path();
+        git_in(repo, &["config", "filter.x.clean", "touch marker; cat"]);
+        fs::write(repo.join(".gitattributes"), "* filter=x\n").unwrap();
+        fs::write(repo.join("a"), "edit\n").unwrap();
+        let index = fs::read(repo.join(".git/index")).unwrap();
+        assert!(git_update(repo, &[(GitStep::Stage, paths(&["a"]))]).is_err());
+        assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
+        assert!(!repo.join("marker").exists());
     }
 
     #[test]

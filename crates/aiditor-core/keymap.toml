@@ -201,6 +201,9 @@
 "b" = "diff-previous-file"
 "w" = "diff-copy-removed"
 "TAB" = "diff-toggle"
+"s" = "diff-stage"
+"u" = "diff-unstage"
+"k" = "diff-discard"
 
 # On while the diff view is open, in both its windows; not in the minibuffer.
 [diff-view]
