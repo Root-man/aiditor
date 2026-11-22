@@ -1379,6 +1379,19 @@ pub fn unified_diff(
         .to_string())
 }
 
+/// A patch turning `base`, the text of `file` (relative to its repository), into `edited`, for
+/// `git apply`.
+// shortcut: built from decoded LF text, so a CRLF or BOM file's patch doesn't apply; encode it
+// as the index holds it when that grates.
+// shortcut: the header isn't quoted, so a path with `"`, `\` or a control char fails to apply;
+// quote it as git does if one turns up.
+pub fn patch(file: &Path, base: &str, edited: &str) -> String {
+    let file = file.display();
+    let diff = similar::TextDiff::from_lines(base, edited);
+    let hunks = diff.unified_diff().to_string();
+    format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n{hunks}")
+}
+
 /// The changed lines between `old` and `new`, in order: each old char range with its new text.
 // shortcut: a marker inside a changed line goes to the hunk's start; diff hunks by chars if that grates.
 pub fn diff(old: &str, new: &str) -> Vec<(Range<usize>, String)> {

@@ -214,6 +214,9 @@
 "C-c f" = "diff-next-file"
 "C-c b" = "diff-previous-file"
 "C-c w" = "diff-copy-removed"
+"C-c s" = "diff-stage"
+"C-c u" = "diff-unstage"
+"C-c k" = "diff-discard"
 # RET edits the file, so C-g leaves the view for it.
 "C-g" = "diff-visit"
 
