@@ -6,7 +6,7 @@ argument-hint: "<frame number or file, e.g. 1 or Main.dc.html>"
 
 # Design check
 
-Compare the running app against one frame in `docs/design` (the list is in `AGENTS.md`). The deliverable is a list of real gaps. A list of pixel differences is not the deliverable.
+Compare the running app against one frame in `docs/design` (the list is in `CLAUDE.md`). The deliverable is a list of real gaps. A list of pixel differences is not the deliverable.
 
 ## The main rule: a difference is not a bug until you have explained it
 

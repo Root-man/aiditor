@@ -1,16 +1,16 @@
 ---
 name: refactor-scan
-description: Read-only scan of the repo, or a folder or crate, for refactoring opportunities (code smells, SOLID violations, slow paths, huge files and god objects, plus the bugs, risks and bloat a ponytail audit finds), reported as one table scored on impact and complexity. Changes nothing. Use for "find refactoring opportunities", "what should we refactor", "code smells", "tech debt scan", /refactor-scan or $refactor-scan.
+description: Read-only scan of the repo, or a folder or crate, for refactoring opportunities (code smells, SOLID violations, slow paths, huge files and god objects, plus the bugs, risks and bloat a ponytail audit finds), reported as one table scored on impact and complexity. Changes nothing. Use for "find refactoring opportunities", "what should we refactor", "code smells", "tech debt scan", /refactor-scan.
 argument-hint: "[path]"
 ---
 
 # Refactor scan
 
-Scan what the user names (`$ARGUMENTS` in Claude Code, the rest of the `$refactor-scan` message in Codex): a path, a crate or the whole repo. Nothing named: the whole repo. This is a report; change no code.
+Scan what the user names (`$ARGUMENTS`): a path, a crate or the whole repo. Nothing named: the whole repo. This is a report; change no code.
 
 ## 1. Run the ponytail audit
 
-Run the `ponytail-audit` skill on the same scope: the `Skill` tool with `ponytail:ponytail-audit` in Claude Code, `$ponytail-audit` in Codex. If it is not installed, read `~/.claude/plugins/marketplaces/ponytail/skills/ponytail-audit/SKILL.md` and follow it. If that file is missing too, say so and continue with step 2 only.
+Run the `ponytail-audit` skill on the same scope: the `Skill` tool with `ponytail:ponytail-audit`. If it is not installed, read `~/.claude/plugins/marketplaces/ponytail/skills/ponytail-audit/SKILL.md` and follow it. If that file is missing too, say so and continue with step 2 only.
 
 Use the audit for its map of the code, its findings and its rules in "Check before you report". Don't print its report: its findings become rows of the table in step 4.
 

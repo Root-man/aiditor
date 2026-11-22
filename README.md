@@ -76,7 +76,7 @@ cargo test
 - [docs/design](docs/design): the approved visual designs
 - [docs/roadmap.yaml](docs/roadmap.yaml): milestones and issues
 - [docs/performance.md](docs/performance.md): benchmarks
-- [AGENTS.md](AGENTS.md): guidance for coding agents working on this repo
+- [CLAUDE.md](CLAUDE.md): guidance for coding agents working on this repo
 
 ## License
 
