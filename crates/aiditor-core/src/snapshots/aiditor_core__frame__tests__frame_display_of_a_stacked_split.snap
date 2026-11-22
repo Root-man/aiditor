@@ -39,6 +39,7 @@ FrameDisplay {
                         aligned: false,
                         icons: [],
                         diff: None,
+                        sign: None,
                     },
                     Line {
                         number: 1,
@@ -66,6 +67,7 @@ FrameDisplay {
                         aligned: false,
                         icons: [],
                         diff: None,
+                        sign: None,
                     },
                 ],
                 cursor: Some(
@@ -332,6 +334,7 @@ FrameDisplay {
                         aligned: false,
                         icons: [],
                         diff: None,
+                        sign: None,
                     },
                     Line {
                         number: 1,
@@ -355,6 +358,7 @@ FrameDisplay {
                         aligned: false,
                         icons: [],
                         diff: None,
+                        sign: None,
                     },
                 ],
                 cursor: Some(

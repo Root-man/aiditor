@@ -1,7 +1,7 @@
 //! The diff view (M9): a temporary full-frame layout of the current workspace, the changed-file
 //! list on the left and a window for the diff on the right.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -34,6 +34,7 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["diff-next-change", "diff-previous-change"], "change"),
     (&["diff-next-file", "diff-previous-file"], "file"),
     (&["diff-copy-removed"], "copy old lines"),
+    (&["diff-toggle"], "fold"),
     (&["diff-refresh"], "refresh"),
     (&["diff-quit"], "quit"),
 ];
@@ -72,6 +73,8 @@ struct Shown {
     /// The new side's tick the hunks were last asked for; `None` before the first ask.
     tick: Option<u64>,
     timer: Option<TimerId>,
+    /// Whether point went to the first change, done once when the hunks first arrive.
+    jumped: bool,
 }
 
 impl Shown {
@@ -101,9 +104,52 @@ pub(crate) struct DiffList {
     /// Statuses asked and not yet answered.
     pending: usize,
     rows: Vec<(usize, Row)>,
+    /// The roots whose files `TAB` hid.
+    folded: BTreeSet<PathBuf>,
     /// The view's right window.
     window: WindowId,
     shown: Option<Shown>,
+}
+
+/// Where a file row's path starts: its indent, letter and gap.
+const PATH_COLUMN: usize = 9;
+
+impl DiffList {
+    /// Cuts each of `lines` to `cols`, a file row's path from the left with `…` so its name stays.
+    pub(crate) fn fit(&self, lines: &mut [crate::display::Line], cols: usize) {
+        for line in lines {
+            let file =
+                (self.rows.iter()).any(|(l, r)| *l == line.number && matches!(r, Row::File { .. }));
+            let len: usize = line.spans.iter().map(|s| s.text.chars().count()).sum();
+            // Cut one more for the `…`, keeping the name's last char at least.
+            let mut cut = (len + 1)
+                .saturating_sub(cols)
+                .min(len.saturating_sub(PATH_COLUMN + 1));
+            if file && len > cols && cut > 0 {
+                let mut col = 0;
+                let mut marked = false;
+                for span in &mut line.spans {
+                    let chars: Vec<char> = span.text.chars().collect();
+                    let from = PATH_COLUMN.saturating_sub(col).min(chars.len());
+                    let take = cut.min(chars.len() - from);
+                    col += chars.len();
+                    if from == chars.len() && take == 0 {
+                        continue;
+                    }
+                    cut -= take;
+                    let mut text: String = chars[..from].iter().collect();
+                    if !marked && from + take < chars.len() {
+                        text.push('…');
+                        marked = true;
+                    }
+                    text.extend(&chars[from + take..]);
+                    span.text = text;
+                }
+                line.spans.retain(|s| !s.text.is_empty());
+            }
+            crate::display::cut_spans(&mut line.spans, cols.saturating_add(1));
+        }
+    }
 }
 
 /// The status letter of a change and its face.
@@ -183,8 +229,15 @@ impl Core {
                         |n| n.to_string_lossy().into_owned(),
                     );
                     rows.push((lines.len(), Row::Root(root.clone())));
-                    // Two columns for the fold mark frame 15 draws there.
-                    let mut heading = vec![("  ".into(), None), (name, bold())];
+                    let has_files = matches!(result, Ok(Some(s)) if !s.files.is_empty());
+                    let folded = has_files && list.folded.contains(root);
+                    let mark = match (has_files, folded) {
+                        (false, _) => "  ",
+                        (true, false) => "▾ ",
+                        (true, true) => "▸ ",
+                    };
+                    let mut heading =
+                        vec![(mark.into(), face(FaceName::ModeLineDim)), (name, bold())];
                     let status = match result {
                         Ok(Some(status)) => status,
                         Ok(None) => {
@@ -209,6 +262,9 @@ impl Core {
                     if status.files.is_empty() {
                         lines.push(vec![("    No changes".into(), face(FaceName::Annotation))]);
                     }
+                    if folded {
+                        continue;
+                    }
                     for (staged, group) in [(true, "Staged"), (false, "Changes")] {
                         let files: Vec<_> = (status.files.iter())
                             .filter_map(|f| Some((if staged { f.staged } else { f.unstaged }?, f)))
@@ -229,10 +285,14 @@ impl Core {
                             let path = (full.strip_prefix(root))
                                 .map_or_else(|_| file.path.clone(), Path::to_path_buf);
                             let (letter, letter_face) = letter(change);
+                            let shown = path.display().to_string();
+                            let (dir, name) = shown.split_at(shown.rfind('/').map_or(0, |i| i + 1));
                             lines.push(vec![
                                 ("      ".into(), None),
                                 (letter.into(), face(letter_face)),
-                                (format!("  {}", path.display()), None),
+                                ("  ".into(), None),
+                                (dir.into(), face(FaceName::ModeLineDim)),
+                                (name.into(), None),
                             ]);
                             let row = Row::File {
                                 root: root.clone(),
@@ -285,7 +345,7 @@ impl Core {
 
 /// The diff rows of `hunks`' removed lines of `old` over a new side of `lines` lines: each above
 /// the line that replaced it, after the last when the removal ended the file, in `old`'s syntax
-/// faces from `palette` over `diff-removed`.
+/// faces from `palette` on `diff-removed`'s background.
 fn removed_rows(
     old: &Buffer,
     hunks: &[Hunk],
@@ -300,7 +360,6 @@ fn removed_rows(
         .filter(|r| !r.is_empty())
         .collect();
     let faces = old.highlights(&ranges, palette);
-    let face = FaceRef::Face(FaceName::DiffRemoved);
     let run = |r: Range<usize>, refs: Vec<FaceRef>| (text.slice(r).to_string(), refs);
     let mut next = 0;
     (hunks.iter())
@@ -316,16 +375,17 @@ fn removed_rows(
             let (mut runs, mut from) = (Vec::new(), start);
             for (r, is) in faces[next..].iter().take_while(|(r, _)| r.start < end) {
                 let r = r.start.max(start)..r.end.min(end);
-                runs.push(run(from..r.start, vec![face]));
+                runs.push(run(from..r.start, Vec::new()));
                 from = r.end;
-                runs.push(run(r, vec![face, FaceRef::Is(*is)]));
+                runs.push(run(r, vec![FaceRef::Is(*is)]));
             }
-            runs.push(run(from..end, vec![face]));
+            runs.push(run(from..end, Vec::new()));
             runs.retain(|(t, _)| !t.is_empty());
             let row = DiffRow {
                 after: at > last,
                 runs,
-                label: Some((i + 1).to_string()),
+                label: None,
+                sign: Some(('-', FaceName::DiffRemoved)),
                 height: 1,
             };
             (at.min(last), row)
@@ -338,7 +398,7 @@ pub(crate) struct Decor {
     pub(crate) window: WindowId,
     pub(crate) added: Vec<Range<usize>>,
     pub(crate) left: Vec<Segment>,
-    pub(crate) right: Segment,
+    pub(crate) right: Vec<Segment>,
 }
 
 impl Core {
@@ -473,7 +533,8 @@ impl Core {
                 .get_mut(id)
                 .expect("just made")
                 .set_grammar(&file);
-            return self.attach(list, window, id);
+            self.attach(list, window, id);
+            return self.first_change(list);
         }
         let full = repository.join(file);
         let workspace = self.buffers.get(list).expect("a live list").workspace;
@@ -531,6 +592,7 @@ impl Core {
             hunks: Vec::new(),
             tick: None,
             timer: None,
+            jumped: false,
         });
     }
 
@@ -596,6 +658,32 @@ impl Core {
         };
         (shown.hunks, shown.request) = (hunks, 0);
         self.redraw(list);
+        self.first_change(list);
+    }
+
+    /// Puts point in list `list`'s diff window on the first change, once, when its hunks first
+    /// arrive; later re-diffs leave point where editing put it.
+    fn first_change(&mut self, list: BufferId) {
+        let Some(diff) = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut()) else {
+            return;
+        };
+        let window = diff.window;
+        let Some(shown) = diff.shown.as_mut().filter(|s| !s.jumped) else {
+            return;
+        };
+        shown.jumped = true;
+        let (Some(id), Some(hunk)) = (shown.buffer, shown.hunks.first().cloned()) else {
+            return;
+        };
+        let Some(buffer) = self.buffers.get(id) else {
+            return;
+        };
+        let line = Shown::start(&hunk, buffer.len_lines() - 1);
+        let at = buffer.char_idx(line, 0).expect("in the buffer");
+        let window = view_window(&mut self.windows, &mut self.workspaces, window);
+        if let Some(window) = window.filter(|w| w.buffer() == id) {
+            window.jump(&mut self.buffers, at).expect("in the buffer");
+        }
     }
 
     /// Asks for the hunks of list `list`'s diff against its buffer's text now.
@@ -661,6 +749,14 @@ impl Core {
         (shown.buffer == Some(window.buffer())).then_some((list, window, shown))
     }
 
+    /// Whether the diff window is selected, showing the diff.
+    pub(crate) fn diff_selected(&self) -> bool {
+        let list = self
+            .diff_shown()
+            .and_then(|(l, ..)| self.buffers.get(l)?.diff_list());
+        list.is_some_and(|l| l.window == self.windows.selected)
+    }
+
     /// Point's line in the diff window and the window buffer's last line.
     fn diff_line(&self, window: &Window) -> (usize, usize) {
         let buffer = self
@@ -690,18 +786,33 @@ impl Core {
             None => format!("{n} changes"),
         };
         let diff = self.buffers.get(list)?.diff_list()?;
+        let mut right = vec![vec![(change, FaceName::ModeLine)]];
+        // A file's mode line names its branch; the index text's buffer has no file.
+        let fileless = self.buffers.get(window.buffer())?.file.is_none();
+        let root = match &shown.row {
+            Row::File { root, .. } => Some(root),
+            Row::Root(_) => None,
+        };
+        let status = (diff.answer.iter().flatten()).find(|(r, _)| Some(r) == root);
+        if let Some((_, Ok(Some(status)))) = status.filter(|_| fileless) {
+            right.insert(
+                0,
+                vec![(format!("⎇ {}", status.branch), FaceName::VcsBranch)],
+            );
+        }
         Some(Decor {
             window: diff.window,
             added: shown.hunks.iter().map(|h| h.new.clone()).collect(),
             left: vec![
                 vec![
-                    (format!("+{added}"), FaceName::DiffAdded),
+                    // As a tool call's counts: the diff faces' backgrounds aren't the bar's.
+                    (format!("+{added}"), FaceName::StatusRunning),
                     (" ".into(), FaceName::ModeLine),
-                    (format!("−{removed}"), FaceName::DiffRemoved),
+                    (format!("−{removed}"), FaceName::StatusFailed),
                 ],
                 vec![(sides.into(), FaceName::ModeLineDim)],
             ],
-            right: vec![(change, FaceName::ModeLine)],
+            right,
         })
     }
 }
@@ -733,6 +844,7 @@ impl Ctx<'_> {
                 answer: None,
                 pending: 0,
                 rows: Vec::new(),
+                folded: BTreeSet::new(),
                 window: WindowId(core.next_window + 1),
                 shown: None,
             });
@@ -855,6 +967,42 @@ impl Ctx<'_> {
         window
             .set_point(&mut core.buffers, at)
             .expect("in the list");
+        Ok(())
+    }
+
+    /// `diff-toggle`: folds or unfolds the root of the list's row at point, point going to its
+    /// heading.
+    pub(crate) fn diff_toggle(&mut self) -> Result<(), String> {
+        let core = &mut *self.core;
+        let id = core.windows.window.buffer();
+        let window = &mut core.windows.window;
+        let buffer = core.buffers.get(id).expect("window buffer is live");
+        let list = buffer.diff_list().ok_or("Not in a diff list")?;
+        let line = (buffer.line_col(window.point(&core.buffers))).map_or(0, |(l, _)| l);
+        let (heading, root) = (list.rows.iter().rev())
+            .find_map(|(l, r)| match r {
+                Row::Root(root) if *l <= line => Some((*l, root.clone())),
+                _ => None,
+            })
+            .ok_or("No root here")?;
+        let files =
+            (list.rows.iter()).any(|(_, r)| matches!(r, Row::File { root: r, .. } if *r == root));
+        if !files && !list.folded.contains(&root) {
+            return Err("Nothing to fold".into());
+        }
+        let at = buffer.char_idx(heading, 0).expect("a row's line");
+        let list = core
+            .buffers
+            .get_mut(id)
+            .and_then(|b| b.diff_list_mut())
+            .expect("checked");
+        if !list.folded.remove(&root) {
+            list.folded.insert(root);
+        }
+        window
+            .set_point(&mut core.buffers, at)
+            .expect("in the list");
+        core.render_diff_list(id);
         Ok(())
     }
 
@@ -1035,14 +1183,14 @@ mod tests {
         assert_eq!(
             h.text(),
             [
-                "  a  ⎇ main",
+                "▾ a  ⎇ main",
                 "    Staged  1",
                 "      M  src/x.rs",
                 "    Changes  2",
                 "      M  src/x.rs",
                 "      ?  notes",
                 "",
-                "  b  ⎇ topic",
+                "▾ b  ⎇ topic",
                 "    Changes  1",
                 "      D  gone",
                 "",
@@ -1185,6 +1333,8 @@ mod tests {
             files: vec![file(name, change(staged), change(changed))],
         };
         h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
+        // Laid out, as the app's windows are before an answer arrives.
+        h.frame(1440., 900.);
         h
     }
 
@@ -1211,21 +1361,31 @@ mod tests {
         (from, to)
     }
 
-    /// The right window's lines: `-<label> ` before a removed row, `+ ` before an added line.
+    /// The right window's lines after their signs, `-`, `+` or blank, each signed row on its
+    /// face's background and a removed row unnumbered.
     fn drawn(h: &mut Harness) -> Vec<String> {
         let frame = h.frame(1440., 900.);
-        let lines = &frame.windows[1].display.lines;
-        (lines.iter())
-            .map(|l| {
-                let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
-                let added = Decoration::Bar(FaceName::DiffAdded);
-                match &l.diff {
-                    Some(label) => format!("-{label} {text}"),
-                    None if l.decorations.contains(&added) => format!("+ {text}"),
-                    None => format!("  {text}"),
-                }
-            })
-            .collect()
+        let window = &frame.windows[1];
+        let gutter = window.gutter.as_ref().expect("a gutter");
+        let rows = (window.display.lines.iter()).zip(gutter.rows.iter().zip(&gutter.signs));
+        rows.map(|(l, ((label, _), (sign, _)))| {
+            let text: String = l.spans.iter().map(|s| s.text.as_str()).collect();
+            let face = match sign.as_str() {
+                "+" => FaceName::DiffAdded,
+                "-" => FaceName::DiffRemoved,
+                _ => return format!("  {text}"),
+            };
+            assert!(
+                l.decorations.contains(&Decoration::Background(face)),
+                "{text}"
+            );
+            assert!(
+                l.diff.is_none() || label.is_empty(),
+                "{text} numbered {label}"
+            );
+            format!("{sign} {text}")
+        })
+        .collect()
     }
 
     fn mode_line(h: &mut Harness) -> String {
@@ -1247,12 +1407,17 @@ mod tests {
         let sides = answer_diff(&mut h, "a\nb\nc\n", "a\nB\nc\nd\n");
         assert_eq!(sides, (GitSide::Index, GitSide::WorkingTree));
         assert_eq!(right(&h).path(), Some(h.path("a/x.rs").as_path()));
-        assert_eq!(drawn(&mut h), ["  a", "-2 b", "+ B", "  c", "+ d", "  "]);
+        assert_eq!(drawn(&mut h), ["  a", "- b", "+ B", "  c", "+ d", "  "]);
         let bar = mode_line(&mut h);
         assert!(bar.contains("+2 −1 │ index → working tree"), "{bar}");
-        assert!(bar.contains("2 changes"), "{bar}");
+        assert!(
+            bar.contains("change 1/2"),
+            "opens on the first change: {bar}"
+        );
         h.keys("n");
-        assert!(mode_line(&mut h).contains("change 1/2"));
+        assert!(mode_line(&mut h).contains("change 2/2"));
+        h.keys("C-x o M-<");
+        assert!(mode_line(&mut h).contains("2 changes"));
     }
 
     #[test]
@@ -1267,14 +1432,14 @@ mod tests {
             "the old answer until the pause"
         );
         h.advance(REDIFF);
-        assert_eq!(drawn(&mut h), ["  a", "-2 b", "  "]);
+        assert_eq!(drawn(&mut h), ["  a", "- b", "  "]);
         h.send(Msg::LinesDiffed {
             request: 1,
             hunks: Vec::new(),
         });
         assert_eq!(
             drawn(&mut h),
-            ["  a", "-2 b", "  "],
+            ["  a", "- b", "  "],
             "a stale answer is dropped"
         );
         assert!(right(&h).modified());
@@ -1303,7 +1468,7 @@ mod tests {
         let sides = answer_diff(&mut h, "a\n", "b\n");
         assert_eq!(sides, (GitSide::Tree("HEAD".into()), GitSide::Index));
         assert_eq!(right(&h).name, "x.rs (index)");
-        assert_eq!(drawn(&mut h), ["-1 a", "+ b", "  "]);
+        assert_eq!(drawn(&mut h), ["- a", "+ b", "  "]);
         assert!(mode_line(&mut h).contains("HEAD → index"));
         h.keys("C-x o z");
         assert_eq!(h.core.message(), Some("Buffer is read-only"));
@@ -1378,14 +1543,14 @@ mod tests {
     }
 
     #[test]
-    fn a_language_without_a_grammar_is_plain_in_the_diff_faces() {
+    fn a_language_without_a_grammar_is_plain_on_the_diff_backgrounds() {
         let mut h = inline_file("x.zzz", false, true, Some("fn b\n"));
         answer_diff(&mut h, "fn a\n", "fn b\n");
-        let removed = h.core.settings().theme.face(FaceName::DiffRemoved).fg;
         assert_eq!(
             colours(&mut h)[..2],
-            [vec![("fn a".into(), removed)], vec![("fn b".into(), None)]]
+            [vec![("fn a".into(), None)], vec![("fn b".into(), None)]]
         );
+        assert_eq!(drawn(&mut h)[..2], ["- fn a", "+ fn b"]);
     }
 
     #[test]
@@ -1394,8 +1559,7 @@ mod tests {
         let old = line.repeat(crate::syntax::PARSE_CUT / line.len() + 1);
         let mut h = inline(false, true, Some(""));
         answer_diff(&mut h, &old, "");
-        let removed = h.core.settings().theme.face(FaceName::DiffRemoved).fg;
-        assert_eq!(colours(&mut h)[0], [("fn f() {}".into(), removed)]);
+        assert_eq!(colours(&mut h)[0], [("fn f() {}".into(), None)]);
         assert_eq!(h.parses.len(), 1, "the old side parsed off the core thread");
         h.parse();
         assert_eq!(colours(&mut h)[0][0], ("fn".into(), syntax(&h, "keyword")));
@@ -1407,8 +1571,7 @@ mod tests {
         answer_diff(&mut h, "a\nb\nc\n", "a\nB\nc\nd\n");
         h.keys("C-x o");
         let line = |h: &Harness| h.core.current().line_col(h.point()).unwrap().0;
-        h.keys("C-c n");
-        assert_eq!(line(&h), 1);
+        assert_eq!(line(&h), 1, "the diff opens on its first change");
         h.keys("C-c n");
         assert_eq!(line(&h), 3);
         h.keys("C-c n");
@@ -1424,10 +1587,10 @@ mod tests {
         let mut h = inline(false, true, Some("a\nB\nC\n"));
         answer_diff(&mut h, "a\nb\nc", "a\nB\nC\n");
         h.keys("w");
-        assert_eq!(h.core.message(), Some("No removed lines here"));
-        h.keys("n w");
         assert_eq!(h.core.message(), Some("Copied 2 removed lines"));
         assert_eq!(h.clipboard.as_deref(), Some("b\nc\n"));
+        h.keys("C-x o M-< C-c w");
+        assert_eq!(h.core.message(), Some("No removed lines here"));
     }
 
     #[test]
@@ -1449,7 +1612,7 @@ mod tests {
     fn c_g_from_a_staged_diff_visits_the_file_at_the_line() {
         let mut h = inline(true, false, Some("a\nb\nc\n"));
         answer_diff(&mut h, "a\n", "a\nb\nc\n");
-        h.keys("C-x o C-n C-n C-g");
+        h.keys("C-x o C-n C-g");
         assert_eq!(h.core.current().path(), Some(h.path("a/x.rs").as_path()));
         assert_eq!(h.core.current().line_col(h.point()).unwrap(), (2, 0));
         assert!(h.core.buffers.find_here("x.rs (index)").is_none());
@@ -1462,7 +1625,7 @@ mod tests {
         assert_eq!(drawn(&mut h), ["+ x", "  "], "untracked: all added");
         let mut h = inline(false, true, None);
         answer_diff(&mut h, "a\n", "");
-        assert_eq!(drawn(&mut h), ["-1 a", "  "], "deleted: all removed");
+        assert_eq!(drawn(&mut h), ["- a", "  "], "deleted: all removed");
         let mut h = inline(false, true, Some("\0"));
         let i = (h.effects.iter())
             .rposition(|e| matches!(e, Effect::File(FileOp::GitDiff { .. })))
@@ -1488,7 +1651,7 @@ mod tests {
         let mut h = inline(false, true, Some("a\nb"));
         answer_diff(&mut h, "a\nb\nc", "a\nb");
         // `similar` counts the unterminated `b` as a changed line.
-        assert_eq!(drawn(&mut h), ["  a", "-2 b", "-3 c", "+ b"]);
+        assert_eq!(drawn(&mut h), ["  a", "- b", "- c", "+ b"]);
         h.keys("C-x o C-c n");
         assert!(mode_line(&mut h).contains("change 1/1"));
         h.keys("C-c n");
@@ -1515,5 +1678,177 @@ mod tests {
         assert_eq!(h.core.message(), Some("No previous change"));
         h.keys("C-g");
         assert!(h.core.windows.saved.is_none(), "C-g in the list quits too");
+    }
+
+    #[test]
+    fn each_diff_row_piece_has_its_face() {
+        let mut h = inline(false, true, Some("a\nB\n"));
+        answer_diff(&mut h, "a\nb\n", "a\nB\n");
+        h.keys("C-x o");
+        let theme = h.core.settings().theme.clone();
+        let sign = |name| Face {
+            bg: None,
+            ..theme.face(name)
+        };
+        let frame = h.frame(1440., 900.);
+        let window = &frame.windows[1];
+        let gutter = window.gutter.as_ref().expect("a gutter");
+        let signs: Vec<_> = gutter.signs.iter().map(|(s, f)| (s.as_str(), *f)).collect();
+        let blank = ("", Face::default());
+        let removed = ("-", sign(FaceName::DiffRemoved));
+        let added = ("+", sign(FaceName::DiffAdded));
+        assert_eq!(signs, [blank, removed, added, blank]);
+        assert_eq!(gutter.rows[1].0, "", "a removed row has no line number");
+        let lines = &window.display.lines;
+        assert_eq!(
+            lines[1].decorations,
+            [Decoration::Background(FaceName::DiffRemoved)]
+        );
+        // Point's line keeps the added background over hl-line.
+        assert_eq!(
+            lines[2].decorations,
+            [
+                Decoration::Background(FaceName::HlLine),
+                Decoration::Background(FaceName::DiffAdded)
+            ]
+        );
+        let plain = crate::display::gutter_width(3, 8.);
+        assert_eq!(gutter.width, plain + crate::display::sign_width(8.));
+        let bar = window.display.mode_line.text();
+        assert!(bar.contains("change 1/1 │ 2:0"), "{bar}");
+        let hints = &frame.key_hints;
+        assert_eq!(hints[0], ("C-c n/p".into(), "change"), "{hints:?}");
+        assert!(hints.contains(&("C-c q".into(), "quit")), "{hints:?}");
+        assert!(
+            hints.iter().all(|(_, a)| *a != "fold"),
+            "TAB isn't bound here"
+        );
+    }
+
+    /// The face of the first span reading `text` in the list's display line `line`.
+    fn list_face(h: &mut Harness, line: usize, text: &str) -> Face {
+        let frame = h.frame(1440., 900.);
+        let spans = &frame.windows[0].display.lines[line].spans;
+        (spans.iter().find(|s| s.text == text))
+            .unwrap_or_else(|| panic!("no {text:?} in {spans:?}"))
+            .face
+    }
+
+    #[test]
+    fn each_list_row_piece_has_its_face() {
+        let mut h = view();
+        let answer = answer(&h, &[]);
+        h.send(answer);
+        let theme = h.core.settings().theme.clone();
+        let fg = |name| theme.face(name).fg;
+        assert_eq!(list_face(&mut h, 0, "▾ ").fg, fg(FaceName::ModeLineDim));
+        assert!(list_face(&mut h, 0, "a").bold);
+        assert_eq!(list_face(&mut h, 0, "⎇ main").fg, fg(FaceName::VcsBranch));
+        let group = list_face(&mut h, 1, "Staged");
+        assert_eq!((group.fg, group.bold), (fg(FaceName::DiffListGroup), true));
+        assert_eq!(
+            list_face(&mut h, 1, "  1").fg,
+            fg(FaceName::SessionListCount)
+        );
+        assert_eq!(list_face(&mut h, 2, "M").fg, fg(FaceName::DiffFileModified));
+        assert_eq!(list_face(&mut h, 2, "src/").fg, fg(FaceName::ModeLineDim));
+        assert_eq!(list_face(&mut h, 2, "x.rs").fg, None);
+        assert_eq!(
+            list_face(&mut h, 5, "?").fg,
+            fg(FaceName::DiffFileUntracked)
+        );
+        assert_eq!(
+            list_face(&mut h, 12, "    No changes").fg,
+            fg(FaceName::Annotation)
+        );
+        // The shown file's row stays marked from the diff window.
+        h.keys("C-x o");
+        let frame = h.frame(1440., 900.);
+        let hl = Decoration::Background(FaceName::HlLine);
+        assert!(frame.windows[0].display.lines[2].decorations.contains(&hl));
+    }
+
+    #[test]
+    fn tab_folds_a_root_until_unfolded_across_refreshes() {
+        let mut h = view();
+        let status = answer(&h, &[]);
+        h.send(status);
+        h.keys("TAB");
+        let text = h.text();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(
+            lines[..4],
+            ["▸ a  ⎇ main", "", "▾ b  ⎇ topic", "    Changes  1"]
+        );
+        assert_eq!(h.point(), 0, "point on the heading");
+        h.keys("g");
+        let status = answer(&h, &[]);
+        h.send(status);
+        assert!(h.text().starts_with("▸ a  ⎇ main\n\n▾ b"), "kept folded");
+        h.keys("TAB");
+        assert!(h.text().starts_with("▾ a  ⎇ main\n    Staged"));
+        h.keys("C-n C-n C-n C-n C-n C-n C-n C-n C-n C-n C-n");
+        assert!(
+            h.text()
+                .lines()
+                .nth(11)
+                .is_some_and(|l| l.starts_with("  c"))
+        );
+        h.keys("TAB");
+        assert_eq!(h.core.message(), Some("Nothing to fold"));
+    }
+
+    #[test]
+    fn a_long_path_is_cut_from_the_left_to_fit() {
+        let mut h = view();
+        let long = file("a/deep/nested/dir/name.rs", None, Some(GitChange::Added));
+        let status = answer(&h, &[long]);
+        h.send(status);
+        let frame = h.frame(600., 900.);
+        let window = &frame.windows[0];
+        let cols = ((window.rect.width - 24.) / 8.) as usize;
+        let rows: Vec<String> = (window.display.lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        let row = rows
+            .iter()
+            .find(|r| r.ends_with("name.rs"))
+            .expect("the file's row");
+        assert!(row.starts_with("      A  …"), "{row}");
+        assert_eq!(row.chars().count(), cols, "{row}");
+        let short = rows
+            .iter()
+            .find(|r| r.ends_with("x.rs"))
+            .expect("a short row");
+        assert_eq!(short, "      M  src/x.rs");
+    }
+
+    #[test]
+    fn only_the_first_answer_moves_point_to_the_first_change() {
+        let mut h = inline(false, true, Some("a\nb\nC\n"));
+        answer_diff(&mut h, "a\nb\nc\n", "a\nb\nC\n");
+        h.keys("C-x o");
+        let line = |h: &Harness| h.core.current().line_col(h.point()).unwrap().0;
+        assert_eq!(line(&h), 2, "on the first change");
+        h.keys("M-< x");
+        h.advance(REDIFF);
+        assert_eq!(drawn(&mut h)[..2], ["- a", "+ xa"], "re-diffed");
+        assert_eq!(line(&h), 0, "a re-diff leaves point where editing put it");
+    }
+
+    #[test]
+    fn a_staged_diff_is_numbered_and_names_its_branch() {
+        let mut h = inline(true, false, None);
+        let numbers = Some("line_numbers = \"absolute\"");
+        h.core.settings = crate::settings::Settings::parse(numbers).unwrap();
+        answer_diff(&mut h, "a\n", "a\nb\n");
+        let frame = h.frame(1440., 900.);
+        let window = &frame.windows[1];
+        let labels: Vec<_> = (window.gutter.as_ref().expect("a gutter").rows.iter())
+            .map(|(l, _)| l.as_str())
+            .collect();
+        assert_eq!(labels, ["1", "2", "3"]);
+        let bar = window.display.mode_line.text();
+        assert!(bar.contains("⎇ main │ change 1/1"), "{bar}");
     }
 }

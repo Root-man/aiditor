@@ -841,6 +841,11 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.diff_copy_removed(),
         },
         Command {
+            name: "diff-toggle",
+            spec: ArgSpec::default(),
+            handler: |ctx, _| ctx.diff_toggle(),
+        },
+        Command {
             name: "diff-visit",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.diff_visit(),

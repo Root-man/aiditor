@@ -96,8 +96,8 @@ session-user-rule = { fg = 0x5a5a5a }
 session-thought = { fg = 0x808080 }
 session-block = { bg = 0x2a2a2a }
 session-code = { fg = 0xce9178 }
-diff-added = { fg = 0x0dbc79 }
-diff-removed = { fg = 0xf14c4c }
+diff-added = { fg = 0x0dbc79, bg = 0x373d29 }
+diff-removed = { fg = 0xf14c4c, bg = 0x4b1818 }
 diff-hunk = { fg = 0x569cd6 }
 diff-file-modified = { fg = 0xfabd2f }
 diff-file-added = { fg = 0xb8bb26 }

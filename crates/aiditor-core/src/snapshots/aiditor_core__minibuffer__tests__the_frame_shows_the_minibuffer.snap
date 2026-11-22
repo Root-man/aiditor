@@ -31,6 +31,7 @@ Some(
                     aligned: false,
                     icons: [],
                     diff: None,
+                    sign: None,
                 },
             ],
             cursor: Some(

@@ -72,5 +72,6 @@ expression: h.display(1).lines
         aligned: false,
         icons: [],
         diff: None,
+        sign: None,
     },
 ]

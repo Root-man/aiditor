@@ -516,9 +516,10 @@ impl Buffer {
         let prose = (self.path().and_then(Path::extension))
             .is_some_and(|e| ["md", "markdown", "txt"].iter().any(|p| e == *p));
         let word = prose || self.major_mode == crate::agents::MODE;
-        // The minibuffer and fitted workspace-list rows each occupy one visual row.
+        // The minibuffer and fitted list rows each occupy one visual row.
         let truncate = self.truncate_lines
             || self.workspace_list().is_some()
+            || self.diff_list().is_some()
             || self.major_mode == "minibuffer-mode";
         (!truncate && cols >= 2).then(|| (cols - 1, word))
     }
