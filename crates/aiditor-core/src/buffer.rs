@@ -120,6 +120,7 @@ impl Buffers {
             file: None,
             read_only: false,
             truncate_lines: false,
+            like: None,
             line_numbers: None,
             unkillable: false,
             modified: false,
@@ -331,6 +332,8 @@ pub struct Buffer {
     pub read_only: bool,
     /// Long lines are cut at the window edge instead of wrapping, as Emacs's `truncate-lines`.
     pub truncate_lines: bool,
+    /// The file whose grammar it took, for a fileless buffer showing a file's text.
+    like: Option<PathBuf>,
     /// `display-line-numbers-mode`'s choice for this buffer; `None` follows the setting.
     pub line_numbers: Option<bool>,
     /// `kill-buffer` refuses it; killing its workspace still kills it.
@@ -513,8 +516,11 @@ impl Buffer {
     /// The chars a visual row holds in a window `cols` wide and whether rows break at words, or
     /// `None` when long lines are cut instead; the last column is left for the `\` marker.
     pub(crate) fn wrap(&self, cols: usize) -> Option<(usize, bool)> {
-        let prose = (self.path().and_then(Path::extension))
-            .is_some_and(|e| ["md", "markdown", "txt"].iter().any(|p| e == *p));
+        let prose = (self
+            .path()
+            .or(self.like.as_deref())
+            .and_then(Path::extension))
+        .is_some_and(|e| ["md", "markdown", "txt"].iter().any(|p| e == *p));
         let word = prose || self.major_mode == crate::agents::MODE;
         // The minibuffer and fitted list rows each occupy one visual row.
         let truncate = self.truncate_lines
@@ -1228,6 +1234,7 @@ impl Buffer {
     /// Highlights its text in the grammar of `path`'s language, if aiditor has it.
     pub(crate) fn set_grammar(&mut self, path: &Path) {
         self.syntax = Syntax::for_file(path, &self.text);
+        self.like = Some(path.to_path_buf());
     }
 
     pub(crate) fn syntax_snapshot(&mut self) -> Option<Syntax> {
@@ -1377,6 +1384,19 @@ pub fn unified_diff(
     Ok((diff.unified_diff())
         .header(&path.display().to_string(), name)
         .to_string())
+}
+
+/// A patch turning `base`, the text of `file` (relative to its repository), into `edited`, for
+/// `git apply`.
+// shortcut: built from decoded LF text, so a CRLF or BOM file's patch doesn't apply; encode it
+// as the index holds it when that grates.
+// shortcut: the header isn't quoted, so a path with `"`, `\` or a control char fails to apply;
+// quote it as git does if one turns up.
+pub fn patch(file: &Path, base: &str, edited: &str) -> String {
+    let file = file.display();
+    let diff = similar::TextDiff::from_lines(base, edited);
+    let hunks = diff.unified_diff().to_string();
+    format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n{hunks}")
 }
 
 /// The changed lines between `old` and `new`, in order: each old char range with its new text.

@@ -125,6 +125,8 @@ pub(crate) struct DiffList {
     /// The view's right window.
     window: WindowId,
     shown: Option<Shown>,
+    /// The shown diff's row and point's line and column before a refresh, to return to.
+    near: Option<Box<(Row, (usize, usize))>>,
 }
 
 /// Where a file row's path starts: its indent, letter and gap.
@@ -205,9 +207,28 @@ impl Core {
             .collect();
         for id in waiting {
             self.render_diff_list(id);
+            let near = self.diff_point(id);
             // A refresh asks the shown diff again.
             self.drop_shown(id);
+            if let Some(list) = self.buffers.get_mut(id).and_then(|b| b.diff_list_mut()) {
+                list.near = near.map(Box::new);
+            }
         }
+    }
+
+    /// List `id`'s shown row and point's line and column in its window, while it shows the diff.
+    fn diff_point(&self, id: BufferId) -> Option<(Row, (usize, usize))> {
+        let list = self.buffers.get(id)?.diff_list()?;
+        let shown = list.shown.as_ref()?;
+        let window = match list.window == self.windows.selected {
+            true => &self.windows.window,
+            false => self.windows.others.get(&list.window)?,
+        };
+        let buffer = self
+            .buffers
+            .get(shown.buffer.filter(|&b| b == window.buffer())?)?;
+        let at = buffer.line_col(window.point(&self.buffers)).ok()?;
+        Some((shown.row.clone(), at))
     }
 
     /// Takes a stage, unstage or discard's answer: refreshes list `list`, or echoes git's error.
@@ -724,24 +745,31 @@ impl Core {
     }
 
     /// Puts point in list `list`'s diff window on the first change, once, when its hunks first
-    /// arrive; later re-diffs leave point where editing put it.
+    /// arrive, or back where it was when a refresh asked the same row again; later re-diffs
+    /// leave point where editing put it.
     fn first_change(&mut self, list: BufferId) {
         let Some(diff) = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut()) else {
             return;
         };
-        let window = diff.window;
+        let (window, near) = (diff.window, diff.near.take());
         let Some(shown) = diff.shown.as_mut().filter(|s| !s.jumped) else {
             return;
         };
         shown.jumped = true;
-        let (Some(id), Some(hunk)) = (shown.buffer, shown.hunks.first().cloned()) else {
+        let near = near.filter(|n| n.0 == shown.row).map(|n| n.1);
+        let (Some(id), hunk) = (shown.buffer, shown.hunks.first().cloned()) else {
             return;
         };
         let Some(buffer) = self.buffers.get(id) else {
             return;
         };
-        let line = Shown::start(&hunk, buffer.len_lines() - 1);
-        let at = buffer.char_idx(line, 0).expect("in the buffer");
+        let last = buffer.len_lines() - 1;
+        let (line, col) = match (near, hunk) {
+            (Some((line, col)), _) => (line.min(last), col),
+            (None, Some(hunk)) => (Shown::start(&hunk, last), 0),
+            (None, None) => return,
+        };
+        let at = buffer.char_idx(line, col).expect("in the buffer");
         let window = view_window(&mut self.windows, &mut self.workspaces, window);
         if let Some(window) = window.filter(|w| w.buffer() == id) {
             window.jump(&mut self.buffers, at).expect("in the buffer");
@@ -909,6 +937,7 @@ impl Ctx<'_> {
                 folded: BTreeSet::new(),
                 window: WindowId(core.next_window + 1),
                 shown: None,
+                near: None,
             });
             id
         });
@@ -1075,6 +1104,9 @@ impl Ctx<'_> {
     /// `diff-stage`, `diff-unstage` and `diff-discard`: acts on the file at point in its group,
     /// or every file under the heading at point; discarding a `Changes` file asks first.
     pub(crate) fn diff_update(&mut self, action: Action, args: Args) -> Result<(), String> {
+        if self.core.diff_selected() {
+            return self.diff_update_change(action);
+        }
         let core = &*self.core;
         let nothing = match action {
             Action::Stage => "Nothing to stage",
@@ -1180,6 +1212,152 @@ impl Ctx<'_> {
         let repository = repository.clone();
         self.effects.push(Effect::File(FileOp::GitUpdate {
             list: id,
+            repository,
+            steps,
+        }));
+        Ok(())
+    }
+
+    /// `diff-stage`, `diff-unstage` and `diff-discard` in the diff window: act on the change at
+    /// point, or with the region active on its added lines and its changes' removed rows.
+    fn diff_update_change(&mut self, action: Action) -> Result<(), String> {
+        let core = &*self.core;
+        let (list, window, shown) = core.diff_shown().ok_or("No diff shown")?;
+        let action = match (action, shown.staged()) {
+            (Action::Stage, true) => return Err("Already staged".into()),
+            (Action::Unstage, false) => return Err("Not staged".into()),
+            (Action::Discard, true) => Action::Unstage,
+            (action, _) => action,
+        };
+        let Row::File {
+            root,
+            repository,
+            file,
+            ..
+        } = &shown.row
+        else {
+            unreachable!("a shown row is a file's");
+        };
+        let id = window.buffer();
+        let buffer = core.buffers.get(id).expect("window buffer is live");
+        let full = repository.join(file);
+        let path = full.strip_prefix(root).unwrap_or(file).display();
+        // Git sees the disk.
+        if action == Action::Stage && buffer.modified() {
+            return Err(format!("Save {path} first"));
+        }
+        // Hunks of an older text would build a wrong patch.
+        if shown.request != 0 || shown.timer.is_some() {
+            return Err("The diff is being worked out".into());
+        }
+        let (line, last) = core.diff_line(window);
+        let mark = window.mark(&core.buffers).filter(|_| window.active());
+        let region = mark.map(|mark| {
+            let point = window.point(&core.buffers);
+            let at = |i| buffer.line_col(i).expect("in the buffer");
+            let ((start, _), (end, col)) = (at(point.min(mark)), at(point.max(mark)));
+            start..if col == 0 && end > start {
+                end
+            } else {
+                end + 1
+            }
+        });
+        // Each change with the new lines chosen: the region's, else all of the change at point.
+        let picks: Vec<(&Hunk, Range<usize>)> = match &region {
+            Some(lines) => (shown.hunks.iter())
+                .filter(|h| {
+                    (h.new.start < lines.end && lines.start < h.new.end)
+                        || lines.contains(&Shown::start(h, last))
+                })
+                .map(|h| {
+                    let start = h.new.start.max(lines.start);
+                    (h, start..h.new.end.min(lines.end).max(start))
+                })
+                .collect(),
+            None => (shown.change_at((line, last)).map(|i| &shown.hunks[i]))
+                .map(|h| (h, h.new.clone()))
+                .into_iter()
+                .collect(),
+        };
+        if picks.is_empty() {
+            return Err("No change here".into());
+        }
+        let diff = core
+            .buffers
+            .get(list)
+            .and_then(|b| b.diff_list())
+            .expect("shown");
+        let status = (diff.answer.iter().flatten())
+            .find(|(r, _)| r == root)
+            .and_then(|(_, s)| s.as_ref().ok()?.as_ref());
+        let git_file = status.and_then(|s| s.files.iter().find(|f| f.path == *file));
+        let state = git_file.and_then(|f| if shown.staged() { f.staged } else { f.unstaged });
+        use GitChange::*;
+        // No index entry under this path on one side, so the file goes whole.
+        let whole = matches!(state, Some(Added | Deleted | Untracked | Renamed | Copied));
+        let old = shown.old.as_ref().expect("shown");
+        let new = buffer.text();
+        let chars = |t: &Rope, r: &Range<usize>| {
+            let to = |i: usize| t.line_to_char(i.min(t.len_lines()));
+            to(r.start)..to(r.end)
+        };
+        let lines = |t: &Rope, r: Range<usize>| t.slice(chars(t, &r)).to_string();
+        // Staging edits the index toward the new side; unstaging and discarding edit the new
+        // side back, keeping the added lines not chosen.
+        let edits: Vec<(Range<usize>, String)> = (picks.into_iter())
+            .map(|(h, chosen)| match action {
+                Action::Stage => (chars(old, &h.old), lines(new, chosen)),
+                _ => {
+                    let mut back = lines(old, h.old.clone());
+                    let kept =
+                        lines(new, h.new.start..chosen.start) + &lines(new, chosen.end..h.new.end);
+                    // Only a text's last line goes without its newline.
+                    if !back.is_empty() && !back.ends_with('\n') && !kept.is_empty() {
+                        back.push('\n');
+                    }
+                    (chars(new, &h.new), back + &kept)
+                }
+            })
+            .collect();
+        let steps = match (action, whole) {
+            (Action::Discard, _) => {
+                let core = &mut *self.core;
+                let buffer = core.buffers.get_mut(id).expect("live");
+                if buffer.read_only {
+                    return Err("Buffer is read-only".into());
+                }
+                let point = core.windows.window.point(&core.buffers);
+                let buffer = core.buffers.get_mut(id).expect("live");
+                buffer.undo_boundary(point);
+                buffer.replace(&edits).expect("the hunks are of this text");
+                let point = core.windows.window.point(&core.buffers);
+                core.buffers.get_mut(id).expect("live").undo_boundary(point);
+                core.windows.window.set_active(false);
+                return Ok(());
+            }
+            (Action::Stage, true) => vec![(GitStep::Stage, vec![file.clone()])],
+            (_, true) => {
+                let old_path = git_file.and_then(|f| f.old_path.clone());
+                vec![(
+                    GitStep::Unstage,
+                    std::iter::once(file.clone()).chain(old_path).collect(),
+                )]
+            }
+            (_, false) => {
+                let base = if action == Action::Stage { old } else { new };
+                let mut edited = base.clone();
+                for (range, text) in edits.iter().rev() {
+                    edited.remove(range.clone());
+                    edited.insert(range.start, text);
+                }
+                let patch = crate::buffer::patch(file, &base.to_string(), &edited.to_string());
+                vec![(GitStep::Apply(patch), Vec::new())]
+            }
+        };
+        let repository = repository.clone();
+        self.core.windows.window.set_active(false);
+        self.effects.push(Effect::File(FileOp::GitUpdate {
+            list,
             repository,
             steps,
         }));
@@ -2355,5 +2533,164 @@ mod tests {
         h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
         let asked = (h.effects.iter()).any(|e| matches!(e, Effect::File(FileOp::GitDiff { .. })));
         assert!(asked, "asked again");
+    }
+
+    /// Answers a refresh with `x.rs` of `a` in these states.
+    fn status_x(h: &mut Harness, staged: Option<GitChange>, unstaged: Option<GitChange>) {
+        let a = h.dir.join("a");
+        let status = GitStatus {
+            repository: a.clone(),
+            branch: "main".into(),
+            files: vec![file("x.rs", staged, unstaged)],
+        };
+        h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
+    }
+
+    /// The newest `GitUpdate`'s one step, a patch, taken.
+    fn patched(h: &mut Harness) -> String {
+        let (_, _, steps) = update(h).expect("asked");
+        match &steps[..] {
+            [(GitStep::Apply(patch), paths)] if paths.is_empty() => patch.clone(),
+            steps => panic!("{steps:?}"),
+        }
+    }
+
+    fn x_patch(base: &str, edited: &str) -> String {
+        crate::buffer::patch(Path::new("x.rs"), base, edited)
+    }
+
+    const TEN: &str = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+
+    #[test]
+    fn staging_one_change_of_several_keeps_point_on_it() {
+        let new = "A\nb\nc\nd\nE\nf\ng\nh\ni\nJ\n";
+        let mut h = inline(false, true, Some(new));
+        answer_diff(&mut h, TEN, new);
+        h.keys("C-x o C-c n");
+        assert_eq!(point_line(&h), 4);
+        h.keys("C-c s");
+        let staged = "a\nb\nc\nd\nE\nf\ng\nh\ni\nj\n";
+        assert_eq!(patched(&mut h), x_patch(TEN, staged));
+        let list = h.core.diff_list_here().unwrap();
+        h.send(Msg::GitUpdated {
+            list,
+            result: Ok(()),
+        });
+        status_x(&mut h, Some(GitChange::Modified), Some(GitChange::Modified));
+        answer_diff(&mut h, staged, new);
+        assert_eq!(point_line(&h), 4, "not back on the first change");
+        assert!(mode_line(&mut h).contains("2 changes"));
+    }
+
+    #[test]
+    fn a_region_stages_its_added_lines_and_its_changes_removed_ones() {
+        let new = "a\nX\nY\nZ\nc\n";
+        let mut h = inline(false, true, Some(new));
+        answer_diff(&mut h, "a\nb\nc\n", new);
+        h.keys("C-x o C-n C-SPC C-n C-c s");
+        assert_eq!(patched(&mut h), x_patch("a\nb\nc\n", "a\nY\nc\n"));
+        assert!(!h.core.windows.window.active(), "the region is done with");
+    }
+
+    #[test]
+    fn unstaging_a_change_puts_head_back_in_the_index() {
+        let index = "a\nB\nc\nD\n";
+        let mut h = inline(true, false, None);
+        answer_diff(&mut h, "a\nb\nc\n", index);
+        h.keys("C-x o C-c s");
+        assert_eq!(h.core.message(), Some("Already staged"));
+        h.keys("C-c n C-c u");
+        assert_eq!(patched(&mut h), x_patch(index, "a\nB\nc\n"));
+        h.keys("C-c k");
+        assert_eq!(
+            patched(&mut h),
+            x_patch(index, "a\nB\nc\n"),
+            "discard unstages"
+        );
+    }
+
+    #[test]
+    fn discarding_a_change_edits_the_buffer_and_undo_brings_it_back() {
+        let new = "a\nB\nc\n";
+        let mut h = inline(false, true, Some(new));
+        answer_diff(&mut h, "a\nb\nc\n", new);
+        h.keys("C-x o C-c u");
+        assert_eq!(h.core.message(), Some("Not staged"));
+        h.keys("C-c k");
+        assert_eq!(update(&mut h), None, "git isn't run");
+        assert_eq!(right(&h).text().to_string(), "a\nb\nc\n");
+        assert!(right(&h).modified(), "left unsaved");
+        h.keys("C-/");
+        assert_eq!(right(&h).text().to_string(), new);
+    }
+
+    #[test]
+    fn discarding_a_region_keeps_the_other_added_lines() {
+        // The old last line has no newline, so one is added when kept lines follow it.
+        let new = "a\nB\nC\n";
+        let mut h = inline(false, true, Some(new));
+        answer_diff(&mut h, "a\nb", new);
+        h.keys("C-x o C-n C-SPC C-n C-c k");
+        assert_eq!(right(&h).text().to_string(), "a\nb\nB\n");
+    }
+
+    #[test]
+    fn staging_refuses_unsaved_edits_and_point_off_a_change() {
+        let mut h = inline(false, true, Some(TEN));
+        answer_diff(&mut h, "a\n", TEN);
+        h.keys("C-x o M-> C-c s");
+        assert_eq!(h.core.message(), Some("No change here"));
+        h.keys("z C-c s");
+        assert_eq!(h.core.message(), Some("Save x.rs first"));
+        h.keys("C-c k");
+        assert_eq!(h.core.message(), Some("The diff is being worked out"));
+        assert_eq!(update(&mut h), None);
+    }
+
+    #[test]
+    fn an_untracked_file_stages_whole() {
+        let mut h = inline(false, true, Some("new\n"));
+        h.keys("g");
+        status_x(&mut h, None, Some(GitChange::Untracked));
+        answer_diff(&mut h, "", "new\n");
+        h.keys("C-x o C-c s");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        assert_eq!(steps, [(GitStep::Stage, paths(&["x.rs"]))]);
+    }
+
+    #[test]
+    fn the_change_keys_in_the_list_act_on_files() {
+        let mut h = inline(false, true, Some("a\nB\n"));
+        answer_diff(&mut h, "a\nb\n", "a\nB\n");
+        h.keys("C-c s");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        assert_eq!(steps, [(GitStep::Stage, paths(&["x.rs"]))]);
+    }
+
+    #[test]
+    fn a_staged_rename_unstages_whole_with_its_old_path() {
+        let mut h = inline(true, false, None);
+        h.keys("g");
+        let a = h.dir.join("a");
+        let mut renamed = file("x.rs", Some(GitChange::Renamed), None);
+        renamed.old_path = Some("old.rs".into());
+        let status = GitStatus {
+            repository: a.clone(),
+            branch: "main".into(),
+            files: vec![renamed],
+        };
+        h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
+        answer_diff(&mut h, "", "a\n");
+        h.keys("C-x o C-c u");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        assert_eq!(steps, [(GitStep::Unstage, paths(&["x.rs", "old.rs"]))]);
+    }
+
+    #[test]
+    fn a_staged_diff_wraps_as_its_file_does() {
+        let mut h = inline_file("x.md", true, false, None);
+        answer_diff(&mut h, "a\n", "b\n");
+        assert_eq!(right(&h).name, "x.md (index)");
+        assert_eq!(right(&h).wrap(40), Some((39, true)), "at words, as prose");
     }
 }

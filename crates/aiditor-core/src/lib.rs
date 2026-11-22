@@ -416,7 +416,7 @@ pub struct GitStatus {
 }
 
 /// What `FileOp::GitUpdate` does to its paths.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum GitStep {
     /// The index takes the working tree's state, deletions and untracked files included.
     Stage,
@@ -426,6 +426,8 @@ pub enum GitStep {
     Restore,
     /// The files are removed from the working tree.
     Delete,
+    /// The index takes this unified patch, the working tree left alone; takes no paths.
+    Apply(String),
 }
 
 /// A file git reports changed or untracked.

@@ -319,7 +319,10 @@ fn git_status(root: &Path) -> Result<Option<GitStatus>, String> {
 /// Runs `steps` on paths relative to `repository`, stopping at the first failure.
 fn git_update(repository: &Path, steps: &[(GitStep, Vec<PathBuf>)]) -> Result<(), String> {
     no_filter(repository)?;
-    for (step, paths) in steps.iter().filter(|(_, paths)| !paths.is_empty()) {
+    let steps = steps
+        .iter()
+        .filter(|(step, paths)| matches!(step, GitStep::Apply(_)) || !paths.is_empty());
+    for (step, paths) in steps {
         let args: &[&str] = match step {
             GitStep::Stage => &["add", "-A"],
             // `reset` over `restore --staged`, which fails on an unborn branch.
@@ -332,6 +335,19 @@ fn git_update(repository: &Path, steps: &[(GitStep, Vec<PathBuf>)]) -> Result<()
                 }
                 continue;
             }
+            GitStep::Apply(patch) => {
+                let mut child = (git(repository).args(["apply", "--cached", "-"]))
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|err| format!("git: {err}"))?;
+                let written = (child.stdin.take().expect("piped")).write_all(patch.as_bytes());
+                let output = child.wait_with_output();
+                written.map_err(|err| format!("git: {err}"))?;
+                check(output.map_err(|err| format!("git: {err}"))?)?;
+                continue;
+            }
         };
         let output = git(repository)
             .args(args)
@@ -339,11 +355,17 @@ fn git_update(repository: &Path, steps: &[(GitStep, Vec<PathBuf>)]) -> Result<()
             .args(paths)
             .output()
             .map_err(|err| format!("git: {err}"))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
+        check(output)?;
     }
     Ok(())
+}
+
+/// Git's message when `output` failed.
+fn check(output: std::process::Output) -> Result<(), String> {
+    match output.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+    }
 }
 
 /// The files in `git status --porcelain=v2 -z` output.
@@ -2242,6 +2264,59 @@ mod tests {
         let err = git_update(repo, &steps).unwrap_err();
         assert!(err.contains("unknown"), "{err}");
         assert!(repo.join("untracked").exists());
+    }
+
+    /// A repository with `my file` committed as `text`, and the index's text of it.
+    fn committed_as(text: &str) -> tempfile::TempDir {
+        let dir = committed(&["my file"]);
+        fs::write(dir.path().join("my file"), text).unwrap();
+        git_in(dir.path(), &["commit", "-q", "-am", "y"]);
+        dir
+    }
+
+    fn staged_text(repo: &Path) -> String {
+        let out = git(repo).args(["show", ":my file"]).output().unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn apply(base: &str, edited: &str) -> (GitStep, Vec<PathBuf>) {
+        let patch = aiditor_core::buffer::patch(Path::new("my file"), base, edited);
+        (GitStep::Apply(patch), Vec::new())
+    }
+
+    #[test]
+    fn git_update_applies_one_change_of_several_to_the_index() {
+        let dir = committed_as("a\nb\nc\nd\ne\nf\ng\nh\n");
+        let repo = dir.path();
+        fs::write(repo.join("my file"), "A\nb\nc\nd\ne\nf\ng\nH\n").unwrap();
+        let step = apply("a\nb\nc\nd\ne\nf\ng\nh\n", "A\nb\nc\nd\ne\nf\ng\nh\n");
+        assert_eq!(git_update(repo, &[step]), Ok(()));
+        assert_eq!(staged_text(repo), "A\nb\nc\nd\ne\nf\ng\nh\n");
+        let diff = git(repo).args(["diff", "-U0"]).output().unwrap();
+        let diff = String::from_utf8(diff.stdout).unwrap();
+        assert!(diff.ends_with("-h\n+H\n"), "{diff}");
+    }
+
+    #[test]
+    fn git_update_applies_at_the_start_and_end_without_a_final_newline() {
+        let dir = committed_as("a\nb\nc");
+        let repo = dir.path();
+        let steps = [apply("a\nb\nc", "A\nb\nc"), apply("A\nb\nc", "A\nb\nC")];
+        assert_eq!(git_update(repo, &steps), Ok(()));
+        assert_eq!(staged_text(repo), "A\nb\nC");
+        let step = apply("A\nb\nC", "A\nb\nC\nd\n");
+        assert_eq!(git_update(repo, &[step]), Ok(()));
+        assert_eq!(staged_text(repo), "A\nb\nC\nd\n");
+        assert_eq!(fs::read_to_string(repo.join("my file")).unwrap(), "a\nb\nc");
+    }
+
+    #[test]
+    fn git_update_answers_a_patch_that_does_not_apply() {
+        let dir = committed_as("a\nb\n");
+        let repo = dir.path();
+        let err = git_update(repo, &[apply("x\nb\n", "y\nb\n")]).unwrap_err();
+        assert!(err.contains("patch does not apply"), "{err}");
+        assert_eq!(staged_text(repo), "a\nb\n");
     }
 
     #[test]
