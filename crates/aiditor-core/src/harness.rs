@@ -363,6 +363,7 @@ impl Harness {
                         | FileOp::GitStatus(_)
                         | FileOp::GitDiff { .. }
                         | FileOp::GitDiffFiles { .. }
+                        | FileOp::GitUpdate { .. }
                         | FileOp::GitSnapshot { .. } => None,
                         FileOp::DiffLines { request, old, new } => Some(Msg::LinesDiffed {
                             request: *request,

@@ -806,6 +806,21 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.diff_status(),
         },
         Command {
+            name: "diff-stage",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.diff_update(crate::diff::Action::Stage, args),
+        },
+        Command {
+            name: "diff-unstage",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.diff_update(crate::diff::Action::Unstage, args),
+        },
+        Command {
+            name: "diff-discard",
+            spec: ArgSpec::default(),
+            handler: |ctx, args| ctx.diff_update(crate::diff::Action::Discard, args),
+        },
+        Command {
             name: "diff-refresh",
             spec: ArgSpec::default(),
             handler: |ctx, _| ctx.diff_refresh(),

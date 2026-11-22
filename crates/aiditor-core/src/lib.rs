@@ -189,6 +189,11 @@ pub enum Msg {
         request: u64,
         result: Result<Vec<ChangedFile>, String>,
     },
+    /// The file service's answer to `FileOp::GitUpdate` for diff list `list`.
+    GitUpdated {
+        list: BufferId,
+        result: Result<(), String>,
+    },
     /// The file service's answer to `FileOp::GitSnapshot` `request`; `None` outside a repository.
     GitSnapshot {
         request: u64,
@@ -408,6 +413,19 @@ pub struct GitStatus {
     /// As the mode line names it.
     pub branch: String,
     pub files: Vec<GitFile>,
+}
+
+/// What `FileOp::GitUpdate` does to its paths.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GitStep {
+    /// The index takes the working tree's state, deletions and untracked files included.
+    Stage,
+    /// The index takes `HEAD`'s state.
+    Unstage,
+    /// The working tree takes the index's state.
+    Restore,
+    /// The files are removed from the working tree.
+    Delete,
 }
 
 /// A file git reports changed or untracked.
@@ -663,6 +681,13 @@ pub enum FileOp {
         old: String,
         new: Option<String>,
         objects: Option<GitObjects>,
+    },
+    /// Run `steps` in the repository at `repository`, each on paths relative to it, stopping at
+    /// the first failure, and send `Msg::GitUpdated`.
+    GitUpdate {
+        list: BufferId,
+        repository: PathBuf,
+        steps: Vec<(GitStep, Vec<PathBuf>)>,
     },
     /// Write a tree of `root`'s repository's working tree, keeping its index and objects in
     /// `dir`, and send `Msg::GitSnapshot`.
@@ -1087,6 +1112,9 @@ impl Ctx<'_> {
             }
             Msg::LinesDiffed { request, hunks } => self.core.on_lines_diffed(request, hunks),
             Msg::Rediff(list) => self.rediff(list),
+            Msg::GitUpdated { list, result } => {
+                (self.core).on_git_updated(list, result, &mut self.effects)
+            }
             // The diff view's later modes will ask; nothing does yet.
             Msg::GitDiffFiles { .. } | Msg::GitSnapshot { .. } => {}
             Msg::LanguageVersion {

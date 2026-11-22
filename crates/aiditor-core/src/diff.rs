@@ -9,14 +9,15 @@ use std::time::{Duration, Instant};
 use ropey::Rope;
 
 use crate::buffer::{Buffer, BufferId, Face, FaceRef, Kind, Prop};
+use crate::command::Args;
 use crate::display::Segment;
 use crate::settings::FaceName;
 use crate::timer::TimerId;
 use crate::window::{DiffRow, Tree, Window, WindowId};
 use crate::workspace::Windows;
 use crate::{
-    Core, Ctx, Effect, Effects, FileDiff, FileOp, GitChange, GitSide, GitStatus, Hunk, Msg,
-    VisitIntent,
+    Core, Ctx, Effect, Effects, FileDiff, FileOp, GitChange, GitFile, GitSide, GitStatus, GitStep,
+    Hunk, Msg, VisitIntent,
 };
 
 pub(crate) const MODE: &str = "diff-list-mode";
@@ -34,6 +35,8 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["diff-next-change", "diff-previous-change"], "change"),
     (&["diff-next-file", "diff-previous-file"], "file"),
     (&["diff-copy-removed"], "copy old lines"),
+    (&["diff-stage", "diff-unstage"], "stage/unstage"),
+    (&["diff-discard"], "discard"),
     (&["diff-toggle"], "fold"),
     (&["diff-refresh"], "refresh"),
     (&["diff-quit"], "quit"),
@@ -56,6 +59,14 @@ enum Row {
         repository: PathBuf,
         file: PathBuf,
     },
+}
+
+/// What `diff-stage`, `diff-unstage` and `diff-discard` do.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Action {
+    Stage,
+    Unstage,
+    Discard,
 }
 
 /// The diff the view's right window shows.
@@ -194,6 +205,24 @@ impl Core {
             .collect();
         for id in waiting {
             self.render_diff_list(id);
+            // A refresh asks the shown diff again.
+            self.drop_shown(id);
+        }
+    }
+
+    /// Takes a stage, unstage or discard's answer: refreshes list `list`, or echoes git's error.
+    pub(crate) fn on_git_updated(
+        &mut self,
+        list: BufferId,
+        result: Result<(), String>,
+        effects: &mut Effects,
+    ) {
+        if let Err(err) = result {
+            return self.echo(err);
+        }
+        if let Some(list) = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut()) {
+            list.pending += 1;
+            effects.push(Effect::File(FileOp::GitStatus(list.roots.clone())));
         }
     }
 
@@ -328,7 +357,19 @@ impl Core {
                 }
             }
         }
-        let target = (at.and_then(|at| rows.iter().find(|(_, r)| *r == at)))
+        // A row that left: the nearest file listed after it and still listed, else before it.
+        let listed = |r: &Row| rows.iter().find(|(_, n)| n == r);
+        let gone = at
+            .as_ref()
+            .and_then(|at| list.rows.iter().position(|(_, r)| r == at));
+        let near = gone.and_then(|i| {
+            let (before, after) = list.rows.split_at(i);
+            (after.iter().chain(before.iter().rev()))
+                .filter(|(_, r)| matches!(r, Row::File { .. }))
+                .find_map(|(_, r)| listed(r))
+        });
+        let target = (at.as_ref().and_then(listed))
+            .or(near)
             .or_else(|| rows.iter().find(|(_, r)| matches!(r, Row::File { .. })))
             .map(|(l, _)| *l);
         let buffer = self.buffers.get_mut(id).expect("checked above");
@@ -1028,6 +1069,120 @@ impl Ctx<'_> {
             .set_point(&mut core.buffers, at)
             .expect("in the list");
         core.render_diff_list(id);
+        Ok(())
+    }
+
+    /// `diff-stage`, `diff-unstage` and `diff-discard`: acts on the file at point in its group,
+    /// or every file under the heading at point; discarding a `Changes` file asks first.
+    pub(crate) fn diff_update(&mut self, action: Action, args: Args) -> Result<(), String> {
+        let core = &*self.core;
+        let nothing = match action {
+            Action::Stage => "Nothing to stage",
+            Action::Unstage => "Nothing to unstage",
+            Action::Discard => "Nothing to discard",
+        };
+        let id = (core.diff_list_here())
+            .filter(|_| core.windows.saved.is_some())
+            .ok_or("No diff view")?;
+        let buffer = core.buffers.get(id).expect("found");
+        let list = buffer.diff_list().expect("a list");
+        let window = (std::iter::once(&core.windows.window))
+            .chain(core.windows.others.values())
+            .find(|w| w.buffer() == id)
+            .ok_or("No diff view")?;
+        let line = (buffer.line_col(window.point(&core.buffers))).map_or(0, |(l, _)| l);
+        let row = (list.rows.iter()).find(|(l, _)| *l == line).map(|(_, r)| r);
+        let (root, group, file) = match row.ok_or(nothing)? {
+            Row::Root(root) => (root, None, None),
+            Row::Group { root, staged } => (root, Some(*staged), None),
+            Row::File {
+                root, staged, file, ..
+            } => (root, Some(*staged), Some(file)),
+        };
+        let status = (list.answer.iter().flatten())
+            .find(|(r, _)| r == root)
+            .and_then(|(_, s)| s.as_ref().ok()?.as_ref())
+            .ok_or(nothing)?;
+        let pick = |staged: bool| -> Vec<&GitFile> {
+            (status.files.iter())
+                .filter(|f| group.is_none_or(|g| g == staged) && file.is_none_or(|p| *p == f.path))
+                .filter(|f| if staged { f.staged } else { f.unstaged }.is_some())
+                .collect()
+        };
+        let (staged, changes) = match action {
+            Action::Stage => (Vec::new(), pick(false)),
+            Action::Unstage => (pick(true), Vec::new()),
+            Action::Discard => (pick(true), pick(false)),
+        };
+        if staged.is_empty() && changes.is_empty() {
+            return Err(nothing.into());
+        }
+        let repository = &status.repository;
+        let shown = |f: &GitFile| {
+            let full = repository.join(&f.path);
+            let path = full.strip_prefix(root).map_or(f.path.as_path(), |p| p);
+            path.display().to_string()
+        };
+        // Git sees the disk, so a buffer's unsaved edits would be left out or lost.
+        if action != Action::Unstage
+            && let Some(f) = changes.iter().find(|f| {
+                let full = repository.join(&f.path);
+                (core.buffers.recent()).any(|(_, b)| b.path() == Some(&full) && b.modified())
+            })
+        {
+            return Err(match action {
+                Action::Stage => format!("Save {} first", shown(f)),
+                _ => format!("{} has unsaved edits", shown(f)),
+            });
+        }
+        let (deleted, restored): (Vec<&GitFile>, Vec<&GitFile>) =
+            (changes.iter()).partition(|f| f.unstaged == Some(GitChange::Untracked));
+        if action == Action::Discard && !changes.is_empty() {
+            match args.strings.first() {
+                Some(answer) if answer.eq_ignore_ascii_case("yes") => {}
+                Some(_) => return Ok(()),
+                None => {
+                    let what = |files: &[&GitFile], verb: &str| match files {
+                        [] => None,
+                        [f] => Some(format!("{verb} {}", shown(f))),
+                        _ => Some(format!("{verb} {} files", files.len())),
+                    };
+                    let parts: Vec<_> = [
+                        what(&restored, "discard changes to"),
+                        what(&deleted, "delete untracked"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    let question = parts.join(" and ");
+                    let prompt = format!("{}{}? ", question[..1].to_uppercase(), &question[1..]);
+                    let command = self.core.commands["diff-discard"];
+                    return self.read_string(command, args, prompt, Some(&["No", "Yes"]));
+                }
+            }
+        }
+        let paths = |files: &[&GitFile], old: bool| -> Vec<PathBuf> {
+            (files.iter())
+                .flat_map(|f| std::iter::once(&f.path).chain(f.old_path.as_ref().filter(|_| old)))
+                .cloned()
+                .collect()
+        };
+        let steps = match action {
+            Action::Stage => vec![(GitStep::Stage, paths(&changes, false))],
+            Action::Unstage => vec![(GitStep::Unstage, paths(&staged, true))],
+            // Restoring first leaves a staged change in the working tree once unstaged.
+            Action::Discard => vec![
+                (GitStep::Restore, paths(&restored, false)),
+                (GitStep::Delete, paths(&deleted, false)),
+                (GitStep::Unstage, paths(&staged, true)),
+            ],
+        };
+        let repository = repository.clone();
+        self.effects.push(Effect::File(FileOp::GitUpdate {
+            list: id,
+            repository,
+            steps,
+        }));
         Ok(())
     }
 
@@ -1935,5 +2090,270 @@ mod tests {
         assert_eq!(labels, ["1", "2", "3"]);
         let bar = window.display.mode_line.text();
         assert!(bar.contains("⎇ main │ change 1/1"), "{bar}");
+    }
+
+    type Update = (BufferId, PathBuf, Vec<(GitStep, Vec<PathBuf>)>);
+
+    /// The newest `GitUpdate` asked, taken: its list, repository and steps.
+    fn update(h: &mut Harness) -> Option<Update> {
+        let i = (h.effects.iter())
+            .rposition(|e| matches!(e, Effect::File(FileOp::GitUpdate { .. })))?;
+        let Effect::File(FileOp::GitUpdate {
+            list,
+            repository,
+            steps,
+        }) = h.effects.remove(i)
+        else {
+            unreachable!()
+        };
+        Some((list, repository, steps))
+    }
+
+    fn on(h: &Harness) -> String {
+        let line = h.core.current().line_col(h.point()).unwrap().0;
+        h.text().lines().nth(line).unwrap().to_string()
+    }
+
+    fn statuses_asked(h: &Harness) -> usize {
+        (h.effects.iter())
+            .filter(|e| matches!(e, Effect::File(FileOp::GitStatus(_))))
+            .count()
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn staging_a_file_refreshes_and_point_walks_down_changes() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n");
+        assert_eq!(on(&h), "      M  src/x.rs");
+        h.keys("s");
+        let (list, repository, steps) = update(&mut h).expect("asked");
+        assert_eq!(repository, h.dir);
+        assert_eq!(steps, [(GitStep::Stage, paths(&["a/src/x.rs"]))]);
+        let asked = statuses_asked(&h);
+        h.send(Msg::GitUpdated {
+            list,
+            result: Ok(()),
+        });
+        assert_eq!(statuses_asked(&h), asked + 1, "refreshed");
+        // x.rs is now staged only, so its row under Changes left.
+        let Msg::GitStatus(mut roots) = answer(&h, &[]) else {
+            unreachable!()
+        };
+        let Ok(Some(a)) = &mut roots[0].1 else {
+            unreachable!()
+        };
+        a.files[0].unstaged = None;
+        h.send(Msg::GitStatus(roots));
+        assert!(
+            h.text()
+                .contains("  ▾ Staged     1\n      M  src/x.rs\n  ▾ Changes    1\n")
+        );
+        assert_eq!(on(&h), "      ?  notes", "the next file");
+        h.keys("u");
+        assert_eq!(update(&mut h), None, "nothing staged here");
+        assert_eq!(h.core.message(), Some("Nothing to unstage"));
+        h.keys("M-< C-n C-n");
+        assert_eq!(on(&h), "      M  src/x.rs");
+        h.keys("u");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        assert_eq!(steps, [(GitStep::Unstage, paths(&["a/src/x.rs"]))]);
+    }
+
+    #[test]
+    fn point_whose_row_left_with_nothing_after_goes_before() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n C-n");
+        assert_eq!(on(&h), "      ?  notes");
+        h.keys("g");
+        let Msg::GitStatus(mut roots) = answer(&h, &[]) else {
+            unreachable!()
+        };
+        for (_, status) in &mut roots[..2] {
+            let Ok(Some(s)) = status else { unreachable!() };
+            s.files.retain(|f| f.unstaged != Some(GitChange::Untracked));
+            s.files.retain(|f| f.unstaged != Some(GitChange::Deleted));
+        }
+        h.send(Msg::GitStatus(roots));
+        assert_eq!(on(&h), "      M  src/x.rs");
+        assert!(h.text().contains("  ▾ Changes    1\n      M  src/x.rs\n"));
+    }
+
+    #[test]
+    fn a_heading_acts_on_every_file_under_it() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("M-< C-n C-n C-n");
+        assert_eq!(on(&h), "  ▾ Changes    2");
+        h.keys("s");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        assert_eq!(steps, [(GitStep::Stage, paths(&["a/src/x.rs", "a/notes"]))]);
+        h.keys("M-< s");
+        let (_, _, steps) = update(&mut h).expect("the root's changes");
+        assert_eq!(steps, [(GitStep::Stage, paths(&["a/src/x.rs", "a/notes"]))]);
+        h.keys("M-< u");
+        let (_, _, steps) = update(&mut h).expect("the root's staged files");
+        assert_eq!(steps, [(GitStep::Unstage, paths(&["a/src/x.rs"]))]);
+    }
+
+    #[test]
+    fn a_staged_rename_unstages_both_paths() {
+        let renamed = GitFile {
+            old_path: Some("a/old.rs".into()),
+            ..file("a/new.rs", Some(GitChange::Renamed), None)
+        };
+        let mut h = view();
+        let first = answer(&h, &[renamed]);
+        h.send(first);
+        h.keys("M-< C-n C-n C-n");
+        assert_eq!(on(&h), "      R  new.rs");
+        h.keys("u");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        assert_eq!(
+            steps,
+            [(GitStep::Unstage, paths(&["a/new.rs", "a/old.rs"]))]
+        );
+    }
+
+    #[test]
+    fn discarding_asks_naming_what_is_lost() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("M-< C-n C-n C-n C-n");
+        assert_eq!(on(&h), "      M  src/x.rs");
+        h.keys("k");
+        let prompt = h.core.minibuffer().map(|m| m.prompt.clone());
+        assert_eq!(prompt.as_deref(), Some("Discard changes to src/x.rs? "));
+        h.keys("RET");
+        assert_eq!(update(&mut h), None, "No is the default");
+        h.keys("C-n k");
+        let prompt = h.core.minibuffer().map(|m| m.prompt.clone());
+        assert_eq!(prompt.as_deref(), Some("Delete untracked notes? "));
+        h.keys("yes RET");
+        let (_, _, steps) = update(&mut h).expect("after yes");
+        let none = Vec::new();
+        assert_eq!(
+            steps,
+            [
+                (GitStep::Restore, none.clone()),
+                (GitStep::Delete, paths(&["a/notes"])),
+                (GitStep::Unstage, none),
+            ]
+        );
+    }
+
+    #[test]
+    fn discarding_a_staged_file_unstages_it_and_a_root_keeps_its_staged_text() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("M-< C-n C-n");
+        assert_eq!(on(&h), "      M  src/x.rs");
+        h.keys("k");
+        assert!(h.core.minibuffer().is_none(), "nothing is lost");
+        let (_, _, steps) = update(&mut h).expect("asked");
+        let none = Vec::new();
+        assert_eq!(
+            steps,
+            [
+                (GitStep::Restore, none.clone()),
+                (GitStep::Delete, none),
+                (GitStep::Unstage, paths(&["a/src/x.rs"])),
+            ]
+        );
+        h.keys("M-< k");
+        let prompt = h.core.minibuffer().map(|m| m.prompt.clone());
+        assert_eq!(
+            prompt.as_deref(),
+            Some("Discard changes to src/x.rs and delete untracked notes? ")
+        );
+        h.keys("yes RET");
+        let (_, _, steps) = update(&mut h).expect("after yes");
+        // Restored before unstaged, so the staged text stays in the working tree.
+        assert_eq!(
+            steps,
+            [
+                (GitStep::Restore, paths(&["a/src/x.rs"])),
+                (GitStep::Delete, paths(&["a/notes"])),
+                (GitStep::Unstage, paths(&["a/src/x.rs"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn unsaved_edits_refuse_staging_and_discarding() {
+        let mut h = Harness::new(&[("a/src/x.rs", "1")]);
+        h.open("a/src/x.rs");
+        h.keys("x");
+        let project = &mut h.core.projects[0].project;
+        project.primary.path = h.dir.join("a");
+        project.roots = Vec::new();
+        h.call("diff-status", Args::default());
+        let Msg::GitStatus(roots) = answer(&h, &[]) else {
+            unreachable!()
+        };
+        h.send(Msg::GitStatus(roots[..1].to_vec()));
+        h.keys("M-< C-n C-n C-n C-n");
+        assert_eq!(on(&h), "      M  src/x.rs");
+        h.keys("s");
+        assert_eq!(h.core.message(), Some("Save src/x.rs first"));
+        h.keys("k");
+        assert_eq!(h.core.message(), Some("src/x.rs has unsaved edits"));
+        assert!(h.core.minibuffer().is_none());
+        assert_eq!(update(&mut h), None);
+        h.keys("M-< C-n C-n u");
+        assert!(update(&mut h).is_some(), "unstaging leaves the disk alone");
+    }
+
+    #[test]
+    fn a_failure_echoes_git_and_leaves_the_list() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n s");
+        let (list, _, _) = update(&mut h).expect("asked");
+        let (text, asked) = (h.text(), statuses_asked(&h));
+        let result = Err("fatal: Unable to create index.lock".into());
+        h.send(Msg::GitUpdated { list, result });
+        assert_eq!(h.core.message(), Some("fatal: Unable to create index.lock"));
+        assert_eq!((h.text(), statuses_asked(&h)), (text, asked));
+    }
+
+    #[test]
+    fn the_list_hints_stage_unstage_and_discard() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        let hints = h.frame(1440., 900.).key_hints;
+        assert!(
+            hints.contains(&("s/u".into(), "stage/unstage")),
+            "{hints:?}"
+        );
+        assert!(hints.contains(&("k".into(), "discard")), "{hints:?}");
+    }
+
+    #[test]
+    fn a_refresh_asks_the_shown_diff_again() {
+        let mut h = inline(false, true, Some("a\nB\n"));
+        answer_diff(&mut h, "a\nb\n", "a\nB\n");
+        h.keys("g");
+        let a = h.dir.join("a");
+        let status = GitStatus {
+            repository: a.clone(),
+            branch: "main".into(),
+            files: vec![file("x.rs", None, Some(GitChange::Modified))],
+        };
+        h.send(Msg::GitStatus(vec![(a, Ok(Some(status)))]));
+        let asked = (h.effects.iter()).any(|e| matches!(e, Effect::File(FileOp::GitDiff { .. })));
+        assert!(asked, "asked again");
     }
 }
