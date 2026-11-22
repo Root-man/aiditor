@@ -557,6 +557,10 @@ impl Core {
 
     /// Shows buffer `id` in the selected window, as a jump, and makes it the most recent.
     pub(crate) fn switch_to(&mut self, id: BufferId) {
+        // Before the jump, so it is of the restored window.
+        if !self.leave_diff_view_for(id) {
+            return;
+        }
         self.pending_visit = None;
         if self.windows.window.buffer() != id {
             self.push_jump();
@@ -566,6 +570,9 @@ impl Core {
 
     /// Shows buffer `id` in the selected window and makes it the most recent.
     pub(crate) fn show_buffer(&mut self, id: BufferId) {
+        if !self.leave_diff_view_for(id) {
+            return;
+        }
         self.buffers.raise(id);
         if self.windows.window.buffer() != id {
             self.pending_visit = None;

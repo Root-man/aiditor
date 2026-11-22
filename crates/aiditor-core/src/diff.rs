@@ -1430,20 +1430,38 @@ impl Ctx<'_> {
     /// `diff-quit`: restores the layout the view replaced and kills the list.
     pub(crate) fn diff_quit(&mut self) -> Result<(), String> {
         self.outside_minibuffer("Can't quit the diff view from the minibuffer")?;
-        let core = &mut *self.core;
-        let saved = core.windows.saved.take().ok_or("No diff view")?;
-        if let Some(list) = core.diff_list_here() {
-            core.drop_shown(list);
+        self.core.leave_diff_view().ok_or("No diff view".into())
+    }
+}
+
+impl Core {
+    /// Restores the layout the diff view replaced and kills the list; `None` outside the view.
+    pub(crate) fn leave_diff_view(&mut self) -> Option<()> {
+        let saved = self.windows.saved.take()?;
+        if let Some(list) = self.diff_list_here() {
+            self.drop_shown(list);
         }
-        let mut view = std::mem::replace(&mut core.windows, *saved);
+        let mut view = std::mem::replace(&mut self.windows, *saved);
         view.windows_mut()
-            .for_each(|w| w.release(&mut core.buffers));
-        core.pending_visit = None;
-        if let Some(list) = core.diff_list_here() {
-            core.kill_buffer(list);
+            .for_each(|w| w.release(&mut self.buffers));
+        self.pending_visit = None;
+        if let Some(list) = self.diff_list_here() {
+            self.kill_buffer(list);
         }
-        core.buffers.raise(core.windows.window.buffer());
-        Ok(())
+        self.buffers.raise(self.windows.window.buffer());
+        Some(())
+    }
+
+    /// Before buffer `id` is shown in the selected window: quits the diff view, a temporary
+    /// layout, unless `id` is already there or is the list; `false` when quitting killed `id`.
+    pub(crate) fn leave_diff_view_for(&mut self, id: BufferId) -> bool {
+        if self.windows.saved.is_some()
+            && self.windows.window.buffer() != id
+            && self.diff_list_here() != Some(id)
+        {
+            self.leave_diff_view();
+        }
+        self.buffers.get(id).is_some()
     }
 }
 
@@ -1612,6 +1630,7 @@ mod tests {
         h.new_workspace("other", "other");
         assert_eq!(shown(&h).len(), 1);
         h.core.switch_workspace(main).unwrap();
+        assert!(h.core.windows.saved.is_some());
         assert_eq!(shown(&h), view);
         h.keys("q");
         assert_eq!(shown(&h).len(), 1, "the saved layout came back with it");
@@ -1625,6 +1644,7 @@ mod tests {
         h.call("diff-status", Args::default());
         let f = h.core.buffers.find_here("f").unwrap();
         h.core.kill_buffer(f);
+        assert!(h.core.windows.saved.is_some(), "killing stays in the view");
         h.keys("q");
         let names: Vec<_> = shown(&h).into_iter().map(|(_, name)| name).collect();
         assert_eq!(names, ["*scratch*<main>", "*scratch*<main>"]);
@@ -1670,6 +1690,119 @@ mod tests {
             "the list is narrow"
         );
     }
+
+    /// The harness over `f` and `g`, `f` current in the top of two windows, and that layout.
+    fn split_over_files() -> (Harness, Vec<(WindowId, String)>, WindowId) {
+        let mut h = Harness::new(&[("f", "x"), ("g", "y")]);
+        h.read_reply("h", Some(b"z"));
+        h.open("g").open("f").keys("C-x 2");
+        let before = shown(&h);
+        let selected = h.core.windows.selected;
+        (h, before, selected)
+    }
+
+    #[test]
+    fn showing_another_buffer_quits_the_view_from_either_window() {
+        let (mut h, before, selected) = split_over_files();
+        for from in ["", "C-x o "] {
+            for (keys, name) in [
+                ("C-x b g RET", "g"),
+                ("C-x C-f C-a C-k /aiditor-test/g RET", "g"),
+                ("C-x C-f C-a C-k /aiditor-test/h RET", "h"),
+            ] {
+                h.call("diff-status", Args::default());
+                h.keys(&format!("{from}{keys}"));
+                assert!(
+                    h.core.windows.saved.is_none(),
+                    "{from}{keys} {:?} {:?}",
+                    h.core.message(),
+                    shown(&h)
+                );
+                assert!(h.core.buffers.find_here("*Diff*<main>").is_none());
+                let mut after = before.clone();
+                after[0].1 = name.into();
+                assert_eq!(shown(&h), after, "{from}{keys}");
+                assert_eq!(h.core.windows.selected, selected);
+                h.keys("C-x b f RET");
+            }
+        }
+        // A link or grep hit followed, from the view, lands in the restored window.
+        h.call("diff-status", Args::default());
+        let g = h.path("g");
+        h.ctx().find_file_at(&g, 0, 1).unwrap();
+        assert!(h.core.windows.saved.is_none());
+        assert_eq!((shown(&h)[0].1.as_str(), h.point()), ("g", 1));
+        // A jump back to another buffer too.
+        h.call("diff-status", Args::default());
+        h.call("xref-go-back", Args::default());
+        assert!(h.core.windows.saved.is_none(), "{:?}", h.core.message());
+        assert_eq!(shown(&h)[0].1, "f");
+    }
+
+    #[test]
+    fn changing_the_window_tree_quits_the_view_first() {
+        let cases = [("C-x 0", 1), ("C-x 1", 1), ("C-x 2", 3), ("C-x 3", 3)];
+        for ((keys, windows), from) in cases.into_iter().flat_map(|c| [(c, ""), (c, "C-x o ")]) {
+            let (mut h, before, selected) = split_over_files();
+            h.call("diff-status", Args::default());
+            h.keys(&format!("{from}{keys}"));
+            assert!(h.core.windows.saved.is_none(), "{keys}");
+            assert_eq!(h.core.windows.tree.leaves().len(), windows, "{keys}");
+            let names: Vec<_> = shown(&h).into_iter().map(|(_, name)| name).collect();
+            assert!(names.iter().all(|n| n == "f"), "{keys} {names:?}");
+            if windows == 3 {
+                assert_eq!(h.core.windows.selected, selected, "{keys} {before:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn showing_a_buffer_in_another_window_quits_the_view() {
+        let mut h = Harness::new(&[("f", "x\n")]);
+        h.open("f").keys("y");
+        h.diffs.insert(h.path("f"), Ok("-x\n+yx\n".into()));
+        h.call("diff-status", Args::default());
+        h.keys("C-x o M-x diff-buffer-with-file RET");
+        assert!(h.core.windows.saved.is_none());
+        let names: Vec<_> = shown(&h).into_iter().map(|(_, name)| name).collect();
+        assert_eq!(names, ["f", "*Diff*"]);
+    }
+
+    #[test]
+    fn working_in_the_view_keeps_it_open() {
+        let mut h = inline(false, true, Some("a\nB\n"));
+        answer_diff(&mut h, "a\nb\n", "a\nB\n");
+        let view = shown(&h);
+        h.keys("C-x o z C-x C-s C-x o C-x o C-c n C-x o n C-x b *Diff*<main> RET");
+        assert!(h.core.windows.saved.is_some(), "{:?}", h.core.message());
+        assert_eq!(h.writes.last().unwrap().0, h.path("a/x.rs"));
+        assert_eq!(shown(&h), view);
+        // The list again from the diff window shows it there too, in the view.
+        h.keys("C-x o C-x b *Diff*<main> RET");
+        assert!(h.core.windows.saved.is_some());
+    }
+
+    #[test]
+    fn a_buffer_the_quit_kills_is_not_shown() {
+        let mut h = inline(true, false, Some("a\n"));
+        answer_diff(&mut h, "b\n", "a\n");
+        let index = right(&h).name.clone();
+        h.keys(&format!("C-x b {index} RET"));
+        assert!(h.core.windows.saved.is_none());
+        assert!(h.core.buffers.find_here(&index).is_none());
+        assert_eq!(shown(&h).len(), 1);
+    }
+
+    #[test]
+    fn the_workspace_list_from_the_view_quits_it() {
+        let mut h = Harness::new(&[]);
+        h.call("workspace-list", Args::default());
+        h.call("diff-status", Args::default());
+        h.call("workspace-list", Args::default());
+        assert!(h.core.windows.saved.is_none());
+        assert_eq!(shown(&h)[0].1, "*Workspaces*");
+    }
+
     /// The view over root `a`, its own repository on `main`, with `x.rs` `staged` and/or
     /// `changed`, on disk as `disk` (`None`: deleted); point on its first row.
     fn inline(staged: bool, changed: bool, disk: Option<&str>) -> Harness {
