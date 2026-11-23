@@ -192,6 +192,8 @@ pub(crate) struct DiffList {
     answer: Option<Answer>,
     /// Statuses asked and not yet answered.
     pending: usize,
+    /// A stage, unstage or discard is in git, or its refreshed status hasn't been taken.
+    updating: bool,
     rows: Vec<(usize, Row)>,
     /// What `TAB` folded: a root (`None`) or its `Staged`/`Changes` group.
     folded: BTreeSet<(PathBuf, Option<bool>)>,
@@ -292,7 +294,7 @@ impl Core {
         // A refresh asks the shown diff again.
         self.drop_shown(id);
         if let Some(list) = self.buffers.get_mut(id).and_then(|b| b.diff_list_mut()) {
-            list.near = near.map(Box::new);
+            (list.near, list.updating) = (near.map(Box::new), false);
         }
     }
 
@@ -383,6 +385,9 @@ impl Core {
         effects: &mut Effects,
     ) {
         if let Err(err) = result {
+            if let Some(list) = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut()) {
+                list.updating = false;
+            }
             return self.echo(err);
         }
         if let Some(list) = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut()) {
@@ -399,16 +404,9 @@ impl Core {
         let Some(list) = buffer.diff_list() else {
             return;
         };
-        // Point where a window shows the buffer, else the buffer's own.
-        let saved = self.workspaces.iter().filter_map(|w| w.windows.as_ref());
-        let point = (std::iter::once(&self.windows).chain(saved))
-            .flat_map(|w| std::iter::once(&w.window).chain(w.others.values()))
-            .find(|w| w.buffer() == id)
-            .map_or_else(
-                || buffer.marker(buffer.point).unwrap_or(0),
-                |w| w.point(&self.buffers),
-            );
-        let line = buffer.line_col(point).map_or(0, |(line, _)| line);
+        let line = buffer
+            .line_col(self.list_point(id))
+            .map_or(0, |(line, _)| line);
         let at = (list.rows.iter())
             .find(|(l, _)| *l == line)
             .map(|(_, r)| r.clone());
@@ -552,34 +550,9 @@ impl Core {
             .map(|(l, _)| *l);
         let buffer = self.buffers.get_mut(id).expect("checked above");
         buffer.diff_list_mut().expect("checked above").rows = rows;
-        let text: Vec<String> = (lines.iter())
-            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
-            .collect();
-        buffer.remove_properties(0..buffer.len_chars());
-        buffer.set_text(&text.join("\n"));
-        let mut at = 0;
-        for line in lines {
-            for (text, prop) in line {
-                let end = at + text.chars().count();
-                if let Some(prop) = prop.filter(|_| end > at) {
-                    (buffer.add_property(at..end, prop)).expect("in the text");
-                }
-                at = end;
-            }
-            at += 1;
-        }
+        buffer.set_lines(lines);
         let point = target.map_or(0, |line| buffer.char_idx(line, 0).expect("a row's line"));
-        buffer.set_marker(buffer.point, point).expect("in the text");
-        let windows = (self.windows.windows_mut()).chain(
-            (self.workspaces.iter_mut())
-                .flat_map(|w| w.windows.iter_mut())
-                .flat_map(|w| w.windows_mut()),
-        );
-        for window in windows.filter(|w| w.buffer() == id) {
-            window
-                .set_point(&mut self.buffers, point)
-                .expect("in the text");
-        }
+        self.place_list_point(id, point, false);
     }
 }
 
@@ -690,10 +663,8 @@ impl Core {
             .get(id)
             .and_then(|b| b.diff_list())
             .expect("found");
-        let shown_window = (std::iter::once(&self.windows.window)
-            .chain(self.windows.others.values()))
-        .find(|w| w.buffer() == id);
-        let row = shown_window.and_then(|w| {
+        let shown_window = (self.windows.iter()).find(|(_, w)| w.buffer() == id);
+        let row = shown_window.and_then(|(_, w)| {
             let buffer = self.buffers.get(id)?;
             let line = buffer.line_col(w.point(&self.buffers)).ok()?.0;
             (list.rows.iter()).find(|(l, r)| *l == line && matches!(r, Row::File { .. }))
@@ -1240,6 +1211,7 @@ impl Core {
                 roots: Vec::new(),
                 answer: None,
                 pending: 0,
+                updating: false,
                 rows: Vec::new(),
                 folded: BTreeSet::new(),
                 window: WindowId(core.next_window + 1),
@@ -1427,6 +1399,11 @@ impl Ctx<'_> {
         if self.core.diff_revisions_here().is_some() {
             return Err("This diff can't be changed".into());
         }
+        let list = self.core.diff_list_here();
+        if (list.and_then(|id| self.core.buffers.get(id)?.diff_list())).is_some_and(|l| l.updating)
+        {
+            return Err("Git is still updating".into());
+        }
         if self.core.diff_selected() {
             return self.diff_update_change(action);
         }
@@ -1441,9 +1418,8 @@ impl Ctx<'_> {
             .ok_or("No diff view")?;
         let buffer = core.buffers.get(id).expect("found");
         let list = buffer.diff_list().expect("a list");
-        let window = (std::iter::once(&core.windows.window))
-            .chain(core.windows.others.values())
-            .find(|w| w.buffer() == id)
+        let (_, window) = (core.windows.iter())
+            .find(|(_, w)| w.buffer() == id)
             .ok_or("No diff view")?;
         let line = (buffer.line_col(window.point(&core.buffers))).map_or(0, |(l, _)| l);
         let row = (list.rows.iter()).find(|(l, _)| *l == line).map(|(_, r)| r);
@@ -1533,6 +1509,12 @@ impl Ctx<'_> {
             ],
         };
         let repository = repository.clone();
+        self.core
+            .buffers
+            .get_mut(id)
+            .and_then(|b| b.diff_list_mut())
+            .expect("a list")
+            .updating = true;
         self.effects.push(Effect::File(FileOp::GitUpdate {
             list: id,
             repository,
@@ -1679,6 +1661,12 @@ impl Ctx<'_> {
         };
         let repository = repository.clone();
         self.core.windows.window.set_active(false);
+        self.core
+            .buffers
+            .get_mut(list)
+            .and_then(|b| b.diff_list_mut())
+            .expect("a list")
+            .updating = true;
         self.effects.push(Effect::File(FileOp::GitUpdate {
             list,
             repository,
@@ -2744,6 +2732,14 @@ mod tests {
         Some((list, repository, steps))
     }
 
+    /// Fails list `list`'s update, so the next one runs.
+    fn fail(h: &mut Harness, list: BufferId) {
+        h.send(Msg::GitUpdated {
+            list,
+            result: Err("failed".into()),
+        });
+    }
+
     fn on(h: &Harness) -> String {
         let line = h.core.current().line_col(h.point()).unwrap().0;
         h.text().lines().nth(line).unwrap().to_string()
@@ -2829,11 +2825,13 @@ mod tests {
         h.keys("M-< C-n C-n C-n");
         assert_eq!(on(&h), "  ▾ Changes    2");
         h.keys("s");
-        let (_, _, steps) = update(&mut h).expect("asked");
+        let (list, _, steps) = update(&mut h).expect("asked");
         assert_eq!(steps, [(GitStep::Stage, paths(&["a/src/x.rs", "a/notes"]))]);
+        fail(&mut h, list);
         h.keys("M-< s");
         let (_, _, steps) = update(&mut h).expect("the root's changes");
         assert_eq!(steps, [(GitStep::Stage, paths(&["a/src/x.rs", "a/notes"]))]);
+        fail(&mut h, list);
         h.keys("M-< u");
         let (_, _, steps) = update(&mut h).expect("the root's staged files");
         assert_eq!(steps, [(GitStep::Unstage, paths(&["a/src/x.rs"]))]);
@@ -2895,7 +2893,7 @@ mod tests {
         assert_eq!(on(&h), "      M  src/x.rs");
         h.keys("k");
         assert!(h.core.minibuffer().is_none(), "nothing is lost");
-        let (_, _, steps) = update(&mut h).expect("asked");
+        let (list, _, steps) = update(&mut h).expect("asked");
         let none = Vec::new();
         assert_eq!(
             steps,
@@ -2905,6 +2903,7 @@ mod tests {
                 (GitStep::Unstage, paths(&["a/src/x.rs"])),
             ]
         );
+        fail(&mut h, list);
         h.keys("M-< k");
         let prompt = h.core.minibuffer().map(|m| m.prompt.clone());
         assert_eq!(
@@ -3019,6 +3018,77 @@ mod tests {
     const TEN: &str = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
 
     #[test]
+    fn a_second_stage_waits_for_git() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n s");
+        assert!(update(&mut h).is_some());
+        h.keys("C-n s");
+        assert_eq!(h.core.message(), Some("Git is still updating"));
+        assert_eq!(update(&mut h), None);
+    }
+
+    #[test]
+    fn a_change_waits_for_the_refreshed_list() {
+        let new = "A\nb\nc\nd\nE\nf\ng\nh\ni\nJ\n";
+        let mut h = inline(false, true, Some(new));
+        answer_diff(&mut h, TEN, new);
+        h.keys("C-x o C-c s");
+        patched(&mut h);
+        let list = h.core.diff_list_here().unwrap();
+        h.send(Msg::GitUpdated {
+            list,
+            result: Ok(()),
+        });
+        h.keys("C-c n C-c s");
+        assert_eq!(h.core.message(), Some("Git is still updating"));
+        assert_eq!(update(&mut h), None, "no patch built");
+    }
+
+    #[test]
+    fn the_refreshed_list_ends_the_wait() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n s");
+        let (list, ..) = update(&mut h).expect("asked");
+        h.send(Msg::GitUpdated {
+            list,
+            result: Ok(()),
+        });
+        let refreshed = answer(&h, &[]);
+        h.send(refreshed);
+        h.keys("C-n s");
+        assert!(update(&mut h).is_some());
+    }
+
+    #[test]
+    fn a_failure_ends_the_wait() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n s");
+        let (list, ..) = update(&mut h).expect("asked");
+        h.send(Msg::GitUpdated {
+            list,
+            result: Err("index.lock exists".into()),
+        });
+        assert_eq!(h.core.message(), Some("index.lock exists"));
+        h.keys("s");
+        assert!(update(&mut h).is_some());
+    }
+
+    #[test]
+    fn a_refresh_alone_doesnt_wait() {
+        let mut h = view();
+        let first = answer(&h, &[]);
+        h.send(first);
+        h.keys("C-n C-n g s");
+        assert!(update(&mut h).is_some());
+    }
+
+    #[test]
     fn staging_one_change_of_several_keeps_point_on_it() {
         let new = "A\nb\nc\nd\nE\nf\ng\nh\ni\nJ\n";
         let mut h = inline(false, true, Some(new));
@@ -3058,6 +3128,8 @@ mod tests {
         assert_eq!(h.core.message(), Some("Already staged"));
         h.keys("C-c n C-c u");
         assert_eq!(patched(&mut h), x_patch(index, "a\nB\nc\n"));
+        let list = h.core.diff_list_here().unwrap();
+        fail(&mut h, list);
         h.keys("C-c k");
         assert_eq!(
             patched(&mut h),

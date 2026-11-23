@@ -30,10 +30,7 @@ impl Ctx<'_> {
     pub(crate) fn display_buffer(&mut self, id: BufferId) {
         let core = &mut *self.core;
         core.leave_diff_view();
-        if std::iter::once(&core.windows.window)
-            .chain(core.windows.others.values())
-            .any(|w| w.buffer() == id)
-        {
+        if core.windows.iter().any(|(_, w)| w.buffer() == id) {
             return;
         }
         if core.windows.tree.leaves().len() == 1 {
@@ -92,6 +89,37 @@ impl Ctx<'_> {
 }
 
 impl Core {
+    /// Point of the first window showing list `id`, in any workspace, else the buffer's own.
+    pub(crate) fn list_point(&self, id: BufferId) -> usize {
+        let buffer = self.buffers.get(id).expect("a live list");
+        let saved = self.workspaces.iter().filter_map(|w| w.windows.as_ref());
+        (std::iter::once(&self.windows).chain(saved))
+            .flat_map(|w| w.iter())
+            .find(|(_, w)| w.buffer() == id)
+            .map_or_else(
+                || buffer.marker(buffer.point).unwrap_or(0),
+                |(_, w)| w.point(&self.buffers),
+            )
+    }
+
+    /// Puts point at `point` in list `id` and every window showing it, in any workspace, each
+    /// scrolled to the top when `top`.
+    pub(crate) fn place_list_point(&mut self, id: BufferId, point: usize, top: bool) {
+        let buffer = self.buffers.get_mut(id).expect("a live list");
+        buffer.set_marker(buffer.point, point).expect("in the text");
+        let windows = (self.windows.windows_mut()).chain(
+            (self.workspaces.iter_mut())
+                .flat_map(|w| w.windows.iter_mut())
+                .flat_map(|w| w.windows_mut()),
+        );
+        for window in windows.filter(|w| w.buffer() == id) {
+            (window.set_point(&mut self.buffers, point)).expect("in the text");
+            if top {
+                window.set_top(0);
+            }
+        }
+    }
+
     /// The selected window's display model for a window of `rows` text rows.
     /// It has no width, so point's line never scrolls sideways.
     #[cfg(test)]

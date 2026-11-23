@@ -389,13 +389,6 @@ impl Editor {
         let settings = self.core.settings();
         let theme = &settings.theme;
         let inset = px(TEXT_INSET);
-        let row = |height: Pixels| {
-            div()
-                .h(height)
-                .line_height(height)
-                .whitespace_nowrap()
-                .overflow_hidden()
-        };
         let bar = theme.face(FaceName::WorkspaceBar);
         let workspace_text: String = workspaces.iter().map(|s| s.text.as_str()).collect();
         let runs = workspaces
@@ -637,11 +630,6 @@ impl Render for Editor {
             self.title = frame.title.clone();
         }
         let inset = px(TEXT_INSET);
-        let row = |height: Pixels| {
-            (div().h(height).line_height(height))
-                .whitespace_nowrap()
-                .overflow_hidden()
-        };
         let line = || row(line_height);
         let hint = self.hint_rows(frame.hint, cell);
         let echo = self.echo_area(

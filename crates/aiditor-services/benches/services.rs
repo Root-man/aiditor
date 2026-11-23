@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use aiditor_core::{GrepSearch, Msg};
-use aiditor_services::{files, grep};
+use aiditor_services::{files, git, grep};
 
 #[path = "../../../benches/support.rs"]
 mod support;
@@ -193,7 +193,7 @@ fn snapshots(output: &mut String) {
     // Only these, since setting a file's mtime changes its ctime, which git compares too.
     backdate(changed.into_iter().chain(&new));
     let snapshot = |dir: &tempfile::TempDir| {
-        let snap = files::snapshot(&repo, dir.path()).unwrap().unwrap();
+        let snap = git::snapshot(&repo, dir.path()).unwrap().unwrap();
         black_box(snap);
     };
     support::prepared(

@@ -207,7 +207,7 @@ impl Window {
             .expect("window point is live")
     }
 
-    pub fn set_point(&self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
+    pub(crate) fn set_point(&self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
         self.live(buffers)?.set_marker(self.point, char_idx)
     }
 
@@ -239,7 +239,7 @@ impl Window {
         self.mark.and_then(|m| buffers.get(self.buffer)?.marker(m))
     }
 
-    pub fn set_mark(&mut self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
+    pub(crate) fn set_mark(&mut self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
         let buffer = self.live(buffers)?;
         match self.mark {
             Some(m) => buffer.set_marker(m, char_idx),
@@ -251,7 +251,7 @@ impl Window {
     }
 
     /// Sets the mark at `char_idx`, pushing the old one onto the mark ring.
-    pub fn push_mark(
+    pub(crate) fn push_mark(
         &mut self,
         buffers: &mut Buffers,
         char_idx: usize,
@@ -272,7 +272,7 @@ impl Window {
     }
 
     /// Makes the ring's first mark the mark and puts the old one at the ring's end, deactivated.
-    pub fn pop_mark(&mut self) {
+    pub(crate) fn pop_mark(&mut self) {
         if let Some(old) = self.mark
             && !self.ring.is_empty()
         {
@@ -283,7 +283,8 @@ impl Window {
     }
 
     /// The mark ring's positions, most recent first.
-    pub fn ring(&self, buffers: &Buffers) -> Vec<usize> {
+    #[cfg(test)]
+    pub(crate) fn ring(&self, buffers: &Buffers) -> Vec<usize> {
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
         self.ring.iter().filter_map(|&m| buffer.marker(m)).collect()
     }
@@ -293,7 +294,7 @@ impl Window {
         self.active && self.mark.is_some()
     }
 
-    pub fn set_active(&mut self, active: bool) {
+    pub(crate) fn set_active(&mut self, active: bool) {
         self.active = active;
     }
 
@@ -419,7 +420,7 @@ impl Window {
     }
 
     /// The first row shown of the first line at the last `scroll`.
-    pub fn top_row(&self) -> usize {
+    pub(crate) fn top_row(&self) -> usize {
         self.top_row
     }
 
@@ -493,7 +494,7 @@ impl Window {
     }
 
     /// Moves point to `char_idx`, centering its line when it is not among the rows shown.
-    pub fn jump(&mut self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
+    pub(crate) fn jump(&mut self, buffers: &mut Buffers, char_idx: usize) -> Result<(), Error> {
         self.set_point(buffers, char_idx)?;
         let buffer = buffers.get(self.buffer).expect("window buffer is live");
         let (line, _) = buffer.line_col(char_idx)?;
@@ -504,7 +505,7 @@ impl Window {
     }
 
     /// Shows from `line` on; the next `scroll` moves it if point's line is not shown.
-    pub fn set_top(&mut self, line: usize) {
+    pub(crate) fn set_top(&mut self, line: usize) {
         (self.top, self.top_row, self.follow) = (line, 0, false);
     }
 
@@ -514,7 +515,7 @@ impl Window {
 
     /// Moves the first column shown just far enough that `col` is among the `cols` shown, 0 while
     /// it fits from column 0, and returns it; a window with no columns does not scroll.
-    pub fn hscroll(&mut self, col: usize, cols: usize) -> usize {
+    pub(crate) fn hscroll(&mut self, col: usize, cols: usize) -> usize {
         self.left = match cols == 0 || col < cols {
             true => 0,
             false => self.left.clamp(col + 1 - cols, col),

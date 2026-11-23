@@ -934,11 +934,18 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    pub fn start_timer(&mut self, after: Duration, repeat: Option<Duration>, msg: Msg) -> TimerId {
+    #[cfg(test)]
+    pub(crate) fn start_timer(
+        &mut self,
+        after: Duration,
+        repeat: Option<Duration>,
+        msg: Msg,
+    ) -> TimerId {
         self.core.timers.start(self.now, after, repeat, msg)
     }
 
-    pub fn cancel_timer(&mut self, id: TimerId) {
+    #[cfg(test)]
+    pub(crate) fn cancel_timer(&mut self, id: TimerId) {
         self.core.timers.cancel(id)
     }
 
@@ -1396,7 +1403,6 @@ pub struct Core {
     capture: bool,
     environments: HashMap<ProjectId, environment::Environment>,
     environment_requests: u64,
-    /// Each sessions buffer's state, until its buffer is killed.
     /// The number of the last list request, so each answer names its request.
     list_requests: u64,
     /// The pinned sessions, as `sessions.toml` holds them.
@@ -1641,7 +1647,8 @@ impl Core {
         self.projects.iter().map(|p| &p.project).collect()
     }
 
-    pub fn this_command(&self) -> Option<&'static str> {
+    #[cfg(test)]
+    pub(crate) fn this_command(&self) -> Option<&'static str> {
         self.this_command
     }
 

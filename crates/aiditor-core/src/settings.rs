@@ -340,13 +340,13 @@ impl Settings {
     }
 
     /// The whole text rows above the mode line of a window `height` px high, at least one.
-    pub fn text_rows(&self, height: f32) -> usize {
+    pub(crate) fn text_rows(&self, height: f32) -> usize {
         // A height of whole rows must not lose one to float error.
         (((height - self.mode_line_height()) / self.line_height() + 0.001) as usize).max(1)
     }
 
     /// `text_rows` plus the row the mode line cuts off, if any, as Emacs draws it.
-    pub fn drawn_rows(&self, height: f32) -> usize {
+    pub(crate) fn drawn_rows(&self, height: f32) -> usize {
         let rows = (height - self.mode_line_height()) / self.line_height();
         ((rows - 0.001).ceil() as usize).max(1)
     }

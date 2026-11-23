@@ -197,3 +197,24 @@ A scan of the whole repo found 20 problems, fixed as the `fix-2026-11-17-refacto
 Run: `cargo test --workspace` (core 1,052, services 121), `cargo clippy --workspace` clean, and `hot_paths` with the new `hot-display/wrapped-600-char-paragraphs-50-rows` case.
 
 Not checked: Linux, and a 200 MiB file opening (#7's "just under the limit").
+
+## Refactor scan, 2026-11-23
+
+A scan of the whole repo found 10 problems, fixed as the `fix-2026-11-23-refactor-scan-findings` change. Only #1 changes behavior.
+
+| # | Problem | Outcome |
+| ---: | --- | --- |
+| 1 | A second stage, unstage or discard in the diff view runs while git still runs the first, and the two collide on `index.lock`. | Done: `DiffList::updating` refuses them with `Git is still updating` until git fails or the refreshed list is taken. Three tests that chained updates now fail each one first. |
+| 2 | `render_sessions` and `render_diff_list` repeat the point lookup, the line writer and the window loop. | Done: `Core::list_point`, `Buffer::set_lines` and `Core::place_list_point`. |
+| 3 | `display::build`'s main loop and `rest` repeat the fold lookup. | Done: one `fold_at`; folds now win over an `AlignRight` inside one, and no test changed. |
+| 4 | Git code fills half of `services/files.rs`. | Done: moves only, into `git.rs`. `terminal_git`, added after the scan, moved too. `files::read` stays `pub`, since the frontend and the integration tests use it. |
+| 5 | Six hand-written walks over a layout's windows. | Done: `Windows::iter()`. |
+| 6 | 37 core `pub fn`s no other crate uses. | Done: `pub(crate)`. `Ctx::start_timer`, `Ctx::cancel_timer`, `Core::this_command` and `Window::ring` were then only called by tests and became `#[cfg(test)]`; none was deleted or put back to `pub`. |
+| 7 | A `row` closure in `Editor::render` copies the free `row`. | Done: deleted, with the same copy in the workspace modeline. |
+| 8 | Four copies of "run git, answer stdout or stderr". | Done: `git_output`. `git_update`'s `Apply` step and `side_bytes` keep their own handling. |
+| 9 | A stale doc line above `list_requests`. | Done: deleted. It's a private field, not a function. |
+| 10 | `FrameElement::prepaint` holds the terminal paint and two copies of the cursor run. | Done: `terminal_paint` (seven parameters) and `cursor_run`. A terminal cursor replaces the text cursor and the char under it together. |
+
+Run on Linux: `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace` passes (core 1,144, services lib 154, frontend 64). `attachment_picker_keeps_the_session_visible_and_control_return_inserts_a_chip` failed once under the workspace run's load and passed alone and in the frontend run.
+
+Not checked: macOS, and the block, beam and hollow cursors drawn in the app (#10).

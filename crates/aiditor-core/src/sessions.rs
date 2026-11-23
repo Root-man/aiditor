@@ -347,16 +347,9 @@ impl Core {
         let Some(list) = buffer.session_list() else {
             return;
         };
-        // Point where a window shows the buffer, else the buffer's own.
-        let saved = self.workspaces.iter().flat_map(|w| &w.windows);
-        let windows = std::iter::once(&self.windows).chain(saved);
-        let point = (windows.flat_map(|w| std::iter::once(&w.window).chain(w.others.values())))
-            .find(|w| w.buffer() == id)
-            .map_or_else(
-                || buffer.marker(buffer.point).unwrap_or(0),
-                |w| w.point(&self.buffers),
-            );
-        let line = buffer.line_col(point).map_or(0, |(line, _)| line);
+        let line = buffer
+            .line_col(self.list_point(id))
+            .map_or(0, |(line, _)| line);
         let at = match list.rows.iter().find(|(l, _)| *l == line) {
             Some((_, row)) => Some(row.clone()),
             None if list.rows.is_empty() => list.at.clone(),
@@ -504,41 +497,12 @@ impl Core {
         let buffer = self.buffers.get_mut(id).expect("checked above");
         let list = buffer.session_list_mut().expect("checked above");
         (list.rows, list.listed, list.at, list.summary) = (rows, listed, at, summary);
-        let text: Vec<String> = (lines.iter())
-            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
-            .collect();
-        buffer.remove_properties(0..buffer.len_chars());
-        buffer.set_text(&text.join("\n"));
-        let mut at = 0;
-        for line in lines {
-            for (text, prop) in line {
-                let end = at + text.chars().count();
-                if let Some(prop) = prop.filter(|_| end > at) {
-                    (buffer.add_property(at..end, prop)).expect("in the text");
-                }
-                at = end;
-            }
-            at += 1;
-        }
+        buffer.set_lines(lines);
         let point = match target {
             Some(line) => buffer.char_idx(line, column).expect("a row is that wide"),
             None => buffer.len_chars(),
         };
-        buffer.set_marker(buffer.point, point).expect("in the text");
-        let windows = (self.windows.windows_mut()).chain(
-            self.workspaces
-                .iter_mut()
-                .flat_map(|w| w.windows.iter_mut())
-                .flat_map(|w| w.windows_mut()),
-        );
-        for window in windows.filter(|w| w.buffer() == id) {
-            window
-                .set_point(&mut self.buffers, point)
-                .expect("in the text");
-            if first {
-                window.set_top(0);
-            }
-        }
+        self.place_list_point(id, point, first);
     }
 }
 
