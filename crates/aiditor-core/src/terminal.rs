@@ -228,7 +228,7 @@ impl Terminal {
     }
 
     /// `feed`, arriving at `now`; also returns the last command that ended in `bytes`.
-    pub fn feed_at(&mut self, bytes: &[u8], now: Instant) -> (Vec<u8>, Option<Finished>) {
+    pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) -> (Vec<u8>, Option<Finished>) {
         let mut finished = None;
         let mut rest = bytes;
         while !rest.is_empty() {
@@ -363,7 +363,7 @@ impl Terminal {
     /// Copy mode's text: the scrollback then the screen, soft-wrapped rows joined and blank rows
     /// below the cursor dropped; the char ranges of its colours resolved against `theme`; the
     /// cursor's line and char column in it; and each command's marks, sorted by start.
-    pub fn copy_text(&self, theme: &Theme) -> CopyText {
+    pub(crate) fn copy_text(&self, theme: &Theme) -> CopyText {
         let grid = self.term.grid();
         let (cursor, cols) = (grid.cursor.point, self.term.columns());
         let mut lines = vec![String::new()];

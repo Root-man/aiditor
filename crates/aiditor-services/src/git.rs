@@ -98,21 +98,15 @@ pub(crate) fn git_status(root: &Path) -> Result<Option<GitStatus>, String> {
         return Ok(None);
     };
     no_filter(root)?;
-    let output = git(root)
-        .args([
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--untracked-files=all",
-            "--",
-            ".",
-        ])
-        .output()
-        .map_err(|err| format!("git: {err}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    let files = porcelain_v2(&output.stdout);
+    let output = git_output(git(root).args([
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        ".",
+    ]))?;
+    let files = porcelain_v2(&output);
     Ok(Some(GitStatus {
         repository,
         branch,
@@ -152,25 +146,23 @@ pub(crate) fn git_update(
                 let written = (child.stdin.take().expect("piped")).write_all(patch.as_bytes());
                 let output = child.wait_with_output();
                 written.map_err(|err| format!("git: {err}"))?;
-                check(output.map_err(|err| format!("git: {err}"))?)?;
+                let output = output.map_err(|err| format!("git: {err}"))?;
+                if !output.status.success() {
+                    return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+                }
                 continue;
             }
         };
-        let output = git(repository)
-            .args(args)
-            .arg("--")
-            .args(paths)
-            .output()
-            .map_err(|err| format!("git: {err}"))?;
-        check(output)?;
+        git_output(git(repository).args(args).arg("--").args(paths))?;
     }
     Ok(())
 }
 
-/// Git's message when `output` failed.
-fn check(output: std::process::Output) -> Result<(), String> {
+/// What `git` prints, or its message when it fails.
+fn git_output(git: &mut Command) -> Result<Vec<u8>, String> {
+    let output = git.output().map_err(|err| format!("git: {err}"))?;
     match output.status.success() {
-        true => Ok(()),
+        true => Ok(output.stdout),
         false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
     }
 }
@@ -300,19 +292,13 @@ pub(crate) fn git_refs(root: &Path) -> Result<Option<(PathBuf, Vec<String>)>, St
     let Some((repository, ..)) = repository(root) else {
         return Ok(None);
     };
-    let output = git(root)
-        .args([
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads",
-            "refs/tags",
-        ])
-        .output()
-        .map_err(|err| format!("git: {err}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    let refs = String::from_utf8_lossy(&output.stdout);
+    let output = git_output(git(root).args([
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads",
+        "refs/tags",
+    ]))?;
+    let refs = String::from_utf8_lossy(&output);
     Ok(Some((
         repository,
         refs.lines().map(str::to_string).collect(),
@@ -332,22 +318,19 @@ pub(crate) fn git_diff_files(
     if new.is_none() {
         no_filter(root)?;
     }
-    let output = with_objects(git(root), objects)?
-        .args([
-            "diff",
-            "--name-status",
-            "-z",
-            "--no-ext-diff",
-            "--no-relative",
-        ])
-        .args(trees)
-        .args(["--", "."])
-        .output()
-        .map_err(|err| format!("git: {err}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(name_status(&output.stdout))
+    let output = git_output(
+        with_objects(git(root), objects)?
+            .args([
+                "diff",
+                "--name-status",
+                "-z",
+                "--no-ext-diff",
+                "--no-relative",
+            ])
+            .args(trees)
+            .args(["--", "."]),
+    )?;
+    Ok(name_status(&output))
 }
 
 /// A tree of `root`'s repository's working tree as it is on disk, untracked files included and
@@ -360,15 +343,8 @@ pub fn snapshot(root: &Path, dir: &Path) -> Result<Option<Snapshot>, String> {
     };
     // `git add` runs clean filters.
     no_filter(&repository)?;
-    let run = |git: &mut Command| {
-        let output = git.output().map_err(|err| format!("git: {err}"))?;
-        match output.status.success() {
-            true => Ok(output.stdout),
-            false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-        }
-    };
     // A linked worktree has its own index and the main repository's objects.
-    let paths = run(git(&repository).args([
+    let paths = git_output(git(&repository).args([
         "rev-parse",
         "--path-format=absolute",
         "--git-path",
@@ -404,7 +380,7 @@ pub fn snapshot(root: &Path, dir: &Path) -> Result<Option<Snapshot>, String> {
             // A split index would write its shared part next to the repository's index.
             git.args(["-c", "core.splitIndex=false"])
                 .env("GIT_INDEX_FILE", &copy);
-            run(git.args(args))
+            git_output(git.args(args))
         };
         snap(&["add", "-A"])?;
         let tree = snap(&["write-tree"])?;

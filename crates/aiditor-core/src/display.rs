@@ -468,7 +468,7 @@ pub(crate) fn mark_message(display: &mut WindowDisplay, lines: RangeInclusive<us
 /// Where each visual row of a line of `len` chars starts, `width` chars to a row. At words a row
 /// breaks after the last whitespace that fits, one more fitting in the column left for the
 /// marker, and at the width when none does.
-pub fn row_starts(
+pub(crate) fn row_starts(
     len: usize,
     width: usize,
     word: bool,

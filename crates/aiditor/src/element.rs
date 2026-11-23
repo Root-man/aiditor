@@ -248,11 +248,7 @@ impl Element for FrameElement {
                         let (x, width, under) = block(&text, byte, chars, cell);
                         let origin = bounds.origin + point(text_x + indent + x, top);
                         cursor = Some(Bounds::new(origin, gpui::size(width, height)));
-                        let face = Face {
-                            fg: settings.theme.face(FaceName::Cursor).fg,
-                            ..Face::default()
-                        };
-                        let run = text_run(under.len(), face, false, &font, &settings.theme);
+                        let run = cursor_run(under.len(), &font, &settings.theme);
                         cursor_char = Some(shape(under.to_string(), &[run]));
                     }
                     let label = |(text, face): &(String, Face)| {
@@ -307,66 +303,12 @@ impl Element for FrameElement {
                 let mut cells = Vec::new();
                 let mut hollow = false;
                 if let Some(terminal) = &w.display.terminal {
-                    let grid = |row: u16, col: u16| {
-                        let x = text_x + cell * col as f32;
-                        bounds.origin + point(x, line_height * row as f32)
-                    };
-                    for (row, runs) in terminal.rows.iter().enumerate() {
-                        for r in runs {
-                            let origin = grid(row as u16, r.col);
-                            let run = TextRun {
-                                len: r.text.len(),
-                                font: styled(&font, r.bold, r.italic),
-                                color: rgb(r.fg).into(),
-                                ..text_run(0, Face::default(), r.underline, &font, &settings.theme)
-                            };
-                            let width = cell * r.cells as f32;
-                            cells.push(Cells {
-                                origin,
-                                background: r.bg.map(|bg| {
-                                    (Bounds::new(origin, gpui::size(width, line_height)), bg)
-                                }),
-                                // Each glyph advances one cell, so fallback fonts stay on the grid.
-                                text: window.text_system().shape_line(
-                                    r.text.clone().into(),
-                                    font_size,
-                                    &[run],
-                                    Some(cell),
-                                ),
-                            });
-                        }
-                    }
-                    if let Some(c) = &terminal.cursor {
-                        let block = Bounds::new(
-                            grid(c.row, c.col),
-                            gpui::size(cell * c.cells as f32, line_height),
-                        );
-                        hollow = !w.selected;
-                        cursor = Some(match (hollow, c.shape) {
-                            (false, CursorShape::Beam) => {
-                                Bounds::new(block.origin, gpui::size(px(2.), line_height))
-                            }
-                            (false, CursorShape::Underline) => Bounds::new(
-                                block.bottom_left() - point(px(0.), px(2.)),
-                                gpui::size(block.size.width, px(2.)),
-                            ),
-                            _ => block,
-                        });
-                        if !hollow && c.shape == CursorShape::Block {
-                            cursor_char = under_cursor(terminal, c.row, c.col).map(|text| {
-                                let face = Face {
-                                    fg: settings.theme.face(FaceName::Cursor).fg,
-                                    ..Face::default()
-                                };
-                                let run = text_run(text.len(), face, false, &font, &settings.theme);
-                                (window.text_system()).shape_line(
-                                    text.into(),
-                                    font_size,
-                                    &[run],
-                                    Some(cell),
-                                )
-                            });
-                        }
+                    let origin = bounds.origin + point(text_x, px(0.));
+                    let p =
+                        terminal_paint(terminal, origin, cell, w.selected, &font, settings, window);
+                    (cells, hollow) = (p.cells, p.hollow);
+                    if p.cursor.is_some() {
+                        (cursor, cursor_char) = (p.cursor, p.cursor_char);
                     }
                 }
                 let active = w.bar.is_some_and(|(_, active)| active);
@@ -590,6 +532,92 @@ pub(crate) fn block(
         false => line.x_for_index(byte + under.len()) - x,
     };
     (x, width, under)
+}
+
+/// A terminal's grid and cursor as painted from `origin`, the grid's top left.
+struct TerminalPaint {
+    cells: Vec<Cells>,
+    cursor: Option<Bounds<Pixels>>,
+    cursor_char: Option<ShapedLine>,
+    hollow: bool,
+}
+
+fn terminal_paint(
+    terminal: &Terminal,
+    origin: Point<Pixels>,
+    cell: Pixels,
+    selected: bool,
+    font: &Font,
+    settings: &aiditor_core::settings::Settings,
+    window: &Window,
+) -> TerminalPaint {
+    let (font_size, line_height) = (px(settings.font_size), px(settings.line_height()));
+    let grid = |row: u16, col: u16| origin + point(cell * col as f32, line_height * row as f32);
+    let mut cells = Vec::new();
+    for (row, runs) in terminal.rows.iter().enumerate() {
+        for r in runs {
+            let origin = grid(row as u16, r.col);
+            let run = TextRun {
+                len: r.text.len(),
+                font: styled(font, r.bold, r.italic),
+                color: rgb(r.fg).into(),
+                ..text_run(0, Face::default(), r.underline, font, &settings.theme)
+            };
+            let width = cell * r.cells as f32;
+            cells.push(Cells {
+                origin,
+                background: r
+                    .bg
+                    .map(|bg| (Bounds::new(origin, gpui::size(width, line_height)), bg)),
+                // Each glyph advances one cell, so fallback fonts stay on the grid.
+                text: window.text_system().shape_line(
+                    r.text.clone().into(),
+                    font_size,
+                    &[run],
+                    Some(cell),
+                ),
+            });
+        }
+    }
+    let (mut cursor, mut cursor_char, mut hollow) = (None, None, false);
+    if let Some(c) = &terminal.cursor {
+        let block = Bounds::new(
+            grid(c.row, c.col),
+            gpui::size(cell * c.cells as f32, line_height),
+        );
+        hollow = !selected;
+        cursor = Some(match (hollow, c.shape) {
+            (false, CursorShape::Beam) => {
+                Bounds::new(block.origin, gpui::size(px(2.), line_height))
+            }
+            (false, CursorShape::Underline) => Bounds::new(
+                block.bottom_left() - point(px(0.), px(2.)),
+                gpui::size(block.size.width, px(2.)),
+            ),
+            _ => block,
+        });
+        if !hollow && c.shape == CursorShape::Block {
+            cursor_char = under_cursor(terminal, c.row, c.col).map(|text| {
+                let run = cursor_run(text.len(), font, &settings.theme);
+                (window.text_system()).shape_line(text.into(), font_size, &[run], Some(cell))
+            });
+        }
+    }
+    TerminalPaint {
+        cells,
+        cursor,
+        cursor_char,
+        hollow,
+    }
+}
+
+/// The run of the char under a block cursor, in the cursor face's colour.
+fn cursor_run(len: usize, font: &Font, theme: &Theme) -> TextRun {
+    let face = Face {
+        fg: theme.face(FaceName::Cursor).fg,
+        ..Face::default()
+    };
+    text_run(len, face, false, font, theme)
 }
 
 /// The char a terminal's block cursor at `row`, `col` covers, if any is drawn there.

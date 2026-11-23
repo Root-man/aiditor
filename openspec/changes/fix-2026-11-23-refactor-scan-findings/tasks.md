@@ -18,17 +18,17 @@ Each finding keeps its scan row number. #1 lands its tests; the others change no
 
 ## 4. Services git module (#4, #8, D4, D7)
 
-- [ ] 4.1 Move the git functions and their direct tests from `files.rs` to a new `git.rs` (`pub mod git` in `aiditor-services/src/lib.rs`), with `files::run` calling `git::…`. Make `read`, `create_temp` and `NEXT_TEMP` `pub(crate)`, and point `benches/services.rs` and `aiditor/src/main.rs` at `git::snapshot` and `git::clear_snapshots`. One commit, moves only. Verify `cargo test -p aiditor-services` passes with the same test count and `git show --color-moved` shows the functions as moved.
-- [ ] 4.2 Replace `check` with `git_output` and use it in `git_status`, `git_refs`, `git_diff_files`, `snapshot` (dropping its `run` closure) and `git_update`'s plain steps. Verify the git status, staging, refs, diff-files and snapshot tests pass, error texts included.
+- [x] 4.1 Move the git functions and their direct tests from `files.rs` to a new `git.rs` (`pub mod git` in `aiditor-services/src/lib.rs`), with `files::run` calling `git::…`. Make `read`, `create_temp` and `NEXT_TEMP` `pub(crate)`, and point `benches/services.rs` and `aiditor/src/main.rs` at `git::snapshot` and `git::clear_snapshots`. One commit, moves only. Verify `cargo test -p aiditor-services` passes with the same test count and `git show --color-moved` shows the functions as moved.
+- [x] 4.2 Replace `check` with `git_output` and use it in `git_status`, `git_refs`, `git_diff_files`, `snapshot` (dropping its `run` closure) and `git_update`'s plain steps. Verify the git status, staging, refs, diff-files and snapshot tests pass, error texts included.
 
 ## 5. Core visibility and leftovers (#6, #9, D6)
 
-- [ ] 5.1 Re-run the scan's grep for core `pub fn`s in public modules that `crates/aiditor`, `crates/aiditor-services` and `crates/aiditor-core/benches` never name, and make the 37 functions `pub(crate)`. Run `cargo clippy --workspace --all-targets -- -D warnings`. Then, per D6, make dead test-only helpers `#[cfg(test)]`, delete other dead functions with the tests of only them, and put anything another crate needs back to `pub`. Verify clippy is clean and `cargo test --workspace` passes.
-- [ ] 5.2 Delete the stale `/// Each sessions buffer's state…` line above `Core::list_requests` in `lib.rs`. Verify `cargo doc -p aiditor-core --no-deps` shows `list_requests` with only its own comment.
+- [x] 5.1 Re-run the scan's grep for core `pub fn`s in public modules that `crates/aiditor`, `crates/aiditor-services` and `crates/aiditor-core/benches` never name, and make the 37 functions `pub(crate)`. Run `cargo clippy --workspace --all-targets -- -D warnings`. Then, per D6, make dead test-only helpers `#[cfg(test)]`, delete other dead functions with the tests of only them, and put anything another crate needs back to `pub`. Verify clippy is clean and `cargo test --workspace` passes.
+- [x] 5.2 Delete the stale `/// Each sessions buffer's state…` line above `Core::list_requests` in `lib.rs`. Verify `cargo doc -p aiditor-core --no-deps` shows `list_requests` with only its own comment.
 
 ## 6. Frontend (#7, #10, D8)
 
-- [ ] 6.1 Delete the `row` closure in `Editor::render` so `line` uses the free `row`. Verify the frontend tests pass (`cargo test -p aiditor`).
+- [x] 6.1 Delete the `row` closure in `Editor::render` so `line` uses the free `row`. Verify the frontend tests pass (`cargo test -p aiditor`).
 - [ ] 6.2 Add `cursor_run` and use it for the text cursor and the terminal cursor in `prepaint`. Then move the terminal block into `terminal_paint` returning `TerminalPaint`, or leave it inline if it needs more than seven parameters. Verify the `terminal_cells_sit_on_the_grid`, cursor and session paint tests pass, and run the app on macOS with a terminal and a file buffer to check the block, beam and hollow cursors draw as before.
 
 ## 7. Integration

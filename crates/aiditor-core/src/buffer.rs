@@ -141,7 +141,7 @@ impl Buffers {
     }
 
     /// A new unkillable `*scratch*<workspace>`.
-    pub fn create_scratch(&mut self, workspace: &str) -> BufferId {
+    pub(crate) fn create_scratch(&mut self, workspace: &str) -> BufferId {
         let id = self.create(&scratch_name(workspace));
         self.map.get_mut(&id).expect("just created").unkillable = true;
         id
@@ -202,12 +202,12 @@ impl Buffers {
     }
 
     /// Every buffer, most recently shown first.
-    pub fn recent(&self) -> impl Iterator<Item = (BufferId, &Buffer)> {
+    pub(crate) fn recent(&self) -> impl Iterator<Item = (BufferId, &Buffer)> {
         self.recent.iter().map(|&id| (id, &self.map[&id]))
     }
 
     /// Makes buffer `id` the most recently shown.
-    pub fn raise(&mut self, id: BufferId) {
+    pub(crate) fn raise(&mut self, id: BufferId) {
         self.recent.retain(|&b| b != id);
         self.recent.insert(0, id);
     }
@@ -221,12 +221,12 @@ impl Buffers {
     }
 
     /// The buffer named `name` that the current workspace owns, or `*Messages*`.
-    pub fn find_here(&self, name: &str) -> Option<BufferId> {
+    pub(crate) fn find_here(&self, name: &str) -> Option<BufferId> {
         self.find(name).filter(|&id| self.is_here(id))
     }
 
     /// Buffer `id` belongs to the current workspace or to none.
-    pub fn is_here(&self, id: BufferId) -> bool {
+    pub(crate) fn is_here(&self, id: BufferId) -> bool {
         self.map[&id]
             .workspace
             .is_none_or(|w| Some(w) == self.workspace)
@@ -238,7 +238,11 @@ impl Buffers {
     }
 
     /// Workspace `workspace`'s buffer visiting `path`.
-    pub fn visiting_in(&self, path: &Path, workspace: Option<WorkspaceId>) -> Option<BufferId> {
+    pub(crate) fn visiting_in(
+        &self,
+        path: &Path,
+        workspace: Option<WorkspaceId>,
+    ) -> Option<BufferId> {
         self.map
             .iter()
             .find(|(_, b)| b.workspace == workspace && b.path() == Some(path))
@@ -559,7 +563,7 @@ impl Buffer {
     }
 
     /// Whether this terminal buffer is in copy mode.
-    pub fn copy_mode(&self) -> bool {
+    pub(crate) fn copy_mode(&self) -> bool {
         matches!(self.kind, Kind::Terminal { copy: Some(_), .. })
     }
 
@@ -778,7 +782,7 @@ impl Buffer {
     }
 
     /// Re-applies the last undone group; returns point after it, or `None` with nothing to redo.
-    pub fn redo(&mut self) -> Option<usize> {
+    pub(crate) fn redo(&mut self) -> Option<usize> {
         let group = self.history.redo.pop()?;
         for change in &group.changes {
             self.apply(change, false);
@@ -893,7 +897,11 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn add_marker(&mut self, char_idx: usize, kind: InsertionType) -> Result<MarkerId, Error> {
+    pub(crate) fn add_marker(
+        &mut self,
+        char_idx: usize,
+        kind: InsertionType,
+    ) -> Result<MarkerId, Error> {
         if char_idx > self.len_chars() {
             return Err(Error::OutOfRange);
         }
@@ -909,7 +917,7 @@ impl Buffer {
     }
 
     /// Moves a live marker to `char_idx`; a removed one is not brought back.
-    pub fn set_marker(&mut self, id: MarkerId, char_idx: usize) -> Result<(), Error> {
+    pub(crate) fn set_marker(&mut self, id: MarkerId, char_idx: usize) -> Result<(), Error> {
         if char_idx > self.len_chars() {
             return Err(Error::OutOfRange);
         }
@@ -920,7 +928,7 @@ impl Buffer {
     }
 
     /// Puts `prop` on `range`; text inserted inside it extends it, at its edges does not.
-    pub fn add_property(&mut self, range: Range<usize>, prop: Prop) -> Result<(), Error> {
+    pub(crate) fn add_property(&mut self, range: Range<usize>, prop: Prop) -> Result<(), Error> {
         if range.start > range.end || range.end > self.len_chars() {
             return Err(Error::OutOfRange);
         }
@@ -1033,7 +1041,7 @@ impl Buffer {
     }
 
     /// Removes every property whose range lies within `range`.
-    pub fn remove_properties(&mut self, range: Range<usize>) {
+    pub(crate) fn remove_properties(&mut self, range: Range<usize>) {
         let markers = &mut self.markers;
         // Each property's new index, `u32::MAX` once removed.
         let mut kept = 0;
@@ -1065,7 +1073,7 @@ impl Buffer {
 
     /// The non-empty property ranges touching `range`, from at its start to at its end, in
     /// stored order, then the prompt area's continuation indent.
-    pub fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
+    pub(crate) fn properties_near(&self, range: Range<usize>) -> Vec<(Range<usize>, &Prop)> {
         let touches = |r: &Range<usize>| r.end >= range.start && r.start <= range.end;
         debug_assert!(
             self.index_holds(),
@@ -1193,7 +1201,7 @@ impl Buffer {
 
     /// Brings the syntax tree up to date with the text's edits, saying whether it parsed. Text
     /// over the cut is left to a `Parse`, its edited tree drawn meanwhile.
-    pub fn reparse(&mut self) -> bool {
+    pub(crate) fn reparse(&mut self) -> bool {
         match (&mut self.syntax, &self.kind) {
             (Some(syntax), Kind::Text) if self.text.len_bytes() <= syntax::PARSE_CUT => {
                 syntax.reparse(&self.text)
@@ -1253,7 +1261,7 @@ impl Buffer {
         (self.syntax.as_ref()).map_or(Vec::new(), |s| s.highlights(self.text(), ranges, palette))
     }
 
-    pub fn remove_marker(&mut self, id: MarkerId) {
+    pub(crate) fn remove_marker(&mut self, id: MarkerId) {
         self.markers.remove(&id);
     }
 
@@ -1266,14 +1274,14 @@ impl Buffer {
     }
 
     /// Zero-based (line, column), the column in chars from the line's start.
-    pub fn line_col(&self, char_idx: usize) -> Result<(usize, usize), Error> {
+    pub(crate) fn line_col(&self, char_idx: usize) -> Result<(usize, usize), Error> {
         let rope = self.text();
         let line = rope.try_char_to_line(char_idx)?;
         Ok((line, char_idx - rope.line_to_char(line)))
     }
 
     /// The offset of `line`, `col`; a column past the line's end clamps to it, before its LF.
-    pub fn char_idx(&self, line: usize, col: usize) -> Result<usize, Error> {
+    pub(crate) fn char_idx(&self, line: usize, col: usize) -> Result<usize, Error> {
         let rope = self.text();
         if line >= rope.len_lines() {
             return Err(Error::OutOfRange);
@@ -1293,7 +1301,7 @@ impl Buffer {
         self.tick
     }
 
-    pub fn set_saved(&mut self) {
+    pub(crate) fn set_saved(&mut self) {
         self.modified = false;
     }
 
@@ -1318,7 +1326,7 @@ impl Buffer {
     }
 
     /// Replaces the whole text with `text`, past read-only and without undo, as `append` writes.
-    pub fn set_text(&mut self, text: &str) {
+    pub(crate) fn set_text(&mut self, text: &str) {
         let (read_only, modified) = (std::mem::take(&mut self.read_only), self.modified);
         self.raw_delete(0..self.len_chars())
             .expect("the whole text is in range");
