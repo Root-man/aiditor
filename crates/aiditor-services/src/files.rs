@@ -167,6 +167,15 @@ pub fn run(op: FileOp) -> Msg {
             request,
             hunks: hunks(&old.to_string(), &new.to_string()),
         },
+        FileOp::GitRefs { request, roots } => Msg::GitRefs {
+            request,
+            roots: (roots.into_iter())
+                .map(|root| {
+                    let refs = git_refs(&root);
+                    (root, refs)
+                })
+                .collect(),
+        },
         FileOp::GitDiffFiles {
             request,
             root,
@@ -485,6 +494,31 @@ fn side_bytes(
         true => Ok(Vec::new()),
         false => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
     }
+}
+
+/// `root`'s repository's top directory and the short names of its local branches and tags;
+/// `None` outside a repository.
+fn git_refs(root: &Path) -> Result<Option<(PathBuf, Vec<String>)>, String> {
+    let Some((repository, ..)) = repository(root) else {
+        return Ok(None);
+    };
+    let output = git(root)
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/tags",
+        ])
+        .output()
+        .map_err(|err| format!("git: {err}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let refs = String::from_utf8_lossy(&output.stdout);
+    Ok(Some((
+        repository,
+        refs.lines().map(str::to_string).collect(),
+    )))
 }
 
 /// The files under `root` that differ between `old` and `new`, or the working tree, as
@@ -2535,6 +2569,38 @@ mod tests {
         fs::write(repo.join("f"), edited).unwrap();
         let saved = diff_of(repo, "f", GitSide::Index, GitSide::WorkingTree, None);
         assert_eq!(saved.unwrap().2, hunks);
+    }
+
+    #[test]
+    fn git_refs_lists_branches_and_tags_and_no_repository() {
+        let (dir, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let repo = dir.path();
+        let git = |args: &[&str]| git_in(repo, args);
+        git(&["init", "-q", "-b", "main"]);
+        fs::create_dir(repo.join("sub")).unwrap();
+        fs::write(repo.join("sub/f"), "f\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "1"]);
+        git(&["branch", "topic"]);
+        git(&["tag", "v1"]);
+        let roots = vec![repo.join("sub"), outside.path().to_path_buf()];
+        let refs = ["main", "topic", "v1"].map(String::from).to_vec();
+        match run(FileOp::GitRefs {
+            request: 3,
+            roots: roots.clone(),
+        }) {
+            Msg::GitRefs {
+                request: 3,
+                roots: answer,
+            } => assert_eq!(
+                answer,
+                vec![
+                    (roots[0].clone(), Ok(Some((repo.to_path_buf(), refs)))),
+                    (roots[1].clone(), Ok(None)),
+                ]
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

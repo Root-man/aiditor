@@ -806,6 +806,16 @@ pub(crate) fn builtins() -> Vec<Command> {
             handler: |ctx, _| ctx.diff_status(),
         },
         Command {
+            name: "diff-revisions",
+            // Asks its own questions; `RET` on an empty prompt answers empty.
+            spec: ArgSpec {
+                workspace: true,
+                unselected: true,
+                ..ArgSpec::default()
+            },
+            handler: |ctx, args| ctx.diff_revisions(args),
+        },
+        Command {
             name: "diff-stage",
             spec: ArgSpec::default(),
             handler: |ctx, args| ctx.diff_update(crate::diff::Action::Stage, args),
