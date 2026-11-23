@@ -690,26 +690,37 @@ pub fn build(
             .map(|(r, _)| r.start)
             .fold(newline, usize::min)
     };
+    // The end of the fold holding `at` and the pieces drawn for it.
+    let fold_at = |at: usize| {
+        props.iter().find_map(|(range, prop)| match prop {
+            // Placeholders stand for hidden text (line counts, a folded call's ` …`), which frame 6 draws dim.
+            Prop::Invisible(placeholder) if range.contains(&at) => Some((
+                range.end,
+                vec![(
+                    Cow::from(placeholder.as_str()),
+                    settings.theme.face(FaceName::Annotation),
+                )],
+            )),
+            Prop::Display(pieces) if range.contains(&at) => {
+                let face = |refs| settings.theme.resolve(refs);
+                let pieces = pieces
+                    .iter()
+                    .map(|(t, refs)| (Cow::from(t.as_str()), face(refs)));
+                Some((range.end, pieces.collect::<Vec<_>>()))
+            }
+            _ => None,
+        })
+    };
     // The columns the rest of the line from `at` draws, folds as their placeholders.
     let rest = |mut at: usize| {
         let mut len = 0;
         loop {
             let end = stop(at);
             len += end - at;
-            let fold = props.iter().find_map(|(range, prop)| match prop {
-                Prop::Invisible(placeholder) if range.contains(&end) => {
-                    Some((range.end, placeholder.chars().count()))
-                }
-                Prop::Display(pieces) if range.contains(&end) => Some((
-                    range.end,
-                    pieces.iter().map(|(t, _)| t.chars().count()).sum(),
-                )),
-                _ => None,
-            });
-            let Some((next, chars)) = fold else {
+            let Some((next, pieces)) = fold_at(end) else {
                 return len;
             };
-            len += chars;
+            len += pieces.iter().map(|(t, _)| t.chars().count()).sum::<usize>();
             at = next;
         }
     };
@@ -752,41 +763,28 @@ pub fn build(
     };
     while short(&lines) {
         let range = columns(line.number);
-        let fold = props.iter().find_map(|(range, prop)| match prop {
-            // Placeholders stand for hidden text (line counts, a folded call's ` …`), which frame 6 draws dim.
-            Prop::Invisible(placeholder) if range.contains(&pos) => Some((
-                range.end,
-                vec![(
-                    Cow::from(placeholder.as_str()),
-                    settings.theme.face(FaceName::Annotation),
-                )],
-            )),
-            Prop::Display(pieces) if range.contains(&pos) => {
-                let face = |refs| settings.theme.resolve(refs);
-                let pieces = pieces
-                    .iter()
-                    .map(|(t, refs)| (Cow::from(t.as_str()), face(refs)));
-                Some((range.end, pieces.collect()))
-            }
-            Prop::AlignRight if range.contains(&pos) => {
-                // A wrapped top line shown from `from` has used those columns too.
-                let before = col + if lines.is_empty() { from } else { 0 };
-                let used = before + 1 + rest(range.end);
-                // An indented line is drawn that many columns in, so it ends that much sooner.
-                let indent = buffer.line_indent(text.char_to_line(pos));
-                let fits = shown.end != usize::MAX && used + indent <= row_width;
-                line.aligned |= fits;
-                let spaces = if fits {
-                    last_col - indent - used + 1
-                } else {
-                    1
-                };
-                Some((
-                    range.end,
-                    vec![(Cow::from(" ".repeat(spaces)), face_at(pos))],
-                ))
-            }
-            _ => None,
+        let fold = fold_at(pos).or_else(|| {
+            props.iter().find_map(|(range, prop)| match prop {
+                Prop::AlignRight if range.contains(&pos) => {
+                    // A wrapped top line shown from `from` has used those columns too.
+                    let before = col + if lines.is_empty() { from } else { 0 };
+                    let used = before + 1 + rest(range.end);
+                    // An indented line is drawn that many columns in, so it ends that much sooner.
+                    let indent = buffer.line_indent(text.char_to_line(pos));
+                    let fits = shown.end != usize::MAX && used + indent <= row_width;
+                    line.aligned |= fits;
+                    let spaces = if fits {
+                        last_col - indent - used + 1
+                    } else {
+                        1
+                    };
+                    Some((
+                        range.end,
+                        vec![(Cow::from(" ".repeat(spaces)), face_at(pos))],
+                    ))
+                }
+                _ => None,
+            })
         });
         if point == pos || fold.as_ref().is_some_and(|f| point > pos && point < f.0) {
             cursor = Some((lines.len(), col.saturating_sub(range.start)));

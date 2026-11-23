@@ -4,17 +4,17 @@ Each finding keeps its scan row number. #1 lands its tests; the others change no
 
 ## 1. One git update at a time (#1, D1)
 
-- [ ] 1.1 Write the spec's five "One git update at a time" scenarios as core tests in `diff.rs`, using the view harness (`view()`, `answer()`, `inline()`): a second `s` before git answers sends no second `GitUpdate`; `C-c s` after a successful update but before the status answer echoes `Git is still updating`; the refreshed answer, a failed update and a plain `g` each leave `s` sending a step. Verify the first two fail before the fix.
-- [ ] 1.2 Add `updating: bool` to `DiffList`. Set it at the two `GitUpdate` pushes in `diff_update` and `diff_update_change`, refuse at the top of `diff_update` after the revisions check, and clear it in `on_git_updated`'s error arm and in `took_answer`. Verify the 1.1 tests and every existing diff-view test pass.
+- [x] 1.1 Write the spec's five "One git update at a time" scenarios as core tests in `diff.rs`, using the view harness (`view()`, `answer()`, `inline()`): a second `s` before git answers sends no second `GitUpdate`; `C-c s` after a successful update but before the status answer echoes `Git is still updating`; the refreshed answer, a failed update and a plain `g` each leave `s` sending a step. Verify the first two fail before the fix.
+- [x] 1.2 Add `updating: bool` to `DiffList`. Set it at the two `GitUpdate` pushes in `diff_update` and `diff_update_change`, refuse at the top of `diff_update` after the revisions check, and clear it in `on_git_updated`'s error arm and in `took_answer`. Verify the 1.1 tests and every existing diff-view test pass.
 
 ## 2. Shared list writing (#2, #5, D2, D5)
 
-- [ ] 2.1 Add `Windows::iter()` yielding `(WindowId, &Window)` next to `windows_mut()` in `workspace.rs`. Use it in `frame.rs` `display_buffer`, `diff.rs` `shown_window` and `diff_update`, and `workspace_list.rs`. Verify `cargo test -p aiditor-core` passes.
-- [ ] 2.2 Add `Core::list_point`, `Buffer::set_lines` and `Core::place_list_point`. Rewrite `render_sessions` and `render_diff_list` on them, `top` set to `first` for sessions and `false` for the diff list. Verify the sessions-list and diff-view tests pass unchanged and both functions lose their point lookup, text and property loop, and window loop.
+- [x] 2.1 Add `Windows::iter()` yielding `(WindowId, &Window)` next to `windows_mut()` in `workspace.rs`. Use it in `frame.rs` `display_buffer`, `diff.rs` `shown_window` and `diff_update`, and `workspace_list.rs`. Verify `cargo test -p aiditor-core` passes.
+- [x] 2.2 Add `Core::list_point`, `Buffer::set_lines` and `Core::place_list_point`. Rewrite `render_sessions` and `render_diff_list` on them, `top` set to `first` for sessions and `false` for the diff list. Verify the sessions-list and diff-view tests pass unchanged and both functions lose their point lookup, text and property loop, and window loop.
 
 ## 3. Display (#3, D3)
 
-- [ ] 3.1 In `display::build`, add the `fold_at` closure and use it from the main loop's fold lookup (AlignRight after it) and from `rest`. Verify the display, session, fold and align-right tests pass unchanged; if one changes because of the fold-over-align order, restore the old order and note it for the scan record.
+- [x] 3.1 In `display::build`, add the `fold_at` closure and use it from the main loop's fold lookup (AlignRight after it) and from `rest`. Verify the display, session, fold and align-right tests pass unchanged; if one changes because of the fold-over-align order, restore the old order and note it for the scan record.
 
 ## 4. Services git module (#4, #8, D4, D7)
 

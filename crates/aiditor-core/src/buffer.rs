@@ -1297,6 +1297,26 @@ impl Buffer {
         self.modified = false;
     }
 
+    /// Replaces the whole text and its properties with `lines`, each piece carrying its property.
+    pub(crate) fn set_lines(&mut self, lines: Vec<Vec<(String, Option<Prop>)>>) {
+        let text: Vec<String> = (lines.iter())
+            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
+            .collect();
+        self.remove_properties(0..self.len_chars());
+        self.set_text(&text.join("\n"));
+        let mut at = 0;
+        for line in lines {
+            for (text, prop) in line {
+                let end = at + text.chars().count();
+                if let Some(prop) = prop.filter(|_| end > at) {
+                    (self.add_property(at..end, prop)).expect("in the text");
+                }
+                at = end;
+            }
+            at += 1;
+        }
+    }
+
     /// Replaces the whole text with `text`, past read-only and without undo, as `append` writes.
     pub fn set_text(&mut self, text: &str) {
         let (read_only, modified) = (std::mem::take(&mut self.read_only), self.modified);

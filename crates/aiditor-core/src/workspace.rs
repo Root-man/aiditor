@@ -59,6 +59,12 @@ impl Windows {
     }
 
     /// Every window, a saved layout's included.
+    /// The current layout's windows with their ids, the selected one first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (WindowId, &Window)> {
+        std::iter::once((self.selected, &self.window))
+            .chain(self.others.iter().map(|(&id, w)| (id, w)))
+    }
+
     pub(crate) fn windows_mut(&mut self) -> impl Iterator<Item = &mut Window> {
         let saved = (self.saved.iter_mut())
             .flat_map(|s| std::iter::once(&mut s.window).chain(s.others.values_mut()));

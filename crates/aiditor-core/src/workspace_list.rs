@@ -583,8 +583,7 @@ impl Core {
                 let Some(snapshot) = buffer.workspace_list() else {
                     return Vec::new();
                 };
-                std::iter::once((core.windows.selected, &core.windows.window))
-                    .chain(core.windows.others.iter().map(|(&id, w)| (id, w)))
+                (core.windows.iter())
                     .filter(|(_, w)| w.buffer() == id)
                     .map(|(id, w)| (id, snapshot.selection(buffer, w.point(&core.buffers))))
                     .collect()
