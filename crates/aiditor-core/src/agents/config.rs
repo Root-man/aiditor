@@ -149,6 +149,7 @@ impl Session {
             left,
             right,
             path: None,
+            optional: 0..0,
         }
     }
 }

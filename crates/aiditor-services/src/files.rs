@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use aiditor_core::buffer::{decode, encode, hash, hunks, prepare_preview, revert, unified_diff};
 use aiditor_core::{
     ChangedFile, FileDiff, FileEntry, FileOp, GitChange, GitFile, GitObjects, GitSide, GitStatus,
-    GitStep, Head, Msg, Snapshot,
+    GitStep, Head, Msg, Snapshot, TerminalGit,
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -138,6 +138,11 @@ pub fn run(op: FileOp) -> Msg {
                 })
                 .collect(),
         ),
+        FileOp::TerminalGit { id, dir } => Msg::TerminalGit {
+            id,
+            git: terminal_git(&dir),
+            dir,
+        },
         FileOp::GitStatus(roots) => Msg::GitStatus(std::thread::scope(|scope| {
             let threads: Vec<_> = (roots.iter())
                 .map(|root| scope.spawn(|| git_status(root)))
@@ -267,6 +272,42 @@ pub fn head(path: &Path) -> Option<Head> {
         root,
         branch,
         changed: changed(path),
+    })
+}
+
+/// The repository holding directory `dir`, with its lines changed against `HEAD` and its
+/// commits ahead of and behind the upstream; `None` outside a repository.
+pub fn terminal_git(dir: &Path) -> Option<TerminalGit> {
+    let (root, head, branch) = repository(dir)?;
+    let run = |args: &[&str]| {
+        let output = git(dir).args(args).stderr(Stdio::null()).output().ok()?;
+        output.status.success().then_some(output.stdout)
+    };
+    // A filter is a command git would run on the working tree's files; an unborn `HEAD` fails.
+    let lines = (own_filter(dir) == Some(false))
+        .then(|| run(&["diff", "--numstat", "HEAD"]))
+        .flatten()
+        .map(|out| {
+            // Binary files count `-`, which doesn't parse.
+            let text = String::from_utf8_lossy(&out);
+            let counts = text.lines().filter_map(|line| {
+                let mut fields = line.split('\t');
+                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+            });
+            counts.fold((0, 0), |(a, r), (x, y): (usize, usize)| (a + x, r + y))
+        });
+    let upstream =
+        run(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).and_then(|out| {
+            let text = String::from_utf8_lossy(&out);
+            let mut counts = text.split_whitespace().map(str::parse);
+            Some((counts.next()?.ok()?, counts.next()?.ok()?))
+        });
+    Some(TerminalGit {
+        head,
+        root,
+        branch,
+        lines,
+        upstream,
     })
 }
 
@@ -2126,6 +2167,63 @@ mod tests {
             unstaged,
             old_path: None,
         }
+    }
+
+    #[test]
+    fn terminal_git_counts_changed_lines_and_the_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| git_in(repo, args);
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(repo.join("a"), "1\n2\n3\n").unwrap();
+        fs::write(repo.join("bin"), b"\0\x01").unwrap();
+        fs::create_dir(repo.join("sub")).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        let state = terminal_git(&repo.join("sub")).unwrap();
+        assert_eq!((state.root.as_path(), &*state.branch), (repo, "main"));
+        assert_eq!(state.head, repo.join(".git/HEAD"));
+        assert_eq!((state.lines, state.upstream), (Some((0, 0)), None));
+
+        // Staged and unstaged count together; binary and untracked files don't.
+        fs::write(repo.join("a"), "1\nx\n3\n").unwrap();
+        git(&["add", "a"]);
+        fs::write(repo.join("a"), "1\nx\n3\n4\n").unwrap();
+        fs::write(repo.join("bin"), b"\0\x02").unwrap();
+        fs::write(repo.join("new"), "untracked\n").unwrap();
+        assert_eq!(terminal_git(repo).unwrap().lines, Some((2, 1)));
+
+        git(&["commit", "-q", "-am", "two"]);
+        git(&["branch", "other", "HEAD~1"]);
+        git(&["branch", "-q", "-u", "other"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "three"]);
+        assert_eq!(terminal_git(repo).unwrap().upstream, Some((2, 0)));
+        git(&["switch", "-q", "other"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "elsewhere"]);
+        git(&["switch", "-q", "main"]);
+        assert_eq!(terminal_git(repo).unwrap().upstream, Some((2, 1)));
+
+        git(&["config", "filter.x.clean", "cat"]);
+        let state = terminal_git(repo).unwrap();
+        assert_eq!(
+            (state.lines, &*state.branch),
+            (None, "main"),
+            "no filter runs"
+        );
+
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(terminal_git(outside.path()), None);
+    }
+
+    #[test]
+    fn terminal_git_on_an_unborn_branch_has_no_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        let state = terminal_git(dir.path()).unwrap();
+        assert_eq!(
+            (&*state.branch, state.lines, state.upstream),
+            ("main", None, None)
+        );
     }
 
     #[test]

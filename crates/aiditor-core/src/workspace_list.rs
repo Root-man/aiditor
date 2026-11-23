@@ -381,6 +381,7 @@ impl Snapshot {
                 .into_iter()
                 .collect(),
             path: None,
+            optional: 0..0,
         };
     }
 
@@ -1635,6 +1636,17 @@ mod tests {
                 .conflict = Some(0);
             let (running, _) = h.core.create_terminal("vterm1<task>", 2, 10);
             let (failed, _) = h.core.create_terminal("vterm2<task>", 2, 10);
+            // A repository's segments stay out of the state column.
+            let repo = crate::TerminalGit {
+                head: "/aiditor-test/.git/HEAD".into(),
+                root: "/aiditor-test".into(),
+                branch: "main".into(),
+                lines: Some((2, 1)),
+                upstream: Some((1, 0)),
+            };
+            for dir in ["/aiditor-test/app", "/aiditor-test/other"] {
+                h.terminal_git.insert(dir.into(), repo.clone());
+            }
             for (id, bytes) in [
                 (
                     running,
@@ -1650,6 +1662,10 @@ mod tests {
                     bytes: bytes.as_bytes().to_vec(),
                 });
             }
+            h.advance(std::time::Duration::from_secs(1));
+            let answered = (h.core.buffers.recent())
+                .filter(|(_, b)| b.terminal().is_some_and(|t| t.git.is_some()));
+            assert_eq!(answered.count(), 2, "both terminals know their repository");
             h.keys("C-x t l");
             let snapshot = h.text();
             assert_eq!(

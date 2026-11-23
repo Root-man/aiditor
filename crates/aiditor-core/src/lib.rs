@@ -170,6 +170,12 @@ pub enum Msg {
     Checked(Vec<(PathBuf, Option<u64>)>),
     /// The file service's answer to `FileOp::Head`: each file's repository, if it is in one.
     Heads(Vec<(PathBuf, Option<Head>)>),
+    /// The file service's answer to `FileOp::TerminalGit`: `dir`'s repository, if it is in one.
+    TerminalGit {
+        id: TerminalId,
+        dir: PathBuf,
+        git: Option<TerminalGit>,
+    },
     /// The file service's answer to `FileOp::GitStatus`, in the roots' order: `Ok(None)` for a
     /// root in no repository, `Err` for git's failure.
     GitStatus(Vec<(PathBuf, Result<Option<GitStatus>, String>)>),
@@ -411,6 +417,27 @@ impl Head {
     /// The repository's files whose changes can change this.
     pub(crate) fn watched(&self) -> [PathBuf; 2] {
         [self.path.clone(), self.path.with_file_name("index")]
+    }
+}
+
+/// The repository holding a terminal's directory, as its mode line shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalGit {
+    /// The repository's `HEAD` file.
+    pub head: PathBuf,
+    /// The directory holding the repository's `.git`.
+    pub root: PathBuf,
+    pub branch: String,
+    /// Lines added and removed against `HEAD`, staged or not; `None` when git can't say.
+    pub lines: Option<(usize, usize)>,
+    /// Commits ahead of and behind the upstream; `None` without one.
+    pub upstream: Option<(usize, usize)>,
+}
+
+impl TerminalGit {
+    /// The repository's files whose changes can change this.
+    pub(crate) fn watched(&self) -> [PathBuf; 2] {
+        [self.head.clone(), self.head.with_file_name("index")]
     }
 }
 
@@ -670,6 +697,8 @@ pub enum FileOp {
     Check(Vec<PathBuf>),
     /// Find each file's repository and send `Msg::Heads`.
     Head(Vec<PathBuf>),
+    /// Find terminal `id`'s directory's repository state and send `Msg::TerminalGit`.
+    TerminalGit { id: TerminalId, dir: PathBuf },
     /// Ask git for each root's branch and changed files and send `Msg::GitStatus`.
     GitStatus(Vec<PathBuf>),
     /// Read `path`, relative to the repository's top directory `repository`, on the `old` and
@@ -1119,6 +1148,7 @@ impl Ctx<'_> {
             Msg::FilesChanged { paths, rescan } => self.on_files_changed(paths, rescan),
             Msg::Checked(files) => self.on_checked(files),
             Msg::Heads(files) => self.on_heads(files),
+            Msg::TerminalGit { id, dir, git } => self.on_terminal_git(id, dir, git),
             Msg::GitStatus(answer) => self.core.on_git_status(answer),
             Msg::GitDiffed { request, result } => {
                 (self.core).on_git_diffed(request, result, &mut self.effects)
@@ -1532,6 +1562,8 @@ impl Core {
         }
         ctx.ensure_watch_indexes();
         ctx.ask_heads();
+        ctx.ask_terminal_git();
+        ctx.show_long_commands();
         ctx.ask_parses();
         ctx.ask_language_versions();
         ctx.ensure_environments();

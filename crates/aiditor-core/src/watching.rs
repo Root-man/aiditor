@@ -57,6 +57,8 @@ impl Core {
                 })
             })
             .collect();
+        let terminals = (self.buffers.recent()).filter_map(|(_, b)| b.terminal()?.git.as_ref());
+        files.extend(terminals.flat_map(crate::TerminalGit::watched));
         files.sort();
         files.dedup();
         let directories = self
@@ -279,6 +281,19 @@ impl Ctx<'_> {
             let stale = rescan || reported(&file.path) || watched.iter().any(reported);
             file.head_asked &= !stale;
             git.extend(watched);
+        }
+        for (_, buffer) in self.core.buffers.iter_mut() {
+            let Some(terminal) = buffer.terminal_mut() else {
+                continue;
+            };
+            let Some(repo) = &terminal.git else {
+                continue;
+            };
+            // shortcut: every report under the repository asks git again; coalesce asks if a busy build shows.
+            let reported =
+                |path: &PathBuf| path.starts_with(&repo.root) || repo.root.starts_with(path);
+            terminal.git_stale |= rescan || paths.iter().map(|(p, _)| p).any(reported);
+            git.extend(repo.watched());
         }
         // Git's files are watched for the mode line; they say nothing about the index.
         paths.retain(|(path, _)| !git.contains(path));

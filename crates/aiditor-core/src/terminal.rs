@@ -22,7 +22,7 @@ use crate::display::{self, CursorShape, Run, TEXT_INSET};
 use crate::key::{Key, KeyCode};
 use crate::settings::Theme;
 use crate::window::WindowId;
-use crate::{Core, Ctx, Effect, Effects, TerminalId, TerminalOp};
+use crate::{Core, Ctx, Effect, Effects, FileOp, TerminalId, TerminalOp};
 
 /// Collects what the emulator writes back to the program; every other event is dropped.
 #[derive(Clone, Default)]
@@ -183,7 +183,16 @@ pub struct Terminal {
     failed: Option<i32>,
     /// When the running command's `C` mark arrived, and its command line.
     began: Option<(Instant, Option<String>)>,
+    /// The running command has run `RUNNING_AFTER`, so the mode line shows it.
+    running_shown: bool,
+    /// The directory's repository, as the file service last answered.
+    pub(crate) git: Option<crate::TerminalGit>,
+    /// The directory or the repository may have changed since `git` was asked for.
+    pub(crate) git_stale: bool,
 }
+
+/// How long a command runs before the mode line shows it.
+const RUNNING_AFTER: Duration = Duration::from_secs(1);
 
 /// A command that ended: its command line, exit code and how long it ran.
 pub type Finished = (Option<String>, Option<i32>, Duration);
@@ -207,6 +216,9 @@ impl Terminal {
             running: None,
             failed: None,
             began: None,
+            running_shown: false,
+            git: None,
+            git_stale: true,
         }
     }
 
@@ -236,10 +248,12 @@ impl Terminal {
                         Mark::Prompt => (self.running, self.began) = (None, None),
                         Mark::Output => {
                             self.began = Some((now, command.clone()));
+                            self.running_shown = false;
                             (self.running, self.failed) = (command, None);
                         }
                         Mark::End(code) => {
                             (self.running, self.failed) = (None, code.filter(|&c| c != 0));
+                            self.git_stale = true;
                             if let Some((at, command)) = self.began.take() {
                                 finished = Some((command, code, now - at));
                             }
@@ -253,7 +267,12 @@ impl Terminal {
                         self.marks.push((line, point.column.0, mark));
                     }
                 }
-                Some(Signal::Cwd(path)) => self.cwd = Some(path),
+                Some(Signal::Cwd(path)) => {
+                    self.git_stale |= self.cwd.as_ref() != Some(&path);
+                    // Another repository's state mustn't show beside this directory while git answers.
+                    self.git.take_if(|git| !path.starts_with(&git.root));
+                    self.cwd = Some(path);
+                }
                 Some(Signal::ClearHistory) if main => self.marks.clear(),
                 Some(Signal::Reset) => self.marks.clear(),
                 _ => {}
@@ -282,6 +301,11 @@ impl Terminal {
     /// The running command as the shell gave it, if it did.
     pub fn running(&self) -> Option<&str> {
         self.running.as_deref()
+    }
+
+    /// The running command once it has run `RUNNING_AFTER`, so a quick one doesn't flash.
+    pub fn shown_running(&self) -> Option<&str> {
+        self.running().filter(|_| self.running_shown)
     }
 
     /// The last command's exit status, when it failed.
@@ -782,7 +806,14 @@ impl Ctx<'_> {
         let Some(terminal) = core.buffers.get_mut(buffer).and_then(Buffer::terminal_mut) else {
             return;
         };
+        let (had_git, began) = (terminal.git.is_some(), terminal.began.as_ref().map(|b| b.0));
         let (bytes, finished) = terminal.feed_at(bytes, self.now);
+        if terminal.began.as_ref().is_some_and(|b| Some(b.0) != began) {
+            core.timers
+                .start(self.now, RUNNING_AFTER, None, crate::Msg::Tick);
+        }
+        // Leaving the repository drops its files from the watch set.
+        core.watch.dirty |= had_git && terminal.git.is_none();
         if !bytes.is_empty() {
             (self.effects).push(Effect::Terminal(TerminalOp::Write { id, bytes }));
         }
@@ -804,6 +835,54 @@ impl Ctx<'_> {
                 Some(code) => format!("failed (exit {code}) after {took}"),
             };
             self.notify_unseen(buffer, title, body);
+        }
+    }
+
+    /// Shows each terminal's running command once it has run `RUNNING_AFTER`.
+    pub(crate) fn show_long_commands(&mut self) {
+        let core = &mut *self.core;
+        for &buffer in core.terminals.values() {
+            if let Some(terminal) = core.buffers.get_mut(buffer).and_then(Buffer::terminal_mut)
+                && let Some((at, _)) = terminal.began
+            {
+                terminal.running_shown |= self.now >= at + RUNNING_AFTER;
+            }
+        }
+    }
+
+    /// Asks for the repository state of each terminal whose directory or repository may have
+    /// changed.
+    pub(crate) fn ask_terminal_git(&mut self) {
+        let core = &mut *self.core;
+        for (&id, &buffer) in &core.terminals {
+            let terminal = core.buffers.get_mut(buffer).and_then(Buffer::terminal_mut);
+            if let Some(terminal) = terminal
+                && let Some(dir) = terminal.cwd.clone()
+                && std::mem::take(&mut terminal.git_stale)
+            {
+                self.effects
+                    .push(Effect::File(FileOp::TerminalGit { id, dir }));
+            }
+        }
+    }
+
+    /// Takes the file service's answer to `FileOp::TerminalGit`, unless the shell has left `dir`.
+    pub(crate) fn on_terminal_git(
+        &mut self,
+        id: TerminalId,
+        dir: PathBuf,
+        git: Option<crate::TerminalGit>,
+    ) {
+        let core = &mut *self.core;
+        let Some(&buffer) = core.terminals.get(&id) else {
+            return;
+        };
+        let terminal = core.buffers.get_mut(buffer).and_then(Buffer::terminal_mut);
+        if let Some(terminal) = terminal
+            && terminal.cwd.as_ref() == Some(&dir)
+        {
+            terminal.git = git;
+            core.watch.dirty = true;
         }
     }
 
@@ -1354,7 +1433,7 @@ mod tests {
         use crate::buffer::Decoration;
         use crate::harness::{Harness, mark};
         use crate::settings::FaceName;
-        use crate::{Effect, Msg, TerminalId, TerminalOp};
+        use crate::{Effect, FileOp, Msg, TerminalGit, TerminalId, TerminalOp};
 
         pub(super) fn output(h: &mut Harness, id: TerminalId, bytes: &str) {
             h.send(Msg::TerminalOutput {
@@ -1697,6 +1776,9 @@ mod tests {
             let (mut h, id) = shown();
             let run = "\x1b]133;C;cmdline_url=cargo%20test\x07";
             let line = mode_line(&mut h, id, run);
+            assert_eq!(line.text(), "t  char", "not before a second");
+            h.advance(std::time::Duration::from_secs(1));
+            let line = mode_line(&mut h, id, "");
             assert_eq!(line.text(), "t  ◉ cargo test │ char");
             assert_eq!(line.right[0][0].1, FaceName::StatusRunning);
             assert_eq!(line.right[1][0].1, FaceName::StatusWaiting);
@@ -1709,7 +1791,9 @@ mod tests {
             assert_eq!(line.right[1][0].1, FaceName::StatusInfo);
             h.keys("C-c C-t");
             let again = "\x1b]133;C;cmdline_url=a%0Ab\x07";
-            assert_eq!(mode_line(&mut h, id, again).text(), "t  ◉ a b │ char");
+            output(&mut h, id, again);
+            h.advance(std::time::Duration::from_secs(1));
+            assert_eq!(mode_line(&mut h, id, "").text(), "t  ◉ a b │ char");
             let line = mode_line(&mut h, id, "\x1b]133;D;0\x07");
             assert_eq!(line.text(), "t  char", "a success shows nothing");
         }
@@ -1739,6 +1823,205 @@ mod tests {
             assert_eq!(left(28), "t │ /srv/one/two/three");
             assert_eq!(left(20), "t │ …two/three");
             assert_eq!(left(10), "t", "no separator is left behind");
+        }
+
+        /// A repository at `/r` on `branch` with `lines` changed and `upstream` counts.
+        fn repo(
+            branch: &str,
+            lines: (usize, usize),
+            upstream: Option<(usize, usize)>,
+        ) -> TerminalGit {
+            TerminalGit {
+                head: "/r/.git/HEAD".into(),
+                root: "/r".into(),
+                branch: branch.into(),
+                lines: Some(lines),
+                upstream,
+            }
+        }
+
+        /// Answers each ask for a terminal's repository since the last call from
+        /// `h.terminal_git`; returns how many there were.
+        fn asks(h: &mut Harness) -> usize {
+            let asked: Vec<_> = (h.effects.drain(..))
+                .filter_map(|e| match e {
+                    Effect::File(FileOp::TerminalGit { id, dir }) => Some((id, dir)),
+                    _ => None,
+                })
+                .collect();
+            for (id, dir) in &asked {
+                let git = h.terminal_git.get(dir).cloned();
+                h.send(Msg::TerminalGit {
+                    id: *id,
+                    dir: dir.clone(),
+                    git,
+                });
+            }
+            asked.len()
+        }
+
+        /// `mode_line`, with the repository asks answered.
+        fn git_line(h: &mut Harness, id: TerminalId, bytes: &str) -> crate::display::ModeLine {
+            output(h, id, bytes);
+            asks(h);
+            mode_line(h, id, "")
+        }
+
+        #[test]
+        fn the_mode_line_shows_the_directorys_git_state() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r/sub".into(), repo("main", (2, 1), Some((2, 1))));
+            let other = TerminalGit {
+                upstream: Some((2, 0)),
+                ..repo("side", (0, 0), None)
+            };
+            h.terminal_git.insert("/q".into(), other);
+            let line = git_line(&mut h, id, "\x1b]7;file:///r/sub\x07");
+            assert_eq!(line.text(), "t │ /r/sub  ⎇ main │ +2 −1 │ ↑2 ↓1 │ char");
+            assert_eq!(line.right[0][0].1, FaceName::VcsBranch);
+            assert_eq!(line.right[1][0].1, FaceName::StatusRunning);
+            assert_eq!(line.right[1][2].1, FaceName::StatusFailed);
+            let line = git_line(&mut h, id, "\x1b]7;file:///q\x07");
+            assert_eq!(line.text(), "t │ /q  ⎇ side │ ↑2 │ char", "no zero counts");
+            let line = git_line(&mut h, id, "\x1b]7;file:///srv\x07");
+            assert_eq!(line.text(), "t │ /srv  char", "outside a repository");
+        }
+
+        #[test]
+        fn a_long_command_shows_left_of_the_branch_and_a_quick_one_never() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r".into(), repo("main", (0, 0), None));
+            git_line(&mut h, id, "\x1b]7;file:///r\x07");
+            let quick = "\x1b]133;C;cmdline_url=ls\x07";
+            assert_eq!(git_line(&mut h, id, quick).text(), "t │ /r  ⎇ main │ char");
+            h.advance(std::time::Duration::from_millis(500));
+            let line = git_line(&mut h, id, "\x1b]133;D;0\x07");
+            h.advance(std::time::Duration::from_secs(1));
+            assert_eq!(
+                line.text(),
+                "t │ /r  ⎇ main │ char",
+                "ended before a second"
+            );
+            assert_eq!(mode_line(&mut h, id, "").text(), "t │ /r  ⎇ main │ char");
+            output(&mut h, id, "\x1b]133;C;cmdline_url=sleep%205\x07");
+            h.advance(std::time::Duration::from_secs(1));
+            let line = mode_line(&mut h, id, "");
+            assert_eq!(line.text(), "t │ /r  ◉ sleep 5 │ ⎇ main │ char");
+            let line = git_line(&mut h, id, "\x1b]133;D;1\x07");
+            assert_eq!(line.text(), "t │ /r  exit 1 │ ⎇ main │ char");
+        }
+
+        #[test]
+        fn the_git_state_is_asked_again_when_a_command_ends() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r".into(), repo("main", (2, 1), None));
+            output(&mut h, id, "\x1b]7;file:///r\x07");
+            assert_eq!(asks(&mut h), 1);
+            output(&mut h, id, "\x1b]7;file:///r\x07\x1b]133;A\x07$ ");
+            assert_eq!(
+                asks(&mut h),
+                0,
+                "neither the directory nor a command changed"
+            );
+            h.terminal_git
+                .insert("/r".into(), repo("main", (0, 0), None));
+            output(&mut h, id, "\x1b]133;C\x07\x1b]133;D;0\x07");
+            assert_eq!(asks(&mut h), 1);
+            assert_eq!(mode_line(&mut h, id, "").text(), "t │ /r  ⎇ main │ char");
+        }
+
+        #[test]
+        fn leaving_the_repository_drops_its_state_before_git_answers() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r".into(), repo("main", (2, 1), None));
+            git_line(&mut h, id, "\x1b]7;file:///r\x07");
+            let line = mode_line(&mut h, id, "\x1b]7;file:///r/sub\x07");
+            assert_eq!(
+                line.text(),
+                "t │ /r/sub  ⎇ main │ +2 −1 │ char",
+                "the same repository"
+            );
+            let line = mode_line(&mut h, id, "\x1b]7;file:///q\x07");
+            assert_eq!(line.text(), "t │ /q  char", "unanswered yet");
+            assert!(!h.core.watch_set().files.contains(&"/r/.git/HEAD".into()));
+        }
+
+        #[test]
+        fn an_answer_for_a_left_directory_is_dropped() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r".into(), repo("main", (0, 0), None));
+            git_line(&mut h, id, "\x1b]7;file:///r\x07");
+            let git = Some(repo("old", (0, 0), None));
+            h.send(Msg::TerminalGit {
+                id,
+                dir: "/elsewhere".into(),
+                git,
+            });
+            let line = git_line(&mut h, id, "");
+            assert_eq!(line.text(), "t │ /r  ⎇ main │ char");
+        }
+
+        #[test]
+        fn the_watcher_follows_a_terminals_repository() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r".into(), repo("main", (0, 0), None));
+            git_line(&mut h, id, "\x1b]7;file:///r\x07");
+            let files = h.core.watch_set().files;
+            assert!(files.contains(&"/r/.git/HEAD".into()), "{files:?}");
+            assert!(files.contains(&"/r/.git/index".into()), "{files:?}");
+            h.terminal_git
+                .insert("/r".into(), repo("side", (0, 0), None));
+            let paths = vec![("/r/.git/HEAD".into(), crate::Disk::File)];
+            h.send(Msg::FilesChanged {
+                paths,
+                rescan: false,
+            });
+            assert_eq!(asks(&mut h), 1);
+            assert_eq!(mode_line(&mut h, id, "").text(), "t │ /r  ⎇ side │ char");
+            let paths = vec![("/srv/a".into(), crate::Disk::File)];
+            h.send(Msg::FilesChanged {
+                paths,
+                rescan: false,
+            });
+            assert_eq!(asks(&mut h), 0, "outside the repository");
+            let buffer = h.core.windows.window.buffer();
+            h.core.kill_buffer(buffer);
+            h.send(Msg::FilesChanged {
+                paths: Vec::new(),
+                rescan: false,
+            });
+            assert!(!h.core.watch_set().files.contains(&"/r/.git/HEAD".into()));
+            let sent = h
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Watch(set) if set.files.is_empty()));
+            assert!(sent, "the watcher drops it");
+        }
+
+        #[test]
+        fn a_narrow_mode_line_drops_git_before_the_directory() {
+            let (mut h, id) = shown();
+            h.terminal_git
+                .insert("/r/sub".into(), repo("main", (2, 1), Some((2, 1))));
+            let line = git_line(&mut h, id, "\x1b]7;file:///r/sub\x07");
+            let bar = |cols| {
+                let bar = line.draw(cols, true, &h.core.settings().theme);
+                let text = |spans: &[crate::display::Span]| -> String {
+                    spans.iter().map(|s| s.text.as_str()).collect()
+                };
+                format!("{}  {}", text(&bar.left), text(&bar.right))
+            };
+            assert_eq!(bar(41), "t │ /r/sub  ⎇ main │ +2 −1 │ ↑2 ↓1 │ char");
+            assert_eq!(bar(40), "t │ /r/sub  ⎇ main │ +2 −1 │ char");
+            assert_eq!(bar(32), "t │ /r/sub  ⎇ main │ char");
+            assert_eq!(bar(24), "t │ /r/sub  char");
+            assert_eq!(bar(15), "t │ …/sub  char", "the directory shortens last");
         }
 
         #[test]
