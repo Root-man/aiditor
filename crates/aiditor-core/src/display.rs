@@ -74,6 +74,8 @@ pub struct ModeLine {
     pub right: Vec<Segment>,
     /// Which span of the drawn left group is a path, separators counting, to shorten first.
     pub path: Option<usize>,
+    /// The right group's segments that give way, last first, before the path.
+    pub optional: std::ops::Range<usize>,
 }
 
 /// A mode line as drawn: its groups with their separators and faces, cut to the window's width.
@@ -118,7 +120,15 @@ impl ModeLine {
             }
             spans
         };
-        let (mut left, right) = (group(&self.left), group(&self.right));
+        let (mut left, mut right) = (group(&self.left), group(&self.right));
+        let mut segments = self.right.clone();
+        for n in self.optional.clone().rev() {
+            if chars(&left) + chars(&right) + GROUP_GAP <= cols {
+                break;
+            }
+            segments.remove(n);
+            right = group(&segments);
+        }
         // shortcut: a wide char counts as one column, so a CJK name can run under the right group; measure widths when the display does.
         let (l, r) = (chars(&left), chars(&right));
         let (l_room, r_room) = share_room(l, r, cols.saturating_sub(GROUP_GAP));
@@ -924,7 +934,19 @@ pub fn build(
         cursor_width,
         mode_line: match (buffer.path(), buffer.terminal()) {
             (Some(file), _) => file_mode_line(buffer, file, roots, region, (l + 1, c), &position),
-            (_, Some(terminal)) => terminal_mode_line(buffer, terminal, l + 1, c),
+            (_, Some(terminal)) => {
+                let mut line = terminal_mode_line(buffer, terminal, l + 1, c);
+                let git = git_segments(terminal);
+                // Left of the command state: the group is right-aligned, so a command coming and going leaves the branch still.
+                let at = (line.right.iter())
+                    .take_while(|s| {
+                        matches!(s[0].1, FaceName::StatusRunning | FaceName::StatusFailed)
+                    })
+                    .count();
+                line.optional = at..at + git.len();
+                line.right.splice(at..at, git);
+                line
+            }
             _ => mode_line(buffer, l + 1, c),
         },
         terminal: None,
@@ -951,7 +973,32 @@ fn mode_line(buffer: &Buffer, line: usize, col: usize) -> ModeLine {
         left,
         right,
         path: None,
+        optional: 0..0,
     }
+}
+
+/// The segments of a terminal's repository: its branch, lines changed and upstream counts.
+fn git_segments(terminal: &crate::terminal::Terminal) -> Vec<Segment> {
+    let Some(git) = &terminal.git else {
+        return Vec::new();
+    };
+    let mut segments = vec![vec![(format!("⎇ {}", git.branch), FaceName::VcsBranch)]];
+    if let Some((added, removed)) = git.lines.filter(|&lines| lines != (0, 0)) {
+        segments.push(vec![
+            // As the diff view's counts: the diff faces' backgrounds aren't the bar's.
+            (format!("+{added}"), FaceName::StatusRunning),
+            (" ".into(), FaceName::ModeLine),
+            (format!("−{removed}"), FaceName::StatusFailed),
+        ]);
+    }
+    if let Some((ahead, behind)) = git.upstream.filter(|&counts| counts != (0, 0)) {
+        let parts = [("↑", ahead), ("↓", behind)]
+            .into_iter()
+            .filter(|&(_, n)| n > 0);
+        let text: Vec<_> = parts.map(|(arrow, n)| format!("{arrow}{n}")).collect();
+        segments.push(vec![(text.join(" "), FaceName::VcsBranch)]);
+    }
+    segments
 }
 
 /// The mode line of terminal `buffer`, with point at `line`:`col` in copy mode.
@@ -975,7 +1022,7 @@ pub(crate) fn terminal_mode_line(
         left.push(segment(&dir, FaceName::ModeLineDim));
     }
     let mut right = Vec::new();
-    if let Some(command) = terminal.running() {
+    if let Some(command) = terminal.shown_running() {
         // Program output, and one line in the bar.
         let command = command.replace(char::is_control, " ");
         right.push(segment(&format!("◉ {command}"), FaceName::StatusRunning));
@@ -992,7 +1039,12 @@ pub(crate) fn terminal_mode_line(
     }
     // After the name and its separator.
     let path = (left.len() > 1).then_some(2);
-    ModeLine { left, right, path }
+    ModeLine {
+        left,
+        right,
+        path,
+        optional: 0..0,
+    }
 }
 
 /// The mode line of `buffer`, which visits `file`, with the current project's `roots`, the active
@@ -1072,7 +1124,12 @@ pub(crate) fn file_mode_line(
     }
     right.push(segment(&format!("{line}:{col}"), FaceName::ModeLine));
     right.push(segment(position, FaceName::ModeLineDim));
-    ModeLine { left, right, path }
+    ModeLine {
+        left,
+        right,
+        path,
+        optional: 0..0,
+    }
 }
 
 /// `3 lines, 84 chars`, counting lines as Emacs's `count-lines`: a last line the region only
@@ -2605,6 +2662,7 @@ mod tests {
             left: segment(left),
             right: segment(right),
             path: None,
+            optional: 0..0,
         };
         let bar = line.draw(cols, true, &Settings::default().theme);
         let text = |spans: &[Span]| spans.iter().map(|s| s.text.as_str()).collect();
@@ -2780,6 +2838,7 @@ mod tests {
             ]],
             right: vec![vec![piece("1:0", FaceName::ModeLine)]],
             path: Some(1),
+            optional: 0..0,
         };
         let left = |cols| {
             let spans = line.draw(cols, true, &Settings::default().theme).left;

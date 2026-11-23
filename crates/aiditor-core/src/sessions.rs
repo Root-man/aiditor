@@ -236,6 +236,7 @@ impl SessionList {
                 .into_iter()
                 .collect(),
             path: None,
+            optional: 0..0,
         };
     }
 }

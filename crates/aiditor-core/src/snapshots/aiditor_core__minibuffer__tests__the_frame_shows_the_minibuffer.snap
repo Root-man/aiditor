@@ -63,6 +63,7 @@ Some(
                     ],
                 ],
                 path: None,
+                optional: 0..0,
             },
             terminal: None,
             prompt: None,

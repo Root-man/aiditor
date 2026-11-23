@@ -37,6 +37,8 @@ pub struct Harness {
     pub checks: HashMap<PathBuf, Option<u64>>,
     /// Each file's answer to `FileOp::Head`; none is outside a repository.
     pub heads: HashMap<PathBuf, crate::Head>,
+    /// Each directory's answer to `FileOp::TerminalGit`; none is outside a repository.
+    pub terminal_git: HashMap<PathBuf, crate::TerminalGit>,
     pub saves: std::collections::VecDeque<Result<u64, String>>,
     pub writes: Vec<(PathBuf, String)>,
     /// Each `sessions.toml` text the core asked to write, in order.
@@ -86,6 +88,7 @@ impl Harness {
             directories: HashMap::new(),
             checks: HashMap::new(),
             heads: HashMap::new(),
+            terminal_git: HashMap::new(),
             saves: std::collections::VecDeque::new(),
             writes: Vec::new(),
             pins: Vec::new(),
@@ -369,6 +372,11 @@ impl Harness {
                         FileOp::DiffLines { request, old, new } => Some(Msg::LinesDiffed {
                             request: *request,
                             hunks: crate::buffer::hunks(&old.to_string(), &new.to_string()),
+                        }),
+                        FileOp::TerminalGit { id, dir } => Some(Msg::TerminalGit {
+                            id: *id,
+                            dir: dir.clone(),
+                            git: self.terminal_git.get(dir).cloned(),
                         }),
                         FileOp::Head(paths) => Some(Msg::Heads(
                             (paths.iter())

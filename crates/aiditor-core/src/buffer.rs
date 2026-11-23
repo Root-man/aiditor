@@ -261,7 +261,8 @@ impl Buffers {
     pub fn kill(&mut self, id: BufferId) -> Result<Buffer, Error> {
         self.recent.retain(|&b| b != id);
         let buffer = self.map.remove(&id).ok_or(Error::NoSuchBuffer(id))?;
-        self.files_changed |= buffer.file.is_some();
+        // A terminal's repository is in the watch set too.
+        self.files_changed |= buffer.file.is_some() || matches!(buffer.kind, Kind::Terminal { .. });
         Ok(buffer)
     }
 }
