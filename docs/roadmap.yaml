@@ -2480,6 +2480,31 @@ milestones:
               - "Highlighting is unchanged: existing syntax tests pass"
               - "A hot-path benchmark covers a large Markdown parse"
 
+      - key: m8-terminal-git
+        title: "Git on the terminal mode line"
+        labels: [terminal, core]
+        design: "#subsystems"
+        body: |
+          A terminal's mode line shows the shell directory's git state, as a file buffer's shows its file's branch: the branch, the lines changed and how the branch stands against its upstream. Tasks are tracked as sub-issues.
+        tasks:
+          - key: m8-terminal-git-mode-line
+            title: "Show branch, changed lines and upstream status in a terminal's mode line"
+            body: |
+              When the shell's directory (`Terminal::cwd`, from OSC 7) is inside a git repository, the terminal's mode line shows, on the right before the running command or exit status:
+              - **Branch.** `⎇ main`, in the `VcsBranch` face and named as the file mode line names it (a detached `HEAD`, linked worktrees and submodules included).
+              - **Lines changed.** `+12 −3` against `HEAD`, staged and unstaged together (`git diff --numstat HEAD`); untracked files and binary files don't count. Hidden when both are zero. Added in green, removed in red.
+              - **Upstream.** `↑2 ↓1` from `git status --porcelain=v2 --branch`'s `branch.ab`, each part only when non-zero; nothing when the branch has no upstream or is level with it. It compares with the last fetched remote ref; nothing fetches.
+
+              The lookup runs off the core thread, as the file mode line's branch does. It runs again when the directory changes and when a command ends (OSC 133 `D`), since commands are what change a repo from a terminal, and on `HEAD` changes the watcher already reports. Outside a repository, or with git missing, none of it shows. A narrow mode line drops these before the directory.
+            acceptance:
+              - "In a repo, a terminal's mode line shows `⎇ <branch>`; `cd` out of it removes it and `cd` into another repo shows that one's branch"
+              - "Editing a tracked file and running a command shows `+N −M`; `git stash` and the next prompt hide it"
+              - "With a branch two commits ahead of its upstream, the mode line shows `↑2`; after `git push`, nothing"
+              - "A branch without an upstream, a non-git directory and a shell without OSC 7 show none of it"
+              - "A narrow window cuts these segments before the directory"
+              - "Core tests cover each segment and its refresh; service tests run against repositories made in a temp dir"
+              - "Spec updated in docs/editor.md and openspec/specs"
+
   # ───────────────────────────────────────────── M9 ─────────────────────────────────────────────
   - key: m9
     title: "M9 · Diff review"
