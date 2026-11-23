@@ -14,10 +14,10 @@ use crate::display::Segment;
 use crate::settings::FaceName;
 use crate::timer::TimerId;
 use crate::window::{DiffRow, Tree, Window, WindowId};
-use crate::workspace::Windows;
+use crate::workspace::{Windows, WorkspaceId};
 use crate::{
-    Core, Ctx, Effect, Effects, FileDiff, FileOp, GitChange, GitFile, GitSide, GitStatus, GitStep,
-    Hunk, Msg, VisitIntent,
+    ChangedFile, Core, Ctx, Effect, Effects, FileDiff, FileOp, GitChange, GitFile, GitSide,
+    GitStatus, GitStep, Hunk, Msg, VisitIntent,
 };
 
 pub(crate) const MODE: &str = "diff-list-mode";
@@ -30,7 +30,7 @@ type Read = Result<Option<(Vec<u8>, u64)>, String>;
 /// The pause after an edit before the shown diff is worked out again.
 const REDIFF: Duration = Duration::from_millis(50);
 
-/// The echo line's actions in the list.
+/// The echo line's actions in the list; `REVISIONS_HINTS` picks entries by index.
 pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["diff-next-change", "diff-previous-change"], "change"),
     (&["diff-next-file", "diff-previous-file"], "file"),
@@ -41,6 +41,10 @@ pub(crate) const HINTS: &[(&[&str], &str)] = &[
     (&["diff-refresh"], "refresh"),
     (&["diff-quit"], "quit"),
 ];
+
+/// `HINTS` without staging and discarding, which a revisions diff refuses.
+const REVISIONS_HINTS: &[(&[&str], &str)] =
+    &[HINTS[0], HINTS[1], HINTS[2], HINTS[5], HINTS[6], HINTS[7]];
 
 /// A line of the list point can be kept on across a refresh.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,10 +73,74 @@ pub(crate) enum Action {
     Discard,
 }
 
+/// A revisions list's root's repository and revisions, `new` `None` for the working tree.
+pub(crate) struct Revisions {
+    repository: PathBuf,
+    old: String,
+    new: Option<String>,
+    /// The file listing awaited.
+    request: u64,
+}
+
+/// A `diff-revisions` waiting on the file service or its prompts.
+pub(crate) enum Pending {
+    Refs {
+        request: u64,
+        workspace: WorkspaceId,
+    },
+    /// Each git root with its repository and refs, for the prompts.
+    Roots {
+        workspace: WorkspaceId,
+        roots: Vec<(PathBuf, PathBuf, Vec<String>)>,
+    },
+    Files {
+        workspace: WorkspaceId,
+        root: PathBuf,
+        revisions: Revisions,
+    },
+}
+
+/// A side as the mode line names it.
+fn side_name(side: &GitSide) -> &str {
+    match side {
+        GitSide::Tree(tree) => tree,
+        GitSide::Index => "index",
+        GitSide::WorkingTree => "working tree",
+    }
+}
+
+/// A file listing as a status answer of one root, every file an unstaged change.
+fn revisions_answer(
+    root: PathBuf,
+    repository: &Path,
+    result: Result<Vec<ChangedFile>, String>,
+) -> Answer {
+    let files = |files: Vec<ChangedFile>| {
+        (files.into_iter())
+            .map(|f| GitFile {
+                path: f.path,
+                staged: None,
+                unstaged: Some(f.change),
+                old_path: f.old_path,
+            })
+            .collect()
+    };
+    let status = result.map(|f| {
+        Some(GitStatus {
+            repository: repository.to_path_buf(),
+            branch: String::new(),
+            files: files(f),
+        })
+    });
+    vec![(root, status)]
+}
+
 /// The diff the view's right window shows.
 struct Shown {
     /// A `Row::File`.
     row: Row,
+    /// The old and new sides.
+    sides: (GitSide, GitSide),
     /// The answer awaited; 0 for none.
     request: u64,
     /// The `FileOp::Open` awaited for the file's buffer.
@@ -96,6 +164,11 @@ struct Shown {
 impl Shown {
     fn staged(&self) -> bool {
         matches!(self.row, Row::File { staged: true, .. })
+    }
+
+    /// Whether the new side is not the working tree, so a read-only buffer holds it.
+    fn fixed(&self) -> bool {
+        self.sides.1 != GitSide::WorkingTree
     }
 
     /// Where change `h` starts in a new side whose last line is `last`: removed rows past the
@@ -124,9 +197,11 @@ pub(crate) struct DiffList {
     folded: BTreeSet<(PathBuf, Option<bool>)>,
     /// The view's right window.
     window: WindowId,
-    shown: Option<Shown>,
+    shown: Option<Box<Shown>>,
     /// The shown diff's row and point's line and column before a refresh, to return to.
     near: Option<Box<(Row, (usize, usize))>>,
+    /// Set for a `diff-revisions` list, whose one root is `roots[0]`.
+    revisions: Option<Revisions>,
 }
 
 /// Where a file row's path starts: its indent, letter and gap.
@@ -206,13 +281,82 @@ impl Core {
             })
             .collect();
         for id in waiting {
-            self.render_diff_list(id);
-            let near = self.diff_point(id);
-            // A refresh asks the shown diff again.
-            self.drop_shown(id);
-            if let Some(list) = self.buffers.get_mut(id).and_then(|b| b.diff_list_mut()) {
-                list.near = near.map(Box::new);
-            }
+            self.took_answer(id);
+        }
+    }
+
+    /// Shows list `id`'s new answer, asking its shown diff again.
+    fn took_answer(&mut self, id: BufferId) {
+        self.render_diff_list(id);
+        let near = self.diff_point(id);
+        // A refresh asks the shown diff again.
+        self.drop_shown(id);
+        if let Some(list) = self.buffers.get_mut(id).and_then(|b| b.diff_list_mut()) {
+            list.near = near.map(Box::new);
+        }
+    }
+
+    /// The echo line's actions for the current view.
+    pub(crate) fn diff_hints(&self) -> &'static [(&'static [&'static str], &'static str)] {
+        match self.diff_revisions_here() {
+            Some(_) => REVISIONS_HINTS,
+            None => HINTS,
+        }
+    }
+
+    /// The current workspace's list's revisions, for a `diff-revisions` list.
+    fn diff_revisions_here(&self) -> Option<&Revisions> {
+        let list = self.diff_list_here()?;
+        self.buffers.get(list)?.diff_list()?.revisions.as_ref()
+    }
+
+    /// Takes a file listing: opens the view `diff-revisions` asked for, or refreshes its list.
+    pub(crate) fn on_git_diff_files(
+        &mut self,
+        request: u64,
+        result: Result<Vec<ChangedFile>, String>,
+    ) {
+        if let Some(Pending::Files { revisions, .. }) = &self.diff_pending
+            && revisions.request == request
+        {
+            let Some(Pending::Files {
+                workspace,
+                root,
+                revisions,
+            }) = self.diff_pending.take()
+            else {
+                unreachable!("matched above")
+            };
+            let Ok(name) = (self.current_workspace())
+                .map(|w| format!("*Diff*<{}>", w.name))
+                .and_then(|name| match self.workspace() == Some(workspace) {
+                    true => Ok(name),
+                    false => Err(String::new()),
+                })
+            else {
+                return;
+            };
+            let files = match result {
+                Ok(files) => files,
+                Err(err) => return self.echo(err),
+            };
+            self.leave_diff_view();
+            let answer = revisions_answer(root.clone(), &revisions.repository, Ok(files));
+            let id = self.show_diff_list(None, name, Some(revisions));
+            let list = self.buffers.get_mut(id).and_then(|b| b.diff_list_mut());
+            let list = list.expect("just made");
+            (list.roots, list.answer) = (vec![root], Some(answer));
+            return self.render_diff_list(id);
+        }
+        let found = (self.buffers.iter_mut()).find_map(|(id, b)| {
+            let list = b.diff_list_mut()?;
+            list.revisions.as_ref().filter(|r| r.request == request)?;
+            Some((id, list))
+        });
+        if let Some((id, list)) = found {
+            let repository = &list.revisions.as_ref().expect("found").repository;
+            list.answer = Some(revisions_answer(list.roots[0].clone(), repository, result));
+            self.took_answer(id);
         }
     }
 
@@ -312,7 +456,13 @@ impl Core {
                         }
                     };
                     heading.push(("  ".into(), None));
-                    heading.push((format!("⎇ {}", status.branch), face(FaceName::VcsBranch)));
+                    heading.push(match &list.revisions {
+                        Some(r) => (
+                            format!("{} → {}", r.old, r.new.as_deref().unwrap_or("working tree")),
+                            face(FaceName::ModeLineDim),
+                        ),
+                        None => (format!("⎇ {}", status.branch), face(FaceName::VcsBranch)),
+                    });
                     lines.push(heading);
                     if status.files.is_empty() {
                         lines.push(vec![("    No changes".into(), face(FaceName::Annotation))]);
@@ -320,7 +470,12 @@ impl Core {
                     if folded {
                         continue;
                     }
-                    for (staged, group) in [(true, "Staged"), (false, "Changes")] {
+                    // A revisions diff's files sit straight under their root.
+                    let groups: &[(bool, &str)] = match list.revisions {
+                        Some(_) => &[(false, "")],
+                        None => &[(true, "Staged"), (false, "Changes")],
+                    };
+                    for &(staged, group) in groups {
                         let files: Vec<_> = (status.files.iter())
                             .filter_map(|f| Some((if staged { f.staged } else { f.unstaged }?, f)))
                             .collect();
@@ -328,26 +483,28 @@ impl Core {
                             continue;
                         }
                         let folded = list.folded.contains(&(root.clone(), Some(staged)));
-                        lines.push(vec![
-                            (
-                                if folded { "  ▸ " } else { "  ▾ " }.into(),
-                                face(FaceName::ModeLineDim),
-                            ),
-                            (group.into(), face(FaceName::DiffListGroup)),
-                            // Counts right-aligned to 3 digits, past the longer name, line up.
-                            (" ".repeat(9 - group.len()), None),
-                            (
-                                format!("{:>3}", files.len()),
-                                face(FaceName::SessionListCount),
-                            ),
-                        ]);
-                        rows.push((
-                            lines.len() - 1,
-                            Row::Group {
-                                root: root.clone(),
-                                staged,
-                            },
-                        ));
+                        if list.revisions.is_none() {
+                            lines.push(vec![
+                                (
+                                    if folded { "  ▸ " } else { "  ▾ " }.into(),
+                                    face(FaceName::ModeLineDim),
+                                ),
+                                (group.into(), face(FaceName::DiffListGroup)),
+                                // Counts right-aligned to 3 digits, past the longer name, line up.
+                                (" ".repeat(9 - group.len()), None),
+                                (
+                                    format!("{:>3}", files.len()),
+                                    face(FaceName::SessionListCount),
+                                ),
+                            ]);
+                            rows.push((
+                                lines.len() - 1,
+                                Row::Group {
+                                    root: root.clone(),
+                                    staged,
+                                },
+                            ));
+                        }
                         if folded {
                             continue;
                         }
@@ -490,13 +647,17 @@ impl Core {
         (self.buffers.iter_mut()).find_map(|(id, b)| {
             let list = b.diff_list_mut()?;
             let window = list.window;
-            let shown = list.shown.as_mut().filter(|s| s.request == request)?;
+            let shown = list.shown.as_deref_mut().filter(|s| s.request == request)?;
             Some((id, window, shown))
         })
     }
 
     fn shown_mut(&mut self, list: BufferId) -> Option<&mut Shown> {
-        self.buffers.get_mut(list)?.diff_list_mut()?.shown.as_mut()
+        self.buffers
+            .get_mut(list)?
+            .diff_list_mut()?
+            .shown
+            .as_deref_mut()
     }
 
     /// Forgets list `list`'s shown diff, killing its side buffer and timer.
@@ -555,7 +716,7 @@ impl Core {
             .and_then(|b| self.buffers.get(b))
             .map(|b| b.tick());
         let Some(tick) =
-            tick.filter(|&t| shown.old.is_some() && !shown.staged() && shown.tick != Some(t))
+            tick.filter(|&t| shown.old.is_some() && !shown.fixed() && shown.tick != Some(t))
         else {
             return;
         };
@@ -583,8 +744,8 @@ impl Core {
             return;
         };
         shown.request = 0;
+        let (fixed, new) = (shown.fixed(), side_name(&shown.sides.1).to_string());
         let Row::File {
-            staged,
             path,
             repository,
             file,
@@ -608,9 +769,9 @@ impl Core {
         self.buffers.get_mut(old).expect("just created").workspace = workspace;
         let shown = self.shown_mut(list).expect("awaited");
         (shown.old, shown.old_buffer) = (Some(diff.old), Some(old));
-        if staged {
+        if fixed {
             shown.hunks = diff.hunks;
-            let name = format!("{} (index)", path.display());
+            let name = format!("{} ({new})", path.display());
             let id = self.side_buffer(list, &name, &diff.new.to_string());
             self.buffers
                 .get_mut(id)
@@ -649,9 +810,14 @@ impl Core {
         else {
             return;
         };
-        let (old, new) = match staged {
-            true => (GitSide::Tree("HEAD".into()), GitSide::Index),
-            false => (GitSide::Index, GitSide::WorkingTree),
+        let revisions = (self.buffers.get(list)).and_then(|b| b.diff_list()?.revisions.as_ref());
+        let (old, new) = match (revisions, staged) {
+            (Some(r), _) => (
+                GitSide::Tree(r.old.clone()),
+                (r.new.clone()).map_or(GitSide::WorkingTree, GitSide::Tree),
+            ),
+            (None, true) => (GitSide::Tree("HEAD".into()), GitSide::Index),
+            (None, false) => (GitSide::Index, GitSide::WorkingTree),
         };
         self.visits += 1;
         let request = self.visits;
@@ -659,13 +825,14 @@ impl Core {
             request,
             repository: repository.clone(),
             path: file.clone(),
-            old,
-            new,
+            old: old.clone(),
+            new: new.clone(),
             objects: None,
         }));
         let diff = self.buffers.get_mut(list).and_then(|b| b.diff_list_mut());
-        diff.expect("a live list").shown = Some(Shown {
+        diff.expect("a live list").shown = Some(Box::new(Shown {
             row,
+            sides: (old, new),
             request,
             visit: None,
             old: None,
@@ -676,7 +843,7 @@ impl Core {
             tick: None,
             timer: None,
             jumped: false,
-        });
+        }));
     }
 
     /// A read-only buffer of `text` named `name`, in list `list`'s workspace, as its side buffer.
@@ -865,10 +1032,11 @@ impl Core {
         let line = self.diff_line(window);
         let count = |r: fn(&Hunk) -> &Range<usize>| shown.hunks.iter().map(|h| r(h).len()).sum();
         let (added, removed): (usize, usize) = (count(|h| &h.new), count(|h| &h.old));
-        let sides = match shown.staged() {
-            true => "HEAD → index",
-            false => "index → working tree",
-        };
+        let sides = format!(
+            "{} → {}",
+            side_name(&shown.sides.0),
+            side_name(&shown.sides.1)
+        );
         let n = shown.hunks.len();
         let change = match shown.change_at(line) {
             Some(i) => format!("change {}/{n}", i + 1),
@@ -884,7 +1052,9 @@ impl Core {
             Row::Root(_) | Row::Group { .. } => None,
         };
         let status = (diff.answer.iter().flatten()).find(|(r, _)| Some(r) == root);
-        if let Some((_, Ok(Some(status)))) = status.filter(|_| fileless) {
+        if let Some((_, Ok(Some(status)))) =
+            status.filter(|_| fileless && shown.sides.1 == GitSide::Index)
+        {
             right.insert(
                 0,
                 vec![(format!("⎇ {}", status.branch), FaceName::VcsBranch)],
@@ -900,7 +1070,7 @@ impl Core {
                     (" ".into(), FaceName::ModeLine),
                     (format!("−{removed}"), FaceName::StatusFailed),
                 ],
-                vec![(sides.into(), FaceName::ModeLineDim)],
+                vec![(sides, FaceName::ModeLineDim)],
             ],
             right,
         })
@@ -924,7 +1094,144 @@ impl Ctx<'_> {
         self.outside_minibuffer("Can't show a diff in the minibuffer")?;
         let core = &mut *self.core;
         let name = format!("*Diff*<{}>", core.current_workspace()?.name);
+        if core.diff_revisions_here().is_some() {
+            core.leave_diff_view();
+        }
         let found = core.diff_list_here();
+        let list = core.show_diff_list(found, name, None);
+        match found {
+            Some(_) => Ok(()),
+            None => {
+                core.render_diff_list(list);
+                self.diff_refresh()
+            }
+        }
+    }
+
+    /// `diff-revisions`: asks for a git root when there are several, then the old and new
+    /// revisions, and opens the view once git lists the files between them.
+    pub(crate) fn diff_revisions(&mut self, args: Args) -> Result<(), String> {
+        self.outside_minibuffer("Can't show a diff in the minibuffer")?;
+        let core = &mut *self.core;
+        let workspace = core.current_workspace()?.id;
+        core.visits += 1;
+        let request = core.visits;
+        if args.strings.is_empty() {
+            core.diff_pending = Some(Pending::Refs { request, workspace });
+            let roots = core.roots();
+            self.effects
+                .push(Effect::File(FileOp::GitRefs { request, roots }));
+            return Ok(());
+        }
+        let Some(Pending::Roots {
+            workspace: asked,
+            roots,
+        }) = &core.diff_pending
+        else {
+            return Err("No revisions asked".into());
+        };
+        let (root, rest) = args.strings.split_first().expect("not empty");
+        let found = (roots.iter()).find(|(r, ..)| r.display().to_string() == *root);
+        let (root, repository, refs) = found
+            .filter(|_| *asked == workspace)
+            .cloned()
+            .ok_or_else(|| format!("{root}: not a git root"))?;
+        let choices: Vec<&str> = refs.iter().map(String::as_str).collect();
+        let command = core.commands["diff-revisions"];
+        match rest {
+            [] => self.read_string(command, args, "Old revision: ".into(), Some(&choices)),
+            [old] if old.trim().is_empty() => Err("No revision".into()),
+            [_] => {
+                let prompt = "New revision (empty for working tree): ".into();
+                self.read_string(command, args, prompt, Some(&choices))
+            }
+            [old, new, ..] => {
+                let (old, new) = (old.trim().to_string(), new.trim());
+                let new = (!new.is_empty()).then(|| new.to_string());
+                self.effects.push(Effect::File(FileOp::GitDiffFiles {
+                    request,
+                    root: root.clone(),
+                    old: old.clone(),
+                    new: new.clone(),
+                    objects: None,
+                }));
+                let revisions = Revisions {
+                    repository,
+                    old,
+                    new,
+                    request,
+                };
+                core.diff_pending = Some(Pending::Files {
+                    workspace,
+                    root,
+                    revisions,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// Takes the refs `diff-revisions` asked for: asks for a root among the git roots, or
+    /// goes on with the only one.
+    pub(crate) fn on_git_refs(&mut self, request: u64, answer: Vec<(PathBuf, crate::GitRefs)>) {
+        let core = &mut *self.core;
+        let Some(&Pending::Refs {
+            request: asked,
+            workspace,
+        }) = core.diff_pending.as_ref()
+        else {
+            return;
+        };
+        if asked != request || core.workspace() != Some(workspace) {
+            return;
+        }
+        let mut error = None;
+        let roots: Vec<_> = (answer.into_iter())
+            .filter_map(|(root, refs)| match refs {
+                Ok(Some((repository, refs))) => Some((root, repository, refs)),
+                Ok(None) => None,
+                Err(err) => {
+                    error.get_or_insert(err);
+                    None
+                }
+            })
+            .collect();
+        let names: Vec<String> = roots
+            .iter()
+            .map(|(r, ..)| r.display().to_string())
+            .collect();
+        core.diff_pending = Some(Pending::Roots { workspace, roots });
+        let result = match &names[..] {
+            [] => Err(error.unwrap_or_else(|| "No git root".into())),
+            [root] => {
+                let strings = vec![root.clone()];
+                self.diff_revisions(Args {
+                    strings,
+                    ..Args::default()
+                })
+            }
+            _ => {
+                let choices: Vec<&str> = names.iter().map(String::as_str).collect();
+                let command = self.core.commands["diff-revisions"];
+                self.read_string(command, Args::default(), "Root: ".into(), Some(&choices))
+            }
+        };
+        if let Err(err) = result {
+            self.core.echo(err);
+        }
+    }
+}
+
+impl Core {
+    /// Shows list `found`, or a new list named `name`, as the view's left window, saving the
+    /// layout when the view isn't open.
+    fn show_diff_list(
+        &mut self,
+        found: Option<BufferId>,
+        name: String,
+        revisions: Option<Revisions>,
+    ) -> BufferId {
+        let core = self;
         let list = found.unwrap_or_else(|| {
             let id = core.buffers.create(&name);
             let buffer = core.buffers.get_mut(id).expect("just created");
@@ -938,6 +1245,7 @@ impl Ctx<'_> {
                 window: WindowId(core.next_window + 1),
                 shown: None,
                 near: None,
+                revisions,
             });
             id
         });
@@ -964,21 +1272,31 @@ impl Ctx<'_> {
             core.windows.saved = Some(Box::new(saved));
             core.buffers.raise(list);
         }
-        match found {
-            Some(_) => Ok(()),
-            None => {
-                core.render_diff_list(list);
-                self.diff_refresh()
-            }
-        }
+        list
     }
+}
 
+impl Ctx<'_> {
     /// `diff-refresh`: asks for the status of the list's roots again.
     pub(crate) fn diff_refresh(&mut self) -> Result<(), String> {
         let roots = self.core.roots();
         let id = self.core.diff_list_here().ok_or("No diff view")?;
+        self.core.visits += 1;
+        let request = self.core.visits;
         let buffer = self.core.buffers.get_mut(id).expect("found live");
         let list = buffer.diff_list_mut().expect("found by kind");
+        // Asking with the names again resolves them again.
+        if let Some(revisions) = &mut list.revisions {
+            revisions.request = request;
+            self.effects.push(Effect::File(FileOp::GitDiffFiles {
+                request,
+                root: list.roots[0].clone(),
+                old: revisions.old.clone(),
+                new: revisions.new.clone(),
+                objects: None,
+            }));
+            return Ok(());
+        }
         list.pending = if list.roots == roots {
             list.pending + 1
         } else {
@@ -1080,8 +1398,10 @@ impl Ctx<'_> {
             })
             .ok_or("No root here")?;
         // A group always has files; a root may not.
-        let files = (list.rows.iter())
-            .any(|(_, r)| matches!(r, Row::Group { root, .. } if *root == fold.0));
+        let files = (list.rows.iter()).any(|(_, r)| match r {
+            Row::Group { root, .. } | Row::File { root, .. } => *root == fold.0,
+            Row::Root(_) => false,
+        });
         if !files && !list.folded.contains(&fold) {
             return Err("Nothing to fold".into());
         }
@@ -1104,6 +1424,9 @@ impl Ctx<'_> {
     /// `diff-stage`, `diff-unstage` and `diff-discard`: acts on the file at point in its group,
     /// or every file under the heading at point; discarding a `Changes` file asks first.
     pub(crate) fn diff_update(&mut self, action: Action, args: Args) -> Result<(), String> {
+        if self.core.diff_revisions_here().is_some() {
+            return Err("This diff can't be changed".into());
+        }
         if self.core.diff_selected() {
             return self.diff_update_change(action);
         }
@@ -1407,7 +1730,7 @@ impl Ctx<'_> {
             else {
                 unreachable!("a shown row is a file's");
             };
-            (shown.staged(), window.buffer(), repository.join(file), at)
+            (shown.fixed(), window.buffer(), repository.join(file), at)
         });
         self.diff_quit()?;
         let Some((staged, buffer, path, (line, col))) = visit else {
@@ -1472,7 +1795,8 @@ mod tests {
     use crate::command::Args;
     use crate::harness::Harness;
     use crate::project::Root;
-    use crate::{GitFile, Msg};
+    use crate::{ChangedFile, GitFile, Msg};
+    use std::ops::Not;
 
     /// A harness whose project has roots `a`, `b`, `c` and `d`, in the view.
     fn view() -> Harness {
@@ -2825,5 +3149,281 @@ mod tests {
         answer_diff(&mut h, "a\n", "b\n");
         assert_eq!(right(&h).name, "x.md (index)");
         assert_eq!(right(&h).wrap(40), Some((39, true)), "at words, as prose");
+    }
+
+    /// A harness whose project has the git root `a` and `b` outside git, asked for revisions.
+    fn revisions(more: &[&str]) -> Harness {
+        let mut h = Harness::new(&[]);
+        let project = &mut h.core.projects[0].project;
+        project.primary.path = h.dir.join("a");
+        project.roots = ["b"]
+            .iter()
+            .chain(more)
+            .map(|r| Root {
+                path: h.dir.join(r),
+            })
+            .collect();
+        h.call("diff-revisions", Args::default());
+        let Some(Effect::File(FileOp::GitRefs { request, roots })) = take(&mut h, |e| {
+            matches!(e, Effect::File(FileOp::GitRefs { .. }))
+        }) else {
+            panic!("refs asked")
+        };
+        let refs = ["main", "topic", "v1"].map(String::from).to_vec();
+        let roots = (roots.into_iter())
+            .map(|root| {
+                let git = root
+                    .ends_with("b")
+                    .not()
+                    .then(|| (root.parent().unwrap().to_path_buf(), refs.clone()));
+                (root, Ok(git))
+            })
+            .collect();
+        h.send(Msg::GitRefs { request, roots });
+        h
+    }
+
+    fn take(h: &mut Harness, f: impl Fn(&Effect) -> bool) -> Option<Effect> {
+        let i = h.effects.iter().rposition(f)?;
+        Some(h.effects.remove(i))
+    }
+
+    fn prompt(h: &mut Harness) -> Option<String> {
+        h.core.minibuffer().map(|m| m.prompt.clone())
+    }
+
+    /// Takes the newest file listing asked: its request, root and revisions.
+    fn listing(h: &mut Harness) -> Option<(u64, PathBuf, String, Option<String>)> {
+        match take(h, |e| {
+            matches!(e, Effect::File(FileOp::GitDiffFiles { .. }))
+        })? {
+            Effect::File(FileOp::GitDiffFiles {
+                request,
+                root,
+                old,
+                new,
+                ..
+            }) => Some((request, root, old, new)),
+            _ => unreachable!(),
+        }
+    }
+
+    fn changed(path: &str, change: GitChange) -> ChangedFile {
+        ChangedFile {
+            path: path.into(),
+            change,
+            old_path: None,
+        }
+    }
+
+    #[test]
+    fn revisions_list_the_files_between_two_revisions_read_only() {
+        use GitChange::*;
+        let mut h = revisions(&[]);
+        assert_eq!(
+            prompt(&mut h).as_deref(),
+            Some("Old revision: "),
+            "one git root"
+        );
+        assert_eq!(
+            h.core.minibuffer().unwrap().candidates,
+            ["main", "topic", "v1"]
+        );
+        h.keys("top RET");
+        assert_eq!(
+            prompt(&mut h).as_deref(),
+            Some("New revision (empty for working tree): ")
+        );
+        h.keys("v1 RET");
+        let (request, root, old, new) = listing(&mut h).expect("listed");
+        assert_eq!(
+            (root, old, new),
+            (h.dir.join("a"), "topic".into(), Some("v1".into()))
+        );
+        let files = [
+            changed("a/mod", Modified),
+            changed("a/new", Added),
+            changed("a/gone", Deleted),
+        ];
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Ok(files.to_vec()),
+        });
+        assert_eq!(
+            h.text(),
+            "▾ a  topic → v1\n      M  mod\n      A  new\n      D  gone"
+        );
+        assert_eq!(h.core.windows.tree.leaves().len(), 2, "the view is open");
+        h.keys("TAB");
+        assert_eq!(h.text(), "▸ a  topic → v1");
+        h.keys("TAB C-n");
+        h.frame(1440., 900.);
+        let sides = answer_diff(&mut h, "a\n", "b\n");
+        assert_eq!(
+            sides,
+            (GitSide::Tree("topic".into()), GitSide::Tree("v1".into()))
+        );
+        assert_eq!(right(&h).name, "mod (v1)");
+        assert!(right(&h).read_only);
+        assert!(
+            mode_line(&mut h).contains("topic → v1"),
+            "{}",
+            mode_line(&mut h)
+        );
+        let hints = h.frame(1440., 900.).key_hints;
+        let has = |name| hints.iter().any(|(_, what)| *what == name);
+        assert!(
+            !has("discard") && !has("stage/unstage") && has("refresh"),
+            "{hints:?}"
+        );
+        for key in ["s", "u", "k", "C-x o C-c s"] {
+            h.keys(key);
+            assert_eq!(
+                h.core.message(),
+                Some("This diff can't be changed"),
+                "{key}"
+            );
+            assert_eq!(update(&mut h), None);
+        }
+        h.keys("C-c g");
+        let (request, root, old, new) = listing(&mut h).expect("asked again");
+        assert_eq!(
+            (root, old, new),
+            (h.dir.join("a"), "topic".into(), Some("v1".into()))
+        );
+        let moved = [changed("a/mod", Modified), changed("a/later", Added)];
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Ok(moved.to_vec()),
+        });
+        h.keys("C-x o");
+        assert_eq!(h.text(), "▾ a  topic → v1\n      M  mod\n      A  later");
+        h.keys("g");
+        let (request, ..) = listing(&mut h).expect("asked again");
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Err("fatal: bad revision 'topic'".into()),
+        });
+        assert_eq!(h.text(), "  a  fatal: bad revision 'topic'");
+    }
+
+    #[test]
+    fn revisions_against_the_working_tree_edit_the_files_buffer() {
+        let mut h = revisions(&[]);
+        h.read_reply("a/mod", Some(b"b\n"));
+        h.keys("HEAD RET RET");
+        let (request, _, old, new) = listing(&mut h).expect("listed");
+        assert_eq!(
+            (old.as_str(), new),
+            ("HEAD", None),
+            "empty is the working tree"
+        );
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Ok(vec![changed("a/mod", GitChange::Modified)]),
+        });
+        assert_eq!(h.text(), "▾ a  HEAD → working tree\n      M  mod");
+        h.frame(1440., 900.);
+        let sides = answer_diff(&mut h, "a\n", "b\n");
+        assert_eq!(sides, (GitSide::Tree("HEAD".into()), GitSide::WorkingTree));
+        assert_eq!(right(&h).path(), Some(h.path("a/mod").as_path()));
+        assert!(mode_line(&mut h).contains("HEAD → working tree"));
+        h.keys("C-x o x");
+        assert_eq!(right(&h).text().to_string(), "xb\n");
+    }
+
+    #[test]
+    fn several_git_roots_ask_for_one_and_bad_answers_open_nothing() {
+        let mut h = revisions(&["c"]);
+        assert_eq!(prompt(&mut h).as_deref(), Some("Root: "));
+        let [a, c] = ["a", "c"].map(|r| h.dir.join(r).display().to_string());
+        let roots = [a, c.clone()];
+        assert_eq!(
+            h.core.minibuffer().unwrap().candidates,
+            roots,
+            "git roots only"
+        );
+        h.keys(&format!("{c} RET RET"));
+        assert_eq!(h.core.message(), Some("No revision"));
+        assert_eq!(listing(&mut h), None);
+        let mut h = revisions(&[]);
+        h.keys("nope RET RET");
+        let (request, ..) = listing(&mut h).expect("listed");
+        let error = "fatal: bad revision 'nope'";
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Err(error.into()),
+        });
+        assert_eq!(h.core.message(), Some(error));
+        assert_eq!(h.core.windows.tree.leaves().len(), 1, "nothing opened");
+    }
+
+    #[test]
+    fn no_git_root_says_so() {
+        let mut h = Harness::new(&[]);
+        let project = &mut h.core.projects[0].project;
+        (project.primary.path, project.roots) = (h.dir.join("b"), Vec::new());
+        h.call("diff-revisions", Args::default());
+        let Some(Effect::File(FileOp::GitRefs { request, roots })) = take(&mut h, |e| {
+            matches!(e, Effect::File(FileOp::GitRefs { .. }))
+        }) else {
+            panic!("refs asked")
+        };
+        let roots = roots.into_iter().map(|r| (r, Ok(None))).collect();
+        h.send(Msg::GitRefs { request, roots });
+        assert_eq!(h.core.message(), Some("No git root"));
+    }
+
+    #[test]
+    fn status_and_revisions_replace_each_others_view() {
+        let mut h = revisions(&[]);
+        h.keys("main RET RET");
+        let (request, ..) = listing(&mut h).expect("listed");
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Ok(Vec::new()),
+        });
+        assert!(
+            h.text().starts_with("  a  main → working tree"),
+            "{}",
+            h.text()
+        );
+        h.call("diff-status", Args::default());
+        assert_eq!(h.text(), "Reading status...");
+        assert_eq!(h.core.windows.tree.leaves().len(), 2);
+        h.call("diff-revisions", Args::default());
+        let Some(Effect::File(FileOp::GitRefs { request, roots })) = take(&mut h, |e| {
+            matches!(e, Effect::File(FileOp::GitRefs { .. }))
+        }) else {
+            panic!("refs asked")
+        };
+        let roots = (roots.into_iter())
+            .map(|r| {
+                let git = r
+                    .ends_with("a")
+                    .then(|| (h.dir.clone(), vec!["main".to_string()]));
+                (r, Ok(git))
+            })
+            .collect();
+        h.send(Msg::GitRefs { request, roots });
+        h.keys("main RET v1 RET");
+        let (request, ..) = listing(&mut h).expect("listed");
+        assert_eq!(
+            h.text(),
+            "Reading status...",
+            "the status view stays until the answer"
+        );
+        h.send(Msg::GitDiffFiles {
+            request,
+            result: Ok(Vec::new()),
+        });
+        assert!(h.text().starts_with("  a  main → v1"), "{}", h.text());
+        assert_eq!(h.core.windows.tree.leaves().len(), 2);
+        h.keys("q");
+        assert_eq!(
+            h.core.windows.tree.leaves().len(),
+            1,
+            "one layout saved, not two"
+        );
     }
 }

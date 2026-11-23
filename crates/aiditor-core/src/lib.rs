@@ -184,6 +184,12 @@ pub enum Msg {
         request: u64,
         hunks: Vec<Hunk>,
     },
+    /// The file service's answer to `FileOp::GitRefs` `request`, in the roots' order: `Ok(None)`
+    /// for a root in no repository, else its repository's top directory and refs.
+    GitRefs {
+        request: u64,
+        roots: Vec<(PathBuf, GitRefs)>,
+    },
     /// The file service's answer to `FileOp::GitDiffFiles` `request`.
     GitDiffFiles {
         request: u64,
@@ -385,6 +391,9 @@ pub struct Recovered {
     /// The ad-hoc project root the visited file would get, for recovering it in the lobby.
     pub root: Option<PathBuf>,
 }
+
+/// A root's repository's top directory and its local branches and tags; `None` outside one.
+pub type GitRefs = Result<Option<(PathBuf, Vec<String>)>, String>;
 
 /// The repository of a visited file, as the mode line shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -675,6 +684,8 @@ pub enum FileOp {
     },
     /// Diff a held old side against a snapshot of a buffer's text and send `Msg::LinesDiffed`.
     DiffLines { request: u64, old: Rope, new: Rope },
+    /// Find each root's repository and its local branches and tags and send `Msg::GitRefs`.
+    GitRefs { request: u64, roots: Vec<PathBuf> },
     /// List the files under `root` that differ between the tree-ishes `old` and `new`, or the
     /// working tree when `new` is `None`, and send `Msg::GitDiffFiles`.
     GitDiffFiles {
@@ -1117,8 +1128,10 @@ impl Ctx<'_> {
             Msg::GitUpdated { list, result } => {
                 (self.core).on_git_updated(list, result, &mut self.effects)
             }
-            // The diff view's later modes will ask; nothing does yet.
-            Msg::GitDiffFiles { .. } | Msg::GitSnapshot { .. } => {}
+            Msg::GitRefs { request, roots } => self.on_git_refs(request, roots),
+            Msg::GitDiffFiles { request, result } => self.core.on_git_diff_files(request, result),
+            // The turn diff will ask; nothing does yet.
+            Msg::GitSnapshot { .. } => {}
             Msg::LanguageVersion {
                 buffer,
                 request,
@@ -1320,6 +1333,8 @@ pub struct Core {
     grep: grep::ProjectGrep,
     visits: u64,
     pending_visit: Option<visiting::PendingVisit>,
+    /// A `diff-revisions` waiting on the file service or its prompts.
+    diff_pending: Option<diff::Pending>,
     commands: HashMap<&'static str, Command>,
     /// shortcut: one line for settings errors, cleared on the next key; the echo area (#36) replaces it.
     message: Option<String>,
@@ -1416,6 +1431,7 @@ impl Default for Core {
             grep: grep::ProjectGrep::default(),
             visits: 0,
             pending_visit: None,
+            diff_pending: None,
             commands,
             message: None,
             quitting: Vec::new(),
