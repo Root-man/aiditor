@@ -5,6 +5,7 @@ pub mod clock;
 pub mod configuration;
 pub mod environment;
 pub mod files;
+pub mod git;
 pub mod grep;
 pub mod projects;
 pub mod recovery;

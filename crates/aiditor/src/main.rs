@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use aiditor_core::{Core, Msg};
 use aiditor_services::configuration::{read_config, read_projects};
-use aiditor_services::{files, recovery};
+use aiditor_services::{files, git, recovery};
 use gpui::{App, Application, WindowOptions, prelude::*};
 use tokio::sync::mpsc;
 use tracing_subscriber::prelude::*;
@@ -191,7 +191,7 @@ fn main() {
         }
     }
     if let Some(dir) = args.snapshots.clone() {
-        std::thread::spawn(move || files::clear_snapshots(&dir));
+        std::thread::spawn(move || git::clear_snapshots(&dir));
     }
     // Read before this session writes any, so all are an earlier session's.
     let recovered = args
